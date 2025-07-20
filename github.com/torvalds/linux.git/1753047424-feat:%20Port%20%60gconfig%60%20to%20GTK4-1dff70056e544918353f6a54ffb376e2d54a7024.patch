@@ -1,0 +1,2163 @@
+From 1dff70056e544918353f6a54ffb376e2d54a7024 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Sun, 20 Jul 2025 17:37:04 -0400
+Subject: [PATCH] feat: Port `gconfig` to GTK4
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/scripts/kconfig/gconf-cfg.sh b/scripts/kconfig/gconf-cfg.sh
+index 856c692f480c2e75368feda59ec43bf262c53f49..750f81335034be85df03388f06b57ba30f90d892 100755
+--- a/scripts/kconfig/gconf-cfg.sh
++++ b/scripts/kconfig/gconf-cfg.sh
+@@ -6,7 +6,7 @@
+ cflags=$1
+ libs=$2
+ 
+-PKG=gtk+-3.0
++PKG=gtk4
+ 
+ if [ -z "$(command -v ${HOSTPKG_CONFIG})" ]; then
+ 	echo >&2 "*"
+@@ -17,8 +17,8 @@ fi
+ 
+ if ! ${HOSTPKG_CONFIG} --exists $PKG; then
+ 	echo >&2 "*"
+-	echo >&2 "* Unable to find the GTK+ installation. Please make sure that"
+-	echo >&2 "* the GTK 3 development package is correctly installed."
++	echo >&2 "* Unable to find the GTK installation. Please make sure that"
++	echo >&2 "* the GTK 4 development package is correctly installed."
+ 	echo >&2 "* You need $PKG"
+ 	echo >&2 "*"
+ 	exit 1
+diff --git a/scripts/kconfig/gconf.c b/scripts/kconfig/gconf.c
+index 7340407e4d6e238c15784d829fd98e3ddb42e384..22ff09fd0d88949453c215bae81a46a9e1d36def 100644
+--- a/scripts/kconfig/gconf.c
++++ b/scripts/kconfig/gconf.c
+@@ -29,6 +29,7 @@ static gboolean show_range = TRUE;
+ static gboolean show_value = TRUE;
+ static int opt_mode = OPT_NORMAL;
+ 
++static GtkApplication *app;
+ static GtkWidget *main_wnd;
+ static GtkWidget *tree1_w;	// left  frame
+ static GtkWidget *tree2_w;	// right frame
+@@ -36,27 +37,24 @@ static GtkWidget *text_w;
+ static GtkWidget *hpaned;
+ static GtkWidget *vpaned;
+ static GtkWidget *back_btn, *save_btn, *single_btn, *split_btn, *full_btn;
+-static GtkWidget *save_menu_item;
++static GSimpleAction *action_save;
+ 
+ static GtkTextTag *tag1, *tag2;
+ 
+ static GtkTreeStore *tree1, *tree2;
+-static GdkPixbuf *pix_menu;
+ 
+ static struct menu *browsed; // browsed menu for SINGLE/SPLIT view
+ static struct menu *selected; // selected entry
+ 
+ enum {
+ 	COL_OPTION, COL_NAME, COL_NO, COL_MOD, COL_YES, COL_VALUE,
+-	COL_MENU, COL_COLOR, COL_EDIT, COL_PIXBUF,
+-	COL_PIXVIS, COL_BTNVIS, COL_BTNACT, COL_BTNINC, COL_BTNRAD,
+-	COL_NUMBER
++	COL_MENU, COL_COLOR, COL_EDIT, COL_BTNVIS, COL_BTNACT,
++	COL_BTNINC, COL_BTNRAD,	COL_NUMBER
+ };
+ 
+ static void conf_changed(bool dirty)
+ {
+-	gtk_widget_set_sensitive(save_btn, dirty);
+-	gtk_widget_set_sensitive(save_menu_item, dirty);
++	g_simple_action_set_enabled(action_save, dirty);
+ }
+ 
+ /* Utility Functions */
+@@ -203,8 +201,6 @@ 			   COL_VALUE, value,
+ 			   COL_MENU, (gpointer) menu,
+ 			   COL_COLOR, &color,
+ 			   COL_EDIT, editable,
+-			   COL_PIXBUF, pix_menu,
+-			   COL_PIXVIS, view_mode == SINGLE_VIEW && menu->type == M_MENU,
+ 			   COL_BTNVIS, btnvis,
+ 			   COL_BTNACT, _yes[0] == 'Y',
+ 			   COL_BTNINC, _mod[0] == 'M',
+@@ -323,11 +319,11 @@
+ 	if (mode == SPLIT_VIEW) { // two panes
+ 		gint w;
+ 
+-		gtk_widget_show(tree1_w);
++		gtk_widget_set_visible(tree1_w, TRUE);
+ 		gtk_window_get_default_size(GTK_WINDOW(main_wnd), &w, NULL);
+ 		gtk_paned_set_position(GTK_PANED(hpaned), w / 2);
+ 	} else {
+-		gtk_widget_hide(tree1_w);
++		gtk_widget_set_visible(tree1_w, FALSE);
+ 		gtk_paned_set_position(GTK_PANED(hpaned), 0);
+ 	}
+ 
+@@ -413,94 +409,123 @@ }
+ 
+ /* Menu & Toolbar Callbacks */
+ 
+-static void on_load1_activate(GtkMenuItem *menuitem, gpointer user_data)
++static void on_load_response(GtkDialog *dialog, gint response_id, gpointer user_data)
++{
++	if (response_id == GTK_RESPONSE_ACCEPT) {
++		GtkFileChooser *chooser = GTK_FILE_CHOOSER(dialog);
++		GFile *file = gtk_file_chooser_get_file(chooser);
++		char *filename = g_file_get_path(file);
++
++		if (conf_read(filename))
++			text_insert_msg("Error",
++					"Unable to load configuration!");
++		else
++			update_trees();
++
++		g_free(filename);
++		g_object_unref(file);
++	}
++
++	gtk_window_destroy(GTK_WINDOW(dialog));
++}
++
++static void on_load1_activate(GSimpleAction *action, GVariant *parameter, gpointer user_data)
+ {
+ 	GtkWidget *dialog;
+ 	GtkFileChooser *chooser;
+-	gint res;
+ 
+ 	dialog = gtk_file_chooser_dialog_new("Load file...",
+-					     GTK_WINDOW(user_data),
++					     GTK_WINDOW(main_wnd),
+ 					     GTK_FILE_CHOOSER_ACTION_OPEN,
+ 					     "_Cancel", GTK_RESPONSE_CANCEL,
+ 					     "_Open", GTK_RESPONSE_ACCEPT,
+ 					     NULL);
+ 
+ 	chooser = GTK_FILE_CHOOSER(dialog);
+-	gtk_file_chooser_set_filename(chooser, conf_get_configname());
+-
+-	res = gtk_dialog_run(GTK_DIALOG(dialog));
+-	if (res == GTK_RESPONSE_ACCEPT) {
+-		char *filename;
+-
+-		filename = gtk_file_chooser_get_filename(chooser);
+-
+-		if (conf_read(filename))
+-			text_insert_msg("Error",
+-					"Unable to load configuration!");
+-		else
+-			update_trees();
+-
+-		g_free(filename);
++	if (conf_get_configname()) {
++		GFile *file = g_file_new_for_path(conf_get_configname());
++		gtk_file_chooser_set_file(chooser, file, NULL);
++		g_object_unref(file);
+ 	}
+ 
+-	gtk_widget_destroy(GTK_WIDGET(dialog));
++	g_signal_connect(dialog, "response", G_CALLBACK(on_load_response), NULL);
++	gtk_window_present(GTK_WINDOW(dialog));
+ }
+ 
+-static void on_save_activate(GtkMenuItem *menuitem, gpointer user_data)
++static void on_save_activate(GSimpleAction *action, GVariant *parameter, gpointer user_data)
+ {
+ 	if (conf_write(NULL))
+ 		text_insert_msg("Error", "Unable to save configuration !");
+ 	conf_write_autoconf(0);
+ }
+ 
+-static void on_save_as1_activate(GtkMenuItem *menuitem, gpointer user_data)
++static void on_save_as_response(GtkDialog *dialog, int response_id, gpointer user_data)
++{
++	if (response_id == GTK_RESPONSE_ACCEPT) {
++		GtkFileChooser *chooser = GTK_FILE_CHOOSER(dialog);
++		GFile *file = gtk_file_chooser_get_file(chooser);
++		
++		if (file) {
++			char *filename = g_file_get_path(file);
++			
++			if (conf_write(filename))
++				text_insert_msg("Error",
++						"Unable to save configuration !");
++			
++			g_free(filename);
++			g_object_unref(file);
++		}
++	}
++	
++	gtk_window_destroy(GTK_WINDOW(dialog));
++}
++
++static void on_save_as1_activate(GSimpleAction *action, GVariant *parameter, gpointer user_data)
+ {
+ 	GtkWidget *dialog;
+ 	GtkFileChooser *chooser;
+-	gint res;
+ 
+ 	dialog = gtk_file_chooser_dialog_new("Save file as...",
+-					     GTK_WINDOW(user_data),
++					     GTK_WINDOW(main_wnd),
+ 					     GTK_FILE_CHOOSER_ACTION_SAVE,
+ 					     "_Cancel", GTK_RESPONSE_CANCEL,
+ 					     "_Save", GTK_RESPONSE_ACCEPT,
+ 					     NULL);
+ 
+ 	chooser = GTK_FILE_CHOOSER(dialog);
+-	gtk_file_chooser_set_filename(chooser, conf_get_configname());
++	gtk_file_chooser_set_current_name(chooser, conf_get_configname());
+ 
+-	res = gtk_dialog_run(GTK_DIALOG(dialog));
+-	if (res == GTK_RESPONSE_ACCEPT) {
+-		char *filename;
+-
+-		filename = gtk_file_chooser_get_filename(chooser);
+-
+-		if (conf_write(filename))
+-			text_insert_msg("Error",
+-					"Unable to save configuration !");
+-
+-		g_free(filename);
+-	}
+-
+-	gtk_widget_destroy(dialog);
++	g_signal_connect(dialog, "response", G_CALLBACK(on_save_as_response), NULL);
++	gtk_window_present(GTK_WINDOW(dialog));
+ }
+ 
+-static void on_show_name1_activate(GtkMenuItem *menuitem, gpointer user_data)
++static void on_show_name1_activate(GSimpleAction *action, GVariant *parameter, gpointer user_data)
+ {
+-	GtkTreeViewColumn *col;
+-
+-	show_name = gtk_check_menu_item_get_active(GTK_CHECK_MENU_ITEM(menuitem));
+-	col = gtk_tree_view_get_column(GTK_TREE_VIEW(tree2_w), COL_NAME);
+-	if (col)
+-		gtk_tree_view_column_set_visible(col, show_name);
++	GVariant *state = g_action_get_state(G_ACTION(action));
++	gboolean new_state = !g_variant_get_boolean(state);
++	
++	show_name = new_state;
++	g_action_change_state(G_ACTION(action), g_variant_new_boolean(new_state));
++	
++	if (tree2_w) {
++		GtkTreeViewColumn *col = gtk_tree_view_get_column(GTK_TREE_VIEW(tree2_w), 1);
++		if (col)
++			gtk_tree_view_column_set_visible(col, show_name);
++	}
++	
++	g_variant_unref(state);
+ }
+ 
+-static void on_show_range1_activate(GtkMenuItem *menuitem, gpointer user_data)
++static void on_show_range1_activate(GSimpleAction *action, GVariant *parameter, gpointer user_data)
+ {
++	GVariant *state = g_action_get_state(G_ACTION(action));
++	gboolean new_state = !g_variant_get_boolean(state);
++	
++	show_range = new_state;
++	g_action_change_state(G_ACTION(action), g_variant_new_boolean(new_state));
++	
+ 	GtkTreeViewColumn *col;
+ 
+-	show_range = gtk_check_menu_item_get_active(GTK_CHECK_MENU_ITEM(menuitem));
+ 	col = gtk_tree_view_get_column(GTK_TREE_VIEW(tree2_w), COL_NO);
+ 	if (col)
+ 		gtk_tree_view_column_set_visible(col, show_range);
+@@ -510,43 +535,45 @@ 		gtk_tree_view_column_set_visible(col, show_range);
+ 	col = gtk_tree_view_get_column(GTK_TREE_VIEW(tree2_w), COL_YES);
+ 	if (col)
+ 		gtk_tree_view_column_set_visible(col, show_range);
+-
++	
++	g_variant_unref(state);
+ }
+ 
+-static void on_show_data1_activate(GtkMenuItem *menuitem, gpointer user_data)
++static void on_show_data1_activate(GSimpleAction *action, GVariant *parameter, gpointer user_data)
+ {
++	GVariant *state = g_action_get_state(G_ACTION(action));
++	gboolean new_state = !g_variant_get_boolean(state);
++	
++	show_value = new_state;
++	g_action_change_state(G_ACTION(action), g_variant_new_boolean(new_state));
++	
+ 	GtkTreeViewColumn *col;
+-
+-	show_value = gtk_check_menu_item_get_active(GTK_CHECK_MENU_ITEM(menuitem));
+-	col = gtk_tree_view_get_column(GTK_TREE_VIEW(tree2_w), COL_VALUE);
++	
++	col = gtk_tree_view_get_column(GTK_TREE_VIEW(tree2_w), 5);
+ 	if (col)
+ 		gtk_tree_view_column_set_visible(col, show_value);
++	
++	g_variant_unref(state);
+ }
+ 
+-static void on_set_option_mode1_activate(GtkMenuItem *menuitem,
+-					 gpointer user_data)
++static void on_option_mode_activate(GSimpleAction *action, GVariant *parameter, gpointer user_data)
+ {
+-	opt_mode = OPT_NORMAL;
+-	update_row_visibility();
+-}
+-
+-static void on_set_option_mode2_activate(GtkMenuItem *menuitem,
+-					 gpointer user_data)
+-{
+-	opt_mode = OPT_ALL;
+-	update_row_visibility();
+-}
+-
+-static void on_set_option_mode3_activate(GtkMenuItem *menuitem,
+-					 gpointer user_data)
+-{
+-	opt_mode = OPT_PROMPT;
++	const char *mode = g_variant_get_string(parameter, NULL);
++	
++	if (g_strcmp0(mode, "normal") == 0)
++		opt_mode = OPT_NORMAL;
++	else if (g_strcmp0(mode, "all") == 0)
++		opt_mode = OPT_ALL;
++	else if (g_strcmp0(mode, "prompt") == 0)
++		opt_mode = OPT_PROMPT;
++	
++	g_action_change_state(G_ACTION(action), g_variant_new_string(mode));
+ 	update_row_visibility();
+ }
+ 
+-static void on_introduction1_activate(GtkMenuItem *menuitem, gpointer user_data)
++static void on_introduction1_activate(GSimpleAction *action, GVariant *parameter, gpointer user_data)
+ {
+-	GtkWidget *dialog;
++	GtkAlertDialog *dialog;
+ 	const gchar *intro_text =
+ 	    "Welcome to gconfig, the GTK+ graphical configuration tool.\n"
+ 	    "For each option, a blank box indicates the feature is disabled, a\n"
+@@ -561,47 +588,43 @@ 	    "what other options must be enabled to support the option you\n"
+ 	    "are interested in, you can still view the help of a grayed-out\n"
+ 	    "option.";
+ 
+-	dialog = gtk_message_dialog_new(GTK_WINDOW(main_wnd),
+-					GTK_DIALOG_DESTROY_WITH_PARENT,
+-					GTK_MESSAGE_INFO,
+-					GTK_BUTTONS_CLOSE, "%s", intro_text);
+-	gtk_dialog_run(GTK_DIALOG(dialog));
+-	gtk_widget_destroy(dialog);
++	dialog = gtk_alert_dialog_new("%s", intro_text);
++	gtk_alert_dialog_show(dialog, GTK_WINDOW(main_wnd));
++	g_object_unref(dialog);
+ }
+ 
+-static void on_about1_activate(GtkMenuItem *menuitem, gpointer user_data)
++static void on_about1_activate(GSimpleAction *action, GVariant *parameter, gpointer user_data)
+ {
+-	GtkWidget *dialog;
++	GtkAlertDialog *dialog;
+ 	const gchar *about_text =
+ 	    "gconfig is copyright (c) 2002 Romain Lievin <roms@lpg.ticalc.org>.\n"
+ 	      "Based on the source code from Roman Zippel.\n";
+ 
+-	dialog = gtk_message_dialog_new(GTK_WINDOW(main_wnd),
+-					GTK_DIALOG_DESTROY_WITH_PARENT,
+-					GTK_MESSAGE_INFO,
+-					GTK_BUTTONS_CLOSE, "%s\nGTK version: %d.%d.%d",
++	dialog = gtk_alert_dialog_new("%s\nGTK version: %d.%d.%d",
+ 					about_text,
+ 					gtk_get_major_version(),
+ 					gtk_get_minor_version(),
+ 					gtk_get_micro_version());
+-	gtk_dialog_run(GTK_DIALOG(dialog));
+-	gtk_widget_destroy(dialog);
++	gtk_alert_dialog_show(dialog, GTK_WINDOW(main_wnd));
++	g_object_unref(dialog);
+ }
+ 
+-static void on_license1_activate(GtkMenuItem *menuitem, gpointer user_data)
++static void on_license1_activate(GSimpleAction *action, GVariant *parameter, gpointer user_data)
+ {
+-	GtkWidget *dialog;
++	GtkAlertDialog *dialog;
+ 	const gchar *license_text =
+ 	    "gconfig is released under the terms of the GNU GPL v2.\n"
+ 	      "For more information, please see the source code or\n"
+ 	      "visit http://www.fsf.org/licenses/licenses.html\n";
+ 
+-	dialog = gtk_message_dialog_new(GTK_WINDOW(main_wnd),
+-					GTK_DIALOG_DESTROY_WITH_PARENT,
+-					GTK_MESSAGE_INFO,
+-					GTK_BUTTONS_CLOSE, "%s", license_text);
+-	gtk_dialog_run(GTK_DIALOG(dialog));
+-	gtk_widget_destroy(dialog);
++	dialog = gtk_alert_dialog_new("%s", license_text);
++	gtk_alert_dialog_show(dialog, GTK_WINDOW(main_wnd));
++	g_object_unref(dialog);
++}
++
++static void on_quit1_activate(GSimpleAction *action, GVariant *parameter, gpointer user_data)
++{
++	g_application_quit(G_APPLICATION(app));
+ }
+ 
+ /* toolbar handlers */
+@@ -619,16 +642,6 @@ 	if (browsed == &rootmenu)
+ 		gtk_widget_set_sensitive(back_btn, FALSE);
+ }
+ 
+-static void on_load_clicked(GtkButton *button, gpointer user_data)
+-{
+-	on_load1_activate(NULL, user_data);
+-}
+-
+-static void on_save_clicked(GtkButton *button, gpointer user_data)
+-{
+-	on_save_activate(NULL, user_data);
+-}
+-
+ static void on_single_clicked(GtkButton *button, gpointer user_data)
+ {
+ 	set_view_mode(SINGLE_VIEW);
+@@ -655,78 +668,50 @@ 	gtk_tree_view_expand_all(GTK_TREE_VIEW(tree2_w));
+ }
+ 
+ /* Main Windows Callbacks */
+-
+-static void on_window1_destroy(GtkWidget *widget, gpointer user_data)
++static void on_close_dialog_response(GObject *dialog, GAsyncResult *result, gpointer user_data)
+ {
+-	gtk_main_quit();
+-}
+-
+-static void on_window_size_allocate(GtkWidget *widget,
+-				    GtkAllocation *allocation,
+-				    gpointer user_data)
+-{
+-	gint h;
++	GtkAlertDialog *alert = GTK_ALERT_DIALOG(dialog);
++	GError *error = NULL;
++	int response;
+ 
+-	h = allocation->height;
++	response = gtk_alert_dialog_choose_finish(alert, result, &error);
++	if (error) {
++		g_warning("Dialog error: %s", error->message);
++		g_error_free(error);
++		return;
++	}
+ 
+-	gtk_paned_set_position(GTK_PANED(vpaned), 2 * h / 3);
++	switch (response) {
++	case 0: /* Save */
++		on_save_activate(NULL, NULL, NULL);
++		/* Fall through to quit */
++	case 1: /* Don't Save */
++		g_application_quit(G_APPLICATION(app));
++		break;
++	case 2: /* Cancel */
++	default:
++		/* Do nothing - keep window open */
++		break;
++	}
+ }
+ 
+-static gboolean on_window1_delete_event(GtkWidget *widget, GdkEvent *event,
+-					gpointer user_data)
++static gboolean on_window_close_request(GtkWindow *window, gpointer user_data)
+ {
+-	GtkWidget *dialog, *label, *content_area;
+-	gint result;
+-	gint ret = FALSE;
+-
+-	if (!conf_get_changed())
++	if (!conf_get_changed()) {
++		g_application_quit(G_APPLICATION(app));
+ 		return FALSE;
+-
+-	dialog = gtk_dialog_new_with_buttons("Warning !",
+-					     GTK_WINDOW(main_wnd),
+-					     (GtkDialogFlags)
+-					     (GTK_DIALOG_MODAL |
+-					      GTK_DIALOG_DESTROY_WITH_PARENT),
+-					     "_OK",
+-					     GTK_RESPONSE_YES,
+-					     "_No",
+-					     GTK_RESPONSE_NO,
+-					     "_Cancel",
+-					     GTK_RESPONSE_CANCEL, NULL);
+-	gtk_dialog_set_default_response(GTK_DIALOG(dialog),
+-					GTK_RESPONSE_CANCEL);
+-
+-	label = gtk_label_new("\nSave configuration ?\n");
+-	content_area = gtk_dialog_get_content_area(GTK_DIALOG(dialog));
+-	gtk_container_add(GTK_CONTAINER(content_area), label);
+-	gtk_widget_show(label);
+-
+-	result = gtk_dialog_run(GTK_DIALOG(dialog));
+-	switch (result) {
+-	case GTK_RESPONSE_YES:
+-		on_save_activate(NULL, NULL);
+-		break;
+-	case GTK_RESPONSE_NO:
+-		break;
+-	case GTK_RESPONSE_CANCEL:
+-	case GTK_RESPONSE_DELETE_EVENT:
+-	default:
+-		ret = TRUE;
+-		break;
+ 	}
+ 
+-	gtk_widget_destroy(dialog);
++	GtkAlertDialog *dialog = gtk_alert_dialog_new("Save configuration before closing?");
++	const char *buttons[] = {"Save", "Don't Save", "Cancel", NULL};
++	gtk_alert_dialog_set_buttons(dialog, buttons);
++	gtk_alert_dialog_set_default_button(dialog, 0);
++	gtk_alert_dialog_set_cancel_button(dialog, 2);
+ 
+-	if (!ret)
+-		g_object_unref(pix_menu);
++	gtk_alert_dialog_choose(dialog, window, NULL, 
++	                       (GAsyncReadyCallback)on_close_dialog_response, NULL);
+ 
+-	return ret;
+-}
+-
+-static void on_quit1_activate(GtkMenuItem *menuitem, gpointer user_data)
+-{
+-	if (!on_window1_delete_event(NULL, NULL, NULL))
+-		gtk_widget_destroy(GTK_WIDGET(main_wnd));
++	return TRUE;
+ }
+ 
+ /* CTree Callbacks */
+@@ -819,34 +804,34 @@
+ 	return -1;
+ }
+ 
+-
+ /* User click: update choice (full) or goes down (single) */
+-static gboolean on_treeview2_button_press_event(GtkWidget *widget,
+-						GdkEventButton *event,
+-						gpointer user_data)
++static void on_treeview2_button_press_event(GtkGestureClick *gesture, gint n_press, 
++                                   gdouble x, gdouble y, gpointer user_data)
+ {
+-	GtkTreeView *view = GTK_TREE_VIEW(widget);
++	GtkTreeView *view = GTK_TREE_VIEW(user_data);
+ 	GtkTreeModel *model = gtk_tree_view_get_model(view);
++	GtkTreeSelection *selection = gtk_tree_view_get_selection(view);
+ 	GtkTreePath *path;
+ 	GtkTreeViewColumn *column;
+ 	GtkTreeIter iter;
+ 	struct menu *menu;
+ 	gint col;
+-	gint tx = (gint) event->x;
+-	gint ty = (gint) event->y;
+ 
+-	gtk_tree_view_get_path_at_pos(view, tx, ty, &path, &column, NULL, NULL);
++	if (!gtk_tree_selection_get_selected(selection, &model, &iter))
++		return;
++	
++	path = gtk_tree_model_get_path(model, &iter);
+ 	if (path == NULL)
+-		return FALSE;
++		return;
+ 
+-	if (!gtk_tree_model_get_iter(model, &iter, path))
+-		return FALSE;
++	if (!gtk_tree_view_get_path_at_pos(view, (gint)x, (gint)y, NULL, &column, NULL, NULL))
++		return;
+ 	gtk_tree_model_get(model, &iter, COL_MENU, &menu, -1);
+ 
+ 	selected = menu;
+ 
+ 	col = column2index(column);
+-	if (event->type == GDK_2BUTTON_PRESS) {
++	if (n_press == 2) {
+ 		enum prop_type ptype;
+ 		ptype = menu->prompt ? menu->prompt->type : P_UNKNOWN;
+ 
+@@ -870,15 +855,15 @@ 			gtk_tree_view_expand_row(view, path, TRUE);
+ 		}
+ 	}
+ 
+-	return FALSE;
++	return;
+ }
+ 
+ /* Key pressed: update choice */
+-static gboolean on_treeview2_key_press_event(GtkWidget *widget,
+-					     GdkEventKey *event,
+-					     gpointer user_data)
++static gboolean on_treeview2_key_press_event(GtkEventControllerKey *controller,
++                                    guint keyval, guint keycode, 
++                                    GdkModifierType state, gpointer user_data)
+ {
+-	GtkTreeView *view = GTK_TREE_VIEW(widget);
++	GtkTreeView *view = GTK_TREE_VIEW(user_data);
+ 	GtkTreeModel *model = gtk_tree_view_get_model(view);
+ 	GtkTreePath *path;
+ 	GtkTreeIter iter;
+@@ -889,7 +874,7 @@ 	gtk_tree_view_get_cursor(view, &path, NULL);
+ 	if (path == NULL)
+ 		return FALSE;
+ 
+-	if (event->keyval == GDK_KEY_space) {
++	if (keyval == GDK_KEY_space) {
+ 		if (gtk_tree_view_row_expanded(view, path))
+ 			gtk_tree_view_collapse_row(view, path);
+ 		else
+@@ -900,14 +885,15 @@
+ 	gtk_tree_model_get_iter(model, &iter, path);
+ 	gtk_tree_model_get(model, &iter, COL_MENU, &menu, -1);
+ 
+-	if (!strcasecmp(event->string, "n"))
+-		col = COL_NO;
+-	else if (!strcasecmp(event->string, "m"))
+-		col = COL_MOD;
+-	else if (!strcasecmp(event->string, "y"))
+-		col = COL_YES;
++	gchar key_char = g_unichar_tolower(gdk_keyval_to_unicode(keyval));
++	if (key_char == 'n')
++	    col = COL_NO;
++	else if (key_char == 'm')
++	    col = COL_MOD;
++	else if (key_char == 'y')
++	    col = COL_YES;
+ 	else
+-		col = -1;
++	    col = -1;
+ 	change_sym_value(menu, col);
+ 
+ 	return FALSE;
+@@ -922,193 +908,226 @@ 	GtkTreeModel *model = gtk_tree_view_get_model(treeview);
+ 	GtkTreeSelection *selection;
+ 	GtkTreeIter iter;
+ 	struct menu *menu;
++	gboolean is_left_tree = (treeview == GTK_TREE_VIEW(tree1_w));
+ 
+ 	selection = gtk_tree_view_get_selection(treeview);
+ 	if (gtk_tree_selection_get_selected(selection, &model, &iter)) {
+ 		gtk_tree_model_get(model, &iter, COL_MENU, &menu, -1);
++		selected = menu;
+ 		text_insert_help(menu);
++		
++		/* If this is the left tree in split view, update right tree */
++		if (is_left_tree && view_mode == SPLIT_VIEW) {
++			if (menu->type == M_MENU) {
++				browsed = menu;
++				recreate_menu_content_tree();
++			}
++		}
+ 	}
+ }
+ 
+-
+ /* User click: display sub-tree in the right frame. */
+-static gboolean on_treeview1_button_press_event(GtkWidget *widget,
+-						GdkEventButton *event,
+-						gpointer user_data)
++static void on_tree_row_activated(GtkTreeView *tree_view, GtkTreePath *path,
++                                 GtkTreeViewColumn *column, gpointer user_data)
+ {
+-	GtkTreeView *view = GTK_TREE_VIEW(widget);
+-	GtkTreeModel *model = gtk_tree_view_get_model(view);
+-	GtkTreePath *path;
++	GtkTreeModel *model = gtk_tree_view_get_model(tree_view);
+ 	GtkTreeIter iter;
+ 	struct menu *menu;
+-	gint tx = (gint) event->x;
+-	gint ty = (gint) event->y;
+-
+-	gtk_tree_view_get_path_at_pos(view, tx, ty, &path, NULL, NULL, NULL);
+-	if (path == NULL)
+-		return FALSE;
+-
++	struct symbol *sym;
++	gboolean is_left_tree = GPOINTER_TO_INT(user_data);
++	
+ 	gtk_tree_model_get_iter(model, &iter, path);
+ 	gtk_tree_model_get(model, &iter, COL_MENU, &menu, -1);
+-
+-	if (event->type == GDK_2BUTTON_PRESS)
+-		toggle_sym_value(menu);
+ 
+ 	selected = menu;
+ 
+-	if (menu->type == M_MENU) {
+-		browsed = menu;
+-		recreate_menu_content_tree();
++	sym = menu->sym;
++	enum prop_type ptype = menu->prompt ? menu->prompt->type : P_UNKNOWN;
++	
++	if (is_left_tree) {
++		/* Left tree: only toggle boolean/tristate, don't navigate */
++		if (sym && (sym_get_type(sym) == S_BOOLEAN || sym_get_type(sym) == S_TRISTATE)) {
++			toggle_sym_value(menu);
++		}
++	} else {
++		/* Right tree: navigation and toggling */
++		if (ptype == P_MENU && view_mode != FULL_VIEW) {
++			/* Navigate into submenu */
++			browsed = menu;
++			recreate_menu_content_tree();
++			gtk_widget_set_sensitive(back_btn, TRUE);
++		} else if (sym && (sym_get_type(sym) == S_BOOLEAN || sym_get_type(sym) == S_TRISTATE)) {
++			/* Toggle symbol value */
++			toggle_sym_value(menu);
++		}
+ 	}
++}
++static gboolean visible_func(GtkTreeModel *model, GtkTreeIter  *iter,
++			     gpointer data)
++{
++	struct menu *menu;
+ 
+-	gtk_tree_view_set_cursor(view, path, NULL, FALSE);
+-	gtk_widget_grab_focus(tree2_w);
++	gtk_tree_model_get(model, iter, COL_MENU, &menu, -1);
+ 
+-	return FALSE;
++	if (!menu)
++		return FALSE;
++
++	return menu_is_visible(menu) || opt_mode == OPT_ALL ||
++		(opt_mode == OPT_PROMPT && menu_has_prompt(menu));
+ }
+ 
+-/* Main Window Initialization */
+-static void replace_button_icon(GtkWidget *widget, const char * const xpm[])
++static void init_tree_view(GtkTreeView *view, GtkTreeStore **store, gboolean is_left_tree)
+ {
+-	GdkPixbuf *pixbuf;
+-	GtkWidget *image;
++	GtkCellRenderer *renderer;
++	GtkTreeSelection *sel;
++	GtkTreeViewColumn *column;
++	GtkTreeModel *filter;
++	GtkGesture *click_gesture;
++	GtkEventController *key_controller;
++
++	*store = gtk_tree_store_new(COL_NUMBER,
++				   G_TYPE_STRING, G_TYPE_STRING,
++				   G_TYPE_STRING, G_TYPE_STRING,
++				   G_TYPE_STRING, G_TYPE_STRING,
++				   G_TYPE_POINTER, GDK_TYPE_RGBA,
++				   G_TYPE_BOOLEAN, G_TYPE_BOOLEAN,
++				   G_TYPE_BOOLEAN, G_TYPE_BOOLEAN,
++				   G_TYPE_BOOLEAN);
+ 
+-	pixbuf = gdk_pixbuf_new_from_xpm_data((const char **)xpm);
+-	image = gtk_image_new_from_pixbuf(pixbuf);
+-	g_object_unref(pixbuf);
++	filter = gtk_tree_model_filter_new(GTK_TREE_MODEL(*store), NULL);
++	gtk_tree_model_filter_set_visible_func(GTK_TREE_MODEL_FILTER(filter),
++					       visible_func, NULL, NULL);
++	gtk_tree_view_set_model(view, filter);
+ 
+-	gtk_widget_show(image);
+-	gtk_tool_button_set_icon_widget(GTK_TOOL_BUTTON(widget), image);
+-}
++	/* Main Options column */
++	column = gtk_tree_view_column_new();
++	gtk_tree_view_append_column(view, column);
++	gtk_tree_view_column_set_title(column, "Options");
+ 
+-static void init_main_window(const gchar *glade_file)
+-{
+-	GtkBuilder *builder;
+-	GtkWidget *widget;
+-	GtkTextBuffer *txtbuf;
++	/* Toggle renderer */
++	renderer = gtk_cell_renderer_toggle_new();
++	gtk_tree_view_column_pack_start(column, renderer, FALSE);
++	gtk_tree_view_column_set_attributes(column, renderer,
++					    "active", COL_BTNACT,
++					    "inconsistent", COL_BTNINC,
++					    "visible", COL_BTNVIS,
++					    "radio", COL_BTNRAD, NULL);
+ 
+-	builder = gtk_builder_new_from_file(glade_file);
+-	if (!builder)
+-		g_error("GUI loading failed !\n");
++	/* Text renderer */
++	renderer = gtk_cell_renderer_text_new();
++	gtk_tree_view_column_pack_start(column, renderer, TRUE);
++	gtk_tree_view_column_set_attributes(column, renderer,
++					    "text", COL_OPTION,
++					    "foreground-rgba", COL_COLOR, NULL);
+ 
+-	main_wnd = GTK_WIDGET(gtk_builder_get_object(builder, "window1"));
+-	g_signal_connect(main_wnd, "destroy",
+-			 G_CALLBACK(on_window1_destroy), NULL);
+-	g_signal_connect(main_wnd, "size_allocate",
+-			 G_CALLBACK(on_window_size_allocate), NULL);
+-	g_signal_connect(main_wnd, "delete_event",
+-			 G_CALLBACK(on_window1_delete_event), NULL);
++	if (!is_left_tree) {
++		/* Additional columns for right tree */
++		renderer = gtk_cell_renderer_text_new();
++		gtk_tree_view_insert_column_with_attributes(view, -1, "Name", renderer,
++							    "text", COL_NAME,
++							    "foreground-rgba", COL_COLOR, NULL);
+ 
+-	hpaned = GTK_WIDGET(gtk_builder_get_object(builder, "hpaned1"));
+-	vpaned = GTK_WIDGET(gtk_builder_get_object(builder, "vpaned1"));
+-	tree1_w = GTK_WIDGET(gtk_builder_get_object(builder, "treeview1"));
+-	g_signal_connect(tree1_w, "cursor_changed",
+-			 G_CALLBACK(on_treeview2_cursor_changed), NULL);
+-	g_signal_connect(tree1_w, "button_press_event",
+-			 G_CALLBACK(on_treeview1_button_press_event), NULL);
+-	g_signal_connect(tree1_w, "key_press_event",
+-			 G_CALLBACK(on_treeview2_key_press_event), NULL);
++		renderer = gtk_cell_renderer_text_new();
++		gtk_tree_view_insert_column_with_attributes(view, -1, "N", renderer,
++							    "text", COL_NO,
++							    "foreground-rgba", COL_COLOR, NULL);
+ 
+-	tree2_w = GTK_WIDGET(gtk_builder_get_object(builder, "treeview2"));
+-	g_signal_connect(tree2_w, "cursor_changed",
+-			 G_CALLBACK(on_treeview2_cursor_changed), NULL);
+-	g_signal_connect(tree2_w, "button_press_event",
+-			 G_CALLBACK(on_treeview2_button_press_event), NULL);
+-	g_signal_connect(tree2_w, "key_press_event",
+-			 G_CALLBACK(on_treeview2_key_press_event), NULL);
++		renderer = gtk_cell_renderer_text_new();
++		gtk_tree_view_insert_column_with_attributes(view, -1, "M", renderer,
++							    "text", COL_MOD,
++							    "foreground-rgba", COL_COLOR, NULL);
+ 
+-	text_w = GTK_WIDGET(gtk_builder_get_object(builder, "textview3"));
++		renderer = gtk_cell_renderer_text_new();
++		gtk_tree_view_insert_column_with_attributes(view, -1, "Y", renderer,
++							    "text", COL_YES,
++							    "foreground-rgba", COL_COLOR, NULL);
+ 
+-	/* menubar */
+-	widget = GTK_WIDGET(gtk_builder_get_object(builder, "load1"));
+-	g_signal_connect(widget, "activate", G_CALLBACK(on_load1_activate), NULL);
++		renderer = gtk_cell_renderer_text_new();
++		gtk_tree_view_insert_column_with_attributes(view, -1, "Value", renderer,
++							    "text", COL_VALUE,
++							    "editable", COL_EDIT,
++							    "foreground-rgba", COL_COLOR, NULL);
++		g_signal_connect(renderer, "edited", G_CALLBACK(renderer_edited), view);
+ 
+-	widget = GTK_WIDGET(gtk_builder_get_object(builder, "save1"));
+-	g_signal_connect(widget, "activate", G_CALLBACK(on_save_activate), NULL);
++		/* Set column visibility */
++		GtkTreeViewColumn *col;
++		col = gtk_tree_view_get_column(view, 1);
++		if (col) gtk_tree_view_column_set_visible(col, show_name);
++		col = gtk_tree_view_get_column(view, 2);
++		if (col) gtk_tree_view_column_set_visible(col, show_range);
++		col = gtk_tree_view_get_column(view, 3);
++		if (col) gtk_tree_view_column_set_visible(col, show_range);
++		col = gtk_tree_view_get_column(view, 4);
++		if (col) gtk_tree_view_column_set_visible(col, show_range);
++		col = gtk_tree_view_get_column(view, 5);
++		if (col) gtk_tree_view_column_set_visible(col, show_value);
++	}
+ 
+-	widget = GTK_WIDGET(gtk_builder_get_object(builder, "save_as1"));
+-	g_signal_connect(widget, "activate", G_CALLBACK(on_save_as1_activate), NULL);
++	for (gint i = 0; i < gtk_tree_view_get_n_columns(view); i++) {
++		column = gtk_tree_view_get_column(view, i);
++		gtk_tree_view_column_set_resizable(column, TRUE);
++	}
+ 
+-	widget = GTK_WIDGET(gtk_builder_get_object(builder, "quit1"));
+-	g_signal_connect(widget, "activate", G_CALLBACK(on_quit1_activate), NULL);
++	sel = gtk_tree_view_get_selection(view);
++	gtk_tree_selection_set_mode(sel, GTK_SELECTION_SINGLE);
+ 
+-	widget = GTK_WIDGET(gtk_builder_get_object(builder, "show_name1"));
+-	g_signal_connect(widget, "activate", G_CALLBACK(on_show_name1_activate), NULL);
+-	gtk_check_menu_item_set_active((GtkCheckMenuItem *) widget,
+-				       show_name);
++	click_gesture = gtk_gesture_click_new();
++	gtk_widget_add_controller(GTK_WIDGET(view), GTK_EVENT_CONTROLLER(click_gesture));
++	g_signal_connect(click_gesture, "released", G_CALLBACK(on_treeview2_button_press_event), view);
+ 
+-	widget = GTK_WIDGET(gtk_builder_get_object(builder, "show_range1"));
+-	g_signal_connect(widget, "activate", G_CALLBACK(on_show_range1_activate), NULL);
+-	gtk_check_menu_item_set_active((GtkCheckMenuItem *) widget,
+-				       show_range);
++	key_controller = gtk_event_controller_key_new();
++	gtk_widget_add_controller(GTK_WIDGET(view), key_controller);
++	g_signal_connect(key_controller, "key-pressed", G_CALLBACK(on_treeview2_key_press_event), view);
+ 
+-	widget = GTK_WIDGET(gtk_builder_get_object(builder, "show_data1"));
+-	g_signal_connect(widget, "activate", G_CALLBACK(on_show_data1_activate), NULL);
+-	gtk_check_menu_item_set_active((GtkCheckMenuItem *) widget,
+-				       show_value);
++	g_signal_connect(view, "row-activated", G_CALLBACK(on_tree_row_activated), GINT_TO_POINTER(is_left_tree));
++	g_signal_connect(view, "cursor-changed", G_CALLBACK(on_treeview2_cursor_changed), NULL);
++}
+ 
+-	widget = GTK_WIDGET(gtk_builder_get_object(builder, "set_option_mode1"));
+-	g_signal_connect(widget, "activate",
+-			 G_CALLBACK(on_set_option_mode1_activate), NULL);
++static void activate(GtkApplication *app, gpointer user_data)
++{
++	GtkTextBuffer *txtbuf;
++	GtkWidget *widget;
++	GtkBuilder *builder;
++	gchar *glade_file = (gchar*)user_data;
+ 
+-	widget = GTK_WIDGET(gtk_builder_get_object(builder, "set_option_mode2"));
+-	g_signal_connect(widget, "activate",
+-			 G_CALLBACK(on_set_option_mode2_activate), NULL);
++	builder = gtk_builder_new_from_file(glade_file);
++	if (!builder)
++		g_error("GUI loading failed !\n");
+ 
+-	widget = GTK_WIDGET(gtk_builder_get_object(builder, "set_option_mode3"));
+-	g_signal_connect(widget, "activate",
+-			 G_CALLBACK(on_set_option_mode3_activate), NULL);
+ 
+-	widget = GTK_WIDGET(gtk_builder_get_object(builder, "introduction1"));
+-	g_signal_connect(widget, "activate",
+-			 G_CALLBACK(on_introduction1_activate), NULL);
++	main_wnd = GTK_WIDGET(gtk_builder_get_object(builder, "window1"));
+ 
+-	widget = GTK_WIDGET(gtk_builder_get_object(builder, "about1"));
+-	g_signal_connect(widget, "activate",
+-			 G_CALLBACK(on_about1_activate), NULL);
++	gtk_window_set_application(GTK_WINDOW(main_wnd), app);
+ 
+-	widget = GTK_WIDGET(gtk_builder_get_object(builder, "license1"));
+-	g_signal_connect(widget, "activate",
+-			 G_CALLBACK(on_license1_activate), NULL);
++	hpaned = GTK_WIDGET(gtk_builder_get_object(builder, "hpaned1"));
++	vpaned = GTK_WIDGET(gtk_builder_get_object(builder, "vpaned1"));
++	tree1_w = GTK_WIDGET(gtk_builder_get_object(builder, "treeview1"));
++	tree2_w = GTK_WIDGET(gtk_builder_get_object(builder, "treeview2"));
++	text_w = GTK_WIDGET(gtk_builder_get_object(builder, "textview3"));
+ 
+ 	/* toolbar */
+ 	back_btn = GTK_WIDGET(gtk_builder_get_object(builder, "button1"));
+-	g_signal_connect(back_btn, "clicked",
+-			 G_CALLBACK(on_back_clicked), NULL);
+-	gtk_widget_set_sensitive(back_btn, FALSE);
+-
+-	widget = GTK_WIDGET(gtk_builder_get_object(builder, "button2"));
+-	g_signal_connect(widget, "clicked",
+-			 G_CALLBACK(on_load_clicked), NULL);
+-
+ 	save_btn = GTK_WIDGET(gtk_builder_get_object(builder, "button3"));
+-	g_signal_connect(save_btn, "clicked",
+-			 G_CALLBACK(on_save_clicked), NULL);
+-	save_menu_item = GTK_WIDGET(gtk_builder_get_object(builder, "save1"));
+-	conf_set_changed_callback(conf_changed);
+-
+ 	single_btn = GTK_WIDGET(gtk_builder_get_object(builder, "button4"));
+-	g_signal_connect(single_btn, "clicked",
+-			 G_CALLBACK(on_single_clicked), NULL);
+-	replace_button_icon(single_btn, xpm_single_view);
+-
+ 	split_btn = GTK_WIDGET(gtk_builder_get_object(builder, "button5"));
+-	g_signal_connect(split_btn, "clicked",
+-			 G_CALLBACK(on_split_clicked), NULL);
+-	replace_button_icon(split_btn, xpm_split_view);
+-
+ 	full_btn = GTK_WIDGET(gtk_builder_get_object(builder, "button6"));
+-	g_signal_connect(full_btn, "clicked",
+-			 G_CALLBACK(on_full_clicked), NULL);
+-	replace_button_icon(full_btn, xpm_tree_view);
++
++	g_signal_connect(back_btn, "clicked", G_CALLBACK(on_back_clicked), NULL);
++	gtk_widget_set_sensitive(back_btn, FALSE);
++	g_signal_connect(single_btn, "clicked", G_CALLBACK(on_single_clicked), NULL);
++	g_signal_connect(split_btn, "clicked", G_CALLBACK(on_split_clicked), NULL);
++	g_signal_connect(full_btn, "clicked", G_CALLBACK(on_full_clicked), NULL);
+ 
+ 	widget = GTK_WIDGET(gtk_builder_get_object(builder, "button7"));
+-	g_signal_connect(widget, "clicked",
+-			 G_CALLBACK(on_collapse_clicked), NULL);
++	g_signal_connect(widget, "clicked", G_CALLBACK(on_collapse_clicked), NULL);
+ 
+ 	widget = GTK_WIDGET(gtk_builder_get_object(builder, "button8"));
+-	g_signal_connect(widget, "clicked",
+-			 G_CALLBACK(on_expand_clicked), NULL);
++	g_signal_connect(widget, "clicked", G_CALLBACK(on_expand_clicked), NULL);
++
++	g_signal_connect(main_wnd, "close-request", G_CALLBACK(on_window_close_request), NULL);
++
++	init_tree_view(GTK_TREE_VIEW(tree1_w), &tree1, TRUE);
++	init_tree_view(GTK_TREE_VIEW(tree2_w), &tree2, FALSE);
+ 
+ 	txtbuf = gtk_text_view_get_buffer(GTK_TEXT_VIEW(text_w));
+ 	tag1 = gtk_text_buffer_create_tag(txtbuf, "mytag1",
+@@ -1121,193 +1140,89 @@ 					  NULL);
+ 
+ 	gtk_window_set_title(GTK_WINDOW(main_wnd), rootmenu.prompt->text);
+ 
+-	gtk_widget_show_all(main_wnd);
++	conf_set_changed_callback(conf_changed);
+ 
+-	g_object_unref(builder);
+-}
++	conf_read(NULL);
+ 
+-static gboolean visible_func(GtkTreeModel *model, GtkTreeIter  *iter,
+-			     gpointer data)
+-{
+-	struct menu *menu;
++	set_view_mode(view_mode);
+ 
+-	gtk_tree_model_get(model, iter, COL_MENU, &menu, -1);
++	gtk_window_present(GTK_WINDOW(main_wnd));
+ 
+-	if (!menu)
+-		return FALSE;
+-
+-	return menu_is_visible(menu) || opt_mode == OPT_ALL ||
+-		(opt_mode == OPT_PROMPT && menu_has_prompt(menu));
++	g_object_unref(builder);
+ }
+ 
+-static void init_left_tree(void)
++static void setup_actions(GtkApplication *app)
+ {
+-	GtkTreeView *view = GTK_TREE_VIEW(tree1_w);
+-	GtkCellRenderer *renderer;
+-	GtkTreeSelection *sel;
+-	GtkTreeViewColumn *column;
+-	GtkTreeModel *filter;
++	GSimpleAction *action;
+ 
+-	tree1 = gtk_tree_store_new(COL_NUMBER,
+-				   G_TYPE_STRING, G_TYPE_STRING,
+-				   G_TYPE_STRING, G_TYPE_STRING,
+-				   G_TYPE_STRING, G_TYPE_STRING,
+-				   G_TYPE_POINTER, GDK_TYPE_RGBA,
+-				   G_TYPE_BOOLEAN, GDK_TYPE_PIXBUF,
+-				   G_TYPE_BOOLEAN, G_TYPE_BOOLEAN,
+-				   G_TYPE_BOOLEAN, G_TYPE_BOOLEAN,
+-				   G_TYPE_BOOLEAN);
++	/* File actions */
++	action = g_simple_action_new("load", NULL);
++	g_signal_connect(action, "activate", G_CALLBACK(on_load1_activate), NULL);
++	g_action_map_add_action(G_ACTION_MAP(app), G_ACTION(action));
+ 
+-	filter = gtk_tree_model_filter_new(GTK_TREE_MODEL(tree1), NULL);
++	action_save = g_simple_action_new("save", NULL);
++	g_signal_connect(action_save, "activate", G_CALLBACK(on_save_activate), NULL);
++	g_action_map_add_action(G_ACTION_MAP(app), G_ACTION(action_save));
+ 
+-	gtk_tree_model_filter_set_visible_func(GTK_TREE_MODEL_FILTER(filter),
+-					       visible_func, NULL, NULL);
+-	gtk_tree_view_set_model(view, filter);
++	action = g_simple_action_new("save-as", NULL);
++	g_signal_connect(action, "activate", G_CALLBACK(on_save_as1_activate), NULL);
++	g_action_map_add_action(G_ACTION_MAP(app), G_ACTION(action));
+ 
+-	column = gtk_tree_view_column_new();
+-	gtk_tree_view_append_column(view, column);
+-	gtk_tree_view_column_set_title(column, "Options");
++	action = g_simple_action_new("quit", NULL);
++	g_signal_connect(action, "activate", G_CALLBACK(on_quit1_activate), NULL);
++	g_action_map_add_action(G_ACTION_MAP(app), G_ACTION(action));
+ 
+-	renderer = gtk_cell_renderer_toggle_new();
+-	gtk_tree_view_column_pack_start(GTK_TREE_VIEW_COLUMN(column),
+-					renderer, FALSE);
+-	gtk_tree_view_column_set_attributes(GTK_TREE_VIEW_COLUMN(column),
+-					    renderer,
+-					    "active", COL_BTNACT,
+-					    "inconsistent", COL_BTNINC,
+-					    "visible", COL_BTNVIS,
+-					    "radio", COL_BTNRAD, NULL);
+-	renderer = gtk_cell_renderer_text_new();
+-	gtk_tree_view_column_pack_start(GTK_TREE_VIEW_COLUMN(column),
+-					renderer, FALSE);
+-	gtk_tree_view_column_set_attributes(GTK_TREE_VIEW_COLUMN(column),
+-					    renderer,
+-					    "text", COL_OPTION,
+-					    "foreground-rgba",
+-					    COL_COLOR, NULL);
+-
+-	sel = gtk_tree_view_get_selection(view);
+-	gtk_tree_selection_set_mode(sel, GTK_SELECTION_SINGLE);
+-}
+-
+-static void init_right_tree(void)
+-{
+-	GtkTreeView *view = GTK_TREE_VIEW(tree2_w);
+-	GtkCellRenderer *renderer;
+-	GtkTreeSelection *sel;
+-	GtkTreeViewColumn *column;
+-	GtkTreeModel *filter;
+-	gint i;
+-
+-	tree2 = gtk_tree_store_new(COL_NUMBER,
+-				   G_TYPE_STRING, G_TYPE_STRING,
+-				   G_TYPE_STRING, G_TYPE_STRING,
+-				   G_TYPE_STRING, G_TYPE_STRING,
+-				   G_TYPE_POINTER, GDK_TYPE_RGBA,
+-				   G_TYPE_BOOLEAN, GDK_TYPE_PIXBUF,
+-				   G_TYPE_BOOLEAN, G_TYPE_BOOLEAN,
+-				   G_TYPE_BOOLEAN, G_TYPE_BOOLEAN,
+-				   G_TYPE_BOOLEAN);
++	/* Options actions */
++	action = g_simple_action_new_stateful("show-name", NULL, g_variant_new_boolean(show_name));
++	g_signal_connect(action, "activate", G_CALLBACK(on_show_name1_activate), NULL);
++	g_action_map_add_action(G_ACTION_MAP(app), G_ACTION(action));
+ 
+-	filter = gtk_tree_model_filter_new(GTK_TREE_MODEL(tree2), NULL);
++	action = g_simple_action_new_stateful("show-range", NULL, g_variant_new_boolean(show_range));
++	g_signal_connect(action, "activate", G_CALLBACK(on_show_range1_activate), NULL);
++	g_action_map_add_action(G_ACTION_MAP(app), G_ACTION(action));
+ 
+-	gtk_tree_model_filter_set_visible_func(GTK_TREE_MODEL_FILTER(filter),
+-					       visible_func, NULL, NULL);
+-	gtk_tree_view_set_model(view, filter);
++	action = g_simple_action_new_stateful("show-data", NULL, g_variant_new_boolean(show_value));
++	g_signal_connect(action, "activate", G_CALLBACK(on_show_data1_activate), NULL);
++	g_action_map_add_action(G_ACTION_MAP(app), G_ACTION(action));
+ 
+-	column = gtk_tree_view_column_new();
+-	gtk_tree_view_append_column(view, column);
+-	gtk_tree_view_column_set_title(column, "Options");
++	action = g_simple_action_new_stateful("option-mode", G_VARIANT_TYPE_STRING, g_variant_new_string("normal"));
++	g_signal_connect(action, "activate", G_CALLBACK(on_option_mode_activate), NULL);
++	g_action_map_add_action(G_ACTION_MAP(app), G_ACTION(action));
+ 
+-	renderer = gtk_cell_renderer_pixbuf_new();
+-	gtk_tree_view_column_pack_start(GTK_TREE_VIEW_COLUMN(column),
+-					renderer, FALSE);
+-	gtk_tree_view_column_set_attributes(GTK_TREE_VIEW_COLUMN(column),
+-					    renderer,
+-					    "pixbuf", COL_PIXBUF,
+-					    "visible", COL_PIXVIS, NULL);
+-	renderer = gtk_cell_renderer_toggle_new();
+-	gtk_tree_view_column_pack_start(GTK_TREE_VIEW_COLUMN(column),
+-					renderer, FALSE);
+-	gtk_tree_view_column_set_attributes(GTK_TREE_VIEW_COLUMN(column),
+-					    renderer,
+-					    "active", COL_BTNACT,
+-					    "inconsistent", COL_BTNINC,
+-					    "visible", COL_BTNVIS,
+-					    "radio", COL_BTNRAD, NULL);
+-	renderer = gtk_cell_renderer_text_new();
+-	gtk_tree_view_column_pack_start(GTK_TREE_VIEW_COLUMN(column),
+-					renderer, FALSE);
+-	gtk_tree_view_column_set_attributes(GTK_TREE_VIEW_COLUMN(column),
+-					    renderer,
+-					    "text", COL_OPTION,
+-					    "foreground-rgba",
+-					    COL_COLOR, NULL);
++	/* Help actions */
++	action = g_simple_action_new("introduction", NULL);
++	g_signal_connect(action, "activate", G_CALLBACK(on_introduction1_activate), NULL);
++	g_action_map_add_action(G_ACTION_MAP(app), G_ACTION(action));
+ 
+-	renderer = gtk_cell_renderer_text_new();
+-	gtk_tree_view_insert_column_with_attributes(view, -1,
+-						    "Name", renderer,
+-						    "text", COL_NAME,
+-						    "foreground-rgba",
+-						    COL_COLOR, NULL);
+-	renderer = gtk_cell_renderer_text_new();
+-	gtk_tree_view_insert_column_with_attributes(view, -1,
+-						    "N", renderer,
+-						    "text", COL_NO,
+-						    "foreground-rgba",
+-						    COL_COLOR, NULL);
+-	renderer = gtk_cell_renderer_text_new();
+-	gtk_tree_view_insert_column_with_attributes(view, -1,
+-						    "M", renderer,
+-						    "text", COL_MOD,
+-						    "foreground-rgba",
+-						    COL_COLOR, NULL);
+-	renderer = gtk_cell_renderer_text_new();
+-	gtk_tree_view_insert_column_with_attributes(view, -1,
+-						    "Y", renderer,
+-						    "text", COL_YES,
+-						    "foreground-rgba",
+-						    COL_COLOR, NULL);
+-	renderer = gtk_cell_renderer_text_new();
+-	gtk_tree_view_insert_column_with_attributes(view, -1,
+-						    "Value", renderer,
+-						    "text", COL_VALUE,
+-						    "editable",
+-						    COL_EDIT,
+-						    "foreground-rgba",
+-						    COL_COLOR, NULL);
+-	g_signal_connect(G_OBJECT(renderer), "edited",
+-			 G_CALLBACK(renderer_edited), tree2_w);
++	action = g_simple_action_new("about", NULL);
++	g_signal_connect(action, "activate", G_CALLBACK(on_about1_activate), NULL);
++	g_action_map_add_action(G_ACTION_MAP(app), G_ACTION(action));
+ 
+-	pix_menu = gdk_pixbuf_new_from_xpm_data((const char **)xpm_menu);
++	action = g_simple_action_new("license", NULL);
++	g_signal_connect(action, "activate", G_CALLBACK(on_license1_activate), NULL);
++	g_action_map_add_action(G_ACTION_MAP(app), G_ACTION(action));
+ 
+-	for (i = 0; i < COL_VALUE; i++) {
+-		column = gtk_tree_view_get_column(view, i);
+-		gtk_tree_view_column_set_resizable(column, TRUE);
+-	}
++	/* Keyboard shortcuts */
++	const gchar *load_accels[] = {"<Ctrl>l", NULL};
++	const gchar *save_accels[] = {"<Ctrl>s", NULL};
++	const gchar *quit_accels[] = {"<Ctrl>q", NULL};
++	const gchar *intro_accels[] = {"<Ctrl>i", NULL};
++	const gchar *about_accels[] = {"<Ctrl>a", NULL};
+ 
+-	sel = gtk_tree_view_get_selection(view);
+-	gtk_tree_selection_set_mode(sel, GTK_SELECTION_SINGLE);
++	gtk_application_set_accels_for_action(app, "app.load", load_accels);
++	gtk_application_set_accels_for_action(app, "app.save", save_accels);
++	gtk_application_set_accels_for_action(app, "app.quit", quit_accels);
++	gtk_application_set_accels_for_action(app, "app.introduction", intro_accels);
++	gtk_application_set_accels_for_action(app, "app.about", about_accels);
+ }
+ 
+-/* Main */
+-int main(int ac, char *av[])
++static void command_line(GtkApplication *app, GApplicationCommandLine *cmdline, gpointer user_data)
+ {
++	gchar **av;
++	gint ac;
+ 	const char *name;
+-	char *env;
+-	gchar *glade_file;
+ 
+-	/* GTK stuffs */
+-	gtk_init(&ac, &av);
+-
+-	/* Determine GUI path */
+-	env = getenv(SRCTREE);
+-	if (env)
+-		glade_file = g_strconcat(env, "/scripts/kconfig/gconf.ui", NULL);
+-	else if (av[0][0] == '/')
+-		glade_file = g_strconcat(av[0], ".ui", NULL);
+-	else
+-		glade_file = g_strconcat(g_get_current_dir(), "/", av[0], ".ui", NULL);
++	av = g_application_command_line_get_arguments(cmdline, &ac);
+ 
+ 	/* Conf stuffs */
+ 	if (ac > 1 && av[1][0] == '-') {
+@@ -1320,8 +1235,9 @@ 			conf_set_message_callback(NULL);
+ 			break;
+ 		case 'h':
+ 		case '?':
+-			printf("%s [-s] <config>\n", av[0]);
+-			exit(0);
++			g_application_command_line_print(cmdline, "%s [-s] <config>\n", av[0]);
++			g_strfreev(av);
++			return;
+ 		}
+ 		name = av[2];
+ 	} else
+@@ -1329,16 +1245,39 @@ 		name = av[1];
+ 
+ 	conf_parse(name);
+ 
+-	/* Load the interface and connect signals */
+-	init_main_window(glade_file);
+-	init_left_tree();
+-	init_right_tree();
++	g_strfreev(av);
++
++	g_application_activate(G_APPLICATION(app));
++
++	return;
++}
++
++/* Main */
++int main(int ac, char *av[])
++{
++	char *env;
++	gchar *glade_file;
++	int status;
++
++	/* Determine GUI path */
++	env = getenv(SRCTREE);
++	if (env)
++		glade_file = g_strconcat(env, "/scripts/kconfig/gconf.ui", NULL);
++	else if (av[0][0] == '/')
++		glade_file = g_strconcat(av[0], ".ui", NULL);
++	else
++		glade_file = g_strconcat(g_get_current_dir(), "/", av[0], ".ui", NULL);
++
++	app = gtk_application_new("org.kernel.gconfig", G_APPLICATION_HANDLES_COMMAND_LINE);
++
++	setup_actions(app);
+ 
+-	conf_read(NULL);
++	g_signal_connect(app, "activate", G_CALLBACK(activate), glade_file);
++	g_signal_connect(app, "command-line", G_CALLBACK(command_line), NULL);
+ 
+-	set_view_mode(view_mode);
++	status = g_application_run(G_APPLICATION(app), ac, av);
+ 
+-	gtk_main();
++	g_object_unref(app);
+ 
+-	return 0;
++	return status;
+ }
+diff --git a/scripts/kconfig/gconf.ui b/scripts/kconfig/gconf.ui
+index 378a3eadf9f86a388208380fef3e324721db4956..2c0e9475c00f8c44c7ef5894397387f5f4311f5a 100644
+--- a/scripts/kconfig/gconf.ui
++++ b/scripts/kconfig/gconf.ui
+@@ -1,535 +1,319 @@
+-<?xml version="1.0" standalone="no"?> <!--*- mode: xml -*-->
+-
++<?xml version="1.0" encoding="UTF-8"?>
+ <interface>
+-
+-<object class="GtkWindow" id="window1">
+-  <property name="visible">True</property>
+-  <property name="title" translatable="yes">Gtk Kernel Configurator</property>
+-  <property name="type">GTK_WINDOW_TOPLEVEL</property>
+-  <property name="window_position">GTK_WIN_POS_NONE</property>
+-  <property name="modal">False</property>
+-  <property name="default_width">640</property>
+-  <property name="default_height">480</property>
+-  <property name="resizable">True</property>
+-  <property name="destroy_with_parent">False</property>
+-  <property name="decorated">True</property>
+-  <property name="skip_taskbar_hint">False</property>
+-  <property name="skip_pager_hint">False</property>
+-  <property name="type_hint">GDK_WINDOW_TYPE_HINT_NORMAL</property>
+-  <property name="gravity">GDK_GRAVITY_NORTH_WEST</property>
+-
+-  <child>
+-    <object class="GtkBox" id="vbox1">
+-      <property name="orientation">vertical</property>
+-      <property name="visible">True</property>
+-      <property name="homogeneous">False</property>
+-      <property name="spacing">0</property>
+-
+-      <child>
+-	<object class="GtkMenuBar" id="menubar1">
+-	  <property name="visible">True</property>
+-
+-	  <child>
+-	    <object class="GtkMenuItem" id="file1">
+-	      <property name="visible">True</property>
+-	      <property name="label" translatable="yes">_File</property>
+-	      <property name="use_underline">True</property>
+-
+-	      <child type="submenu">
+-		<object class="GtkMenu" id="file1_menu">
+-
+-		  <child>
+-		    <object class="GtkImageMenuItem" id="load1">
+-		      <property name="visible">True</property>
+-		      <property name="tooltip-text" translatable="yes">Load a config file</property>
+-		      <property name="label" translatable="yes">_Load</property>
+-		      <property name="use_underline">True</property>
+-		      <accelerator key="L" modifiers="GDK_CONTROL_MASK" signal="activate"/>
+-		    </object>
+-		  </child>
+-
+-		  <child>
+-		    <object class="GtkImageMenuItem" id="save1">
+-		      <property name="visible">True</property>
+-		      <property name="tooltip-text" translatable="yes">Save the config in .config</property>
+-		      <property name="label" translatable="yes">_Save</property>
+-		      <property name="use_underline">True</property>
+-		      <accelerator key="S" modifiers="GDK_CONTROL_MASK" signal="activate"/>
+-		    </object>
+-		  </child>
+-
+-		  <child>
+-		    <object class="GtkImageMenuItem" id="save_as1">
+-		      <property name="visible">True</property>
+-		      <property name="tooltip-text" translatable="yes">Save the config in a file</property>
+-		      <property name="label" translatable="yes">Save _as</property>
+-		      <property name="use_underline">True</property>
+-		    </object>
+-		  </child>
+-
+-		  <child>
+-		    <object class="GtkSeparatorMenuItem" id="separator1">
+-		      <property name="visible">True</property>
+-		    </object>
+-		  </child>
+-
+-		  <child>
+-		    <object class="GtkImageMenuItem" id="quit1">
+-		      <property name="visible">True</property>
+-		      <property name="label" translatable="yes">_Quit</property>
+-		      <property name="use_underline">True</property>
+-		      <accelerator key="Q" modifiers="GDK_CONTROL_MASK" signal="activate"/>
+-		    </object>
+-		  </child>
+-		</object>
+-	      </child>
+-	    </object>
+-	  </child>
+-
+-	  <child>
+-	    <object class="GtkMenuItem" id="options1">
+-	      <property name="visible">True</property>
+-	      <property name="label" translatable="yes">_Options</property>
+-	      <property name="use_underline">True</property>
+-
+-	      <child type="submenu">
+-		<object class="GtkMenu" id="options1_menu">
+-
+-		  <child>
+-		    <object class="GtkCheckMenuItem" id="show_name1">
+-		      <property name="visible">True</property>
+-		      <property name="tooltip-text" translatable="yes">Show name</property>
+-		      <property name="label" translatable="yes">Show _name</property>
+-		      <property name="use_underline">True</property>
+-		      <property name="active">False</property>
+-		    </object>
+-		  </child>
+-
+-		  <child>
+-		    <object class="GtkCheckMenuItem" id="show_range1">
+-		      <property name="visible">True</property>
+-		      <property name="tooltip-text" translatable="yes">Show range (Y/M/N)</property>
+-		      <property name="label" translatable="yes">Show _range</property>
+-		      <property name="use_underline">True</property>
+-		      <property name="active">False</property>
+-		    </object>
+-		  </child>
+-
+-		  <child>
+-		    <object class="GtkCheckMenuItem" id="show_data1">
+-		      <property name="visible">True</property>
+-		      <property name="tooltip-text" translatable="yes">Show value of the option</property>
+-		      <property name="label" translatable="yes">Show _data</property>
+-		      <property name="use_underline">True</property>
+-		      <property name="active">False</property>
+-		    </object>
+-		  </child>
+-
+-		  <child>
+-		    <object class="GtkSeparatorMenuItem" id="separator2">
+-		      <property name="visible">True</property>
+-		    </object>
+-		  </child>
+-
+-		  <child>
+-		    <object class="GtkRadioMenuItem" id="set_option_mode1">
+-		      <property name="visible">True</property>
+-		      <property name="tooltip-text" translatable="yes">Show normal options</property>
+-		      <property name="label" translatable="yes">Show normal options</property>
+-		      <property name="use_underline">True</property>
+-		      <property name="active">True</property>
+-		    </object>
+-		  </child>
+-
+-		  <child>
+-		    <object class="GtkRadioMenuItem" id="set_option_mode2">
+-		      <property name="visible">True</property>
+-		      <property name="tooltip-text" translatable="yes">Show all options</property>
+-		      <property name="label" translatable="yes">Show all _options</property>
+-		      <property name="use_underline">True</property>
+-		      <property name="active">False</property>
+-		      <property name="group">set_option_mode1</property>
+-		    </object>
+-		  </child>
+-
+-		  <child>
+-		    <object class="GtkRadioMenuItem" id="set_option_mode3">
+-		      <property name="visible">True</property>
+-		      <property name="tooltip-text" translatable="yes">Show all options with prompts</property>
+-		      <property name="label" translatable="yes">Show all prompt options</property>
+-		      <property name="use_underline">True</property>
+-		      <property name="active">False</property>
+-		      <property name="group">set_option_mode1</property>
+-		    </object>
+-		  </child>
+-
+-		</object>
+-	      </child>
+-	    </object>
+-	  </child>
+-
+-	  <child>
+-	    <object class="GtkMenuItem" id="help1">
+-	      <property name="visible">True</property>
+-	      <property name="label" translatable="yes">_Help</property>
+-	      <property name="use_underline">True</property>
+-
+-	      <child type="submenu">
+-		<object class="GtkMenu" id="help1_menu">
+-
+-		  <child>
+-		    <object class="GtkImageMenuItem" id="introduction1">
+-		      <property name="visible">True</property>
+-		      <property name="label" translatable="yes">_Introduction</property>
+-		      <property name="use_underline">True</property>
+-		      <accelerator key="I" modifiers="GDK_CONTROL_MASK" signal="activate"/>
+-		    </object>
+-		  </child>
+-
+-		  <child>
+-		    <object class="GtkImageMenuItem" id="about1">
+-		      <property name="visible">True</property>
+-		      <property name="label" translatable="yes">_About</property>
+-		      <property name="use_underline">True</property>
+-		      <accelerator key="A" modifiers="GDK_CONTROL_MASK" signal="activate"/>
+-		    </object>
+-		  </child>
+-
+-		  <child>
+-		    <object class="GtkImageMenuItem" id="license1">
+-		      <property name="visible">True</property>
+-		      <property name="label" translatable="yes">_License</property>
+-		      <property name="use_underline">True</property>
+-		    </object>
+-		  </child>
+-		</object>
+-	      </child>
+-	    </object>
+-	  </child>
+-	</object>
+-	<packing>
+-	  <property name="padding">0</property>
+-	  <property name="expand">False</property>
+-	  <property name="fill">False</property>
+-	</packing>
+-      </child>
+-
+-      <child>
+-	    <object class="GtkToolbar" id="toolbar1">
+-	      <property name="visible">True</property>
+-	      <property name="orientation">GTK_ORIENTATION_HORIZONTAL</property>
+-	      <property name="toolbar_style">GTK_TOOLBAR_BOTH</property>
+-	      <property name="show_arrow">True</property>
+-
+-	      <child>
+-		<object class="GtkToolButton" id="button1">
+-		  <property name="visible">True</property>
+-		  <property name="tooltip-text" translatable="yes">Goes up of one level (single view)</property>
+-		  <property name="label" translatable="yes">Back</property>
+-		  <property name="use_underline">True</property>
+-		  <property name="stock_id">gtk-undo</property>
+-		  <property name="visible_horizontal">True</property>
+-		  <property name="visible_vertical">True</property>
+-		  <property name="is_important">False</property>
+-		</object>
+-		<packing>
+-		  <property name="expand">False</property>
+-		  <property name="homogeneous">True</property>
+-		</packing>
+-	      </child>
+-
+-	      <child>
+-		<object class="GtkToolItem" id="toolitem1">
+-		  <property name="visible">True</property>
+-		  <property name="visible_horizontal">True</property>
+-		  <property name="visible_vertical">True</property>
+-		  <property name="is_important">False</property>
+-
+-		  <child>
+-		    <object class="GtkVSeparator" id="vseparator1">
+-		      <property name="visible">True</property>
+-		    </object>
+-		  </child>
+-		</object>
+-		<packing>
+-		  <property name="expand">False</property>
+-		  <property name="homogeneous">False</property>
+-		</packing>
+-	      </child>
+-
+-	      <child>
+-		<object class="GtkToolButton" id="button2">
+-		  <property name="visible">True</property>
+-		  <property name="tooltip-text" translatable="yes">Load a config file</property>
+-		  <property name="label" translatable="yes">Load</property>
+-		  <property name="use_underline">True</property>
+-		  <property name="stock_id">gtk-open</property>
+-		  <property name="visible_horizontal">True</property>
+-		  <property name="visible_vertical">True</property>
+-		  <property name="is_important">False</property>
+-		</object>
+-		<packing>
+-		  <property name="expand">False</property>
+-		  <property name="homogeneous">True</property>
+-		</packing>
+-	      </child>
+-
+-	      <child>
+-		<object class="GtkToolButton" id="button3">
+-		  <property name="visible">True</property>
+-		  <property name="tooltip-text" translatable="yes">Save a config file</property>
+-		  <property name="label" translatable="yes">Save</property>
+-		  <property name="use_underline">True</property>
+-		  <property name="stock_id">gtk-save</property>
+-		  <property name="visible_horizontal">True</property>
+-		  <property name="visible_vertical">True</property>
+-		  <property name="is_important">False</property>
+-		</object>
+-		<packing>
+-		  <property name="expand">False</property>
+-		  <property name="homogeneous">True</property>
+-		</packing>
+-	      </child>
+-
+-	      <child>
+-		<object class="GtkToolItem" id="toolitem2">
+-		  <property name="visible">True</property>
+-		  <property name="visible_horizontal">True</property>
+-		  <property name="visible_vertical">True</property>
+-		  <property name="is_important">False</property>
+-
+-		  <child>
+-		    <object class="GtkVSeparator" id="vseparator2">
+-		      <property name="visible">True</property>
+-		    </object>
+-		  </child>
+-		</object>
+-		<packing>
+-		  <property name="expand">False</property>
+-		  <property name="homogeneous">False</property>
+-		</packing>
+-	      </child>
+-
+-	      <child>
+-		<object class="GtkToolButton" id="button4">
+-		  <property name="visible">True</property>
+-		  <property name="tooltip-text" translatable="yes">Single view</property>
+-		  <property name="label" translatable="yes">Single</property>
+-		  <property name="use_underline">True</property>
+-		  <property name="stock_id">gtk-missing-image</property>
+-		  <property name="visible_horizontal">True</property>
+-		  <property name="visible_vertical">True</property>
+-		  <property name="is_important">False</property>
+-		</object>
+-		<packing>
+-		  <property name="expand">False</property>
+-		  <property name="homogeneous">True</property>
+-		</packing>
+-	      </child>
+-
+-	      <child>
+-		<object class="GtkToolButton" id="button5">
+-		  <property name="visible">True</property>
+-		  <property name="tooltip-text" translatable="yes">Split view</property>
+-		  <property name="label" translatable="yes">Split</property>
+-		  <property name="use_underline">True</property>
+-		  <property name="stock_id">gtk-missing-image</property>
+-		  <property name="visible_horizontal">True</property>
+-		  <property name="visible_vertical">True</property>
+-		  <property name="is_important">False</property>
+-		</object>
+-		<packing>
+-		  <property name="expand">False</property>
+-		  <property name="homogeneous">True</property>
+-		</packing>
+-	      </child>
+-
+-	      <child>
+-		<object class="GtkToolButton" id="button6">
+-		  <property name="visible">True</property>
+-		  <property name="tooltip-text" translatable="yes">Full view</property>
+-		  <property name="label" translatable="yes">Full</property>
+-		  <property name="use_underline">True</property>
+-		  <property name="stock_id">gtk-missing-image</property>
+-		  <property name="visible_horizontal">True</property>
+-		  <property name="visible_vertical">True</property>
+-		  <property name="is_important">False</property>
+-		</object>
+-		<packing>
+-		  <property name="expand">False</property>
+-		  <property name="homogeneous">True</property>
+-		</packing>
+-	      </child>
+-
+-	      <child>
+-		<object class="GtkToolItem" id="toolitem3">
+-		  <property name="visible">True</property>
+-		  <property name="visible_horizontal">True</property>
+-		  <property name="visible_vertical">True</property>
+-		  <property name="is_important">False</property>
+-
+-		  <child>
+-		    <object class="GtkVSeparator" id="vseparator3">
+-		      <property name="visible">True</property>
+-		    </object>
+-		  </child>
+-		</object>
+-		<packing>
+-		  <property name="expand">False</property>
+-		  <property name="homogeneous">False</property>
+-		</packing>
+-	      </child>
+-
+-	      <child>
+-		<object class="GtkToolButton" id="button7">
+-		  <property name="visible">True</property>
+-		  <property name="tooltip-text" translatable="yes">Collapse the whole tree in the right frame</property>
+-		  <property name="label" translatable="yes">Collapse</property>
+-		  <property name="use_underline">True</property>
+-		  <property name="stock_id">gtk-remove</property>
+-		  <property name="visible_horizontal">True</property>
+-		  <property name="visible_vertical">True</property>
+-		  <property name="is_important">False</property>
+-		</object>
+-		<packing>
+-		  <property name="expand">False</property>
+-		  <property name="homogeneous">True</property>
+-		</packing>
+-	      </child>
+-
+-	      <child>
+-		<object class="GtkToolButton" id="button8">
+-		  <property name="visible">True</property>
+-		  <property name="tooltip-text" translatable="yes">Expand the whole tree in the right frame</property>
+-		  <property name="label" translatable="yes">Expand</property>
+-		  <property name="use_underline">True</property>
+-		  <property name="stock_id">gtk-add</property>
+-		  <property name="visible_horizontal">True</property>
+-		  <property name="visible_vertical">True</property>
+-		  <property name="is_important">False</property>
+-		</object>
+-		<packing>
+-		  <property name="expand">False</property>
+-		  <property name="homogeneous">True</property>
+-		</packing>
+-	      </child>
+-	    </object>
+-	<packing>
+-	  <property name="padding">0</property>
+-	  <property name="expand">False</property>
+-	  <property name="fill">False</property>
+-	</packing>
+-      </child>
+-
+-      <child>
+-	<object class="GtkHPaned" id="hpaned1">
+-	  <property name="width_request">1</property>
+-	  <property name="visible">True</property>
+-	  <property name="can_focus">True</property>
+-
+-	  <child>
+-	    <object class="GtkScrolledWindow" id="scrolledwindow1">
+-	      <property name="visible">True</property>
+-	      <property name="hscrollbar_policy">GTK_POLICY_AUTOMATIC</property>
+-	      <property name="vscrollbar_policy">GTK_POLICY_AUTOMATIC</property>
+-	      <property name="shadow_type">GTK_SHADOW_IN</property>
+-	      <property name="window_placement">GTK_CORNER_TOP_LEFT</property>
+-
+-	      <child>
+-		<object class="GtkTreeView" id="treeview1">
+-		  <property name="visible">True</property>
+-		  <property name="can_focus">True</property>
+-		  <property name="headers_visible">True</property>
+-		  <property name="rules_hint">False</property>
+-		  <property name="reorderable">False</property>
+-		  <property name="enable_search">False</property>
+-		</object>
+-	      </child>
+-	    </object>
+-	    <packing>
+-	      <property name="shrink">True</property>
+-	      <property name="resize">False</property>
+-	    </packing>
+-	  </child>
+-
+-	  <child>
+-	    <object class="GtkVPaned" id="vpaned1">
+-	      <property name="visible">True</property>
+-	      <property name="can_focus">True</property>
+-
+-	      <child>
+-		<object class="GtkScrolledWindow" id="scrolledwindow2">
+-		  <property name="visible">True</property>
+-		  <property name="hscrollbar_policy">GTK_POLICY_AUTOMATIC</property>
+-		  <property name="vscrollbar_policy">GTK_POLICY_AUTOMATIC</property>
+-		  <property name="shadow_type">GTK_SHADOW_IN</property>
+-		  <property name="window_placement">GTK_CORNER_TOP_LEFT</property>
+-
+-		  <child>
+-		    <object class="GtkTreeView" id="treeview2">
+-		      <property name="visible">True</property>
+-		      <property name="can_focus">True</property>
+-		      <property name="has_focus">True</property>
+-		      <property name="headers_visible">True</property>
+-		      <property name="rules_hint">False</property>
+-		      <property name="reorderable">False</property>
+-		      <property name="enable_search">False</property>
+-		    </object>
+-		  </child>
+-		</object>
+-		<packing>
+-		  <property name="shrink">True</property>
+-		  <property name="resize">False</property>
+-		</packing>
+-	      </child>
+-
+-	      <child>
+-		<object class="GtkScrolledWindow" id="scrolledwindow3">
+-		  <property name="visible">True</property>
+-		  <property name="hscrollbar_policy">GTK_POLICY_NEVER</property>
+-		  <property name="vscrollbar_policy">GTK_POLICY_AUTOMATIC</property>
+-		  <property name="shadow_type">GTK_SHADOW_IN</property>
+-		  <property name="window_placement">GTK_CORNER_TOP_LEFT</property>
+-
+-		  <child>
+-		    <object class="GtkTextView" id="textview3">
+-		      <property name="visible">True</property>
+-		      <property name="can_focus">True</property>
+-		      <property name="editable">False</property>
+-		      <property name="overwrite">False</property>
+-		      <property name="accepts_tab">True</property>
+-		      <property name="justification">GTK_JUSTIFY_LEFT</property>
+-		      <property name="wrap_mode">GTK_WRAP_WORD</property>
+-		      <property name="cursor_visible">True</property>
+-		      <property name="pixels_above_lines">0</property>
+-		      <property name="pixels_below_lines">0</property>
+-		      <property name="pixels_inside_wrap">0</property>
+-		      <property name="left_margin">0</property>
+-		      <property name="right_margin">0</property>
+-		      <property name="indent">0</property>
+-		    </object>
+-		  </child>
+-		</object>
+-		<packing>
+-		  <property name="shrink">True</property>
+-		  <property name="resize">True</property>
+-		</packing>
+-	      </child>
+-	    </object>
+-	    <packing>
+-	      <property name="shrink">True</property>
+-	      <property name="resize">True</property>
+-	    </packing>
+-	  </child>
+-	</object>
+-	<packing>
+-	  <property name="padding">0</property>
+-	  <property name="expand">True</property>
+-	  <property name="fill">True</property>
+-	</packing>
+-      </child>
+-    </object>
+-  </child>
+-</object>
+-
++  <requires lib="gtk" version="4.0"/>
++  <menu id="main_menu">
++    <submenu>
++      <attribute name="label" translatable="yes">_File</attribute>
++      <section>
++        <item>
++          <attribute name="label" translatable="yes">_Load</attribute>
++          <attribute name="action">app.load</attribute>
++          <attribute name="accel">&lt;Primary&gt;l</attribute>
++        </item>
++        <item>
++          <attribute name="label" translatable="yes">_Save</attribute>
++          <attribute name="action">app.save</attribute>
++          <attribute name="accel">&lt;Primary&gt;s</attribute>
++        </item>
++        <item>
++          <attribute name="label" translatable="yes">Save _As</attribute>
++          <attribute name="action">app.save-as</attribute>
++        </item>
++      </section>
++      <section>
++        <item>
++          <attribute name="label" translatable="yes">_Quit</attribute>
++          <attribute name="action">app.quit</attribute>
++          <attribute name="accel">&lt;Primary&gt;q</attribute>
++        </item>
++      </section>
++    </submenu>
++    <submenu>
++      <attribute name="label" translatable="yes">_Options</attribute>
++      <section>
++        <item>
++          <attribute name="label" translatable="yes">Show _Name</attribute>
++          <attribute name="action">app.show-name</attribute>
++        </item>
++        <item>
++          <attribute name="label" translatable="yes">Show _Range</attribute>
++          <attribute name="action">app.show-range</attribute>
++        </item>
++        <item>
++          <attribute name="label" translatable="yes">Show _Data</attribute>
++          <attribute name="action">app.show-data</attribute>
++        </item>
++      </section>
++      <section>
++        <item>
++          <attribute name="label" translatable="yes">Show Normal Options</attribute>
++          <attribute name="action">app.option-mode</attribute>
++          <attribute name="target">normal</attribute>
++        </item>
++        <item>
++          <attribute name="label" translatable="yes">Show All Options</attribute>
++          <attribute name="action">app.option-mode</attribute>
++          <attribute name="target">all</attribute>
++        </item>
++        <item>
++          <attribute name="label" translatable="yes">Show All Prompt Options</attribute>
++          <attribute name="action">app.option-mode</attribute>
++          <attribute name="target">prompt</attribute>
++        </item>
++      </section>
++    </submenu>
++    <submenu>
++      <attribute name="label" translatable="yes">_Help</attribute>
++      <section>
++        <item>
++          <attribute name="label" translatable="yes">_Introduction</attribute>
++          <attribute name="action">app.introduction</attribute>
++          <attribute name="accel">&lt;Primary&gt;i</attribute>
++        </item>
++        <item>
++          <attribute name="label" translatable="yes">_About</attribute>
++          <attribute name="action">app.about</attribute>
++          <attribute name="accel">&lt;Primary&gt;a</attribute>
++        </item>
++        <item>
++          <attribute name="label" translatable="yes">_License</attribute>
++          <attribute name="action">app.license</attribute>
++        </item>
++      </section>
++    </submenu>
++  </menu>
++  <object class="GtkApplicationWindow" id="window1">
++    <property name="title" translatable="1">GTK Kernel Configurator</property>
++    <property name="default-width">800</property>
++    <property name="default-height">600</property>
++    <child>
++      <object class="GtkBox" id="vbox1">
++        <property name="orientation">vertical</property>
++        <child>
++          <object class="GtkPopoverMenuBar" id="menubar1">
++            <property name="menu-model">main_menu</property>
++          </object>
++        </child>
++        <child>
++          <object class="GtkBox" id="toolbar_box">
++            <style>
++              <class name="toolbar"/>
++            </style>
++            <child>
++              <object class="GtkButton" id="button1">
++                <property name="tooltip-text">Goes up of one level (single view)</property>
++                <child>
++                  <object class="GtkBox">
++                    <property name="spacing">6</property>
++                    <child>
++                      <object class="GtkImage">
++                        <property name="icon-name">edit-undo-symbolic</property>
++                      </object>
++                    </child>
++                    <child>
++                      <object class="GtkLabel">
++                        <property name="label">Back</property>
++                      </object>
++                    </child>
++                  </object>
++                </child>
++                <style>
++                  <class name="flat"/>
++                </style>
++              </object>
++            </child>
++            <child>
++              <object class="GtkSeparator">
++                <property name="orientation">vertical</property>
++              </object>
++            </child>
++            <child>
++              <object class="GtkButton" id="button2">
++                <property name="tooltip-text">Load a config file</property>
++                <property name="action-name">app.load</property>
++                <child>
++                  <object class="GtkBox">
++                    <property name="spacing">6</property>
++                    <child>
++                      <object class="GtkImage">
++                        <property name="icon-name">document-open-symbolic</property>
++                      </object>
++                    </child>
++                    <child>
++                      <object class="GtkLabel">
++                        <property name="label">Load</property>
++                      </object>
++                    </child>
++                  </object>
++                </child>
++                <style>
++                  <class name="flat"/>
++                </style>
++              </object>
++            </child>
++            <child>
++              <object class="GtkButton" id="button3">
++                <property name="tooltip-text">Save a config file</property>
++                <property name="action-name">app.save</property>
++                <child>
++                  <object class="GtkBox">
++                    <property name="spacing">6</property>
++                    <child>
++                      <object class="GtkImage">
++                        <property name="icon-name">document-save-symbolic</property>
++                      </object>
++                    </child>
++                    <child>
++                      <object class="GtkLabel">
++                        <property name="label">Save</property>
++                      </object>
++                    </child>
++                  </object>
++                </child>
++                <style>
++                  <class name="flat"/>
++                </style>
++              </object>
++            </child>
++            <child>
++              <object class="GtkSeparator">
++                <property name="orientation">vertical</property>
++              </object>
++            </child>
++            <child>
++              <object class="GtkButton" id="button4">
++                <property name="tooltip-text">Single view</property>
++                <property name="label">Single</property>
++                <style>
++                  <class name="flat"/>
++                </style>
++              </object>
++            </child>
++            <child>
++              <object class="GtkButton" id="button5">
++                <property name="tooltip-text">Split view</property>
++                <property name="label">Split</property>
++                <style>
++                  <class name="flat"/>
++                </style>
++              </object>
++            </child>
++            <child>
++              <object class="GtkButton" id="button6">
++                <property name="tooltip-text">Full view</property>
++                <property name="label">Full</property>
++                <style>
++                  <class name="flat"/>
++                </style>
++              </object>
++            </child>
++            <child>
++              <object class="GtkSeparator">
++                <property name="orientation">vertical</property>
++              </object>
++            </child>
++            <child>
++              <object class="GtkButton" id="button7">
++                <property name="tooltip-text">Collapse the whole tree in the right frame</property>
++                <child>
++                  <object class="GtkBox">
++                    <property name="spacing">6</property>
++                    <child>
++                      <object class="GtkImage">
++                        <property name="icon-name">list-remove-symbolic</property>
++                      </object>
++                    </child>
++                    <child>
++                      <object class="GtkLabel">
++                        <property name="label">Collapse</property>
++                      </object>
++                    </child>
++                  </object>
++                </child>
++                <style>
++                  <class name="flat"/>
++                </style>
++              </object>
++            </child>
++            <child>
++              <object class="GtkButton" id="button8">
++                <property name="tooltip-text">Expand the whole tree in the right frame</property>
++                <child>
++                  <object class="GtkBox">
++                    <property name="spacing">6</property>
++                    <child>
++                      <object class="GtkImage">
++                        <property name="icon-name">list-add-symbolic</property>
++                      </object>
++                    </child>
++                    <child>
++                      <object class="GtkLabel">
++                        <property name="label">Expand</property>
++                      </object>
++                    </child>
++                  </object>
++                </child>
++                <style>
++                  <class name="flat"/>
++                </style>
++              </object>
++            </child>
++          </object>
++        </child>
++        <child>
++          <object class="GtkPaned" id="hpaned1">
++            <property name="hexpand">1</property>
++            <property name="vexpand">1</property>
++            <property name="wide-handle">1</property>
++            <property name="start-child">
++              <object class="GtkScrolledWindow" id="scrolledwindow1">
++                <property name="has-frame">1</property>
++                <property name="hexpand">0</property>
++                <property name="vexpand">1</property>
++                <property name="child">
++                  <object class="GtkTreeView" id="treeview1">
++                    <property name="enable-search">0</property>
++                  </object>
++                </property>
++              </object>
++            </property>
++            <property name="end-child">
++              <object class="GtkPaned" id="vpaned1">
++                <property name="orientation">vertical</property>
++                <property name="hexpand">1</property>
++                <property name="vexpand">1</property>
++                <property name="wide-handle">1</property>
++                <property name="start-child">
++                  <object class="GtkScrolledWindow" id="scrolledwindow2">
++                    <property name="has-frame">1</property>
++                    <property name="hexpand">1</property>
++                    <property name="vexpand">1</property>
++                    <property name="child">
++                      <object class="GtkTreeView" id="treeview2">
++                        <property name="enable-search">0</property>
++                      </object>
++                    </property>
++                  </object>
++                </property>
++                <property name="end-child">
++                  <object class="GtkScrolledWindow" id="scrolledwindow3">
++                    <property name="hscrollbar-policy">never</property>
++                    <property name="has-frame">1</property>
++                    <property name="hexpand">1</property>
++                    <property name="vexpand">1</property>
++                    <property name="child">
++                      <object class="GtkTextView" id="textview3">
++                        <property name="editable">0</property>
++                        <property name="wrap-mode">word</property>
++                      </object>
++                    </property>
++                  </object>
++                </property>
++              </object>
++            </property>
++          </object>
++        </child>
++      </object>
++    </child>
++  </object>
+ </interface>
+
