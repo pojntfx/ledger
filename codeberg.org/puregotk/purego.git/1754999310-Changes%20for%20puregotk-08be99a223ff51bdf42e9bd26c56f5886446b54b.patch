@@ -1,0 +1,856 @@
+From 08be99a223ff51bdf42e9bd26c56f5886446b54b Mon Sep 17 00:00:00 2001
+From: Jeroen Wijenbergh <jeroen.wijenbergh@geant.org>
+Date: Tue, 12 Aug 2025 13:48:30 +0200
+Subject: [PATCH] Changes for puregotk
+
+- change module name to jwijenbergh/purego
+- add support for []string as return kind
+- add support for arrays by converting them to slices
+- add support for deduplicating callbacks via function ptr (more info,
+  see: https://github.com/jwijenbergh/purego/pull/1)
+- add support for strings in callback arguments
+- convert []string->**byte
+- return if too many arguments instead of panicking
+---
+diff --git a/callback_test.go b/callback_test.go
+index e373c02a3d98184697e285056046c0cb468d73ce..2bc4ba4b32ba69028cfa84d9788ada33aef75ea9 100644
+--- a/callback_test.go
++++ b/callback_test.go
+@@ -13,7 +13,7 @@ 	"runtime"
+ 	"testing"
+ 	"unsafe"
+ 
+-	"github.com/ebitengine/purego"
++	"github.com/jwijenbergh/purego"
+ )
+ 
+ // TestCallGoFromSharedLib is a test that checks for stack corruption on arm64
+diff --git a/cgo.go b/cgo.go
+index b6def570c28f66781b49bd0fb822e33257417928..1bea1bbecc03841c3b4e6e4f4a4689d314631e5a 100644
+--- a/cgo.go
++++ b/cgo.go
+@@ -15,5 +15,5 @@ // it is since we don't use `import "C"`!
+ import (
+ 	_ "runtime/cgo"
+ 
+-	_ "github.com/ebitengine/purego/internal/cgo"
++	_ "github.com/jwijenbergh/purego/internal/cgo"
+ )
+diff --git a/dlfcn_android.go b/dlfcn_android.go
+index 0d5341764edefbbe9823fbb579caddd479b6935f..030d9f5a3a8ef291794295d005a31dec5d43b379 100644
+--- a/dlfcn_android.go
++++ b/dlfcn_android.go
+@@ -3,7 +3,7 @@ // SPDX-FileCopyrightText: 2024 The Ebitengine Authors
+ 
+ package purego
+ 
+-import "github.com/ebitengine/purego/internal/cgo"
++import "github.com/jwijenbergh/purego/internal/cgo"
+ 
+ // Source for constants: https://android.googlesource.com/platform/bionic/+/refs/heads/main/libc/include/dlfcn.h
+ 
+diff --git a/dlfcn_test.go b/dlfcn_test.go
+index 7ca5456cd5d56d8b52b72d94eb02415557dde535..a76693f2009602dfa2376afd79867bc56595ad2e 100644
+--- a/dlfcn_test.go
++++ b/dlfcn_test.go
+@@ -11,7 +11,7 @@ 	"path/filepath"
+ 	"testing"
+ 	"unsafe"
+ 
+-	"github.com/ebitengine/purego"
++	"github.com/jwijenbergh/purego"
+ )
+ 
+ func TestSimpleDlsym(t *testing.T) {
+diff --git a/examples/libc/main.go b/examples/libc/main.go
+index a88da2e716538fea6e80bfb159309081d9520adc..535e69bbdab3a0db014e2d9c64a6a2ea01e249fe 100644
+--- a/examples/libc/main.go
++++ b/examples/libc/main.go
+@@ -9,7 +9,7 @@ import (
+ 	"fmt"
+ 	"runtime"
+ 
+-	"github.com/ebitengine/purego"
++	"github.com/jwijenbergh/purego"
+ )
+ 
+ func getSystemLibrary() string {
+diff --git a/examples/libc/main_unix.go b/examples/libc/main_unix.go
+index e7683d84096a3f3f4083240f2a1180dcd794f539..90da093670d60d21497edd725d7fc5d61e81961a 100644
+--- a/examples/libc/main_unix.go
++++ b/examples/libc/main_unix.go
+@@ -5,7 +5,7 @@ //go:build darwin || freebsd || linux || netbsd
+ 
+ package main
+ 
+-import "github.com/ebitengine/purego"
++import "github.com/jwijenbergh/purego"
+ 
+ func openLibrary(name string) (uintptr, error) {
+ 	return purego.Dlopen(name, purego.RTLD_NOW|purego.RTLD_GLOBAL)
+diff --git a/examples/objc/main_darwin.go b/examples/objc/main_darwin.go
+index df9bcdbcf52d9fc239d092c6c9e67cb8826a7d75..384a3cf685ac04d83b34792458c57f6ef36fc1bc 100644
+--- a/examples/objc/main_darwin.go
++++ b/examples/objc/main_darwin.go
+@@ -7,7 +7,7 @@ import (
+ 	"fmt"
+ 	"reflect"
+ 
+-	"github.com/ebitengine/purego/objc"
++	"github.com/jwijenbergh/purego/objc"
+ )
+ 
+ var (
+diff --git a/examples/protocol-dumper/main_darwin.go b/examples/protocol-dumper/main_darwin.go
+index d5f143b20800ecc6692ade8bb2ed1caf8fce84ea..8a07b14296c2ffd2d925b5154a67c8ddd359cba1 100644
+--- a/examples/protocol-dumper/main_darwin.go
++++ b/examples/protocol-dumper/main_darwin.go
+@@ -24,7 +24,7 @@ 	"strconv"
+ 	"strings"
+ 	"text/template"
+ 
+-	"github.com/ebitengine/purego/objc"
++	"github.com/jwijenbergh/purego/objc"
+ )
+ 
+ var protocols = []string{
+@@ -79,7 +79,7 @@
+ import (
+ 	"log"
+ 
+-	"github.com/ebitengine/purego/objc"
++	"github.com/jwijenbergh/purego/objc"
+ )
+ 
+ func init() {
+diff --git a/examples/window/main_darwin.go b/examples/window/main_darwin.go
+index be7c39514603b5957354a553b906d7fa45d46ae8..8e61675888b49ee68639aab1cba4328860098c0c 100644
+--- a/examples/window/main_darwin.go
++++ b/examples/window/main_darwin.go
+@@ -6,8 +6,8 @@
+ import (
+ 	"runtime"
+ 
+-	"github.com/ebitengine/purego"
+-	"github.com/ebitengine/purego/objc"
++	"github.com/jwijenbergh/purego"
++	"github.com/jwijenbergh/purego/objc"
+ )
+ 
+ const (
+diff --git a/examples/window/main_windows.go b/examples/window/main_windows.go
+index 1f3d94124f3226a1bbb1eca7519e13c3a0aea901..e74410515af6eedd29461507c1558888d15d13fc 100644
+--- a/examples/window/main_windows.go
++++ b/examples/window/main_windows.go
+@@ -8,7 +8,7 @@ 	"runtime"
+ 	"syscall"
+ 	"unsafe"
+ 
+-	"github.com/ebitengine/purego"
++	"github.com/jwijenbergh/purego"
+ )
+ 
+ const (
+diff --git a/func.go b/func.go
+index 9b9f0b2378760c3748da5f517f1721a44fdca4db..41b3deebbd222067ace2858db5bf083e4ff9a4e2 100644
+--- a/func.go
++++ b/func.go
+@@ -12,8 +12,8 @@ 	"reflect"
+ 	"runtime"
+ 	"unsafe"
+ 
+-	"github.com/ebitengine/purego/internal/strings"
+-	"github.com/ebitengine/purego/internal/xreflect"
++	"github.com/jwijenbergh/purego/internal/strings"
++	"github.com/jwijenbergh/purego/internal/xreflect"
+ )
+ 
+ const (
+@@ -153,7 +153,7 @@ 					if j != 0 {
+ 						panic("purego: CDecl must be the first argument")
+ 					}
+ 				}
+-			case reflect.String, reflect.Uintptr, reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64,
++			case reflect.Array, reflect.String, reflect.Uintptr, reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64,
+ 				reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64, reflect.Ptr, reflect.UnsafePointer,
+ 				reflect.Slice, reflect.Bool:
+ 				if ints < numOfIntegerRegisters() {
+@@ -204,11 +204,11 @@ 		if runtime.GOOS == "darwin" && runtime.GOARCH == "arm64" {
+ 			stackBytes := estimateStackBytes(ty)
+ 			maxStackBytes := sizeOfStack * 8
+ 			if stackBytes > maxStackBytes {
+-				panic("purego: too many stack arguments")
++				return
+ 			}
+ 		} else {
+ 			if stack > sizeOfStack {
+-				panic("purego: too many stack arguments")
++				return
+ 			}
+ 		}
+ 	}
+@@ -371,6 +371,14 @@ 				v.SetFloat(math.Float64frombits(uint64(syscall.f1)))
+ 			}
+ 		case reflect.Struct:
+ 			v = getStruct(outType, *syscall)
++		case reflect.Slice:
++			// only []string is supported
++			elemType := outType.Elem()
++			if elemType.Kind() != reflect.String {
++				panic("purego: unsupported return slice element kind: " + elemType.Kind().String())
++			}
++			stringSlice := strings.GoStringSlice(syscall.a1)
++			v.Set(reflect.ValueOf(stringSlice))
+ 		default:
+ 			panic("purego: unsupported return kind: " + outType.Kind().String())
+ 		}
+@@ -396,9 +404,22 @@ 	case reflect.Uintptr, reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
+ 		addInt(uintptr(v.Uint()))
+ 	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+ 		addInt(uintptr(v.Int()))
++	case reflect.Array:
++		sliceT := reflect.SliceOf(v.Type().Elem())
++		slice := reflect.MakeSlice(sliceT, v.Len(), v.Len())
++		reflect.Copy(slice, v)
++		v = slice
++		fallthrough
+ 	case reflect.Ptr, reflect.UnsafePointer, reflect.Slice:
+-		// There is no need to keepAlive this pointer separately because it is kept alive in the args variable
+-		addInt(v.Pointer())
++		if g, ok := v.Interface().([]string); ok {
++			res := strings.ByteSlice(g)
++			keepAlive = append(keepAlive, res)
++			addInt(uintptr(unsafe.Pointer(res)))
++		} else {
++			keepAlive = append(keepAlive, v.Pointer())
++			// There is no need to keepAlive this pointer separately because it is kept alive in the args variable
++			addInt(v.Pointer())
++		}
+ 	case reflect.Func:
+ 		addInt(NewCallback(v.Interface()))
+ 	case reflect.Bool:
+diff --git a/func_sysv_test.go b/func_sysv_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..eb6aad11948cf6ff7ab916a908aac2790cdf5332
+--- /dev/null
++++ b/func_sysv_test.go
+@@ -0,0 +1,53 @@
++// SPDX-License-Identifier: Apache-2.0
++// SPDX-FileCopyrightText: 2022 The Ebitengine Authors
++
++//go:build darwin || freebsd || (linux && (amd64 || arm64))
++
++package purego_test
++
++import (
++	"testing"
++
++	"github.com/jwijenbergh/purego"
++)
++
++func TestUnrefCallback(t *testing.T) {
++	imp := func() bool {
++		return true
++	}
++
++	if err := purego.UnrefCallback(0); err == nil {
++		t.Errorf("unref of unknown callback produced nil but wanted error")
++	}
++
++	ref := purego.NewCallback(imp)
++
++	if err := purego.UnrefCallback(ref); err != nil {
++		t.Errorf("callback unref produced %v but wanted nil", err)
++	}
++	if err := purego.UnrefCallback(ref); err == nil {
++		t.Errorf("callback unref of already unref'd callback produced nil but wanted error")
++	}
++}
++
++func TestUnrefCallbackFnPtr(t *testing.T) {
++	imp := func() bool {
++		return true
++	}
++
++	if err := purego.UnrefCallbackFnPtr(&imp); err == nil {
++		t.Errorf("unref of unknown callback produced nil but wanted error")
++	}
++
++	ref := purego.NewCallbackFnPtr(&imp)
++
++	if err := purego.UnrefCallbackFnPtr(&imp); err != nil {
++		t.Errorf("unref produced %v but wanted nil", err)
++	}
++	if err := purego.UnrefCallbackFnPtr(&imp); err == nil {
++		t.Errorf("unref of already unref'd callback produced nil but wanted error")
++	}
++	if err := purego.UnrefCallback(ref); err == nil {
++		t.Errorf("unref of already unref'd callback ptr produced nil but wanted error")
++	}
++}
+diff --git a/func_test.go b/func_test.go
+index 64fe599fbd2de2dea95573369bc14160bb1f8c43..562f68a5ff8db5b5b4473bafa4fc3ee55851c073 100644
+--- a/func_test.go
++++ b/func_test.go
+@@ -15,8 +15,8 @@ 	"sync"
+ 	"testing"
+ 	"unsafe"
+ 
+-	"github.com/ebitengine/purego"
+-	"github.com/ebitengine/purego/internal/load"
++	"github.com/jwijenbergh/purego"
++	"github.com/jwijenbergh/purego/internal/load"
+ )
+ 
+ func getSystemLibrary() (string, error) {
+@@ -502,3 +502,16 @@ 	}
+ 
+ 	return nil
+ }
++
++func TestCallbackFnPtrDedup(t *testing.T) {
++	imp := func() uintptr {
++		return 0
++	}
++
++	ref1 := purego.NewCallbackFnPtr(&imp)
++	ref2 := purego.NewCallbackFnPtr(&imp)
++
++	if ref1 != ref2 {
++		t.Errorf("deduplicate expected %d to equal %d", ref1, ref2)
++	}
++}
+diff --git a/go.mod b/go.mod
+index ea4133e89bb966debe258b227bafa02c7fa645f4..73f140d3458c37ca2fc270e15cee4c29375d4289 100644
+--- a/go.mod
++++ b/go.mod
+@@ -1,3 +1,3 @@
+-module github.com/ebitengine/purego
++module github.com/jwijenbergh/purego
+ 
+ go 1.18
+diff --git a/internal/buildtest/main.go b/internal/buildtest/main.go
+index 632abde1137adf4002468d4cae87285108ff743d..b353f20c5f4ac9ffd03c5d5f9fdcd89e2245f792 100644
+--- a/internal/buildtest/main.go
++++ b/internal/buildtest/main.go
+@@ -6,7 +6,7 @@
+ package main
+ 
+ import (
+-	_ "github.com/ebitengine/purego"
++	_ "github.com/jwijenbergh/purego"
+ )
+ 
+ import "C"
+diff --git a/internal/fakecgo/doc.go b/internal/fakecgo/doc.go
+index e482c120c6457d1fa557fcd54ee0ac75c89cbee6..6fab36d9c5d5d4a6d0646f618ca151d3bf12f255 100644
+--- a/internal/fakecgo/doc.go
++++ b/internal/fakecgo/doc.go
+@@ -21,7 +21,7 @@ // that fakecgo does not implement at the moment.
+ //
+ // # Usage
+ //
+-// Using fakecgo is easy just import _ "github.com/ebitengine/purego" and then
++// Using fakecgo is easy just import _ "github.com/jwijenbergh/purego" and then
+ // set the environment variable CGO_ENABLED=0.
+ // The recommended usage for fakecgo is to prefer using runtime/cgo if possible
+ // but if cross-compiling or fast build times are important fakecgo is available.
+diff --git a/internal/fakecgo/freebsd.go b/internal/fakecgo/freebsd.go
+index bb73a709e69188b554e9ecf8caf6ea278bbc8a23..9ed4d99e376d41db3971b4e18ccf5ff7320b41cd 100644
+--- a/internal/fakecgo/freebsd.go
++++ b/internal/fakecgo/freebsd.go
+@@ -15,7 +15,7 @@
+ // Note: when building with cross-compiling or CGO_ENABLED=0, add
+ // the following argument to `go` so that these symbols are defined by
+ // making fakecgo the Cgo.
+-//   -gcflags="github.com/ebitengine/purego/internal/fakecgo=-std"
++//   -gcflags="github.com/jwijenbergh/purego/internal/fakecgo=-std"
+ 
+ //go:linkname _environ environ
+ //go:linkname _progname __progname
+diff --git a/internal/load/load_unix.go b/internal/load/load_unix.go
+index ec3f7e56f231263fde11f1161c71bdb0fa7360bb..3b528f4a8178843fb5f384fccc704e7f01b65068 100644
+--- a/internal/load/load_unix.go
++++ b/internal/load/load_unix.go
+@@ -5,7 +5,7 @@ //go:build darwin || freebsd || linux || netbsd
+ 
+ package load
+ 
+-import "github.com/ebitengine/purego"
++import "github.com/jwijenbergh/purego"
+ 
+ func OpenLibrary(name string) (uintptr, error) {
+ 	return purego.Dlopen(name, purego.RTLD_NOW|purego.RTLD_GLOBAL)
+diff --git a/internal/strings/strings.go b/internal/strings/strings.go
+index 5b0d252255477d523f05bf03ee712f72e74aa008..ce37c1bf91391735ff87b752f695b3a755b1b6af 100644
+--- a/internal/strings/strings.go
++++ b/internal/strings/strings.go
+@@ -12,6 +12,21 @@ func hasSuffix(s, suffix string) bool {
+ 	return len(s) >= len(suffix) && s[len(s)-len(suffix):] == suffix
+ }
+ 
++// ByteSlice creates a pointer to a byte slice of C strings
++func ByteSlice(name []string) **byte {
++	if name == nil {
++		return nil
++	}
++	res := make([]*byte, len(name)+1)
++	for i, v := range name {
++		res[i] = CString(v)
++	}
++
++	// the last element is NULL terminated for GTK
++	res[len(name)] = nil
++	return &res[0]
++}
++
+ // CString converts a go string to *byte that can be passed to C code.
+ func CString(name string) *byte {
+ 	if hasSuffix(name, "\x00") {
+@@ -20,6 +35,23 @@ 	}
+ 	b := make([]byte, len(name)+1)
+ 	copy(b, name)
+ 	return &b[0]
++}
++
++// GoStringSlice gets a string slice from a char** array
++func GoStringSlice(c uintptr) []string {
++	var ret []string
++	for i := 0; ; i++ {
++		ptrAddr := c + uintptr(i)*unsafe.Sizeof(uintptr(0))
++		addr := *(*unsafe.Pointer)(unsafe.Pointer(&ptrAddr))
++		// We take the address and then dereference it to trick go vet from creating a possible misuse of unsafe.Pointer
++		ptr := *(*uintptr)(addr)
++		if ptr == 0 {
++			break
++		}
++		ret = append(ret, GoString(ptr))
++	}
++
++	return ret
+ }
+ 
+ // GoString copies a null-terminated char* to a Go string.
+diff --git a/nocgo.go b/nocgo.go
+index b91b9796b9b6da846203d05bab288f0e51880fda..81c043cc214b49e4ef4fed8102186f08ed4998d4 100644
+--- a/nocgo.go
++++ b/nocgo.go
+@@ -22,4 +22,4 @@ // )
+ // importing fakecgo will set these (using //go:linkname) with functions written
+ // entirely in Go (except for some assembly trampolines to change GCC ABI to Go ABI).
+ // Doing so makes it possible to build applications that call into C without CGO_ENABLED=1.
+-import _ "github.com/ebitengine/purego/internal/fakecgo"
++import _ "github.com/jwijenbergh/purego/internal/fakecgo"
+diff --git a/objc/objc_block_darwin.go b/objc/objc_block_darwin.go
+index f0b7c1d56dd6db60c7e38196a3940451cb08ca47..11a645d02cbf8dd51a86b4266ad48f13706868de 100644
+--- a/objc/objc_block_darwin.go
++++ b/objc/objc_block_darwin.go
+@@ -9,8 +9,8 @@ 	"reflect"
+ 	"sync"
+ 	"unsafe"
+ 
+-	"github.com/ebitengine/purego"
+-	"github.com/ebitengine/purego/internal/xreflect"
++	"github.com/jwijenbergh/purego"
++	"github.com/jwijenbergh/purego/internal/xreflect"
+ )
+ 
+ const (
+@@ -95,7 +95,7 @@
+ // blockCache is a thread safe cache of block layouts.
+ //
+ // It takes advantage of the block being the first argument of a block call being the block closure,
+-// only invoking [github.com/ebitengine/purego.NewCallback] when it encounters a new function type (rather than on for every block creation).
++// only invoking [github.com/jwijenbergh/purego.NewCallback] when it encounters a new function type (rather than on for every block creation).
+ // This should mitigate block creations putting pressure on the callback limit.
+ type blockCache struct {
+ 	sync.Mutex
+diff --git a/objc/objc_block_darwin_test.go b/objc/objc_block_darwin_test.go
+index 9599dfa928a423f64c111e2b314c34924eea535b..b444b9b99135f26bdfbadb11aef6f93715e778a2 100644
+--- a/objc/objc_block_darwin_test.go
++++ b/objc/objc_block_darwin_test.go
+@@ -7,8 +7,8 @@ import (
+ 	"fmt"
+ 	"testing"
+ 
+-	"github.com/ebitengine/purego"
+-	"github.com/ebitengine/purego/objc"
++	"github.com/jwijenbergh/purego"
++	"github.com/jwijenbergh/purego/objc"
+ )
+ 
+ func ExampleNewBlock() {
+diff --git a/objc/objc_runtime_darwin.go b/objc/objc_runtime_darwin.go
+index 82d4632a55499af746e436e28cee190f62e9a60f..265c475d8f2a0b559edcca1550060358a217cfef 100644
+--- a/objc/objc_runtime_darwin.go
++++ b/objc/objc_runtime_darwin.go
+@@ -15,9 +15,9 @@ 	"runtime"
+ 	"unicode"
+ 	"unsafe"
+ 
+-	"github.com/ebitengine/purego"
+-	"github.com/ebitengine/purego/internal/strings"
+-	"github.com/ebitengine/purego/internal/xreflect"
++	"github.com/jwijenbergh/purego"
++	"github.com/jwijenbergh/purego/internal/strings"
++	"github.com/jwijenbergh/purego/internal/xreflect"
+ )
+ 
+ // TODO: support try/catch?
+diff --git a/objc/objc_runtime_darwin_test.go b/objc/objc_runtime_darwin_test.go
+index 1e73bfb2e60bb4225633477572e56008e5609b92..da927e0c70accd3459fc6875a90603cea6df8fd2 100644
+--- a/objc/objc_runtime_darwin_test.go
++++ b/objc/objc_runtime_darwin_test.go
+@@ -9,8 +9,8 @@ 	"log"
+ 	"reflect"
+ 	"testing"
+ 
+-	"github.com/ebitengine/purego"
+-	"github.com/ebitengine/purego/objc"
++	"github.com/jwijenbergh/purego"
++	"github.com/jwijenbergh/purego/objc"
+ )
+ 
+ func ExampleRegisterClass_helloworld() {
+diff --git a/struct_test.go b/struct_test.go
+index 669ab8fb9c8857672bc5f676791b16d654290e39..cc819ea2ca0dc9bf4b18de876510c2477031bebe 100644
+--- a/struct_test.go
++++ b/struct_test.go
+@@ -13,7 +13,7 @@ 	"runtime"
+ 	"testing"
+ 	"unsafe"
+ 
+-	"github.com/ebitengine/purego"
++	"github.com/jwijenbergh/purego"
+ )
+ 
+ func TestRegisterFunc_structArgs(t *testing.T) {
+diff --git a/syscall_cgo_linux.go b/syscall_cgo_linux.go
+index 179167f4b45d2045edb73ef85a0bbecf12809b15..626b510f25081f6d91cffb0f871374c07260d833 100644
+--- a/syscall_cgo_linux.go
++++ b/syscall_cgo_linux.go
+@@ -6,7 +6,7 @@
+ package purego
+ 
+ import (
+-	"github.com/ebitengine/purego/internal/cgo"
++	"github.com/jwijenbergh/purego/internal/cgo"
+ )
+ 
+ var syscall15XABI0 = uintptr(cgo.Syscall15XABI0)
+diff --git a/syscall_sysv.go b/syscall_sysv.go
+index f6e9e29bc354fdb0be3085e38a7232eceaee91c0..1c5f6015905a2c1894b6e6e5445cdde9418e312a 100644
+--- a/syscall_sysv.go
++++ b/syscall_sysv.go
+@@ -7,10 +7,13 @@
+ package purego
+ 
+ import (
++	"errors"
+ 	"reflect"
+ 	"runtime"
+ 	"sync"
+ 	"unsafe"
++
++	"github.com/jwijenbergh/purego/internal/strings"
+ )
+ 
+ var syscall15XABI0 uintptr
+@@ -27,6 +30,47 @@ 	runtime_cgocall(syscall15XABI0, unsafe.Pointer(args))
+ 	return args.a1, args.a2, args.a3
+ }
+ 
++// UnrefCallback unreferences the associated callback (created by NewCallback) by callback pointer.
++func UnrefCallback(cb uintptr) error {
++	cbs.lock.Lock()
++	defer cbs.lock.Unlock()
++	idx, ok := cbs.knownIdx[cb]
++	if !ok {
++		return errors.New(`callback not found`)
++	}
++	val := cbs.funcs[idx]
++	delete(cbs.knownFnPtr, val.Pointer())
++	delete(cbs.knownIdx, cb)
++	cbs.holes[idx] = struct{}{}
++	cbs.funcs[idx] = reflect.Value{}
++	return nil
++}
++
++// UnrefCallbackFnPtr unreferences the associated callback (created by NewCallbackFnPtr) by function pointer address
++func UnrefCallbackFnPtr(cb any) error {
++	val := reflect.ValueOf(cb)
++	if val.IsNil() {
++		panic("purego: function must not be nil")
++	}
++	if val.Kind() != reflect.Ptr || val.Elem().Kind() != reflect.Func {
++		panic("purego: the type must be a function pointer but was not")
++	}
++
++	addr, ok := getCallbackByFnPtr(val)
++	if !ok {
++		return errors.New(`callback not found`)
++	}
++
++	cbs.lock.Lock()
++	defer cbs.lock.Unlock()
++	idx := cbs.knownIdx[addr]
++	delete(cbs.knownFnPtr, val.Pointer())
++	delete(cbs.knownIdx, addr)
++	cbs.holes[idx] = struct{}{}
++	cbs.funcs[idx] = reflect.Value{}
++	return nil
++}
++
+ // NewCallback converts a Go function to a function pointer conforming to the C calling convention.
+ // This is useful when interoperating with C code requiring callbacks. The argument is expected to be a
+ // function with zero or one uintptr-sized result. The function must not have arguments with size larger than the size
+@@ -34,37 +78,76 @@ // of uintptr. Only a limited number of callbacks may be created in a single Go process, and any memory allocated
+ // for these callbacks is never released. At least 2000 callbacks can always be created. Although this function
+ // provides similar functionality to windows.NewCallback it is distinct.
+ func NewCallback(fn any) uintptr {
+-	ty := reflect.TypeOf(fn)
+-	for i := 0; i < ty.NumIn(); i++ {
+-		in := ty.In(i)
+-		if !in.AssignableTo(reflect.TypeOf(CDecl{})) {
+-			continue
+-		}
+-		if i != 0 {
+-			panic("purego: CDecl must be the first argument")
+-		}
++	val := reflect.ValueOf(fn)
++	if val.Kind() != reflect.Func {
++		panic("purego: the type must be a function but was not")
+ 	}
+-	return compileCallback(fn)
++	if val.IsNil() {
++		panic("purego: function must not be nil")
++	}
++	return compileCallback(val)
++}
++
++// NewCallbackFnPtr converts a Go function pointer to a function pointer conforming to the C calling convention.
++// This is useful when interoperating with C code requiring callbacks. The argument is expected to be a
++// function with zero or one uintptr-sized result. The function must not have arguments with size larger than the size
++// of uintptr. Only a limited number of callbacks may be live in a single Go process, and any memory allocated
++// for these callbacks is not released until CallbackUnrefFnPtr is called. At most 2000 callbacks can always be live.
++//
++// Calling this function multiple times with the same function pointer will return the originally created callback
++// reference, reducing live callback pressure.
++func NewCallbackFnPtr(fnptr interface{}) uintptr {
++	val := reflect.ValueOf(fnptr)
++	if val.IsNil() {
++		panic("purego: function must not be nil")
++	}
++	if val.Kind() != reflect.Ptr || val.Elem().Kind() != reflect.Func {
++		panic("purego: the type must be a function pointer but was not")
++	}
++
++	// Re-use callback to function pointer if available
++	if addr, ok := getCallbackByFnPtr(val); ok {
++		return addr
++	}
++
++	addr := compileCallback(val.Elem())
++
++	cbs.lock.Lock()
++	cbs.knownFnPtr[val.Pointer()] = addr
++	cbs.lock.Unlock()
++	return addr
+ }
+ 
+ // maxCb is the maximum number of callbacks
+ // only increase this if you have added more to the callbackasm function
+ const maxCB = 2000
+ 
+-var cbs struct {
+-	lock  sync.Mutex
+-	numFn int                  // the number of functions currently in cbs.funcs
+-	funcs [maxCB]reflect.Value // the saved callbacks
++var cbs = struct {
++	lock       sync.RWMutex
++	holes      map[int]struct{}     // tracks available indexes in the funcs array
++	funcs      [maxCB]reflect.Value // the saved callbacks
++	knownIdx   map[uintptr]int      // maps callback addresses to index in funcs
++	knownFnPtr map[uintptr]uintptr  // maps function pointers to callback addresses
++}{
++	holes:      make(map[int]struct{}, maxCB),
++	knownIdx:   make(map[uintptr]int, maxCB),
++	knownFnPtr: make(map[uintptr]uintptr, maxCB),
+ }
+ 
+-func compileCallback(fn any) uintptr {
+-	val := reflect.ValueOf(fn)
+-	if val.Kind() != reflect.Func {
+-		panic("purego: the type must be a function but was not")
+-	}
+-	if val.IsNil() {
+-		panic("purego: function must not be nil")
++func init() {
++	for i := 0; i < maxCB; i++ {
++		cbs.holes[i] = struct{}{}
+ 	}
++}
++
++func getCallbackByFnPtr(val reflect.Value) (uintptr, bool) {
++	cbs.lock.RLock()
++	defer cbs.lock.RUnlock()
++	addr, ok := cbs.knownFnPtr[val.Pointer()]
++	return addr, ok
++}
++
++func compileCallback(val reflect.Value) uintptr {
+ 	ty := val.Type()
+ 	for i := 0; i < ty.NumIn(); i++ {
+ 		in := ty.In(i)
+@@ -76,7 +159,7 @@ 			}
+ 			fallthrough
+ 		case reflect.Interface, reflect.Func, reflect.Slice,
+ 			reflect.Chan, reflect.Complex64, reflect.Complex128,
+-			reflect.String, reflect.Map, reflect.Invalid:
++			reflect.Map, reflect.Invalid:
+ 			panic("purego: unsupported argument type: " + in.Kind().String())
+ 		}
+ 	}
+@@ -95,12 +178,19 @@ 		panic("purego: callbacks can only have one return")
+ 	}
+ 	cbs.lock.Lock()
+ 	defer cbs.lock.Unlock()
+-	if cbs.numFn >= maxCB {
++	if len(cbs.holes) == 0 {
+ 		panic("purego: the maximum number of callbacks has been reached")
+ 	}
+-	cbs.funcs[cbs.numFn] = val
+-	cbs.numFn++
+-	return callbackasmAddr(cbs.numFn - 1)
++	var idx int
++	for i := range cbs.holes {
++		idx = i
++		break
++	}
++	delete(cbs.holes, idx)
++	cbs.funcs[idx] = val
++	addr := callbackasmAddr(idx)
++	cbs.knownIdx[addr] = idx
++	return addr
+ }
+ 
+ const ptrSize = unsafe.Sizeof((*int)(nil))
+@@ -122,9 +212,9 @@
+ // callbackWrap is called by assembly code which determines which Go function to call.
+ // This function takes the arguments and passes them to the Go function and returns the result.
+ func callbackWrap(a *callbackArgs) {
+-	cbs.lock.Lock()
++	cbs.lock.RLock()
+ 	fn := cbs.funcs[a.index]
+-	cbs.lock.Unlock()
++	cbs.lock.RUnlock()
+ 	fnType := fn.Type()
+ 	args := make([]reflect.Value, fnType.NumIn())
+ 	frame := (*[callbackMaxFrame]uintptr)(a.args)
+@@ -183,6 +273,20 @@ 					args[i] = reflect.NewAt(inType, unsafe.Pointer(&frame[floatsN])).Elem()
+ 				}
+ 			}
+ 			floatsN += slots
++		case reflect.String:
++			var pos int
++			addInt := func() {
++				if intsN >= numOfIntegerRegisters() {
++					pos = stackSlot
++					stackSlot++
++				} else {
++					// the integers begin after the floats in frame
++					pos = intsN + numOfFloatRegisters()
++				}
++				intsN++
++			}
++			addInt()
++			args[i] = reflect.ValueOf(strings.GoString(frame[pos]))
+ 		case reflect.Struct:
+ 			// This is the CDecl field
+ 			args[i] = reflect.Zero(inType)
+diff --git a/syscall_test.go b/syscall_test.go
+index f8d8a63f089e870ca70b5fea26d2c411e8ff8100..44ebe08a25afaadfd31af05fc7edafd85bd12b93 100644
+--- a/syscall_test.go
++++ b/syscall_test.go
+@@ -9,8 +9,8 @@ 	"runtime"
+ 	"testing"
+ 	"unsafe"
+ 
+-	"github.com/ebitengine/purego"
+-	"github.com/ebitengine/purego/internal/load"
++	"github.com/jwijenbergh/purego"
++	"github.com/jwijenbergh/purego/internal/load"
+ )
+ 
+ func TestOS(t *testing.T) {
+diff --git a/syscall_windows.go b/syscall_windows.go
+index 5afd8d83ca2dbc152e9a7d648481581ff4c0b57d..b9e9f80753a6d4a617d4d389f2c450eee6db8fa8 100644
+--- a/syscall_windows.go
++++ b/syscall_windows.go
+@@ -5,8 +5,12 @@ package purego
+ 
+ import (
+ 	"reflect"
++	"sync"
+ 	"syscall"
+ )
++
++// maxCb is the maximum number of callbacks
++const maxCB = 1024
+ 
+ var syscall15XABI0 uintptr
+ 
+@@ -41,6 +45,52 @@ 	}
+ 	return syscall.NewCallback(fn)
+ }
+ 
++// NewCallbackFnPtr converts a Go function pointer to a function pointer conforming to the stdcall calling convention.
++// This is useful when interoperating with C code requiring callbacks. The argument is expected to be a
++// function with one uintptr-sized result. The function must not have arguments with size larger than the
++// size of uintptr. Only a limited number of callbacks may be created in a single Go process, and any memory
++// allocated for these callbacks is never released. Between NewCallback and NewCallbackCDecl, at least 1024
++// callbacks can always be created. Although this function is similiar to the darwin version it may act
++// differently.
++//
++// Calling this function multiple times with the same function pointer will return the originally created callback
++// reference, reducing live callback pressure.
++func NewCallbackFnPtr(fnptr interface{}) uintptr {
++	val := reflect.ValueOf(fnptr)
++	if val.IsNil() {
++		panic("purego: function must not be nil")
++	}
++	if val.Kind() != reflect.Ptr || val.Elem().Kind() != reflect.Func {
++		panic("purego: the type must be a function pointer but was not")
++	}
++
++	// Re-use callback to function pointer if available
++	if addr, ok := getCallbackByFnPtr(val); ok {
++		return addr
++	}
++
++	addr := syscall.NewCallback(val.Elem().Interface())
++
++	cbs.lock.Lock()
++	cbs.knownFnPtr[val.Pointer()] = addr
++	cbs.lock.Unlock()
++	return addr
++}
++
++var cbs = struct {
++	lock       sync.RWMutex
++	knownFnPtr map[uintptr]uintptr // maps function pointers to callback addresses
++}{
++	knownFnPtr: make(map[uintptr]uintptr, maxCB),
++}
++
+ func loadSymbol(handle uintptr, name string) (uintptr, error) {
+ 	return syscall.GetProcAddress(syscall.Handle(handle), name)
+ }
++
++func getCallbackByFnPtr(val reflect.Value) (uintptr, bool) {
++	cbs.lock.RLock()
++	defer cbs.lock.RUnlock()
++	addr, ok := cbs.knownFnPtr[val.Pointer()]
++	return addr, ok
++}
+
