@@ -1,0 +1,153 @@
+From 5d024855c05a37850d973fe747a118c502efdd48 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Tue, 26 Aug 2025 14:10:59 -0700
+Subject: [PATCH] GIR: Read pkg-config and shared library names from GIR file, then extend list of known libraries at `init` time
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/internal/core/core.go b/internal/core/core.go
+index f6888bc8776e203e23b63de6b1f409e6a06186d6..2782d3264d37d3a4b41ae62f2851d024cd2cedc8 100644
+--- a/internal/core/core.go
++++ b/internal/core/core.go
+@@ -38,6 +38,7 @@ 	"arm64": {"/usr/lib/aarch64-linux-gnu/", "/usr/lib64/", "/usr/lib/"},
+ }
+ 
+ // names is a lookup from library names to shared object filenames
++// This is populated dynamically via SetSharedLibrary and has defaults for common libraries
+ var names = map[string][]string{
+ 	"ADW":        {"libadwaita-1.so"},
+ 	"CAIRO":      {"libcairo.so"},
+@@ -60,7 +61,7 @@ 	"GDK": "GTK",
+ }
+ 
+ // pkgConfNames is a lookup from library names to pkg-config library names
+-// TODO: Get this from the package name in the gir files with a fallback to gtk's package name
++// This is populated dynamically via SetPackageName and has defaults for common libraries
+ var pkgConfNames = map[string]string{
+ 	"ADW":        "libadwaita-1",
+ 	"CAIRO":      "cairo",
+@@ -73,6 +74,24 @@ 	"GRAPHENE":   "graphene-gobject-1.0",
+ 	"GTK":        "gtk4",
+ 	"PANGO":      "pango",
+ 	"PANGOCAIRO": "pangocairo",
++}
++
++// SetPackageName registers a pkg-config package name for a library.
++// This is used by the code generator to set package names from GIR files.
++// It won't override existing entries to preserve defaults.
++func SetPackageName(libName, pkgName string) {
++	if _, exists := pkgConfNames[libName]; !exists && pkgName != "" {
++		pkgConfNames[libName] = pkgName
++	}
++}
++
++// SetSharedLibrary registers a shared library name for a library.
++// This is used by the code generator to set library names from GIR files.
++// It won't override existing entries to preserve defaults.
++func SetSharedLibrary(libName, sharedLib string) {
++	if _, exists := names[libName]; !exists && sharedLib != "" {
++		names[libName] = []string{sharedLib}
++	}
+ }
+ 
+ // findSo tries to find a shared object from a path and a library name
+diff --git a/internal/gir/pass/pass.go b/internal/gir/pass/pass.go
+index 31549f40c571c4dcc3433163abfad551a7c023a9..a57ae466e95b3830a6fea1518c3ee61bfb0fa606 100644
+--- a/internal/gir/pass/pass.go
++++ b/internal/gir/pass/pass.go
+@@ -304,6 +304,14 @@ 		})
+ 	}
+ 
+ 	pkgName := strings.ToLower(ns.Name)
++
++	var pkgConfigName string
++	if len(r.Packages) > 0 {
++		pkgConfigName = r.Packages[0].Name
++	}
++
++	sharedLibrary := ns.SharedLibrary
++
+ 	for _, fn := range files {
+ 		methods := 0
+ 		for _, i := range interfaces[fn] {
+@@ -323,17 +331,19 @@ 		// as they should only be loaded when there are classes
+ 		needsInit := (len(functions[fn]) + methods) > 0
+ 
+ 		args := types.TemplateArg{
+-			PkgName:    pkgName,
+-			PkgEnv:     strings.ToUpper(pkgName),
+-			NeedsInit:  needsInit,
+-			Aliases:    aliases[fn],
+-			Callbacks:  callbacks[fn],
+-			Records:    records[fn],
+-			Enums:      enums[fn],
+-			Constants:  constants[fn],
+-			Functions:  functions[fn],
+-			Interfaces: interfaces[fn],
+-			Classes:    classes[fn],
++			PkgName:       pkgName,
++			PkgEnv:        strings.ToUpper(pkgName),
++			PkgConfigName: pkgConfigName,
++			SharedLibrary: sharedLibrary,
++			NeedsInit:     needsInit,
++			Aliases:       aliases[fn],
++			Callbacks:     callbacks[fn],
++			Records:       records[fn],
++			Enums:         enums[fn],
++			Constants:     constants[fn],
++			Functions:     functions[fn],
++			Interfaces:    interfaces[fn],
++			Classes:       classes[fn],
+ 		}
+ 
+ 		os.MkdirAll(fmt.Sprintf(dir+"/%s", pkgName), 0o755)
+diff --git a/internal/gir/types/template.go b/internal/gir/types/template.go
+index 77914bb8f0d8fcc3a453c45f9d1067861fff801d..31c4f7a7a3b0601d73b499a18fd40105d1269540 100644
+--- a/internal/gir/types/template.go
++++ b/internal/gir/types/template.go
+@@ -394,6 +394,10 @@ 	// PkgName is the name of the package, declared at the top-level
+ 	PkgName string
+ 	// PkgEnv is the name of the package in the load environment variable
+ 	PkgEnv string
++	// PkgConfigName is the pkg-config package name from the GIR file
++	PkgConfigName string
++	// SharedLibrary is the shared library name from the GIR file
++	SharedLibrary string
+ 	// NeedsInit declares whether or not this file needs an init code to register functions with purego
+ 	NeedsInit bool
+ 	// Imports defines the package imports that we need
+diff --git a/pkg/core/core.go b/pkg/core/core.go
+index f6ad08fc09a5509ff5526537d88714ae943f84c0..80619ce44426557ca9bc23c70748cc92485abd27 100644
+--- a/pkg/core/core.go
++++ b/pkg/core/core.go
+@@ -4,6 +4,8 @@ import "github.com/jwijenbergh/puregotk/internal/core"
+ 
+ var (
+ 	PuregoSafeRegister = core.PuregoSafeRegister
+-	GetPath           = core.GetPath
+-	GoString          = core.GoString
+-)
+\ No newline at end of file
++	GetPath            = core.GetPath
++	GoString           = core.GoString
++	SetPackageName     = core.SetPackageName
++	SetSharedLibrary   = core.SetSharedLibrary
++)
+diff --git a/templates/go b/templates/go
+index 4483118bfb00df44f2aed4db89d42085b2966aa0..9f3159899c704fa4a96fcdd05f3f40ff5e4a705d 100644
+--- a/templates/go
++++ b/templates/go
+@@ -279,7 +279,11 @@
+ {{if .NeedsInit}}
+ 
+ func init() {
+-    lib, err := purego.Dlopen(core.GetPath("{{.PkgEnv}}"), purego.RTLD_NOW|purego.RTLD_GLOBAL)
++    {{if .PkgConfigName}}
++    core.SetPackageName("{{.PkgEnv}}", "{{.PkgConfigName}}")
++    {{end}}{{if .SharedLibrary}}
++    core.SetSharedLibrary("{{.PkgEnv}}", "{{.SharedLibrary}}")
++    {{end}}lib, err := purego.Dlopen(core.GetPath("{{.PkgEnv}}"), purego.RTLD_NOW|purego.RTLD_GLOBAL)
+     if err != nil {
+             panic(err)
+     }
+
