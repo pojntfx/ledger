@@ -1,0 +1,87 @@
+From 022f8fdd8a55634e9a3f21af3fc30c55253cfb58 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Sun, 21 Sep 2025 12:35:41 -0700
+Subject: [PATCH] feat: Implement `--pull` flag for ledger repo
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/cmd/pledge/cmd/index.go b/cmd/pledge/cmd/index.go
+index 0ed10378503fd05e62384666c5e15ea8d56385f1..0af70ec6510086508bfb56cc628a20e8d3ebcf48 100644
+--- a/cmd/pledge/cmd/index.go
++++ b/cmd/pledge/cmd/index.go
+@@ -9,6 +9,7 @@ 	"path/filepath"
+ 	"strings"
+ 
+ 	"github.com/adrg/xdg"
++	"github.com/go-git/go-git/v6"
+ 	"github.com/spf13/cobra"
+ 	"github.com/spf13/viper"
+ )
+@@ -62,7 +63,7 @@ 		},
+ 	}
+ )
+ 
+-func getLedgerRepo(ctx context.Context, log *slog.Logger) (string, error) {
++func verifyLedgerRepo(ctx context.Context, log *slog.Logger) (*git.Repository, string, error) {
+ 	ledgerRepoDirectory := viper.GetString(ledgerKey)
+ 
+ 	log = log.With("ledgerRepoDirectory", ledgerRepoDirectory)
+@@ -73,20 +74,40 @@ 	if _, err := os.Stat(ledgerRepoDirectory); err != nil {
+ 		if errors.Is(err, os.ErrNotExist) {
+ 			log.ErrorContext(ctx, "Ledger repo directory does not exist, please clone it first", "err", err)
+ 
+-			return "", err
++			return nil, "", err
+ 		}
+ 
+-		return "", err
++		return nil, "", err
++	}
++
++	log.Debug("Opening ledger repo")
++
++	repo, err := git.PlainOpen(ledgerRepoDirectory)
++	if err != nil {
++		return nil, "", err
+ 	}
+ 
+-	return ledgerRepoDirectory, nil
++	if viper.GetBool(pullKey) {
++		log.Debug("Pulling ledger repo")
++
++		worktree, err := repo.Worktree()
++		if err != nil {
++			return nil, "", err
++		}
++
++		if err := worktree.Pull(&git.PullOptions{}); err != nil && !errors.Is(err, git.NoErrAlreadyUpToDate) {
++			return nil, "", err
++		}
++	}
++
++	return repo, ledgerRepoDirectory, nil
+ }
+ 
+ func Execute() error {
+ 	indexCommand.PersistentFlags().BoolP(verboseKey, "v", false, "Whether to enable verbose logging")
+ 	indexCommand.PersistentFlags().StringP(configKey, "c", "", "Config file to use (by default "+indexCommand.Use+".yaml in the XDG config directory is read if it exists)")
+ 	indexCommand.PersistentFlags().StringP(ledgerKey, "l", filepath.Join(xdg.StateHome, indexCommand.Use, "ledger"), "Ledger repo directory")
+-	indexCommand.PersistentFlags().BoolP(pullKey, "p", false, "Whether to pull the ledger repo before writing to it")
++	indexCommand.PersistentFlags().BoolP(pullKey, "p", true, "Whether to pull the ledger repo before reading from or writing to it")
+ 
+ 	if err := viper.BindPFlags(indexCommand.PersistentFlags()); err != nil {
+ 		return err
+diff --git a/cmd/pledge/cmd/submit.go b/cmd/pledge/cmd/submit.go
+index b8211ba53004abbd868d67f6e8fcfe02961e325e..8be1a044f74bee30acb1fcfe7ce9344ba937000a 100644
+--- a/cmd/pledge/cmd/submit.go
++++ b/cmd/pledge/cmd/submit.go
+@@ -38,7 +38,7 @@
+ 		ctx, cancel := context.WithCancel(cmd.Context())
+ 		defer cancel()
+ 
+-		ledgerRepoDirectory, err := getLedgerRepo(ctx, log)
++		_, ledgerRepoDirectory, err := verifyLedgerRepo(ctx, log)
+ 		if err != nil {
+ 			return err
+ 		}
+
