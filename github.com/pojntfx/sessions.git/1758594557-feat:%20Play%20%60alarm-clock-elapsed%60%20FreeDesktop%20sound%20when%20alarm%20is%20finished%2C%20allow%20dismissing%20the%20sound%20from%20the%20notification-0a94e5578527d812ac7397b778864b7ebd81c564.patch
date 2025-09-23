@@ -1,0 +1,553 @@
+From 0a94e5578527d812ac7397b778864b7ebd81c564 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Mon, 22 Sep 2025 19:29:17 -0700
+Subject: [PATCH] feat: Play `alarm-clock-elapsed` FreeDesktop sound when alarm is finished, allow dismissing the sound from the notification
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/assets/resources/alarm-clock-elapsed.oga b/assets/resources/alarm-clock-elapsed.oga
+new file mode 100644
+index 0000000000000000000000000000000000000000..a253702a5f65c375457b5d7fb08a4ec06476b9d0
+Binary files /dev/null and b/assets/resources/alarm-clock-elapsed.oga differ
+diff --git a/assets/resources/index.go b/assets/resources/index.go
+index 6de390df00de1a12ac6a2a981287854ae26347ca..959f86ee044a319c766a700ddbdf8703163d2e53 100644
+--- a/assets/resources/index.go
++++ b/assets/resources/index.go
+@@ -26,6 +26,7 @@ 	AppDevelopers = []string{"Felicitas Pojtinger", "Guido Günther"}
+ 	AppArtists    = AppDevelopers
+ 	AppCopyright  = "© 2025 " + strings.Join(AppDevelopers, ", ")
+ 
+-	ResourceWindowUIPath = path.Join(AppPath, "window.ui")
+-	ResourceMetainfoPath = path.Join(AppPath, "metainfo.xml")
++	ResourceWindowUIPath          = path.Join(AppPath, "window.ui")
++	ResourceMetainfoPath          = path.Join(AppPath, "metainfo.xml")
++	ResourceAlarmClockElapsedPath = path.Join(AppPath, "alarm-clock-elapsed.oga")
+ )
+diff --git a/assets/resources/index.gresource.xml b/assets/resources/index.gresource.xml
+index 64266ac8658e7036b60ca9818b81aa71f610c0a5..43ca2207c8e77b18ce28a524cefcc440d091205c 100644
+--- a/assets/resources/index.gresource.xml
++++ b/assets/resources/index.gresource.xml
+@@ -3,5 +3,6 @@ <gresources>
+     <gresource prefix="/com/pojtinger/felicitas/Sessions">
+         <file>window.ui</file>
+         <file>metainfo.xml</file>
++        <file>alarm-clock-elapsed.oga</file>
+     </gresource>
+ </gresources>
+\ No newline at end of file
+diff --git a/com.pojtinger.felicitas.Sessions.json b/com.pojtinger.felicitas.Sessions.json
+index c85c00ada3be21beeb608635106f4c4654d729af..ea04d1f61b4e0bd5e9d15cf2c4fae7eda1d5277a 100644
+--- a/com.pojtinger.felicitas.Sessions.json
++++ b/com.pojtinger.felicitas.Sessions.json
+@@ -12,7 +12,8 @@   "finish-args": [
+     "--socket=wayland",
+     "--socket=fallback-x11",
+     "--share=ipc",
+-    "--device=dri"
++    "--device=dri",
++    "--socket=pulseaudio"
+   ],
+   "modules": [
+     {
+diff --git a/main.go b/main.go
+index fe73be244490a497c1714c27adba5f9a7beac36c..21666d12de3e46a7a97ff434494d7a5eed5a6bc8 100644
+--- a/main.go
++++ b/main.go
+@@ -91,6 +91,19 @@ 			minus  = b.GetObject("minus_button").Cast().(*gtk.Button)
+ 		)
+ 
+ 		var (
++			alarmClockElapsedFile = gtk.NewMediaFileForResource(resources.ResourceAlarmClockElapsedPath)
++		)
++		startAlarmPlayback := func() {
++			alarmClockElapsedFile.Seek(0)
++			alarmClockElapsedFile.Play()
++		}
++
++		stopAlarmPlayback := func() {
++			alarmClockElapsedFile.SetPlaying(false)
++			alarmClockElapsedFile.Seek(0)
++		}
++
++		var (
+ 			totalSec = 300
+ 			running  = false
+ 		)
+@@ -148,7 +161,13 @@
+ 					updateButtons()
+ 					updateDial()
+ 
++					startAlarmPlayback()
++
+ 					n := gio.NewNotification(gcore.Local("Session finished"))
++					n.SetPriority(gio.NotificationPriorityUrgent)
++					n.SetDefaultAction("app.stopAlarmPlayback")
++					n.AddButton(gcore.Local("Stop alarm"), "app.stopAlarmPlayback")
++
+ 					a.SendNotification("session-finished", n)
+ 
+ 					return false
+@@ -159,6 +178,8 @@ 			}
+ 		}
+ 
+ 		startTimer := func() {
++			stopAlarmPlayback()
++
+ 			running = true
+ 			remain = time.Duration(totalSec) * time.Second
+ 
+@@ -358,6 +379,14 @@ 		openAboutAction.ConnectActivate(func(parameter *glib.Variant) {
+ 			aboutDialog.Present(&w.Window)
+ 		})
+ 		a.AddAction(openAboutAction)
++
++		stopAlarmPlaybackAction := gio.NewSimpleAction("stopAlarmPlayback", nil)
++		stopAlarmPlaybackAction.ConnectActivate(func(parameter *glib.Variant) {
++			stopAlarmPlayback()
++
++			a.Activate()
++		})
++		a.AddAction(stopAlarmPlaybackAction)
+ 
+ 		updateButtons()
+ 		updateDial()
+diff --git a/po/de/LC_MESSAGES/default.po b/po/de/LC_MESSAGES/default.po
+index 55cf9d8c55226e6098363cbb22bf69b4fe268c7b..73f3006e2e81d7ae8f2383b2bf4cf8a5808dd0d1 100644
+--- a/po/de/LC_MESSAGES/default.po
++++ b/po/de/LC_MESSAGES/default.po
+@@ -18,7 +18,7 @@ #: ../assets/resources/window.blp:78
+ msgid "Remove 30s"
+ msgstr "30s entfernen"
+ 
+-#: ../assets/resources/window.blp:89 ../main.go:105
++#: ../assets/resources/window.blp:89 ../main.go:118
+ msgid "Start Timer"
+ msgstr "Timer starten"
+ 
+@@ -30,13 +30,17 @@ #: ../assets/resources/window.blp:115
+ msgid "About Sessions"
+ msgstr "Über Sitzungen"
+ 
+-#: ../main.go:100
++#: ../main.go:113
+ msgid "Stop"
+ msgstr "Stoppen"
+ 
+-#: ../main.go:151
++#: ../main.go:166
+ msgid "Session finished"
+ msgstr "Sitzung beendet"
++
++#: ../main.go:169
++msgid "Stop alarm"
++msgstr "Alarm stoppen"
+ 
+ #: ../assets/meta/com.pojtinger.felicitas.Sessions.desktop.in:5
+ #: ../assets/resources/metainfo.xml.in:5
+@@ -82,7 +86,8 @@ msgstr "Timer läuft während einer Arbeitssitzung"
+ 
+ #: ../assets/resources/metainfo.xml.in:79
+ msgid "Fix icon not showing in overview on non-GNOME desktops"
+-msgstr "Icon erscheint jetzt auch auf anderen Desktops als GNOME in der Übersicht"
++msgstr ""
++"Icon erscheint jetzt auch auf anderen Desktops als GNOME in der Übersicht"
+ 
+ #: ../assets/resources/metainfo.xml.in:80
+ msgid "Update to latest GNOME runtime"
+diff --git a/po/default.pot b/po/default.pot
+index e81344013470690e0ae909c9573ca94d4bc22ea6..f2b7af2b20510644a89d2d99de39be350c755a42 100644
+--- a/po/default.pot
++++ b/po/default.pot
+@@ -12,7 +12,7 @@ #: ../assets/resources/window.blp:78
+ msgid "Remove 30s"
+ msgstr ""
+ 
+-#: ../assets/resources/window.blp:89 ../main.go:105
++#: ../assets/resources/window.blp:89 ../main.go:118
+ msgid "Start Timer"
+ msgstr ""
+ 
+@@ -24,12 +24,16 @@ #: ../assets/resources/window.blp:115
+ msgid "About Sessions"
+ msgstr ""
+ 
+-#: ../main.go:100
++#: ../main.go:113
+ msgid "Stop"
+ msgstr ""
+ 
+-#: ../main.go:151
++#: ../main.go:166
+ msgid "Session finished"
++msgstr ""
++
++#: ../main.go:169
++msgid "Stop alarm"
+ msgstr ""
+ 
+ #: ../assets/meta/com.pojtinger.felicitas.Sessions.desktop.in:5
+diff --git a/po/en_GB/LC_MESSAGES/default.po b/po/en_GB/LC_MESSAGES/default.po
+index 683de438e6eb59f1008133554d411d19de115f9d..6a1f51518257c1911a7c89c0700269a5261ee93f 100644
+--- a/po/en_GB/LC_MESSAGES/default.po
++++ b/po/en_GB/LC_MESSAGES/default.po
+@@ -18,7 +18,7 @@ #: ../assets/resources/window.blp:78
+ msgid "Remove 30s"
+ msgstr "Remove 30s"
+ 
+-#: ../assets/resources/window.blp:89 ../main.go:105
++#: ../assets/resources/window.blp:89 ../main.go:118
+ msgid "Start Timer"
+ msgstr "Start Timer"
+ 
+@@ -30,13 +30,17 @@ #: ../assets/resources/window.blp:115
+ msgid "About Sessions"
+ msgstr "About Sessions"
+ 
+-#: ../main.go:100
++#: ../main.go:113
+ msgid "Stop"
+ msgstr "Stop"
+ 
+-#: ../main.go:151
++#: ../main.go:166
+ msgid "Session finished"
+ msgstr "Session finished"
++
++#: ../main.go:169
++msgid "Stop alarm"
++msgstr "Stop alarm"
+ 
+ #: ../assets/meta/com.pojtinger.felicitas.Sessions.desktop.in:5
+ #: ../assets/resources/metainfo.xml.in:5
+diff --git a/po/en_US/LC_MESSAGES/default.po b/po/en_US/LC_MESSAGES/default.po
+index 078b1b8a05fd1db0c1986d8afa813019fa240ce9..122729f0a79256c13d44a3fb821498b1d4b3911f 100644
+--- a/po/en_US/LC_MESSAGES/default.po
++++ b/po/en_US/LC_MESSAGES/default.po
+@@ -18,7 +18,7 @@ #: ../assets/resources/window.blp:78
+ msgid "Remove 30s"
+ msgstr "Remove 30s"
+ 
+-#: ../assets/resources/window.blp:89 ../main.go:105
++#: ../assets/resources/window.blp:89 ../main.go:118
+ msgid "Start Timer"
+ msgstr "Start Timer"
+ 
+@@ -30,13 +30,17 @@ #: ../assets/resources/window.blp:115
+ msgid "About Sessions"
+ msgstr "About Sessions"
+ 
+-#: ../main.go:100
++#: ../main.go:113
+ msgid "Stop"
+ msgstr "Stop"
+ 
+-#: ../main.go:151
++#: ../main.go:166
+ msgid "Session finished"
+ msgstr "Session finished"
++
++#: ../main.go:169
++msgid "Stop alarm"
++msgstr "Stop alarm"
+ 
+ #: ../assets/meta/com.pojtinger.felicitas.Sessions.desktop.in:5
+ #: ../assets/resources/metainfo.xml.in:5
+diff --git a/po/es/LC_MESSAGES/default.po b/po/es/LC_MESSAGES/default.po
+index 234c521f59d5086a4298830b19dbb6a16d5cc1c6..f0989ecdae11b357a2d633dcaeb405a49c24e608 100644
+--- a/po/es/LC_MESSAGES/default.po
++++ b/po/es/LC_MESSAGES/default.po
+@@ -28,7 +28,7 @@ #: ../assets/resources/window.blp:78
+ msgid "Remove 30s"
+ msgstr "Restar 30s"
+ 
+-#: ../assets/resources/window.blp:89 ../main.go:105
++#: ../assets/resources/window.blp:89 ../main.go:118
+ msgid "Start Timer"
+ msgstr "Empezar temporizador"
+ 
+@@ -40,13 +40,17 @@ #: ../assets/resources/window.blp:115
+ msgid "About Sessions"
+ msgstr "Acerca de Sesiones"
+ 
+-#: ../main.go:100
++#: ../main.go:113
+ msgid "Stop"
+ msgstr "Detener"
+ 
+-#: ../main.go:151
++#: ../main.go:166
+ msgid "Session finished"
+ msgstr "Sesión terminada"
++
++#: ../main.go:169
++msgid "Stop alarm"
++msgstr ""
+ 
+ #: ../assets/meta/com.pojtinger.felicitas.Sessions.desktop.in:5
+ #: ../assets/resources/metainfo.xml.in:5
+diff --git a/po/fi/LC_MESSAGES/default.po b/po/fi/LC_MESSAGES/default.po
+index 4586d6299e838cfac7b08886d4f2ad06fb82126b..a337fda878ae71682a3b52cfaf6c2538dc3d482c 100644
+--- a/po/fi/LC_MESSAGES/default.po
++++ b/po/fi/LC_MESSAGES/default.po
+@@ -27,7 +27,7 @@ #: ../assets/resources/window.blp:78
+ msgid "Remove 30s"
+ msgstr "Poista 30 s"
+ 
+-#: ../assets/resources/window.blp:89 ../main.go:105
++#: ../assets/resources/window.blp:89 ../main.go:118
+ msgid "Start Timer"
+ msgstr "Käynnistä ajastin"
+ 
+@@ -39,13 +39,17 @@ #: ../assets/resources/window.blp:115
+ msgid "About Sessions"
+ msgstr "Tietoja - Sessions"
+ 
+-#: ../main.go:100
++#: ../main.go:113
+ msgid "Stop"
+ msgstr "Pysäytä"
+ 
+-#: ../main.go:151
++#: ../main.go:166
+ msgid "Session finished"
+ msgstr "Istunto valmistui"
++
++#: ../main.go:169
++msgid "Stop alarm"
++msgstr ""
+ 
+ #: ../assets/meta/com.pojtinger.felicitas.Sessions.desktop.in:5
+ #: ../assets/resources/metainfo.xml.in:5
+diff --git a/po/fr/LC_MESSAGES/default.po b/po/fr/LC_MESSAGES/default.po
+index 9825c8b779820f1e5a454628d302c019abae19d5..b7f384077c418c45e4e295a776b5c7ac7622c8fd 100644
+--- a/po/fr/LC_MESSAGES/default.po
++++ b/po/fr/LC_MESSAGES/default.po
+@@ -18,7 +18,7 @@ #: ../assets/resources/window.blp:78
+ msgid "Remove 30s"
+ msgstr "Retirer 30s"
+ 
+-#: ../assets/resources/window.blp:89 ../main.go:105
++#: ../assets/resources/window.blp:89 ../main.go:118
+ msgid "Start Timer"
+ msgstr "Démarrer le minuteur"
+ 
+@@ -30,13 +30,17 @@ #: ../assets/resources/window.blp:115
+ msgid "About Sessions"
+ msgstr "À propos de Sessions"
+ 
+-#: ../main.go:100
++#: ../main.go:113
+ msgid "Stop"
+ msgstr "Arrêter"
+ 
+-#: ../main.go:151
++#: ../main.go:166
+ msgid "Session finished"
+ msgstr "Session terminée"
++
++#: ../main.go:169
++msgid "Stop alarm"
++msgstr "Arrêter l'alarme"
+ 
+ #: ../assets/meta/com.pojtinger.felicitas.Sessions.desktop.in:5
+ #: ../assets/resources/metainfo.xml.in:5
+@@ -81,11 +85,14 @@ msgstr "Minuteur en cours pendant une session de travail"
+ 
+ #: ../assets/resources/metainfo.xml.in:79
+ msgid "Fix icon not showing in overview on non-GNOME desktops"
+-msgstr "L'icône apparaît désormais dans la vue d'ensemble même sur les bureaux non-GNOME"
++msgstr ""
++"L'icône apparaît désormais dans la vue d'ensemble même sur les bureaux non-"
++"GNOME"
+ 
+ #: ../assets/resources/metainfo.xml.in:80
+ msgid "Update to latest GNOME runtime"
+-msgstr "Mise à jour de l'environnement d'exécution GNOME vers la dernière version"
++msgstr ""
++"Mise à jour de l'environnement d'exécution GNOME vers la dernière version"
+ 
+ #: ../assets/resources/metainfo.xml.in:88
+ msgid "Add additional translations"
+diff --git a/po/fr_CA/LC_MESSAGES/default.po b/po/fr_CA/LC_MESSAGES/default.po
+index 660766aa6b27d2669a534d8533914418fa85e272..d371a03d1f2ddf8364a40ddae21ca8df10437942 100644
+--- a/po/fr_CA/LC_MESSAGES/default.po
++++ b/po/fr_CA/LC_MESSAGES/default.po
+@@ -18,7 +18,7 @@ #: ../assets/resources/window.blp:78
+ msgid "Remove 30s"
+ msgstr "Retirer 30s"
+ 
+-#: ../assets/resources/window.blp:89 ../main.go:105
++#: ../assets/resources/window.blp:89 ../main.go:118
+ msgid "Start Timer"
+ msgstr "Démarrer la minuterie"
+ 
+@@ -30,13 +30,17 @@ #: ../assets/resources/window.blp:115
+ msgid "About Sessions"
+ msgstr "À propos de Sessions"
+ 
+-#: ../main.go:100
++#: ../main.go:113
+ msgid "Stop"
+ msgstr "Arrêter"
+ 
+-#: ../main.go:151
++#: ../main.go:166
+ msgid "Session finished"
+ msgstr "Session terminée"
++
++#: ../main.go:169
++msgid "Stop alarm"
++msgstr "Arrêter l'alarme"
+ 
+ #: ../assets/meta/com.pojtinger.felicitas.Sessions.desktop.in:5
+ #: ../assets/resources/metainfo.xml.in:5
+@@ -81,11 +85,14 @@ msgstr "Minuterie en cours pendant une session de travail"
+ 
+ #: ../assets/resources/metainfo.xml.in:79
+ msgid "Fix icon not showing in overview on non-GNOME desktops"
+-msgstr "L'icône apparaît désormais dans la vue d'ensemble même sur les bureaux non-GNOME"
++msgstr ""
++"L'icône apparaît désormais dans la vue d'ensemble même sur les bureaux non-"
++"GNOME"
+ 
+ #: ../assets/resources/metainfo.xml.in:80
+ msgid "Update to latest GNOME runtime"
+-msgstr "Mise à jour de l'environnement d'exécution GNOME vers la dernière version"
++msgstr ""
++"Mise à jour de l'environnement d'exécution GNOME vers la dernière version"
+ 
+ #: ../assets/resources/metainfo.xml.in:88
+ msgid "Add additional translations"
+diff --git a/po/hu/LC_MESSAGES/default.po b/po/hu/LC_MESSAGES/default.po
+index fede11d4101391f7596a8ec0ce2e89acf511ef16..0fd27d6ca85d62c3094fddb422035ef9d56aa1c1 100644
+--- a/po/hu/LC_MESSAGES/default.po
++++ b/po/hu/LC_MESSAGES/default.po
+@@ -26,7 +26,7 @@ #: ../assets/resources/window.blp:78
+ msgid "Remove 30s"
+ msgstr "30mp levonása"
+ 
+-#: ../assets/resources/window.blp:89 ../main.go:105
++#: ../assets/resources/window.blp:89 ../main.go:118
+ msgid "Start Timer"
+ msgstr "Indítás"
+ 
+@@ -38,13 +38,17 @@ #: ../assets/resources/window.blp:115
+ msgid "About Sessions"
+ msgstr "A Sessions névjegye"
+ 
+-#: ../main.go:100
++#: ../main.go:113
+ msgid "Stop"
+ msgstr "Állj"
+ 
+-#: ../main.go:151
++#: ../main.go:166
+ msgid "Session finished"
+ msgstr "A munkamenet befejeződött"
++
++#: ../main.go:169
++msgid "Stop alarm"
++msgstr ""
+ 
+ #: ../assets/meta/com.pojtinger.felicitas.Sessions.desktop.in:5
+ #: ../assets/resources/metainfo.xml.in:5
+diff --git a/po/pt/LC_MESSAGES/default.po b/po/pt/LC_MESSAGES/default.po
+index f324585eded07848134cbf19181aa06ce725b718..31af89a469d3e905afbc5b7aede68441ebc0a2d7 100644
+--- a/po/pt/LC_MESSAGES/default.po
++++ b/po/pt/LC_MESSAGES/default.po
+@@ -28,7 +28,7 @@ #: ../assets/resources/window.blp:78
+ msgid "Remove 30s"
+ msgstr "Menos 30s"
+ 
+-#: ../assets/resources/window.blp:89 ../main.go:105
++#: ../assets/resources/window.blp:89 ../main.go:118
+ msgid "Start Timer"
+ msgstr "Iniciar Timer"
+ 
+@@ -40,13 +40,17 @@ #: ../assets/resources/window.blp:115
+ msgid "About Sessions"
+ msgstr "Sobre o Sessions"
+ 
+-#: ../main.go:100
++#: ../main.go:113
+ msgid "Stop"
+ msgstr "Encerrar"
+ 
+-#: ../main.go:151
++#: ../main.go:166
+ msgid "Session finished"
+ msgstr "Sessão finalizada"
++
++#: ../main.go:169
++msgid "Stop alarm"
++msgstr ""
+ 
+ #: ../assets/meta/com.pojtinger.felicitas.Sessions.desktop.in:5
+ #: ../assets/resources/metainfo.xml.in:5
+diff --git a/po/pt_BR/LC_MESSAGES/default.po b/po/pt_BR/LC_MESSAGES/default.po
+index a3f86c4b00364482264c78dc0c1e637499c9aaf9..795a9ab84321d23c723690a2222304bf5acfd974 100644
+--- a/po/pt_BR/LC_MESSAGES/default.po
++++ b/po/pt_BR/LC_MESSAGES/default.po
+@@ -28,7 +28,7 @@ #: ../assets/resources/window.blp:78
+ msgid "Remove 30s"
+ msgstr "Menos 30s"
+ 
+-#: ../assets/resources/window.blp:89 ../main.go:105
++#: ../assets/resources/window.blp:89 ../main.go:118
+ msgid "Start Timer"
+ msgstr "Iniciar Timer"
+ 
+@@ -40,13 +40,17 @@ #: ../assets/resources/window.blp:115
+ msgid "About Sessions"
+ msgstr "Sobre o Sessions"
+ 
+-#: ../main.go:100
++#: ../main.go:113
+ msgid "Stop"
+ msgstr "Encerrar"
+ 
+-#: ../main.go:151
++#: ../main.go:166
+ msgid "Session finished"
+ msgstr "Sessão finalizada"
++
++#: ../main.go:169
++msgid "Stop alarm"
++msgstr ""
+ 
+ #: ../assets/meta/com.pojtinger.felicitas.Sessions.desktop.in:5
+ #: ../assets/resources/metainfo.xml.in:5
+diff --git a/po/zh_Hant/LC_MESSAGES/default.po b/po/zh_Hant/LC_MESSAGES/default.po
+index 95edcb5069cdab876b5ab8ee223c884c8f630e60..9fbdc7fa854875ef00fe1a82be9757ff911b9fe3 100644
+--- a/po/zh_Hant/LC_MESSAGES/default.po
++++ b/po/zh_Hant/LC_MESSAGES/default.po
+@@ -28,7 +28,7 @@ #: ../assets/resources/window.blp:78
+ msgid "Remove 30s"
+ msgstr "減30秒"
+ 
+-#: ../assets/resources/window.blp:89 ../main.go:105
++#: ../assets/resources/window.blp:89 ../main.go:118
+ msgid "Start Timer"
+ msgstr "定時開始"
+ 
+@@ -40,13 +40,17 @@ #: ../assets/resources/window.blp:115
+ msgid "About Sessions"
+ msgstr "關於Sessions"
+ 
+-#: ../main.go:100
++#: ../main.go:113
+ msgid "Stop"
+ msgstr "停"
+ 
+-#: ../main.go:151
++#: ../main.go:166
+ msgid "Session finished"
+ msgstr "會期完"
++
++#: ../main.go:169
++msgid "Stop alarm"
++msgstr ""
+ 
+ #: ../assets/meta/com.pojtinger.felicitas.Sessions.desktop.in:5
+ #: ../assets/resources/metainfo.xml.in:5
+
