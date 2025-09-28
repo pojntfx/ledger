@@ -1,0 +1,98 @@
+From fe0bb513bc98da4afcb63a2805a1a964f3e26c95 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Sun, 28 Sep 2025 16:06:32 -0700
+Subject: [PATCH] GIR: Add support for nullable callbacks by return null pointers where GIR files mark them as nullable
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/internal/gir/pass/pass.go b/internal/gir/pass/pass.go
+index 31549f40c571c4dcc3433163abfad551a7c023a9..f269a74b0d9a973f2265e28c3c4cd7043999bf0c 100644
+--- a/internal/gir/pass/pass.go
++++ b/internal/gir/pass/pass.go
+@@ -63,6 +63,21 @@ 	}
+ 	for _, inter := range ns.Interfaces {
+ 		p.Types.Add(ns.Name, inter.Name, types.InterfacesType, inter)
+ 	}
++	for _, alias := range ns.Aliases {
++		// Check what the alias points to and use the same type
++		aliasTarget := alias.Type.Name
++		if aliasTarget != "" {
++			targetKind := p.Types.Kind(ns.Name, aliasTarget)
++			if targetKind != types.UnknownType {
++				p.Types.Add(ns.Name, alias.Name, targetKind, alias)
++			} else {
++				// If we don't know the target type yet, default to alias type
++				p.Types.Add(ns.Name, alias.Name, types.AliasType, alias)
++			}
++		} else {
++			p.Types.Add(ns.Name, alias.Name, types.AliasType, alias)
++		}
++	}
+ }
+ 
+ // First does a "first pass" meaning it collects basic type information for all the repositories
+diff --git a/internal/gir/types/template.go b/internal/gir/types/template.go
+index 77914bb8f0d8fcc3a453c45f9d1067861fff801d..7d7452450bb93000628b192c56015bbb7b880a16 100644
+--- a/internal/gir/types/template.go
++++ b/internal/gir/types/template.go
+@@ -29,7 +29,7 @@ 	// API are the arguments as suitable for a Go API
+ 	API argsTemplate
+ }
+ 
+-func (f *funcArgsTemplate) AddAPI(t string, n string, k Kind, ns string) {
++func (f *funcArgsTemplate) AddAPI(t string, n string, k Kind, ns string, nullable bool) {
+ 	c := n
+ 	stars := strings.Count(t, "*")
+ 	gobjectNs := "gobject."
+@@ -42,7 +42,11 @@ 		glibNs = ""
+ 	}
+ 	switch k {
+ 	case CallbackType:
+-		c = fmt.Sprintf("%sNewCallback(%s)", glibNs, n)
++		if nullable {
++			c = fmt.Sprintf("%sNewCallbackNullable(%s)", glibNs, n)
++		} else {
++			c = fmt.Sprintf("%sNewCallback(%s)", glibNs, n)
++		}
+ 		t = "*" + t
+ 	case ClassesType:
+ 		if stars == 0 {
+@@ -133,7 +137,7 @@
+ 	// Get a suitable variable name
+ 	varName := p.VarName()
+ 
+-	f.AddAPI(goType, varName, kind, ns)
++	f.AddAPI(goType, varName, kind, ns, p.Nullable)
+ 	f.AddPure(goType, varName, kind)
+ }
+ 
+diff --git a/templates/glib b/templates/glib
+index c37715351160f0b06ad79986484bbbf2f1f473b4..0856ba38058571f237d6bd6be4da3a884eff96f0 100644
+--- a/templates/glib
++++ b/templates/glib
+@@ -2,6 +2,7 @@ package glib
+ 
+ import (
+ 	"fmt"
++	"reflect"
+ 	"sync"
+ 
+ 	"github.com/jwijenbergh/purego"
+@@ -44,6 +45,16 @@
+ // NewCallback is an alias to purego.NewCallback
+ func NewCallback(fnPtr interface{}) uintptr {
+ 	return purego.NewCallbackFnPtr(fnPtr)
++}
++
++// NewCallbackNullable is an alias to purego.NewCallback that returns a null pointer for null functions
++func NewCallbackNullable(fn interface{}) uintptr {
++	val := reflect.ValueOf(fn)
++	if val.IsNil() {
++		return 0
++	}
++
++	return NewCallback(fn)
+ }
+ 
+ func (e *Error) Error() string {
+
