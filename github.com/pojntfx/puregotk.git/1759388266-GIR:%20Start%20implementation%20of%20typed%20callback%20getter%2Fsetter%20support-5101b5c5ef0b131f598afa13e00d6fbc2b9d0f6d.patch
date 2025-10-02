@@ -1,0 +1,213 @@
+From 5101b5c5ef0b131f598afa13e00d6fbc2b9d0f6d Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Wed, 01 Oct 2025 23:57:46 -0700
+Subject: [PATCH] GIR: Start implementation of typed callback getter/setter support
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/internal/gir/pass/pass.go b/internal/gir/pass/pass.go
+index fc564c517e40ffc9aa8661b62b78103eea7ef96e..b02a9c26880b95bdeaca8632a5803162d7198610 100644
+--- a/internal/gir/pass/pass.go
++++ b/internal/gir/pass/pass.go
+@@ -132,13 +132,33 @@ 				Args:  c.Parameters.Template(ns.Name, "", p.Types, c.Throws),
+ 				Ret:   c.ReturnValue.Template(ns.Name, "", p.Types, c.Throws),
+ 			}
+ 		}
++		var callbackSetters []types.CallbackSetterTemplate
+ 		for _, f := range rec.Fields {
+ 			var _type string
++			var isCallback bool
++			var callbackInfo *types.Callback
+ 
+ 			// Check if this field is a callback
+ 			if f.Callback != nil {
+-				// Callbacks in structs are function pointers, represented as uintptr
++				// Callbacks in structs are still stored as uintptr but we generate typed setters
+ 				_type = "uintptr"
++				isCallback = true
++				callbackInfo = f.Callback
++
++				// Generate setter template with proper function type
++				publicFieldName := util.SnakeToCamel(f.Name)
++				privateFieldName := strings.ToLower(publicFieldName[:1]) + publicFieldName[1:]
++				setterName := "SetCallback" + publicFieldName
++				getterName := "GetCallback" + publicFieldName
++				callbackType := f.Callback.GenerateCallbackType(ns.Name, p.Types)
++				callbackSetters = append(callbackSetters, types.CallbackSetterTemplate{
++					FieldName:        publicFieldName,
++					PrivateFieldName: privateFieldName,
++					SetterName:       setterName,
++					GetterName:       getterName,
++					CallbackType:     callbackType,
++					Doc:              fmt.Sprintf("// %s sets the %s callback function", setterName, publicFieldName),
++				})
+ 			} else {
+ 				_type = f.Translate(ns.Name, p.Types)
+ 				if _type == "" {
+@@ -157,9 +177,19 @@ 					_type = "uintptr"
+ 				}
+ 			}
+ 
++			fieldName := util.SnakeToCamel(f.Name)
++			// Make callback fields private by lowercasing the first letter
++			if isCallback && len(fieldName) > 0 {
++				fieldName = strings.ToLower(fieldName[:1]) + fieldName[1:]
++				// Handle reserved keywords by appending underscore
++				fieldName = handleReservedKeyword(fieldName)
++			}
++
+ 			fields = append(fields, types.RecordField{
+-				Name: util.SnakeToCamel(f.Name),
+-				Type: _type,
++				Name:         fieldName,
++				Type:         _type,
++				IsCallback:   isCallback,
++				CallbackInfo: callbackInfo,
+ 			})
+ 		}
+ 		for _, f := range rec.Methods {
+@@ -182,12 +212,13 @@ 				Ret:   f.ReturnValue.Template(ns.Name, "", p.Types, f.Throws),
+ 			})
+ 		}
+ 		records[fn] = append(records[fn], types.RecordTemplate{
+-			Name:         name,
+-			Doc:          rec.Doc.StringSafe(),
+-			Constructors: constructors,
+-			Receivers:    receivers,
+-			Fields:       fields,
+-			TypeGetter:   rec.GLibGetType,
++			Name:            name,
++			Doc:             rec.Doc.StringSafe(),
++			Constructors:    constructors,
++			Receivers:       receivers,
++			Fields:          fields,
++			TypeGetter:      rec.GLibGetType,
++			CallbackSetters: callbackSetters,
+ 		})
+ 		recordLookup[name] = true
+ 	}
+diff --git a/internal/gir/types/template.go b/internal/gir/types/template.go
+index 6733ef897d95638e28c45cbaa9a1840bc52d39cc..72af319648a28ae81c2be223b8e26b90741fec2f 100644
+--- a/internal/gir/types/template.go
++++ b/internal/gir/types/template.go
+@@ -177,6 +177,12 @@ 	Name string
+ 
+ 	// Type is the Go type of the field
+ 	Type string
++
++	// IsCallback indicates if this field is a callback function pointer
++	IsCallback bool
++
++	// CallbackInfo stores the callback information for generating setters
++	CallbackInfo *Callback
+ }
+ 
+ type RecordTemplate struct {
+@@ -197,6 +203,29 @@ 	Fields []RecordField
+ 
+ 	// TypeGetter is the function to get the GLib type
+ 	TypeGetter string
++
++	// CallbackSetters is the list of callback setter methods
++	CallbackSetters []CallbackSetterTemplate
++}
++
++type CallbackSetterTemplate struct {
++	// FieldName is the public name of the callback field
++	FieldName string
++
++	// PrivateFieldName is the private name of the callback field in the struct
++	PrivateFieldName string
++
++	// SetterName is the name of the setter method (e.g., "SetCallbackConstructed")
++	SetterName string
++
++	// GetterName is the name of the getter method (e.g., "GetCallbackConstructed")
++	GetterName string
++
++	// CallbackType is the function signature type
++	CallbackType string
++
++	// Doc is the documentation for the setter
++	Doc string
+ }
+ 
+ type enumValues struct {
+diff --git a/internal/gir/types/types.go b/internal/gir/types/types.go
+index b211d2b84345f0c1c43120f3aa1fc28a1d8e45b1..dba19f49bd3957134eae3b652d96639b9ea6f19c 100644
+--- a/internal/gir/types/types.go
++++ b/internal/gir/types/types.go
+@@ -786,3 +786,43 @@ 		RefSink: r.TransferOwnership.TransferOwnership == "none",
+ 		Throws:  throws,
+ 	}
+ }
++
++// GenerateCallbackType generates a Go function type string for a callback
++func (c *Callback) GenerateCallbackType(ns string, kinds KindMap) string {
++	if c == nil {
++		return "uintptr"
++	}
++
++	var args []string
++	var returnType string = ""
++
++	// Generate parameter types
++	if c.Parameters != nil {
++		for _, param := range c.Parameters.Parameters {
++			paramType := param.Translate(ns, kinds)
++			if paramType == "" {
++				paramType = "uintptr"
++			}
++			args = append(args, paramType)
++		}
++	}
++
++	// Generate return type
++	if c.ReturnValue != nil {
++		returnType = c.ReturnValue.AnyType.Translate(ns, kinds)
++		if returnType == "" {
++			returnType = ""
++		}
++	}
++
++	// Build function type string
++	funcType := "func("
++	funcType += strings.Join(args, ", ")
++	funcType += ")"
++
++	if returnType != "" && returnType != "none" && returnType != "void" {
++		funcType += " " + returnType
++	}
++
++	return funcType
++}
+diff --git a/templates/go b/templates/go
+index 7524214eb61d9fd7ac4b3b3600c75e6c15d74738..7315d488ef192441ef7e177ef786ac12465961eb 100644
+--- a/templates/go
++++ b/templates/go
+@@ -59,6 +59,24 @@ }
+ 
+ {{$outer := .}}
+ 
++{{range .CallbackSetters -}}
++{{.Doc}}
++func (x *{{$outer.Name}}) {{.SetterName}}(callback {{.CallbackType}}) {
++     x.{{.PrivateFieldName}} = purego.NewCallback(callback)
++}
++
++// {{.GetterName}} returns a callable function for the {{.FieldName}} callback
++func (x *{{$outer.Name}}) {{.GetterName}}() {{.CallbackType}} {
++     if x.{{.PrivateFieldName}} == 0 {
++          return nil
++     }
++     var fn {{.CallbackType}}
++     purego.RegisterFunc(&fn, x.{{.PrivateFieldName}})
++     return fn
++}
++
++{{end}}
++
+ {{range .Constructors -}}
+ var x{{.Name}} func({{conv .Args.Pure.Types}}) {{.Ret.Raw}}
+ 
+
