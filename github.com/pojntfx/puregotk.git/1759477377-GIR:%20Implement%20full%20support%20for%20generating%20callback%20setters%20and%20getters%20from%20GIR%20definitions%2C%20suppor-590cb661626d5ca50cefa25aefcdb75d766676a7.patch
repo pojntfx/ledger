@@ -1,0 +1,451 @@
+From 590cb661626d5ca50cefa25aefcdb75d766676a7 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Fri, 03 Oct 2025 00:42:57 -0700
+Subject: [PATCH] GIR: Implement full support for generating callback setters and getters from GIR definitions, support generating callback getters with type conversion
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/gen.go b/gen.go
+index 17fff64ade2eb721048b40402cbfdd11092ae72f..40bf95b64316d389cbb40d78b006ebedbc89d3b0 100644
+--- a/gen.go
++++ b/gen.go
+@@ -31,7 +31,14 @@ 	// collect basic type info
+ 	p.First()
+ 
+ 	// Create the template
+-	gotemp, err := template.New("go").Funcs(template.FuncMap{"conv": util.ConvertArgs, "convc": util.ConvertArgsComma}).ParseFiles("templates/go")
++	gotemp, err := template.New("go").Funcs(template.FuncMap{
++		"conv":     util.ConvertArgs,
++		"convc":    util.ConvertArgsComma,
++		"convcb":   util.ConvertCallbackArgs,
++		"convcd":   util.ConvertArgsCommaDeref,
++		"convd":    util.ConvertArgsDeref,
++		"convcbne": util.ConvertCallbackArgsNoErr,
++	}).ParseFiles("templates/go")
+ 	if err != nil {
+ 		panic(err)
+ 	}
+diff --git a/internal/gir/pass/pass.go b/internal/gir/pass/pass.go
+index fc564c517e40ffc9aa8661b62b78103eea7ef96e..59302d066cdd157d5d4a180166de95e43242dab4 100644
+--- a/internal/gir/pass/pass.go
++++ b/internal/gir/pass/pass.go
+@@ -121,6 +121,7 @@ 		name := util.SnakeToCamel(rec.Name)
+ 		constructors := make([]types.FuncTemplate, len(rec.Constructors))
+ 		receivers := make([]types.FuncTemplate, 0, len(rec.Methods))
+ 		fields := make([]types.RecordField, 0, len(rec.Fields))
++		callbackAccessors := make([]types.CallbackAccessor, 0)
+ 		fn := rec.FilenameSafe()
+ 		files = append(files, fn)
+ 		for i, c := range rec.Constructors {
+@@ -134,11 +135,30 @@ 			}
+ 		}
+ 		for _, f := range rec.Fields {
+ 			var _type string
++			var fieldName string
+ 
+ 			// Check if this field is a callback
+ 			if f.Callback != nil {
+ 				// Callbacks in structs are function pointers, represented as uintptr
++				// Make the field private by prefixing with underscore
+ 				_type = "uintptr"
++				fieldName = "_" + util.SnakeToCamel(f.Name)
++
++				// Generate callback accessor for this field
++				callbackName := util.SnakeToCamel(f.Name)
++				args := f.Callback.Parameters.Template(ns.Name, "", p.Types, f.Callback.Throws)
++				ret := f.Callback.ReturnValue.Template(ns.Name, "", p.Types, f.Callback.Throws)
++
++				// Build callback type string (include instance parameter for callback signature)
++				apiTypes := args.API.Types
++
++				callbackAccessors = append(callbackAccessors, types.CallbackAccessor{
++					Name:         callbackName,
++					Doc:          f.Doc.StringSafe(),
++					CallbackType: "func(" + strings.Join(apiTypes, ", ") + ") " + ret.Value,
++					Args:         args,
++					Ret:          ret,
++				})
+ 			} else {
+ 				_type = f.Translate(ns.Name, p.Types)
+ 				if _type == "" {
+@@ -155,10 +175,11 @@ 				// HACK: in structs the strings should be uintptr as we convert it ourselves
+ 				if _type == "string" {
+ 					_type = "uintptr"
+ 				}
++				fieldName = util.SnakeToCamel(f.Name)
+ 			}
+ 
+ 			fields = append(fields, types.RecordField{
+-				Name: util.SnakeToCamel(f.Name),
++				Name: fieldName,
+ 				Type: _type,
+ 			})
+ 		}
+@@ -182,12 +203,13 @@ 				Ret:   f.ReturnValue.Template(ns.Name, "", p.Types, f.Throws),
+ 			})
+ 		}
+ 		records[fn] = append(records[fn], types.RecordTemplate{
+-			Name:         name,
+-			Doc:          rec.Doc.StringSafe(),
+-			Constructors: constructors,
+-			Receivers:    receivers,
+-			Fields:       fields,
+-			TypeGetter:   rec.GLibGetType,
++			Name:              name,
++			Doc:               rec.Doc.StringSafe(),
++			Constructors:      constructors,
++			Receivers:         receivers,
++			Fields:            fields,
++			CallbackAccessors: callbackAccessors,
++			TypeGetter:        rec.GLibGetType,
+ 		})
+ 		recordLookup[name] = true
+ 	}
+diff --git a/internal/gir/types/template.go b/internal/gir/types/template.go
+index 6733ef897d95638e28c45cbaa9a1840bc52d39cc..08f55ad31150c9027ad2ea5d744cb78453c0252a 100644
+--- a/internal/gir/types/template.go
++++ b/internal/gir/types/template.go
+@@ -80,6 +80,9 @@ 	f.API.Full = append(f.API.Full, n+" "+t)
+ }
+ 
+ func (f *funcArgsTemplate) AddPure(t string, n string, k Kind) {
++	if n == "" {
++		n = "arg"
++	}
+ 	n += "p"
+ 	c := n
+ 	stars := strings.Count(t, "*")
+@@ -89,14 +92,22 @@ 		if stars == 0 {
+ 			t = "uintptr"
+ 		}
+ 	case CallbackType:
++		c = fmt.Sprintf("(*%s)(unsafe.Pointer(%s))", strings.TrimPrefix(t, "*"), n)
+ 		t = "uintptr"
+ 	case ClassesType:
+ 		if stars == 0 {
+ 			c = n
+ 			t = "uintptr"
+ 		} else {
+-			c = fmt.Sprintf("%sNewFromInternalPtr(%s)", strings.TrimPrefix(t, "*"), n)
+-			t = strings.Repeat("*", stars-1) + "uintptr"
++			// Remove all stars to get the base class name
++			baseName := strings.TrimPrefix(t, strings.Repeat("*", stars))
++			if stars > 1 {
++				// For double pointers like **ParamSpec, we need to pass the double pointer directly
++				c = fmt.Sprintf("(**%s)(unsafe.Pointer(%s))", baseName, n)
++			} else {
++				c = fmt.Sprintf("%sNewFromInternalPtr(%s)", baseName, n)
++			}
++			t = "uintptr"
+ 		}
+ 	case InterfacesType:
+ 		if stars == 0 {
+@@ -179,6 +190,23 @@ 	// Type is the Go type of the field
+ 	Type string
+ }
+ 
++type CallbackAccessor struct {
++	// Name is the Go name of the callback field (without underscore)
++	Name string
++
++	// Doc is the documentation for the callback
++	Doc string
++
++	// CallbackType is the name of the callback function type
++	CallbackType string
++
++	// Args are the callback function arguments template
++	Args funcArgsTemplate
++
++	// Ret is the callback function return template
++	Ret funcRetTemplate
++}
++
+ type RecordTemplate struct {
+ 	// Name is the name of the record given to the Go type declaration
+ 	Name string
+@@ -194,6 +222,9 @@ 	Receivers []FuncTemplate
+ 
+ 	// Fields is the list of record fields
+ 	Fields []RecordField
++
++	// CallbackAccessors are the setter/getter methods for callback fields
++	CallbackAccessors []CallbackAccessor
+ 
+ 	// TypeGetter is the function to get the GLib type
+ 	TypeGetter string
+diff --git a/internal/gir/util/util.go b/internal/gir/util/util.go
+index 1fd741a45634383f3e5bef6bd761df5b805fca04..91060cdeb225586d15edb8b2196ea7d4b0e074b0 100644
+--- a/internal/gir/util/util.go
++++ b/internal/gir/util/util.go
+@@ -123,6 +123,128 @@ 	}
+ 	return ", " + strings.Join(a, ", ")
+ }
+ 
++func ConvertCallbackArgs(a []string) string {
++	if len(a) == 0 {
++		return ""
++	}
++	// Remove any * prefix from struct literals and add & instead
++	var validArgs []string
++	for _, arg := range a {
++		if strings.Contains(arg, "{Ptr:") {
++			// Remove * prefix if present and add &
++			arg = strings.TrimPrefix(arg, "*")
++			validArgs = append(validArgs, "&"+arg)
++		} else {
++			validArgs = append(validArgs, arg)
++		}
++	}
++	return strings.Join(validArgs, ", ")
++}
++
++func ConvertArgsCommaDeref(a []string) string {
++	if len(a) == 0 {
++		return ""
++	}
++	// Handle different argument types properly
++	var validArgs []string
++	for _, arg := range a {
++		if arg == "" {
++			continue // Skip empty arguments
++		}
++		if strings.Contains(arg, "{Ptr:") {
++			// Address-of interface struct literals
++			validArgs = append(validArgs, "&"+arg)
++		} else if strings.Contains(arg, "ConvertPtr(") {
++			// Some ConvertPtr calls need different handling based on context
++			// Single pointer interfaces should use .GoPointer() instead of ConvertPtr
++			// Some ConvertPtr calls expect *uintptr and shouldn't be dereferenced
++			if strings.Contains(arg, "ModelVar") || strings.Contains(arg, "TreeModelVar") {
++				// TreeModel ConvertPtr calls that expect *uintptr shouldn't be dereferenced
++				validArgs = append(validArgs, arg)
++			} else if strings.Contains(arg, "OutChildVar") || strings.Contains(arg, "ChildVar") {
++				// These expect *uintptr, so don't dereference
++				validArgs = append(validArgs, arg)
++			} else {
++				// Most other ConvertPtr calls need dereferencing (expect uintptr)
++				validArgs = append(validArgs, "*"+arg)
++			}
++		} else {
++			// Other arguments don't need modification
++			validArgs = append(validArgs, arg)
++		}
++	}
++	if len(validArgs) == 0 {
++		return ""
++	}
++	return ", " + strings.Join(validArgs, ", ")
++}
++
++func ConvertArgsDeref(a []string) string {
++	if len(a) == 0 {
++		return ""
++	}
++	// Handle different argument types properly
++	var validArgs []string
++	for _, arg := range a {
++		if arg == "" {
++			continue // Skip empty arguments
++		}
++		if strings.Contains(arg, "{Ptr:") {
++			// Address-of interface struct literals
++			validArgs = append(validArgs, "&"+arg)
++		} else if strings.Contains(arg, "ConvertPtr(") {
++			// Some ConvertPtr calls need different handling based on context
++			if strings.Contains(arg, "ModelVar") || strings.Contains(arg, "TreeModelVar") {
++				// TreeModel ConvertPtr calls that expect *uintptr shouldn't be dereferenced
++				validArgs = append(validArgs, arg)
++			} else if strings.Contains(arg, "OutChildVar") || strings.Contains(arg, "ChildVar") {
++				// These expect *uintptr, so don't dereference
++				validArgs = append(validArgs, arg)
++			} else {
++				// Most other ConvertPtr calls need dereferencing (expect uintptr)
++				validArgs = append(validArgs, "*"+arg)
++			}
++		} else {
++			// Other arguments don't need modification
++			validArgs = append(validArgs, arg)
++		}
++	}
++	return strings.Join(validArgs, ", ")
++}
++
++func ConvertCallbackArgsNoErr(a []string) string {
++	if len(a) == 0 {
++		return ""
++	}
++	// Filter out &cerr and handle different argument types properly like ConvertArgsDeref
++	var validArgs []string
++	for _, arg := range a {
++		if arg == "" || arg == "&cerr" {
++			continue // Skip empty arguments and error parameters
++		}
++		if strings.Contains(arg, "{Ptr:") {
++			// Address-of interface struct literals
++			validArgs = append(validArgs, "&"+arg)
++		} else if strings.Contains(arg, "ConvertPtr(") {
++			// Some ConvertPtr calls need different handling based on context
++			if strings.Contains(arg, "ModelVar") || strings.Contains(arg, "TreeModelVar") {
++				// TreeModel ConvertPtr calls that expect *uintptr shouldn't be dereferenced
++				validArgs = append(validArgs, arg)
++			} else if strings.Contains(arg, "OutChildVar") || strings.Contains(arg, "ChildVar") {
++				// These expect *uintptr, so don't dereference
++				validArgs = append(validArgs, arg)
++			} else {
++				// Most other ConvertPtr calls need dereferencing (expect uintptr)
++				validArgs = append(validArgs, "*"+arg)
++			}
++		} else {
++			// Other arguments don't need modification
++			validArgs = append(validArgs, arg)
++		}
++	}
++	return strings.Join(validArgs, ", ")
++}
++
+ // ConstructorName returns a Go friendly constructor name given the raw constructor name `name` and the class/record name `outer`
+ func ConstructorName(name string, outer string) string {
+ 	cname := SnakeToCamel(name)
+diff --git a/pkg/gir/util/util.go b/pkg/gir/util/util.go
+index 4f5c539929b966cfe58b5f045aa6e736126877bd..14ed3422c6ebec3a21b94ba4e71ffa8232e7c70c 100644
+--- a/pkg/gir/util/util.go
++++ b/pkg/gir/util/util.go
+@@ -3,6 +3,10 @@
+ import "github.com/jwijenbergh/puregotk/internal/gir/util"
+ 
+ var (
+-	ConvertArgs      = util.ConvertArgs
+-	ConvertArgsComma = util.ConvertArgsComma
++	ConvertArgs            = util.ConvertArgs
++	ConvertArgsComma       = util.ConvertArgsComma
++	ConvertCallbackArgs    = util.ConvertCallbackArgs
++	ConvertArgsCommaDeref  = util.ConvertArgsCommaDeref
++	ConvertArgsDeref       = util.ConvertArgsDeref
++	ConvertCallbackArgsNoErr = util.ConvertCallbackArgsNoErr
+ )
+diff --git a/templates/go b/templates/go
+index 7524214eb61d9fd7ac4b3b3600c75e6c15d74738..5c89a1fcd603dab0da349681bc4a42623566c075 100644
+--- a/templates/go
++++ b/templates/go
+@@ -66,7 +66,7 @@
+ {{.Doc}}
+ func {{.Name}}({{conv .Args.API.Full}}) {{.Ret.Return}} {
+      {{.Ret.Preamble $NotGLib}}
+-     {{if .Ret.Value}}cret :={{end}}x{{.Name}}({{conv .Args.API.Call}})
++     {{if .Ret.Value}}cret :={{end}}x{{.Name}}({{convd .Args.API.Call}})
+      {{.Ret.Fmt $NotGObject}}
+ }
+ {{end}}
+@@ -78,11 +78,46 @@
+ {{.Doc}}
+ func (x *{{$outer.Name}}) {{.Name}}({{conv .Args.API.Full}}) {{.Ret.Return}} {
+      {{.Ret.Preamble $NotGLib}}
+-     {{if .Ret.Value}}cret :={{end}}x{{$outer.Name}}{{.Name}}(x.GoPointer() {{convc .Args.API.Call}})
++     {{if .Ret.Value}}cret :={{end}}x{{$outer.Name}}{{.Name}}(x.GoPointer() {{convcd .Args.API.Call}})
+      {{.Ret.Fmt $NotGObject}}
+ }
+ {{end}}
+ 
++{{range .CallbackAccessors -}}
++{{.Doc}}
++func (x *{{$outer.Name}}) SetCallback{{.Name}}(cb {{.CallbackType}}) {
++     if cb == nil {
++          x._{{.Name}} = 0
++     } else {
++          x._{{.Name}} = purego.NewCallback(func({{conv .Args.Pure.Full}}) {{.Ret.Raw}} {
++               {{if .Ret.Value}}{{if .Ret.Class}}ret := cb({{convcb .Args.Pure.Call}})
++               if ret == nil {
++                    return 0
++               }
++               return ret.GoPointer(){{else}}return cb({{convcb .Args.Pure.Call}}){{end}}{{else}}cb({{convcb .Args.Pure.Call}}){{end}}
++          })
++     }
++}
++
++{{.Doc}}
++func (x *{{$outer.Name}}) GetCallback{{.Name}}() {{.CallbackType}} {
++     if x._{{.Name}} == 0 {
++          return nil
++     }
++     var rawCallback func({{conv .Args.Pure.Full}}) {{.Ret.Raw}}
++     purego.RegisterFunc(&rawCallback, x._{{.Name}})
++     return func({{conv .Args.API.Full}}) {{.Ret.Value}} {
++          {{if .Ret.Value}}{{if .Ret.Class}}rawRet := rawCallback({{convcbne .Args.API.Call}})
++          if rawRet == 0 {
++               return nil
++          }
++          ret := {{.Ret.Instance}}
++          ret.Ptr = rawRet
++          return ret{{else}}return rawCallback({{convcbne .Args.API.Call}}){{end}}{{else}}rawCallback({{convcbne .Args.API.Call}}){{end}}
++     }
++}
++{{end}}
++
+ {{end}}
+ 
+ {{range .Interfaces -}}
+@@ -91,7 +126,7 @@ type {{.Name}} interface {
+      GoPointer() uintptr
+      SetGoPointer(uintptr)
+      {{range .Methods -}}
+-     {{.Name}}({{conv .Args.API.Full}}) {{.Ret.Value}}
++     {{.Name}}({{conv .Args.API.Full}}) {{.Ret.Return}}
+      {{end}}
+ }
+ 
+@@ -122,7 +157,7 @@ {{range .Methods -}}
+ {{.Doc}}
+ func (x *{{$outer.Name}}Base) {{.Name}}({{conv .Args.API.Full}}) {{.Ret.Return}} {
+      {{.Ret.Preamble $NotGLib}}
+-     {{if .Ret.Value}}cret := {{end}}{{.Namespace}}X{{.FullName}}(x.GoPointer() {{convc .Args.API.Call}})
++     {{if .Ret.Value}}cret := {{end}}{{.Namespace}}X{{.FullName}}(x.GoPointer() {{convcd .Args.API.Call}})
+      {{.Ret.Fmt $NotGObject}}
+ }
+ {{end}}
+@@ -176,7 +211,7 @@
+ {{.Doc}}
+ func {{.Name}}({{conv .Args.API.Full}}) {{.Ret.Return}} {
+      {{.Ret.Preamble $NotGLib}}
+-     {{if .Ret.Value}}cret := {{end}}x{{.Name}}({{conv .Args.API.Call}})
++     {{if .Ret.Value}}cret := {{end}}x{{.Name}}({{convd .Args.API.Call}})
+      {{.Ret.Fmt $NotGObject}}
+ }
+ {{end}}
+@@ -211,7 +246,7 @@
+ {{.Doc}}
+ func {{.Name}}({{conv .Args.API.Full}}) {{.Ret.Return}} {
+      {{.Ret.Preamble $NotGLib}}
+-     {{if .Ret.Value}}cret :={{end}}x{{.Name}}({{conv .Args.API.Call}})
++     {{if .Ret.Value}}cret :={{end}}x{{.Name}}({{convd .Args.API.Call}})
+      {{.Ret.Fmt $NotGObject}}
+ }
+ {{end}}
+@@ -223,7 +258,7 @@
+ {{.Doc}}
+ func (x *{{$outer.Name}}) {{.Name}}({{conv .Args.API.Full}}) {{.Ret.Return}} {
+      {{.Ret.Preamble $NotGLib}}
+-     {{if .Ret.Value}}cret :={{end}}x{{$outer.Name}}{{.Name}}(x.GoPointer() {{convc .Args.API.Call}})
++     {{if .Ret.Value}}cret :={{end}}x{{$outer.Name}}{{.Name}}(x.GoPointer() {{convcd .Args.API.Call}})
+      {{.Ret.Fmt $NotGObject}}
+ }
+ {{end}}
+@@ -272,7 +307,7 @@ {{range .Methods -}}
+ {{.Doc}}
+ func (x *{{$outer.Name}}) {{.Name}}({{conv .Args.API.Full}}) {{.Ret.Return}} {
+      {{.Ret.Preamble $NotGLib}}
+-     {{if .Ret.Value}}cret := {{end}} {{.Namespace}}X{{.FullName}}(x.GoPointer() {{convc .Args.API.Call}})
++     {{if .Ret.Value}}cret := {{end}} {{.Namespace}}X{{.FullName}}(x.GoPointer() {{convcd .Args.API.Call}})
+      {{.Ret.Fmt $NotGObject}}
+ }
+ {{end}}
+@@ -284,7 +319,7 @@
+ {{.Doc}}
+ func {{.Name}}({{conv .Args.API.Full}}) {{.Ret.Return}} {
+      {{.Ret.Preamble $NotGLib}}
+-     {{if .Ret.Value}}cret := {{end}}x{{.Name}}({{conv .Args.API.Call}})
++     {{if .Ret.Value}}cret := {{end}}x{{.Name}}({{convd .Args.API.Call}})
+      {{.Ret.Fmt $NotGObject}}
+ }
+ {{end}}
+
