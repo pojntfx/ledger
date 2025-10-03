@@ -1,0 +1,100 @@
+From 1c6afe72cfdca9a19a420cf66a0e611f4046db00 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Thu, 02 Oct 2025 23:43:02 -0700
+Subject: [PATCH] refactor: Convert to new generated callback syntax
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/go.work b/go.work
+index 779129567e195e37e26ffa762904036888aac01c..abfc8cfecf3520311936537e6022b3c3c1ca5c4e 100644
+--- a/go.work
++++ b/go.work
+@@ -2,7 +2,7 @@ go 1.24.0
+ 
+ use (
+ 	.
+-	// ./senbara-gtk // Disabled for now until we can remove the go replace directives for purego
++	./senbara-gtk 
+ 	// ./senbara-gtk-go // Disabled for now until we can remove the go replace directives for purego
+ 	./senbara-cli
+ 	./senbara-common
+diff --git a/senbara-gtk/src/senbara-gtk.go b/senbara-gtk/src/senbara-gtk.go
+index 19f2d7ae99f39d4a64120a5ef3861c5812dcd726..2bdac6eef0cdc4c6adad1007ae17f93399cb0ff8 100644
+--- a/senbara-gtk/src/senbara-gtk.go
++++ b/senbara-gtk/src/senbara-gtk.go
+@@ -7,7 +7,6 @@ 	"unsafe"
+ 
+ 	_ "embed"
+ 
+-	"github.com/jwijenbergh/purego"
+ 	"github.com/jwijenbergh/puregotk/v4/adw"
+ 	"github.com/jwijenbergh/puregotk/v4/gio"
+ 	"github.com/jwijenbergh/puregotk/v4/glib"
+@@ -98,16 +97,12 @@ 		)
+ 
+ 		objClass := (*gobject.ObjectClass)(unsafe.Pointer(tc))
+ 
+-		objClass.Constructed = purego.NewCallback(func(rawObj uintptr) {
++		objClass.SetCallbackConstructed(func(o *gobject.Object) {
+ 			parentObjClass := (*gobject.ObjectClass)(unsafe.Pointer(gobject.TypeClassPeek(adw.ApplicationWindowGLibType())))
+ 
+-			var parentConstructed func(obj uintptr)
+-			purego.RegisterFunc(&parentConstructed, parentObjClass.Constructed)
+-			parentConstructed(rawObj)
++			parentObjClass.GetCallbackConstructed()(o)
+ 
+-			obj := gobject.ObjectNewFromInternalPtr(rawObj)
+-
+-			parent := (*adw.ApplicationWindow)(unsafe.Pointer(obj))
++			parent := (*adw.ApplicationWindow)(unsafe.Pointer(o))
+ 			parent.InitTemplate()
+ 
+ 			rawButtonTest := parent.Widget.GetTemplateChild(
+@@ -134,11 +129,11 @@
+ 			var cleanupCallback glib.DestroyNotify = func(data uintptr) {
+ 				pinner.Unpin()
+ 			}
+-			obj.SetDataFull(dataKeyGoInstance, uintptr(unsafe.Pointer(w)), &cleanupCallback)
++			o.SetDataFull(dataKeyGoInstance, uintptr(unsafe.Pointer(w)), &cleanupCallback)
+ 
+ 			cb := func(gtk.Button) {
+ 				gobject.SignalEmit(
+-					obj,
++					o,
+ 					gobject.SignalLookup("button-test-clicked", gTypeSenbaraGtkMainApplicationWindow),
+ 					0,
+ 				)
+@@ -147,23 +142,24 @@
+ 			buttonTest.ConnectClicked(&cb)
+ 		})
+ 
+-		objClass.SetProperty = purego.NewCallback(func(obj uintptr, propId uint, value uintptr, pspec uintptr) {
+-			switch propId {
++		objClass.SetCallbackSetProperty(func(o *gobject.Object, u uint, v *gobject.Value, ps *gobject.ParamSpec) {
++			switch u {
+ 			case propertyIdTestButtonSensitive:
+ 				var (
+-					v = (*gobject.Value)(unsafe.Pointer(value))
+-					w = (*senbaraGtkMainApplicationWindow)(unsafe.Pointer(gobject.ObjectNewFromInternalPtr(obj).GetData(dataKeyGoInstance)))
++					v = (*gobject.Value)(unsafe.Pointer(v))
++					w = (*senbaraGtkMainApplicationWindow)(unsafe.Pointer(o.GetData(dataKeyGoInstance)))
+ 				)
+ 
+ 				w.buttonTest.SetSensitive(v.GetBoolean())
+ 			}
+ 		})
+-		objClass.GetProperty = purego.NewCallback(func(obj uintptr, propId uint, value uintptr, pspec uintptr) {
+-			switch propId {
++
++		objClass.SetCallbackGetProperty(func(o *gobject.Object, u uint, v *gobject.Value, ps *gobject.ParamSpec) {
++			switch u {
+ 			case propertyIdTestButtonSensitive:
+ 				var (
+-					v = (*gobject.Value)(unsafe.Pointer(value))
+-					w = (*senbaraGtkMainApplicationWindow)(unsafe.Pointer(gobject.ObjectNewFromInternalPtr(obj).GetData(dataKeyGoInstance)))
++					v = (*gobject.Value)(unsafe.Pointer(v))
++					w = (*senbaraGtkMainApplicationWindow)(unsafe.Pointer(o.GetData(dataKeyGoInstance)))
+ 				)
+ 
+ 				v.SetBoolean(w.buttonTest.IsSensitive())
+
