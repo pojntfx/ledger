@@ -1,0 +1,33 @@
+From e155c02349446f7145b35fb5d30ffb167f712a4d Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Wed, 08 Oct 2025 21:29:01 -0700
+Subject: [PATCH] GIR: Embed `parent_class` as value, not uintptr
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/internal/gir/pass/pass.go b/internal/gir/pass/pass.go
+index 75feadb1be93a6b1b89c19c2c4326e15d85792ab..d90bbe3e0a56011e7e7dbbb40459b4f5c63bd5d2 100644
+--- a/internal/gir/pass/pass.go
++++ b/internal/gir/pass/pass.go
+@@ -175,6 +175,20 @@ 				// HACK: in structs the strings should be uintptr as we convert it ourselves
+ 				if _type == "string" {
+ 					_type = "uintptr"
+ 				}
++
++				// HACK: Special handling for parent_class field - it should be embedded as a full struct
++				// to match C's memory layout, not converted to uintptr
++				// See https://docs.gtk.org/gobject/tutorial.html
++				if f.Name == "parent_class" && f.AnyType.Type != nil {
++					// Check if this is a Record type with no pointers (embedded struct)
++					typeName := util.NormalizeNamespace(ns.Name, f.AnyType.Type.Name, true)
++					kind := p.Types.Kind(ns.Name, typeName)
++					if kind == types.RecordsType && !strings.Contains(f.AnyType.Type.CType, "*") {
++						// Use the full struct type for embedding
++						_type = typeName
++					}
++				}
++
+ 				fieldName = util.SnakeToCamel(f.Name)
+ 			}
+ 
+
