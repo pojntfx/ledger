@@ -1,0 +1,389 @@
+From 9dc942fc17b0428861fb3e0522343d501b505437 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Thu, 09 Oct 2025 20:52:17 -0700
+Subject: [PATCH] GIR: Implement support for automatic property getter/setter generation for hand-picked set of types except for slices
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/internal/gir/pass/pass.go b/internal/gir/pass/pass.go
+index 9b76f25f94fe3decd35c8c787cc4476842a01ace..2de7a68e8d4b29c1bf079d42b0beea2cc7508ce7 100644
+--- a/internal/gir/pass/pass.go
++++ b/internal/gir/pass/pass.go
+@@ -339,6 +339,14 @@ 				Args:  s.Parameters.Template(ns.Name, "", p.Types, false),
+ 				Ret:   s.ReturnValue.Template(ns.Name, "", p.Types, false),
+ 			}
+ 		}
++		properties := make([]types.PropertyTemplate, 0, len(cls.Properties))
++		for _, prop := range cls.Properties {
++			// Skip properties that are not introspectable
++			if !prop.IsIntrospectable() {
++				continue
++			}
++			properties = append(properties, prop.Template(ns.Name, p.Types))
++		}
+ 		receivers := make([]types.FuncTemplate, len(cls.Methods))
+ 		for i, f := range cls.Methods {
+ 			name := util.SnakeToCamel(f.Name)
+@@ -373,6 +381,7 @@ 			Constructors: constructors,
+ 			Receivers:    receivers,
+ 			Interfaces:   interfaces,
+ 			Functions:    functions,
++			Properties:   properties,
+ 			Signals:      signals,
+ 			TypeGetter:   cls.GLibGetType,
+ 		})
+diff --git a/internal/gir/types/interface.go b/internal/gir/types/interface.go
+index 953ea5fa799024ef7ef3e7d29762629fe6b309f8..a701af3994c5a8c3e2795f9d2316f802c84fa1f8 100644
+--- a/internal/gir/types/interface.go
++++ b/internal/gir/types/interface.go
+@@ -33,11 +33,23 @@ 				Ret:   m.ReturnValue.Template(currns, ins, kinds, m.Throws),
+ 			},
+ 		})
+ 	}
++
++	// Process properties
++	properties := make([]PropertyTemplate, 0, len(inter.Properties))
++	for _, prop := range inter.Properties {
++		// Skip properties that are not introspectable
++		if !prop.IsIntrospectable() {
++			continue
++		}
++		properties = append(properties, prop.Template(currns, kinds))
++	}
++
+ 	name := util.SnakeToCamel(inter.Name)
+ 	return InterfaceTemplate{
+ 		Name:       name,
+ 		Doc:        inter.Doc.StringSafe(),
+ 		Methods:    methods,
++		Properties: properties,
+ 		TypeGetter: inter.GLibGetType,
+ 	}
+ }
+diff --git a/internal/gir/types/template.go b/internal/gir/types/template.go
+index b0f4cd0b4b3193076c853e101edb0f08f40fdb7a..8400728f70089dee2aba67bcb26a82a2cfcce4be 100644
+--- a/internal/gir/types/template.go
++++ b/internal/gir/types/template.go
+@@ -391,6 +391,29 @@ 	Args  funcArgsTemplate
+ 	Ret   funcRetTemplate
+ }
+ 
++type PropertyTemplate struct {
++	// Name is the Go name of the property (e.g., "TestButtonSensitive")
++	Name string
++	// CName is the original GObject property name (e.g., "test-button-sensitive")
++	CName string
++	// Doc is the documentation for the property
++	Doc string
++	// Type is the Go type for this property
++	GoType string
++	// BaseGoType is the Go type without pointer prefix (for composite literals)
++	BaseGoType string
++	// GLibType is the GType constant for this property (e.g., "TypeBooleanVal")
++	GLibType string
++	// IsInterface indicates if the property type is an interface
++	IsInterface bool
++	// IsRecord indicates if the property type is a record/struct
++	IsRecord bool
++	// Writable indicates if this property can be set
++	Writable bool
++	// Readable indicates if this property can be get
++	Readable bool
++}
++
+ type ClassTemplate struct {
+ 	// Doc is the documentation for the class
+ 	Doc string
+@@ -406,6 +429,8 @@ 	// Interfaces are receiver methods that are implemented because it needs to satisfy a certain interface
+ 	Interfaces []InterfaceTemplate
+ 	// Functions are the Go function declarations
+ 	Functions []FuncTemplate
++	// Properties are the GObject properties with SetX/GetX accessors
++	Properties []PropertyTemplate
+ 	// Signals are helpers for ConnectX receivers
+ 	Signals []SignalsTemplate
+ 	// TypeGetter is the function to get the GLib type
+@@ -417,6 +442,8 @@ 	Doc  string
+ 	Name string
+ 	// Methods is the methods that this interface defines
+ 	Methods []InterfaceFuncTemplate
++	// Properties are the GObject properties with SetX/GetX accessors
++	Properties []PropertyTemplate
+ 	// TypeGetter is the function to get the GLib type
+ 	TypeGetter string
+ }
+diff --git a/internal/gir/types/types.go b/internal/gir/types/types.go
+index b211d2b84345f0c1c43120f3aa1fc28a1d8e45b1..b2bde346b8b91320e2746559db0b3961957a3e98 100644
+--- a/internal/gir/types/types.go
++++ b/internal/gir/types/types.go
+@@ -372,6 +372,7 @@ 	Constructors   []Constructor   `xml:"http://www.gtk.org/introspection/core/1.0 constructor"`
+ 	Methods        []Method        `xml:"http://www.gtk.org/introspection/core/1.0 method"`
+ 	VirtualMethods []VirtualMethod `xml:"http://www.gtk.org/introspection/core/1.0 virtual-method"`
+ 	Fields         []Field         `xml:"http://www.gtk.org/introspection/core/1.0 field"`
++	Properties     []Property      `xml:"http://www.gtk.org/introspection/core/1.0 property"`
+ 	Signals        []Signal        `xml:"http://www.gtk.org/introspection/glib/1.0 signal"`
+ }
+ 
+@@ -561,6 +562,7 @@ 	Functions      []Function      `xml:"http://www.gtk.org/introspection/core/1.0 function"`
+ 	Methods        []Method        `xml:"http://www.gtk.org/introspection/core/1.0 method"`
+ 	VirtualMethods []VirtualMethod `xml:"http://www.gtk.org/introspection/core/1.0 virtual-method"`
+ 	Prerequisites  []Prerequisite  `xml:"http://www.gtk.org/introspection/core/1.0 prerequisite"`
++	Properties     []Property      `xml:"http://www.gtk.org/introspection/core/1.0 property"`
+ 	Signals        []Signal        `xml:"http://www.gtk.org/introspection/glib/1.0 signal"`
+ 
+ 	InfoAttrs
+@@ -697,7 +699,140 @@ 	XMLName xml.Name `xml:"http://www.gtk.org/introspection/core/1.0 prerequisite"`
+ 	Name    string   `xml:"name,attr"`
+ }
+ 
+-type Property struct{}
++type Property struct {
++	XMLName xml.Name `xml:"http://www.gtk.org/introspection/core/1.0 property"`
++	Name    string   `xml:"name,attr"`
++
++	Writable      *bool  `xml:"writable,attr"`      // default false for properties
++	Readable      *bool  `xml:"readable,attr"`      // default true
++	Construct     bool   `xml:"construct,attr"`     // can be set at construction
++	ConstructOnly bool   `xml:"construct-only,attr"` // can only be set at construction
++	Setter        string `xml:"setter,attr"`        // setter method name if any
++	Getter        string `xml:"getter,attr"`        // getter method name if any
++
++	TransferOwnership
++	AnyType
++	InfoAttrs
++	InfoElements
++}
++
++// IsWritable returns true if the property is writable.
++func (p Property) IsWritable() bool {
++	return p.Writable != nil && *p.Writable
++}
++
++// IsReadable returns true if the property is readable.
++func (p Property) IsReadable() bool {
++	return p.Readable == nil || *p.Readable
++}
++
++// Template converts a Property to a PropertyTemplate for code generation
++func (p *Property) Template(ns string, kinds KindMap) PropertyTemplate {
++	// Get the Go type for this property
++	goType := p.AnyType.Translate(ns, kinds)
++	kind := kinds.Kind(ns, goType)
++
++	// Normalize the type name with namespace
++	goType = util.NormalizeNamespace(ns, goType, true)
++
++	// Handle classes and records - they need pointer types
++	// Interfaces don't need pointer prefix since they're already reference types
++	if kind == ClassesType || kind == RecordsType {
++		if !strings.HasPrefix(goType, "*") {
++			goType = "*" + goType
++		}
++	}
++
++	// Determine the property type name from the GIR
++	propertyTypeName := ""
++	if p.Type != nil {
++		propertyTypeName = p.Type.Name
++	}
++
++	// Map Go type to GLib GType constant, using kind information and type name
++	glibType := goTypeToGLibType(goType, kind, propertyTypeName, kinds, ns)
++
++	// Convert property name from kebab-case to CamelCase
++	propName := util.DashToCamel(p.Name)
++
++	// Create BaseGoType by stripping the leading * if present
++	baseGoType := goType
++	if strings.HasPrefix(baseGoType, "*") {
++		baseGoType = strings.TrimPrefix(baseGoType, "*")
++	}
++
++	return PropertyTemplate{
++		Name:        propName,
++		CName:       p.Name,
++		Doc:         p.Doc.StringSafe(),
++		GoType:      goType,
++		BaseGoType:  baseGoType,
++		GLibType:    glibType,
++		IsInterface: kind == InterfacesType,
++		IsRecord:    kind == RecordsType,
++		Writable:    p.IsWritable(),
++		Readable:    p.IsReadable(),
++	}
++}
++
++// goTypeToGLibType maps a Go type to the corresponding GLib GType constant name
++func goTypeToGLibType(goType string, kind Kind, typeName string, kinds KindMap, ns string) string {
++	// Remove pointer prefix for mapping
++	baseType := strings.TrimPrefix(goType, "*")
++
++	// Check for GType specifically
++	if baseType == "types.GType" {
++		return "TypeGtypeVal"
++	}
++
++	// Check for slice types - these should use TypePointerVal, not TypeObjectVal
++	if strings.HasPrefix(baseType, "[]") || kind == SliceType {
++		return "TypePointerVal"
++	}
++
++	// If we have the original type name, check if it's an enum or bitfield in the namespace
++	if typeName != "" {
++		pair := kinds.pair(ns, typeName)
++		if pair.K == AliasType {
++			// Check if this alias points to an Enum or Bitfield
++			switch pair.Value.(type) {
++			case Enum:
++				return "TypeEnumVal"
++			case Bitfield:
++				return "TypeFlagsVal"
++			}
++		}
++	}
++
++	// Map primitive types
++	switch baseType {
++	case "bool":
++		return "TypeBooleanVal"
++	case "int":
++		return "TypeIntVal"
++	case "uint":
++		return "TypeUintVal"
++	case "int32":
++		return "TypeIntVal"
++	case "uint32":
++		return "TypeUintVal"
++	case "int64":
++		return "TypeInt64Val"
++	case "uint64":
++		return "TypeUint64Val"
++	case "float32":
++		return "TypeFloatVal"
++	case "float64":
++		return "TypeDoubleVal"
++	case "string":
++		return "TypeStringVal"
++	case "byte":
++		return "TypeUcharVal"
++	default:
++		// For classes and other complex types, use TypeObjectVal
++		return "TypeObjectVal"
++	}
++}
+ 
+ type Record struct {
+ 	XMLName              xml.Name `xml:"http://www.gtk.org/introspection/core/1.0 record"`
+diff --git a/templates/go b/templates/go
+index 68d4676eb94747fa08038f12ce7f6d772949697b..3987fb289b8c753176513dcee6baa7e988448ff6 100644
+--- a/templates/go
++++ b/templates/go
+@@ -9,9 +9,22 @@   {{if .Signals}}
+     {{ $HasSignals = true }}
+   {{end}}
+ {{end}}
++{{ $HasInterfaceProperties := false }}
++{{range .Interfaces -}}
++  {{if .Properties}}
++    {{ $HasInterfaceProperties = true }}
++  {{end}}
++{{end}}
++{{ $HasClassProperties := false }}
++{{range .Classes -}}
++  {{if .Properties}}
++    {{ $HasClassProperties = true }}
++  {{end}}
++{{end}}
++{{ $NeedsGObject := and $NotGObject (or $HasInterfaceProperties $HasClassProperties) }}
+ {{ $NeedsUnsafe := or .Records $HasSignals }}
+ {{ $NeedsPurego := or .NeedsInit $HasSignals }}
+-{{ $AnyImports := or .NeedsInit .Records $HasSignals }}
++{{ $AnyImports := or .NeedsInit .Records $HasSignals $NeedsGObject }}
+ 
+ {{if $AnyImports}}
+ import (
+@@ -26,6 +39,9 @@ 	"github.com/jwijenbergh/purego"
+ {{- end}}
+ {{- if .NeedsInit}}
+ 	"github.com/jwijenbergh/puregotk/pkg/core"
++{{- end}}
++{{- if $NeedsGObject}}
++	"github.com/jwijenbergh/puregotk/v4/gobject"
+ {{- end}}
+ )
+ {{end}}
+@@ -164,6 +180,29 @@      {{.Ret.Fmt $NotGObject}}
+ }
+ {{end}}
+ 
++{{range .Properties -}}
++
++{{.Doc}}
++{{if .Writable}}
++func (x *{{$outer.Name}}Base) SetProperty{{.Name}}(value {{.GoType}}) {
++     {{if eq .GLibType "TypePointerVal"}}// Slice/array properties not supported{{else}}var v {{if $NotGObject}}gobject.{{end}}Value
++     v.Init({{if $NotGObject}}gobject.{{end}}{{.GLibType}})
++     {{if eq .GoType "bool"}}v.SetBoolean(value){{else if eq .GoType "int"}}v.SetInt(value){{else if eq .GoType "int64"}}v.SetInt64(value){{else if eq .GoType "uint"}}v.SetUint(value){{else if eq .GoType "uint64"}}v.SetUint64(value){{else if eq .GoType "float32"}}v.SetFloat(value){{else if eq .GoType "float64"}}v.SetDouble(value){{else if eq .GoType "string"}}v.SetString(value){{else if eq .GoType "uintptr"}}v.SetPointer(value){{else if eq .GLibType "TypeEnumVal"}}v.SetEnum(int(value)){{else if eq .GLibType "TypeFlagsVal"}}v.SetFlags(uint(value)){{else if eq .GLibType "TypeGtypeVal"}}v.SetGtype(value){{else if eq .GLibType "TypeObjectVal"}}v.SetObject(&{{if $NotGObject}}gobject.{{end}}Object{Ptr: value.GoPointer()}){{else}}v.SetPointer(uintptr(value)){{end}}
++     obj := {{if $NotGObject}}gobject.{{end}}Object{Ptr: x.GoPointer()}
++     obj.SetProperty("{{.CName}}", &v){{end}}
++}
++{{end}}
++
++{{if .Readable}}
++func (x *{{$outer.Name}}Base) GetProperty{{.Name}}() {{.GoType}} {
++     var v {{if $NotGObject}}gobject.{{end}}Value
++     obj := {{if $NotGObject}}gobject.{{end}}Object{Ptr: x.GoPointer()}
++     obj.GetProperty("{{.CName}}", &v)
++     {{if eq .GoType "bool"}}return v.GetBoolean(){{else if eq .GoType "int"}}return v.GetInt(){{else if eq .GoType "int64"}}return v.GetInt64(){{else if eq .GoType "uint"}}return v.GetUint(){{else if eq .GoType "uint64"}}return v.GetUint64(){{else if eq .GoType "float32"}}return v.GetFloat(){{else if eq .GoType "float64"}}return v.GetDouble(){{else if eq .GoType "string"}}return v.GetString(){{else if eq .GoType "uintptr"}}return v.GetPointer(){{else if eq .GLibType "TypeEnumVal"}}return {{.GoType}}(v.GetEnum()){{else if eq .GLibType "TypeFlagsVal"}}return {{.GoType}}(v.GetFlags()){{else if eq .GLibType "TypeGtypeVal"}}return v.GetGtype(){{else if eq .GLibType "TypeObjectVal"}}ptr := v.GetObject().GoPointer(); if ptr == 0 { return nil }; {{if .IsInterface}}result := &{{.BaseGoType}}Base{}; result.Ptr = ptr; return result{{else if .IsRecord}}return (*{{.BaseGoType}})(unsafe.Pointer(ptr)){{else}}result := &{{.BaseGoType}}{}; result.Ptr = ptr; return result{{end}}{{else if eq .GLibType "TypePointerVal"}}return nil{{else}}return {{.GoType}}(v.GetPointer()){{end}}
++}
++{{end}}
++{{end}}
++
+ {{range .Methods -}}
+ var {{.Namespace}}X{{.FullName}} func(uintptr {{convc .Args.Pure.Types}}) {{.Ret.Raw}}
+ {{end}}
+@@ -275,6 +314,27 @@
+ func (c *{{.Name}}) SetGoPointer(ptr uintptr) {
+      c.Ptr = ptr
+ }
++
++{{range .Properties -}}
++
++{{.Doc}}
++{{if .Writable}}
++func (x *{{$outer.Name}}) SetProperty{{.Name}}(value {{.GoType}}) {
++     {{if eq .GLibType "TypePointerVal"}}// Slice/array properties not supported{{else}}var v {{if $NotGObject}}gobject.{{end}}Value
++     v.Init({{if $NotGObject}}gobject.{{end}}{{.GLibType}})
++     {{if eq .GoType "bool"}}v.SetBoolean(value){{else if eq .GoType "int"}}v.SetInt(value){{else if eq .GoType "int64"}}v.SetInt64(value){{else if eq .GoType "uint"}}v.SetUint(value){{else if eq .GoType "uint64"}}v.SetUint64(value){{else if eq .GoType "float32"}}v.SetFloat(value){{else if eq .GoType "float64"}}v.SetDouble(value){{else if eq .GoType "string"}}v.SetString(value){{else if eq .GoType "uintptr"}}v.SetPointer(value){{else if eq .GLibType "TypeEnumVal"}}v.SetEnum(int(value)){{else if eq .GLibType "TypeFlagsVal"}}v.SetFlags(uint(value)){{else if eq .GLibType "TypeGtypeVal"}}v.SetGtype(value){{else if eq .GLibType "TypeObjectVal"}}v.SetObject(&{{if $NotGObject}}gobject.{{end}}Object{Ptr: value.GoPointer()}){{else}}v.SetPointer(uintptr(value)){{end}}
++     x.SetProperty("{{.CName}}", &v){{end}}
++}
++{{end}}
++
++{{if .Readable}}
++func (x *{{$outer.Name}}) GetProperty{{.Name}}() {{.GoType}} {
++     var v {{if $NotGObject}}gobject.{{end}}Value
++     x.GetProperty("{{.CName}}", &v)
++     {{if eq .GoType "bool"}}return v.GetBoolean(){{else if eq .GoType "int"}}return v.GetInt(){{else if eq .GoType "int64"}}return v.GetInt64(){{else if eq .GoType "uint"}}return v.GetUint(){{else if eq .GoType "uint64"}}return v.GetUint64(){{else if eq .GoType "float32"}}return v.GetFloat(){{else if eq .GoType "float64"}}return v.GetDouble(){{else if eq .GoType "string"}}return v.GetString(){{else if eq .GoType "uintptr"}}return v.GetPointer(){{else if eq .GLibType "TypeEnumVal"}}return {{.GoType}}(v.GetEnum()){{else if eq .GLibType "TypeFlagsVal"}}return {{.GoType}}(v.GetFlags()){{else if eq .GLibType "TypeGtypeVal"}}return v.GetGtype(){{else if eq .GLibType "TypeObjectVal"}}ptr := v.GetObject().GoPointer(); if ptr == 0 { return nil }; {{if .IsInterface}}result := &{{.BaseGoType}}Base{}; result.Ptr = ptr; return result{{else if .IsRecord}}return (*{{.BaseGoType}})(unsafe.Pointer(ptr)){{else}}result := &{{.BaseGoType}}{}; result.Ptr = ptr; return result{{end}}{{else if eq .GLibType "TypePointerVal"}}return nil{{else}}return {{.GoType}}(v.GetPointer()){{end}}
++}
++{{end}}
++{{end}}
+ 
+ {{range .Signals -}}
+ 
+diff --git a/templates/gobject b/templates/gobject
+index c86e65c489c6237c1b1057e1dfcdc6e07c3f1ec2..1301175f1a11ee4257a182ba344b3575088fb93c 100644
+--- a/templates/gobject
++++ b/templates/gobject
+@@ -72,3 +72,11 @@ 	TypeReservedBseFirstVal       = 32 << 2
+ 	TypeReservedBseLastVal        = 48 << 2
+ 	TypeReservedUserFirstVal      = 49 << 2
+ )
++
++// TypeGtypeVal is initialized at runtime via g_gtype_get_type()
++var TypeGtypeVal Type
++
++func init() {
++	// Initialize TypeGtypeVal after purego has registered the function pointer
++	TypeGtypeVal = GtypeGetType()
++}
+
