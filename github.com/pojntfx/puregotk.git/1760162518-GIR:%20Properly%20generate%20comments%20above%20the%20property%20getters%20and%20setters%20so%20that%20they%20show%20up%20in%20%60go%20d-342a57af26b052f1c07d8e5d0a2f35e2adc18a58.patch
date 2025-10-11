@@ -1,0 +1,114 @@
+From 342a57af26b052f1c07d8e5d0a2f35e2adc18a58 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Fri, 10 Oct 2025 23:01:58 -0700
+Subject: [PATCH] GIR: Properly generate comments above the property getters and setters so that they show up in `go doc`
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/internal/gir/pass/pass.go b/internal/gir/pass/pass.go
+index 2de7a68e8d4b29c1bf079d42b0beea2cc7508ce7..c95a8de4ed539ce1c074561f1b6d5ded0dc4a6bc 100644
+--- a/internal/gir/pass/pass.go
++++ b/internal/gir/pass/pass.go
+@@ -169,6 +169,7 @@ 				}
+ 
+ 				callbackAccessors = append(callbackAccessors, types.CallbackAccessor{
+ 					Name:         callbackName,
++					CName:        f.Name,
+ 					Doc:          doc,
+ 					CallbackType: "func(" + strings.Join(apiTypes, ", ") + ") " + ret.Value,
+ 					Args:         args,
+diff --git a/internal/gir/types/template.go b/internal/gir/types/template.go
+index 8400728f70089dee2aba67bcb26a82a2cfcce4be..b91bfcd6b1b2faad73b9b934e0312e08f9ea8f70 100644
+--- a/internal/gir/types/template.go
++++ b/internal/gir/types/template.go
+@@ -191,6 +191,9 @@ type CallbackAccessor struct {
+ 	// Name is the Go name of the callback field (without x prefix)
+ 	Name string
+ 
++	// CName is the original C name of the callback field
++	CName string
++
+ 	// Doc is the documentation for the callback
+ 	Doc string
+ 
+diff --git a/templates/go b/templates/go
+index 3987fb289b8c753176513dcee6baa7e988448ff6..bdcd40d94f46abde2513ace75ed65fbc89877f08 100644
+--- a/templates/go
++++ b/templates/go
+@@ -100,8 +100,8 @@ }
+ {{end}}
+ 
+ {{range .CallbackAccessors -}}
+-{{if .Doc}}// Override{{.Name}} sets the callback function.
+-{{.Doc}}{{else}}// Override{{.Name}} sets the callback function.{{end}}
++{{if .Doc}}// Override{{.Name}} sets the "{{.CName}}" callback function.
++{{.Doc}}{{else}}// Override{{.Name}} sets the "{{.CName}}" callback function.{{end}}
+ func (x *{{$outer.Name}}) Override{{.Name}}(cb {{.CallbackType}}) {
+      if cb == nil {
+           x.x{{.Name}} = 0
+@@ -116,8 +116,8 @@           })
+      }
+ }
+ 
+-{{if .Doc}}// Get{{.Name}} gets the callback function.
+-{{.Doc}}{{else}}// Get{{.Name}} gets the callback function.{{end}}
++{{if .Doc}}// Get{{.Name}} gets the "{{.CName}}" callback function.
++{{.Doc}}{{else}}// Get{{.Name}} gets the "{{.CName}}" callback function.{{end}}
+ func (x *{{$outer.Name}}) Get{{.Name}}() {{.CallbackType}} {
+      if x.x{{.Name}} == 0 {
+           return nil
+@@ -181,10 +181,11 @@ }
+ {{end}}
+ 
+ {{range .Properties -}}
+-
++{{if .Writable}}
++{{if .Doc}}// SetProperty{{.Name}} sets the "{{.CName}}" property.
+ {{.Doc}}
+-{{if .Writable}}
+-func (x *{{$outer.Name}}Base) SetProperty{{.Name}}(value {{.GoType}}) {
++{{else}}// SetProperty{{.Name}} sets the "{{.CName}}" property.
++{{end}}func (x *{{$outer.Name}}Base) SetProperty{{.Name}}(value {{.GoType}}) {
+      {{if eq .GLibType "TypePointerVal"}}// Slice/array properties not supported{{else}}var v {{if $NotGObject}}gobject.{{end}}Value
+      v.Init({{if $NotGObject}}gobject.{{end}}{{.GLibType}})
+      {{if eq .GoType "bool"}}v.SetBoolean(value){{else if eq .GoType "int"}}v.SetInt(value){{else if eq .GoType "int64"}}v.SetInt64(value){{else if eq .GoType "uint"}}v.SetUint(value){{else if eq .GoType "uint64"}}v.SetUint64(value){{else if eq .GoType "float32"}}v.SetFloat(value){{else if eq .GoType "float64"}}v.SetDouble(value){{else if eq .GoType "string"}}v.SetString(value){{else if eq .GoType "uintptr"}}v.SetPointer(value){{else if eq .GLibType "TypeEnumVal"}}v.SetEnum(int(value)){{else if eq .GLibType "TypeFlagsVal"}}v.SetFlags(uint(value)){{else if eq .GLibType "TypeGtypeVal"}}v.SetGtype(value){{else if eq .GLibType "TypeObjectVal"}}v.SetObject(&{{if $NotGObject}}gobject.{{end}}Object{Ptr: value.GoPointer()}){{else}}v.SetPointer(uintptr(value)){{end}}
+@@ -194,7 +195,10 @@ }
+ {{end}}
+ 
+ {{if .Readable}}
+-func (x *{{$outer.Name}}Base) GetProperty{{.Name}}() {{.GoType}} {
++{{if .Doc}}// GetProperty{{.Name}} gets the "{{.CName}}" property.
++{{.Doc}}
++{{else}}// GetProperty{{.Name}} gets the "{{.CName}}" property.
++{{end}}func (x *{{$outer.Name}}Base) GetProperty{{.Name}}() {{.GoType}} {
+      var v {{if $NotGObject}}gobject.{{end}}Value
+      obj := {{if $NotGObject}}gobject.{{end}}Object{Ptr: x.GoPointer()}
+      obj.GetProperty("{{.CName}}", &v)
+@@ -316,10 +320,11 @@      c.Ptr = ptr
+ }
+ 
+ {{range .Properties -}}
+-
+-{{.Doc}}
+ {{if .Writable}}
+-func (x *{{$outer.Name}}) SetProperty{{.Name}}(value {{.GoType}}) {
++{{if .Doc}}// SetProperty{{.Name}} sets the "{{.CName}}" property.
++{{.Doc}}
++{{else}}// SetProperty{{.Name}} sets the "{{.CName}}" property.
++{{end}}func (x *{{$outer.Name}}) SetProperty{{.Name}}(value {{.GoType}}) {
+      {{if eq .GLibType "TypePointerVal"}}// Slice/array properties not supported{{else}}var v {{if $NotGObject}}gobject.{{end}}Value
+      v.Init({{if $NotGObject}}gobject.{{end}}{{.GLibType}})
+      {{if eq .GoType "bool"}}v.SetBoolean(value){{else if eq .GoType "int"}}v.SetInt(value){{else if eq .GoType "int64"}}v.SetInt64(value){{else if eq .GoType "uint"}}v.SetUint(value){{else if eq .GoType "uint64"}}v.SetUint64(value){{else if eq .GoType "float32"}}v.SetFloat(value){{else if eq .GoType "float64"}}v.SetDouble(value){{else if eq .GoType "string"}}v.SetString(value){{else if eq .GoType "uintptr"}}v.SetPointer(value){{else if eq .GLibType "TypeEnumVal"}}v.SetEnum(int(value)){{else if eq .GLibType "TypeFlagsVal"}}v.SetFlags(uint(value)){{else if eq .GLibType "TypeGtypeVal"}}v.SetGtype(value){{else if eq .GLibType "TypeObjectVal"}}v.SetObject(&{{if $NotGObject}}gobject.{{end}}Object{Ptr: value.GoPointer()}){{else}}v.SetPointer(uintptr(value)){{end}}
+@@ -328,7 +333,10 @@ }
+ {{end}}
+ 
+ {{if .Readable}}
+-func (x *{{$outer.Name}}) GetProperty{{.Name}}() {{.GoType}} {
++{{if .Doc}}// GetProperty{{.Name}} gets the "{{.CName}}" property.
++{{.Doc}}
++{{else}}// GetProperty{{.Name}} gets the "{{.CName}}" property.
++{{end}}func (x *{{$outer.Name}}) GetProperty{{.Name}}() {{.GoType}} {
+      var v {{if $NotGObject}}gobject.{{end}}Value
+      x.GetProperty("{{.CName}}", &v)
+      {{if eq .GoType "bool"}}return v.GetBoolean(){{else if eq .GoType "int"}}return v.GetInt(){{else if eq .GoType "int64"}}return v.GetInt64(){{else if eq .GoType "uint"}}return v.GetUint(){{else if eq .GoType "uint64"}}return v.GetUint64(){{else if eq .GoType "float32"}}return v.GetFloat(){{else if eq .GoType "float64"}}return v.GetDouble(){{else if eq .GoType "string"}}return v.GetString(){{else if eq .GoType "uintptr"}}return v.GetPointer(){{else if eq .GLibType "TypeEnumVal"}}return {{.GoType}}(v.GetEnum()){{else if eq .GLibType "TypeFlagsVal"}}return {{.GoType}}(v.GetFlags()){{else if eq .GLibType "TypeGtypeVal"}}return v.GetGtype(){{else if eq .GLibType "TypeObjectVal"}}ptr := v.GetObject().GoPointer(); if ptr == 0 { return nil }; {{if .IsInterface}}result := &{{.BaseGoType}}Base{}; result.Ptr = ptr; return result{{else if .IsRecord}}return (*{{.BaseGoType}})(unsafe.Pointer(ptr)){{else}}result := &{{.BaseGoType}}{}; result.Ptr = ptr; return result{{end}}{{else if eq .GLibType "TypePointerVal"}}return nil{{else}}return {{.GoType}}(v.GetPointer()){{end}}
+
