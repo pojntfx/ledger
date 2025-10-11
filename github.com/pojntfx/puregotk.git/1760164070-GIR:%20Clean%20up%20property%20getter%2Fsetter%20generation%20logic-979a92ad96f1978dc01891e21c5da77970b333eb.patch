@@ -1,0 +1,187 @@
+From 979a92ad96f1978dc01891e21c5da77970b333eb Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Fri, 10 Oct 2025 23:27:50 -0700
+Subject: [PATCH] GIR: Clean up property getter/setter generation logic
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/gen.go b/gen.go
+index 40bf95b64316d389cbb40d78b006ebedbc89d3b0..4b78bf6a3587d8890107b3b1e344f94f21afa9f7 100644
+--- a/gen.go
++++ b/gen.go
+@@ -32,12 +32,14 @@ 	p.First()
+ 
+ 	// Create the template
+ 	gotemp, err := template.New("go").Funcs(template.FuncMap{
+-		"conv":     util.ConvertArgs,
+-		"convc":    util.ConvertArgsComma,
+-		"convcb":   util.ConvertCallbackArgs,
+-		"convcd":   util.ConvertArgsCommaDeref,
+-		"convd":    util.ConvertArgsDeref,
+-		"convcbne": util.ConvertCallbackArgsNoErr,
++		"conv":      util.ConvertArgs,
++		"convc":     util.ConvertArgsComma,
++		"convcb":    util.ConvertCallbackArgs,
++		"convcd":    util.ConvertArgsCommaDeref,
++		"convd":     util.ConvertArgsDeref,
++		"convcbne":  util.ConvertCallbackArgsNoErr,
++		"valueset":  util.PropertyValueSet,
++		"valueget":  util.PropertyValueGet,
+ 	}).ParseFiles("templates/go")
+ 	if err != nil {
+ 		panic(err)
+diff --git a/internal/gir/util/util.go b/internal/gir/util/util.go
+index 4fa86cb2b68b4ff000427632fd176c081373224e..f71593c6e2258cb1bfe8bc734a47114ca5defdd6 100644
+--- a/internal/gir/util/util.go
++++ b/internal/gir/util/util.go
+@@ -213,3 +213,87 @@ 	}
+ 	// the default is just a concatenation if the constructor doesn't start with New
+ 	return outer + cname
+ }
++
++// PropertyValueSet generates the appropriate v.SetXXX(value) call based on the property's GoType and GLibType
++func PropertyValueSet(goType, glibType, valueName, objPrefix string) string {
++	switch goType {
++	case "bool":
++		return "v.SetBoolean(" + valueName + ")"
++	case "int":
++		return "v.SetInt(" + valueName + ")"
++	case "int64":
++		return "v.SetInt64(" + valueName + ")"
++	case "uint":
++		return "v.SetUint(" + valueName + ")"
++	case "uint64":
++		return "v.SetUint64(" + valueName + ")"
++	case "float32":
++		return "v.SetFloat(" + valueName + ")"
++	case "float64":
++		return "v.SetDouble(" + valueName + ")"
++	case "string":
++		return "v.SetString(" + valueName + ")"
++	case "uintptr":
++		return "v.SetPointer(" + valueName + ")"
++	}
++
++	switch glibType {
++	case "TypeEnumVal":
++		return "v.SetEnum(int(" + valueName + "))"
++	case "TypeFlagsVal":
++		return "v.SetFlags(uint(" + valueName + "))"
++	case "TypeGtypeVal":
++		return "v.SetGtype(" + valueName + ")"
++	case "TypeObjectVal":
++		return "v.SetObject(&" + objPrefix + "Object{Ptr: " + valueName + ".GoPointer()})"
++	default:
++		return "v.SetPointer(uintptr(" + valueName + "))"
++	}
++}
++
++// PropertyValueGet generates the appropriate v.GetXXX() expression based on the property's GoType and GLibType
++func PropertyValueGet(goType, glibType, baseGoType string, isInterface, isRecord bool) string {
++	switch goType {
++	case "bool":
++		return "return v.GetBoolean()"
++	case "int":
++		return "return v.GetInt()"
++	case "int64":
++		return "return v.GetInt64()"
++	case "uint":
++		return "return v.GetUint()"
++	case "uint64":
++		return "return v.GetUint64()"
++	case "float32":
++		return "return v.GetFloat()"
++	case "float64":
++		return "return v.GetDouble()"
++	case "string":
++		return "return v.GetString()"
++	case "uintptr":
++		return "return v.GetPointer()"
++	}
++
++	switch glibType {
++	case "TypeEnumVal":
++		return "return " + goType + "(v.GetEnum())"
++	case "TypeFlagsVal":
++		return "return " + goType + "(v.GetFlags())"
++	case "TypeGtypeVal":
++		return "return v.GetGtype()"
++	case "TypeObjectVal":
++		result := "ptr := v.GetObject().GoPointer(); if ptr == 0 { return nil }; "
++		if isInterface {
++			result += "result := &" + baseGoType + "Base{}; result.Ptr = ptr; return result"
++		} else if isRecord {
++			result += "return (*" + baseGoType + ")(unsafe.Pointer(ptr))"
++		} else {
++			result += "result := &" + baseGoType + "{}; result.Ptr = ptr; return result"
++		}
++		return result
++	case "TypePointerVal":
++		return "return nil"
++	default:
++		return "return " + goType + "(v.GetPointer())"
++	}
++}
+diff --git a/pkg/gir/util/util.go b/pkg/gir/util/util.go
+index 14ed3422c6ebec3a21b94ba4e71ffa8232e7c70c..f2b657f9b479f860967afe31f894565df6200142 100644
+--- a/pkg/gir/util/util.go
++++ b/pkg/gir/util/util.go
+@@ -3,10 +3,12 @@
+ import "github.com/jwijenbergh/puregotk/internal/gir/util"
+ 
+ var (
+-	ConvertArgs            = util.ConvertArgs
+-	ConvertArgsComma       = util.ConvertArgsComma
+-	ConvertCallbackArgs    = util.ConvertCallbackArgs
+-	ConvertArgsCommaDeref  = util.ConvertArgsCommaDeref
+-	ConvertArgsDeref       = util.ConvertArgsDeref
++	ConvertArgs              = util.ConvertArgs
++	ConvertArgsComma         = util.ConvertArgsComma
++	ConvertCallbackArgs      = util.ConvertCallbackArgs
++	ConvertArgsCommaDeref    = util.ConvertArgsCommaDeref
++	ConvertArgsDeref         = util.ConvertArgsDeref
+ 	ConvertCallbackArgsNoErr = util.ConvertCallbackArgsNoErr
++	PropertyValueSet         = util.PropertyValueSet
++	PropertyValueGet         = util.PropertyValueGet
+ )
+diff --git a/templates/go b/templates/go
+index bdcd40d94f46abde2513ace75ed65fbc89877f08..9bd78a82a150930912bc31c8c1b2522e8076bbc8 100644
+--- a/templates/go
++++ b/templates/go
+@@ -188,7 +188,7 @@ {{else}}// SetProperty{{.Name}} sets the "{{.CName}}" property.
+ {{end}}func (x *{{$outer.Name}}Base) SetProperty{{.Name}}(value {{.GoType}}) {
+      {{if eq .GLibType "TypePointerVal"}}// Slice/array properties not supported{{else}}var v {{if $NotGObject}}gobject.{{end}}Value
+      v.Init({{if $NotGObject}}gobject.{{end}}{{.GLibType}})
+-     {{if eq .GoType "bool"}}v.SetBoolean(value){{else if eq .GoType "int"}}v.SetInt(value){{else if eq .GoType "int64"}}v.SetInt64(value){{else if eq .GoType "uint"}}v.SetUint(value){{else if eq .GoType "uint64"}}v.SetUint64(value){{else if eq .GoType "float32"}}v.SetFloat(value){{else if eq .GoType "float64"}}v.SetDouble(value){{else if eq .GoType "string"}}v.SetString(value){{else if eq .GoType "uintptr"}}v.SetPointer(value){{else if eq .GLibType "TypeEnumVal"}}v.SetEnum(int(value)){{else if eq .GLibType "TypeFlagsVal"}}v.SetFlags(uint(value)){{else if eq .GLibType "TypeGtypeVal"}}v.SetGtype(value){{else if eq .GLibType "TypeObjectVal"}}v.SetObject(&{{if $NotGObject}}gobject.{{end}}Object{Ptr: value.GoPointer()}){{else}}v.SetPointer(uintptr(value)){{end}}
++     {{if $NotGObject}}{{valueset .GoType .GLibType "value" "gobject."}}{{else}}{{valueset .GoType .GLibType "value" ""}}{{end}}
+      obj := {{if $NotGObject}}gobject.{{end}}Object{Ptr: x.GoPointer()}
+      obj.SetProperty("{{.CName}}", &v){{end}}
+ }
+@@ -202,7 +202,7 @@ {{end}}func (x *{{$outer.Name}}Base) GetProperty{{.Name}}() {{.GoType}} {
+      var v {{if $NotGObject}}gobject.{{end}}Value
+      obj := {{if $NotGObject}}gobject.{{end}}Object{Ptr: x.GoPointer()}
+      obj.GetProperty("{{.CName}}", &v)
+-     {{if eq .GoType "bool"}}return v.GetBoolean(){{else if eq .GoType "int"}}return v.GetInt(){{else if eq .GoType "int64"}}return v.GetInt64(){{else if eq .GoType "uint"}}return v.GetUint(){{else if eq .GoType "uint64"}}return v.GetUint64(){{else if eq .GoType "float32"}}return v.GetFloat(){{else if eq .GoType "float64"}}return v.GetDouble(){{else if eq .GoType "string"}}return v.GetString(){{else if eq .GoType "uintptr"}}return v.GetPointer(){{else if eq .GLibType "TypeEnumVal"}}return {{.GoType}}(v.GetEnum()){{else if eq .GLibType "TypeFlagsVal"}}return {{.GoType}}(v.GetFlags()){{else if eq .GLibType "TypeGtypeVal"}}return v.GetGtype(){{else if eq .GLibType "TypeObjectVal"}}ptr := v.GetObject().GoPointer(); if ptr == 0 { return nil }; {{if .IsInterface}}result := &{{.BaseGoType}}Base{}; result.Ptr = ptr; return result{{else if .IsRecord}}return (*{{.BaseGoType}})(unsafe.Pointer(ptr)){{else}}result := &{{.BaseGoType}}{}; result.Ptr = ptr; return result{{end}}{{else if eq .GLibType "TypePointerVal"}}return nil{{else}}return {{.GoType}}(v.GetPointer()){{end}}
++     {{valueget .GoType .GLibType .BaseGoType .IsInterface .IsRecord}}
+ }
+ {{end}}
+ {{end}}
+@@ -327,7 +327,7 @@ {{else}}// SetProperty{{.Name}} sets the "{{.CName}}" property.
+ {{end}}func (x *{{$outer.Name}}) SetProperty{{.Name}}(value {{.GoType}}) {
+      {{if eq .GLibType "TypePointerVal"}}// Slice/array properties not supported{{else}}var v {{if $NotGObject}}gobject.{{end}}Value
+      v.Init({{if $NotGObject}}gobject.{{end}}{{.GLibType}})
+-     {{if eq .GoType "bool"}}v.SetBoolean(value){{else if eq .GoType "int"}}v.SetInt(value){{else if eq .GoType "int64"}}v.SetInt64(value){{else if eq .GoType "uint"}}v.SetUint(value){{else if eq .GoType "uint64"}}v.SetUint64(value){{else if eq .GoType "float32"}}v.SetFloat(value){{else if eq .GoType "float64"}}v.SetDouble(value){{else if eq .GoType "string"}}v.SetString(value){{else if eq .GoType "uintptr"}}v.SetPointer(value){{else if eq .GLibType "TypeEnumVal"}}v.SetEnum(int(value)){{else if eq .GLibType "TypeFlagsVal"}}v.SetFlags(uint(value)){{else if eq .GLibType "TypeGtypeVal"}}v.SetGtype(value){{else if eq .GLibType "TypeObjectVal"}}v.SetObject(&{{if $NotGObject}}gobject.{{end}}Object{Ptr: value.GoPointer()}){{else}}v.SetPointer(uintptr(value)){{end}}
++     {{if $NotGObject}}{{valueset .GoType .GLibType "value" "gobject."}}{{else}}{{valueset .GoType .GLibType "value" ""}}{{end}}
+      x.SetProperty("{{.CName}}", &v){{end}}
+ }
+ {{end}}
+@@ -339,7 +339,7 @@ {{else}}// GetProperty{{.Name}} gets the "{{.CName}}" property.
+ {{end}}func (x *{{$outer.Name}}) GetProperty{{.Name}}() {{.GoType}} {
+      var v {{if $NotGObject}}gobject.{{end}}Value
+      x.GetProperty("{{.CName}}", &v)
+-     {{if eq .GoType "bool"}}return v.GetBoolean(){{else if eq .GoType "int"}}return v.GetInt(){{else if eq .GoType "int64"}}return v.GetInt64(){{else if eq .GoType "uint"}}return v.GetUint(){{else if eq .GoType "uint64"}}return v.GetUint64(){{else if eq .GoType "float32"}}return v.GetFloat(){{else if eq .GoType "float64"}}return v.GetDouble(){{else if eq .GoType "string"}}return v.GetString(){{else if eq .GoType "uintptr"}}return v.GetPointer(){{else if eq .GLibType "TypeEnumVal"}}return {{.GoType}}(v.GetEnum()){{else if eq .GLibType "TypeFlagsVal"}}return {{.GoType}}(v.GetFlags()){{else if eq .GLibType "TypeGtypeVal"}}return v.GetGtype(){{else if eq .GLibType "TypeObjectVal"}}ptr := v.GetObject().GoPointer(); if ptr == 0 { return nil }; {{if .IsInterface}}result := &{{.BaseGoType}}Base{}; result.Ptr = ptr; return result{{else if .IsRecord}}return (*{{.BaseGoType}})(unsafe.Pointer(ptr)){{else}}result := &{{.BaseGoType}}{}; result.Ptr = ptr; return result{{end}}{{else if eq .GLibType "TypePointerVal"}}return nil{{else}}return {{.GoType}}(v.GetPointer()){{end}}
++     {{valueget .GoType .GLibType .BaseGoType .IsInterface .IsRecord}}
+ }
+ {{end}}
+ {{end}}
+
