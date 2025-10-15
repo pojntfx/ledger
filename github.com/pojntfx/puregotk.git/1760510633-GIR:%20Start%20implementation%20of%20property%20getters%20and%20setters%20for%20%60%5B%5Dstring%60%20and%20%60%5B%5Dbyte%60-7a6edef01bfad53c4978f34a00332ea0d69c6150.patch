@@ -1,0 +1,141 @@
+From 7a6edef01bfad53c4978f34a00332ea0d69c6150 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Tue, 14 Oct 2025 23:43:53 -0700
+Subject: [PATCH] GIR: Start implementation of property getters and setters for `[]string` and `[]byte`
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/internal/gir/util/util.go b/internal/gir/util/util.go
+index f71593c6e2258cb1bfe8bc734a47114ca5defdd6..a177c49e12e895d54718a22fef7ba7688392313f 100644
+--- a/internal/gir/util/util.go
++++ b/internal/gir/util/util.go
+@@ -235,6 +235,13 @@ 	case "string":
+ 		return "v.SetString(" + valueName + ")"
+ 	case "uintptr":
+ 		return "v.SetPointer(" + valueName + ")"
++	case "[]string":
++		// For string slices, we need to use the GStrv boxed type, not pointer type
++		// This should not be reached if template is configured correctly
++		return "// []string properties should use TypeBoxedVal with glib.StrvGetType(), not TypePointerVal"
++	case "[]byte":
++		// For byte slices, use SetPointer with the slice data
++		return "if len(" + valueName + ") > 0 { v.SetPointer(uintptr(unsafe.Pointer(&" + valueName + "[0]))) } else { v.SetPointer(0) }"
+ 	}
+ 
+ 	switch glibType {
+@@ -246,6 +253,9 @@ 	case "TypeGtypeVal":
+ 		return "v.SetGtype(" + valueName + ")"
+ 	case "TypeObjectVal":
+ 		return "v.SetObject(&" + objPrefix + "Object{Ptr: " + valueName + ".GoPointer()})"
++	case "TypePointerVal":
++		// For pointer types that are slices, we need special handling
++		return "// Pointer/boxed slice properties require manual conversion"
+ 	default:
+ 		return "v.SetPointer(uintptr(" + valueName + "))"
+ 	}
+@@ -272,6 +282,10 @@ 	case "string":
+ 		return "return v.GetString()"
+ 	case "uintptr":
+ 		return "return v.GetPointer()"
++	case "[]string":
++		return "strv := v.GetBoxed(); if strv == 0 { return nil }; return gobject.StrvToStringSlice(strv)"
++	case "[]byte":
++		return "ptr := v.GetPointer(); if ptr == 0 { return nil }; return unsafe.Slice((*byte)(unsafe.Pointer(ptr)), 0)"
+ 	}
+ 
+ 	switch glibType {
+diff --git a/templates/go b/templates/go
+index 9bd78a82a150930912bc31c8c1b2522e8076bbc8..e3b48374becba55471b3dbd72ca8cebaf2265c0c 100644
+--- a/templates/go
++++ b/templates/go
+@@ -186,9 +186,11 @@ {{if .Doc}}// SetProperty{{.Name}} sets the "{{.CName}}" property.
+ {{.Doc}}
+ {{else}}// SetProperty{{.Name}} sets the "{{.CName}}" property.
+ {{end}}func (x *{{$outer.Name}}Base) SetProperty{{.Name}}(value {{.GoType}}) {
+-     {{if eq .GLibType "TypePointerVal"}}// Slice/array properties not supported{{else}}var v {{if $NotGObject}}gobject.{{end}}Value
+-     v.Init({{if $NotGObject}}gobject.{{end}}{{.GLibType}})
+-     {{if $NotGObject}}{{valueset .GoType .GLibType "value" "gobject."}}{{else}}{{valueset .GoType .GLibType "value" ""}}{{end}}
++     {{if and (eq .GLibType "TypePointerVal") (ne .GoType "[]string")}}// Slice/array properties not supported{{else}}var v {{if $NotGObject}}gobject.{{end}}Value
++     {{if eq .GoType "[]string"}}v.Init({{if $NotGObject}}gobject.{{end}}TypeBoxedVal)
++     strv := {{if $NotGObject}}gobject.{{end}}StringSliceToStrv(value)
++     if strv != 0 { v.SetBoxed(strv) }{{else}}v.Init({{if $NotGObject}}gobject.{{end}}{{.GLibType}})
++     {{if $NotGObject}}{{valueset .GoType .GLibType "value" "gobject."}}{{else}}{{valueset .GoType .GLibType "value" ""}}{{end}}{{end}}
+      obj := {{if $NotGObject}}gobject.{{end}}Object{Ptr: x.GoPointer()}
+      obj.SetProperty("{{.CName}}", &v){{end}}
+ }
+@@ -325,9 +327,11 @@ {{if .Doc}}// SetProperty{{.Name}} sets the "{{.CName}}" property.
+ {{.Doc}}
+ {{else}}// SetProperty{{.Name}} sets the "{{.CName}}" property.
+ {{end}}func (x *{{$outer.Name}}) SetProperty{{.Name}}(value {{.GoType}}) {
+-     {{if eq .GLibType "TypePointerVal"}}// Slice/array properties not supported{{else}}var v {{if $NotGObject}}gobject.{{end}}Value
+-     v.Init({{if $NotGObject}}gobject.{{end}}{{.GLibType}})
+-     {{if $NotGObject}}{{valueset .GoType .GLibType "value" "gobject."}}{{else}}{{valueset .GoType .GLibType "value" ""}}{{end}}
++     {{if and (eq .GLibType "TypePointerVal") (ne .GoType "[]string")}}// Slice/array properties not supported{{else}}var v {{if $NotGObject}}gobject.{{end}}Value
++     {{if eq .GoType "[]string"}}v.Init({{if $NotGObject}}gobject.{{end}}TypeBoxedVal)
++     strv := {{if $NotGObject}}gobject.{{end}}StringSliceToStrv(value)
++     if strv != 0 { v.SetBoxed(strv) }{{else}}v.Init({{if $NotGObject}}gobject.{{end}}{{.GLibType}})
++     {{if $NotGObject}}{{valueset .GoType .GLibType "value" "gobject."}}{{else}}{{valueset .GoType .GLibType "value" ""}}{{end}}{{end}}
+      x.SetProperty("{{.CName}}", &v){{end}}
+ }
+ {{end}}
+diff --git a/templates/gobject b/templates/gobject
+index 1301175f1a11ee4257a182ba344b3575088fb93c..29eb36f6b01e5523a594ddae645654d348ae117a 100644
+--- a/templates/gobject
++++ b/templates/gobject
+@@ -2,7 +2,10 @@ package gobject
+ 
+ import (
+ 	"reflect"
++	"sync"
++	"unsafe"
+ 
++	"github.com/jwijenbergh/puregotk/pkg/core"
+ 	"github.com/jwijenbergh/puregotk/v4/glib"
+ )
+ 
+@@ -80,3 +83,44 @@ func init() {
+ 	// Initialize TypeGtypeVal after purego has registered the function pointer
+ 	TypeGtypeVal = GtypeGetType()
+ }
++
++// StringSliceToStrv converts a Go []string to a C NULL-terminated string array (GStrv).
++// The caller is responsible for freeing the returned pointer using g_strfreev() or appropriate mechanism.
++func StringSliceToStrv(slice []string) uintptr {
++	if len(slice) == 0 {
++		return 0
++	}
++	// Allocate memory for pointers + NULL terminator
++	ptrs := make([]uintptr, len(slice)+1)
++	for i, s := range slice {
++		// Create C string from Go string
++		// Note: This allocates memory that should be freed by GLib
++		cstr := make([]byte, len(s)+1)
++		copy(cstr, s)
++		cstr[len(s)] = 0
++		ptrs[i] = uintptr(unsafe.Pointer(&cstr[0]))
++	}
++	ptrs[len(slice)] = 0 // NULL terminator
++	return uintptr(unsafe.Pointer(&ptrs[0]))
++}
++
++// StrvToStringSlice converts a C NULL-terminated string array (GStrv) to a Go []string.
++// The C array is not freed by this function.
++func StrvToStringSlice(strv uintptr) []string {
++	if strv == 0 {
++		return nil
++	}
++	var result []string
++	ptr := strv
++	for {
++		cstrPtr := *(*uintptr)(unsafe.Pointer(ptr))
++		if cstrPtr == 0 {
++			break
++		}
++		// Convert C string to Go string
++		str := core.GoString(cstrPtr)
++		result = append(result, str)
++		ptr += unsafe.Sizeof(uintptr(0))
++	}
++	return result
++}
+
