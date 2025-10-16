@@ -1,0 +1,267 @@
+From 681ff2da78aeec71f7016b11de70942398fd5d00 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Wed, 15 Oct 2025 20:14:15 -0700
+Subject: [PATCH] GIR: Implement support for multiple libraries to be in `shared-library` key in GIR by iterating over all registered ones in the GIR and using the first one that linking succeeds with
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/internal/core/core.go b/internal/core/core.go
+index 2782d3264d37d3a4b41ae62f2851d024cd2cedc8..3072ed975861be376e1c15d5a9a61961dd5e0c5b 100644
+--- a/internal/core/core.go
++++ b/internal/core/core.go
+@@ -44,7 +44,7 @@ 	"ADW":        {"libadwaita-1.so"},
+ 	"CAIRO":      {"libcairo.so"},
+ 	"GDKPIXBUF":  {"libgdk_pixbuf-2.0.so"},
+ 	"GIO":        {"libgio-2.0.so"},
+-	"GLIB":       {"libglib-2.0.so"},
++	"GLIB":       {"libglib-2.0.so", "libgobject-2.0.so"},
+ 	"GMODULE":    {"libgmodule-2.0.so"},
+ 	"GOBJECT":    {"libgobject-2.0.so"},
+ 	"GRAPHENE":   {"libgraphene-1.0.so"},
+@@ -85,12 +85,12 @@ 		pkgConfNames[libName] = pkgName
+ 	}
+ }
+ 
+-// SetSharedLibrary registers a shared library name for a library.
++// SetSharedLibraries registers shared library names for a library.
+ // This is used by the code generator to set library names from GIR files.
+ // It won't override existing entries to preserve defaults.
+-func SetSharedLibrary(libName, sharedLib string) {
+-	if _, exists := names[libName]; !exists && sharedLib != "" {
+-		names[libName] = []string{sharedLib}
++func SetSharedLibraries(libName string, sharedLibs []string) {
++	if _, exists := names[libName]; !exists && len(sharedLibs) > 0 {
++		names[libName] = sharedLibs
+ 	}
+ }
+ 
+@@ -205,3 +205,73 @@ 		length++
+ 	}
+ 	return string(unsafe.Slice((*byte)(ptr), length))
+ }
++
++// GetPaths gets all shared object file paths for a library name that may have multiple libraries.
++// This is used when a package needs to load multiple shared libraries (e.g., GLIB needs both libgobject and libglib).
++// Returns a slice of full paths to all libraries for this package.
++func GetPaths(name string) []string {
++	// resolve alias
++	if v, ok := aliases[name]; ok {
++		name = v
++	}
++
++	libNames, ok := names[name]
++	if !ok || len(libNames) == 0 {
++		// Fallback to single GetPath for backward compatibility
++		return []string{GetPath(name)}
++	}
++
++	// If only one library, use the original GetPath logic
++	if len(libNames) == 1 {
++		return []string{GetPath(name)}
++	}
++
++	var result []string
++	for _, libName := range libNames {
++		// Try PUREGOTK_LIB_FOLDER first
++		ep := os.Getenv("PUREGOTK_LIB_FOLDER")
++		if ep != "" {
++			suffixes := []string{"", ".0", ".1", ".2"}
++			found := false
++			for _, s := range suffixes {
++				fullPath := filepath.Join(ep, libName+s)
++				if _, err := os.Stat(fullPath); err == nil {
++					result = append(result, fullPath)
++					found = true
++					break
++				}
++			}
++			if found {
++				continue
++			}
++		}
++
++		// Try hardcoded paths
++		gp, pathsOk := paths[runtime.GOARCH]
++		if pathsOk {
++			found := false
++			for _, p := range gp {
++				suffixes := []string{"", ".0", ".1", ".2"}
++				fn := filepath.Join(p, libName)
++				for _, s := range suffixes {
++					if _, err := os.Stat(fn + s); err == nil {
++						result = append(result, fn+s)
++						found = true
++						break
++					}
++				}
++				if found {
++					break
++				}
++			}
++			if found {
++				continue
++			}
++		}
++
++		// If we get here, we couldn't find this library
++		panic(fmt.Sprintf("Path for library %s (package %s) not found. Please set PUREGOTK_LIB_FOLDER or ensure the library is in standard paths", libName, name))
++	}
++
++	return result
++}
+diff --git a/internal/gir/pass/pass.go b/internal/gir/pass/pass.go
+index 9b76f25f94fe3decd35c8c787cc4476842a01ace..2e5bf7fdb05d93139296144fa2ea0f1c96b34cfe 100644
+--- a/internal/gir/pass/pass.go
++++ b/internal/gir/pass/pass.go
+@@ -385,7 +385,14 @@ 	if len(r.Packages) > 0 {
+ 		pkgConfigName = r.Packages[0].Name
+ 	}
+ 
+-	sharedLibrary := ns.SharedLibrary
++	var sharedLibraries []string
++	if ns.SharedLibrary != "" {
++		for _, lib := range libs := strings.Split(ns.SharedLibrary, ",") {
++			if trimmed := strings.TrimSpace(lib); trimmed != "" {
++				sharedLibraries = append(sharedLibraries, trimmed)
++			}
++		}
++	}
+ 
+ 	for _, fn := range files {
+ 		methods := 0
+@@ -409,7 +416,7 @@ 		args := types.TemplateArg{
+ 			PkgName:       pkgName,
+ 			PkgEnv:        strings.ToUpper(pkgName),
+ 			PkgConfigName: pkgConfigName,
+-			SharedLibrary: sharedLibrary,
++			SharedLibraries: sharedLibraries,
+ 			NeedsInit:     needsInit,
+ 			Aliases:       aliases[fn],
+ 			Callbacks:     callbacks[fn],
+diff --git a/internal/gir/types/template.go b/internal/gir/types/template.go
+index b0f4cd0b4b3193076c853e101edb0f08f40fdb7a..2e166362489baff9d2c91b0d6b6a07b6d52ae2c7 100644
+--- a/internal/gir/types/template.go
++++ b/internal/gir/types/template.go
+@@ -428,8 +428,8 @@ 	// PkgEnv is the name of the package in the load environment variable
+ 	PkgEnv string
+ 	// PkgConfigName is the pkg-config package name from the GIR file
+ 	PkgConfigName string
+-	// SharedLibrary is the shared library name from the GIR file
+-	SharedLibrary string
++	// SharedLibraries is the list of shared library names from the GIR file
++	SharedLibraries []string
+ 	// NeedsInit declares whether or not this file needs an init code to register functions with purego
+ 	NeedsInit bool
+ 	// Imports defines the package imports that we need
+diff --git a/pkg/core/core.go b/pkg/core/core.go
+index 80619ce44426557ca9bc23c70748cc92485abd27..8081bdb50c6534658d46115b8a4d506b11b1fbce 100644
+--- a/pkg/core/core.go
++++ b/pkg/core/core.go
+@@ -5,7 +5,8 @@
+ var (
+ 	PuregoSafeRegister = core.PuregoSafeRegister
+ 	GetPath            = core.GetPath
++	GetPaths           = core.GetPaths
+ 	GoString           = core.GoString
+ 	SetPackageName     = core.SetPackageName
+-	SetSharedLibrary   = core.SetSharedLibrary
++	SetSharedLibraries   = core.SetSharedLibraries
+ )
+diff --git a/templates/go b/templates/go
+index 0748d14d623f5a163c899a5b31016a68dd10b886..9376d174bb88470a07679c31d193bd1807f61679 100644
+--- a/templates/go
++++ b/templates/go
+@@ -335,62 +335,76 @@ func init() {
+     {{if .PkgConfigName -}}
+     core.SetPackageName("{{.PkgEnv}}", "{{.PkgConfigName}}")
+     {{end -}}
+-    {{if .SharedLibrary -}}
+-    core.SetSharedLibrary("{{.PkgEnv}}", "{{.SharedLibrary}}")
++    {{if .SharedLibraries -}}
++    core.SetSharedLibraries("{{.PkgEnv}}", []string{ {{range .SharedLibraries}}"{{.}}", {{end}} })
+     {{end -}}
+-    lib, err := purego.Dlopen(core.GetPath("{{.PkgEnv}}"), purego.RTLD_NOW|purego.RTLD_GLOBAL)
+-    if err != nil {
++
++    var libs []uintptr
++    for _, libPath := range core.GetPaths("{{.PkgEnv}}") {
++        lib, err := purego.Dlopen(libPath, purego.RTLD_NOW|purego.RTLD_GLOBAL)
++        if err != nil {
+             panic(err)
++        }
++        libs = append(libs, lib)
+     }
++
++    tryRegister := func(fptr interface{}, name string) {
++        for _, lib := range libs {
++            if err := core.PuregoSafeRegister(fptr, lib, name); err == nil {
++                return
++            }
++        }
++    }
++
+     {{range .Aliases -}}
+     {{if .TypeGetter -}}
+-    core.PuregoSafeRegister(&x{{.Name}}GLibType, lib, "{{.TypeGetter}}")
++    tryRegister(&x{{.Name}}GLibType, "{{.TypeGetter}}")
+     {{end}}
+     {{end}}
+     {{range .Enums -}}
+     {{if .TypeGetter -}}
+-    core.PuregoSafeRegister(&x{{.Name}}GLibType, lib, "{{.TypeGetter}}")
++    tryRegister(&x{{.Name}}GLibType, "{{.TypeGetter}}")
+     {{end}}
+     {{end}}
+     {{range .Functions -}}
+-    core.PuregoSafeRegister(&x{{.Name}}, lib, "{{.CName}}")
++    tryRegister(&x{{.Name}}, "{{.CName}}")
+     {{end}}
+ 
+     {{range .Records -}}
+     {{$rec := .}}
+     {{if .TypeGetter -}}
+-    core.PuregoSafeRegister(&x{{.Name}}GLibType, lib, "{{.TypeGetter}}")
++    tryRegister(&x{{.Name}}GLibType, "{{.TypeGetter}}")
+     {{end}}
+     {{range .Constructors -}}
+-    core.PuregoSafeRegister(&x{{.Name}}, lib, "{{.CName}}")
++    tryRegister(&x{{.Name}}, "{{.CName}}")
+     {{end}}
+     {{range .Receivers -}}
+-    core.PuregoSafeRegister(&x{{$rec.Name}}{{.Name}}, lib, "{{.CName}}")
++    tryRegister(&x{{$rec.Name}}{{.Name}}, "{{.CName}}")
+     {{end}}
+     {{end}}
+ 
+     {{range .Classes -}}
+     {{$cls := .}}
+     {{if .TypeGetter -}}
+-    core.PuregoSafeRegister(&x{{.Name}}GLibType, lib, "{{.TypeGetter}}")
++    tryRegister(&x{{.Name}}GLibType, "{{.TypeGetter}}")
+     {{end}}
+     {{range .Constructors -}}
+-    core.PuregoSafeRegister(&x{{.Name}}, lib, "{{.CName}}")
++    tryRegister(&x{{.Name}}, "{{.CName}}")
+     {{end}}
+     {{range .Receivers -}}
+-    core.PuregoSafeRegister(&x{{$cls.Name}}{{.Name}}, lib, "{{.CName}}")
++    tryRegister(&x{{$cls.Name}}{{.Name}}, "{{.CName}}")
+     {{end}}
+     {{range .Functions -}}
+-    core.PuregoSafeRegister(&x{{.Name}}, lib, "{{.CName}}")
++    tryRegister(&x{{.Name}}, "{{.CName}}")
+     {{end}}
+     {{end}}
+ 
+     {{range .Interfaces -}}
+     {{if .TypeGetter -}}
+-    core.PuregoSafeRegister(&x{{.Name}}GLibType, lib, "{{.TypeGetter}}")
++    tryRegister(&x{{.Name}}GLibType, "{{.TypeGetter}}")
+     {{end}}
+     {{range .Methods -}}
+-    core.PuregoSafeRegister(&{{.Namespace}}X{{.FullName}}, lib, "{{.CName}}")
++    tryRegister(&{{.Namespace}}X{{.FullName}}, "{{.CName}}")
+     {{end}}
+     {{end}}
+ }
+
