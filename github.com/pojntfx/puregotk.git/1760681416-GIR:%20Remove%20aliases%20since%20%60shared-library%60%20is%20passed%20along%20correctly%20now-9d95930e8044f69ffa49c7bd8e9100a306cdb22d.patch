@@ -1,0 +1,94 @@
+From 9d95930e8044f69ffa49c7bd8e9100a306cdb22d Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Thu, 16 Oct 2025 23:10:16 -0700
+Subject: [PATCH] GIR: Remove aliases since `shared-library` is passed along correctly now
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/internal/core/core.go b/internal/core/core.go
+index 3072ed975861be376e1c15d5a9a61961dd5e0c5b..a708019c152bac1fff54dd59d3d11ff666ef6c0c 100644
+--- a/internal/core/core.go
++++ b/internal/core/core.go
+@@ -53,13 +53,6 @@ 	"PANGO":      {"libpango-1.0.so"},
+ 	"PANGOCAIRO": {"libpangocairo-1.0.so"},
+ }
+ 
+-// aliases are lib aliases
+-// for example when we load the GSK lib, we should get the functions from the GTK shared library
+-var aliases = map[string]string{
+-	"GSK": "GTK",
+-	"GDK": "GTK",
+-}
+-
+ // pkgConfNames is a lookup from library names to pkg-config library names
+ // This is populated dynamically via SetPackageName and has defaults for common libraries
+ var pkgConfNames = map[string]string{
+@@ -147,10 +140,6 @@ // panic if failed
+ // TODO: Hardcore a library shared object with linker -X flag
+ // This is useful for packaging
+ func GetPath(name string) string {
+-	// resolve alias
+-	if v, ok := aliases[name]; ok {
+-		name = v
+-	}
+ 	// try to get from env var
+ 	ev := fmt.Sprintf("PUREGOTK_%s_PATH", name)
+ 	if v := os.Getenv(ev); v != "" {
+@@ -210,11 +199,6 @@ // GetPaths gets all shared object file paths for a library name that may have multiple libraries.
+ // This is used when a package needs to load multiple shared libraries (e.g., GLIB needs both libgobject and libglib).
+ // Returns a slice of full paths to all libraries for this package.
+ func GetPaths(name string) []string {
+-	// resolve alias
+-	if v, ok := aliases[name]; ok {
+-		name = v
+-	}
+-
+ 	libNames, ok := names[name]
+ 	if !ok || len(libNames) == 0 {
+ 		// Fallback to single GetPath for backward compatibility
+diff --git a/internal/gir/pass/pass.go b/internal/gir/pass/pass.go
+index 2e5bf7fdb05d93139296144fa2ea0f1c96b34cfe..beea0a1e2d2c6c575ab3e2e703ceee3569ebe440 100644
+--- a/internal/gir/pass/pass.go
++++ b/internal/gir/pass/pass.go
+@@ -387,7 +387,7 @@ 	}
+ 
+ 	var sharedLibraries []string
+ 	if ns.SharedLibrary != "" {
+-		for _, lib := range libs := strings.Split(ns.SharedLibrary, ",") {
++		for _, lib := range strings.Split(ns.SharedLibrary, ",") {
+ 			if trimmed := strings.TrimSpace(lib); trimmed != "" {
+ 				sharedLibraries = append(sharedLibraries, trimmed)
+ 			}
+@@ -413,19 +413,19 @@ 		// as they should only be loaded when there are classes
+ 		needsInit := (len(functions[fn]) + methods) > 0
+ 
+ 		args := types.TemplateArg{
+-			PkgName:       pkgName,
+-			PkgEnv:        strings.ToUpper(pkgName),
+-			PkgConfigName: pkgConfigName,
++			PkgName:         pkgName,
++			PkgEnv:          strings.ToUpper(pkgName),
++			PkgConfigName:   pkgConfigName,
+ 			SharedLibraries: sharedLibraries,
+-			NeedsInit:     needsInit,
+-			Aliases:       aliases[fn],
+-			Callbacks:     callbacks[fn],
+-			Records:       records[fn],
+-			Enums:         enums[fn],
+-			Constants:     constants[fn],
+-			Functions:     functions[fn],
+-			Interfaces:    interfaces[fn],
+-			Classes:       classes[fn],
++			NeedsInit:       needsInit,
++			Aliases:         aliases[fn],
++			Callbacks:       callbacks[fn],
++			Records:         records[fn],
++			Enums:           enums[fn],
++			Constants:       constants[fn],
++			Functions:       functions[fn],
++			Interfaces:      interfaces[fn],
++			Classes:         classes[fn],
+ 		}
+ 
+ 		os.MkdirAll(fmt.Sprintf(dir+"/%s", pkgName), 0o755)
+
