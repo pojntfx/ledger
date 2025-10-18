@@ -1,0 +1,41 @@
+From fc75be7eb418ebf55ec5e64809854e85f07bbd71 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Fri, 17 Oct 2025 21:24:37 -0700
+Subject: [PATCH] Switch `copygir.sh` script from using Alpine Linux downstream to extracting GIR files to extracting them from the upstream runtime directly
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/copygir.sh b/copygir.sh
+index 151d8de59e8e00963b6b1df9999d463dadb98d72..d7ccb4165bf8b8b9f5e0197b184978e25ad6df6a 100755
+--- a/copygir.sh
++++ b/copygir.sh
+@@ -2,11 +2,4 @@ #!/bin/sh
+ 
+ set -e
+ 
+-podman build . -t puregotk-gir-fetcher -f gir.Dockerfile
+-podman create --name puregotk-gir-fetcher puregotk-gir-fetcher
+-
+-GIR_DIR="internal/gir/spec/"
+-find "${GIR_DIR}"*.gir -type f | while read filename; do
+-  podman cp "puregotk-gir-fetcher:/gir-files/$(basename ${filename})" "${GIR_DIR}" || true
+-done
+-podman rm puregotk-gir-fetcher
++for f in internal/gir/spec/*.gir; do flatpak run --filesystem="${PWD}" --command=sh org.gnome.Sdk -c "cp /usr/share/gir-1.0/$(basename ${f}) ${PWD}/${f}"; done
+diff --git a/gir.Dockerfile b/gir.Dockerfile
+deleted file mode 100644
+index 05f97e329585f236a273460c4a77e54355befdd0..0000000000000000000000000000000000000000
+--- a/gir.Dockerfile
++++ /dev/null
+@@ -1,10 +0,0 @@
+-FROM docker.io/library/alpine:latest
+-
+-RUN apk add --no-cache \
+-    cairo-dev \
+-    gtk4.0-dev \
+-    libadwaita-dev
+-
+-WORKDIR /gir-files
+-
+-RUN cp -r /usr/share/gir-1.0/*.gir .
+
