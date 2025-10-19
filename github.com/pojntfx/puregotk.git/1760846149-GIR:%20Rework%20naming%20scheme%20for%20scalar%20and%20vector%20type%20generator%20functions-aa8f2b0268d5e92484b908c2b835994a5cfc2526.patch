@@ -1,0 +1,192 @@
+From aa8f2b0268d5e92484b908c2b835994a5cfc2526 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Sat, 18 Oct 2025 20:55:49 -0700
+Subject: [PATCH] GIR: Rework naming scheme for scalar and vector type generator functions
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/gen.go b/gen.go
+index 4b78bf6a3587d8890107b3b1e344f94f21afa9f7..d0248e15591f9d260e2c4e67912b7e7f6c3a4635 100644
+--- a/gen.go
++++ b/gen.go
+@@ -32,14 +32,16 @@ 	p.First()
+ 
+ 	// Create the template
+ 	gotemp, err := template.New("go").Funcs(template.FuncMap{
+-		"conv":      util.ConvertArgs,
+-		"convc":     util.ConvertArgsComma,
+-		"convcb":    util.ConvertCallbackArgs,
+-		"convcd":    util.ConvertArgsCommaDeref,
+-		"convd":     util.ConvertArgsDeref,
+-		"convcbne":  util.ConvertCallbackArgsNoErr,
+-		"valueset":  util.PropertyValueSet,
+-		"valueget":  util.PropertyValueGet,
++		"conv":     util.ConvertArgs,
++		"convc":    util.ConvertArgsComma,
++		"convcb":   util.ConvertCallbackArgs,
++		"convcd":   util.ConvertArgsCommaDeref,
++		"convd":    util.ConvertArgsDeref,
++		"convcbne": util.ConvertCallbackArgsNoErr,
++		"propsset": util.PropertyScalarSet,
++		"propsget": util.PropertyScalarGet,
++		"propvset": util.PropertyVectorSet,
++		"propvget": util.PropertyVectorGet,
+ 	}).ParseFiles("templates/go")
+ 	if err != nil {
+ 		panic(err)
+diff --git a/internal/gir/util/util.go b/internal/gir/util/util.go
+index 42865f71e0a262c0e56594c9c56c99980ea7e4ac..7484461aa2298c6f0ebc51c2c309a59bb13c6c55 100644
+--- a/internal/gir/util/util.go
++++ b/internal/gir/util/util.go
+@@ -214,8 +214,8 @@ 	// the default is just a concatenation if the constructor doesn't start with New
+ 	return outer + cname
+ }
+ 
+-// PropertyValueSet generates the appropriate v.SetXXX(value) call based on the property's GoType and GLibType
+-func PropertyValueSet(goType, glibType, valueName, objPrefix string) string {
++// PropertyScalarSet generates the appropriate v.SetXXX(value) call based on the property's GoType and GLibType
++func PropertyScalarSet(goType, glibType, valueName, objPrefix string) string {
+ 	switch goType {
+ 	case "bool":
+ 		return "v.SetBoolean(" + valueName + ")"
+@@ -251,8 +251,8 @@ 		return "v.SetPointer(uintptr(" + valueName + "))"
+ 	}
+ }
+ 
+-// PropertyValueGet generates the appropriate v.GetXXX() expression based on the property's GoType and GLibType
+-func PropertyValueGet(goType, glibType, baseGoType string, isInterface, isRecord bool) string {
++// PropertyScalarGet generates the appropriate v.GetXXX() expression based on the property's GoType and GLibType
++func PropertyScalarGet(goType, glibType, baseGoType string, isInterface, isRecord bool) string {
+ 	switch goType {
+ 	case "bool":
+ 		return "return v.GetBoolean()"
+@@ -298,9 +298,10 @@ 		return "return " + goType + "(v.GetPointer())"
+ 	}
+ }
+ 
+-// PropertySetArray generates the array conversion and v.SetXXX(value) call for array types
+-func PropertySetArray(goType, objPrefix, glibPrefix, propertyName string, useBaseObj bool) string {
+-	if goType == "[]string" {
++// PropertyVectorSet generates the array conversion and v.SetXXX(value) call for array types
++func PropertyVectorSet(goType, objPrefix, glibPrefix, propertyName string, useBaseObj bool) string {
++	switch goType {
++	case "[]string":
+ 		objAccess := "x"
+ 		if useBaseObj {
+ 			objAccess = "obj"
+@@ -329,7 +330,8 @@ 		result += "\n     " + objAccess + `.SetProperty("` + propertyName + `", &v)
+ 
+      v.Unset()`
+ 		return result
+-	} else if goType == "[]byte" {
++
++	case "[]byte":
+ 		objAccess := "x"
+ 		if useBaseObj {
+ 			objAccess = "obj"
+@@ -353,12 +355,14 @@
+      v.Unset()`
+ 		return result
+ 	}
++
+ 	return ""
+ }
+ 
+-// PropertyGetArray generates the array conversion and v.GetXXX() call for array types
+-func PropertyGetArray(goType, objPrefix, corePrefix, propertyName string, useBaseObj bool) string {
+-	if goType == "[]string" {
++// PropertyVectorGet generates the array conversion and v.GetXXX() call for array types
++func PropertyVectorGet(goType, objPrefix, corePrefix, propertyName string, useBaseObj bool) string {
++	switch goType {
++	case "[]string":
+ 		objAccess := "x"
+ 		result := `var v ` + objPrefix + `Value`
+ 
+@@ -387,7 +391,8 @@      }
+ 
+      return result`
+ 		return result
+-	} else if goType == "[]byte" {
++
++	case "[]byte":
+ 		objAccess := "x"
+ 		result := `var v ` + objPrefix + `Value`
+ 
+@@ -408,5 +413,6 @@
+      return *(*[]byte)(unsafe.Pointer(ptr))`
+ 		return result
+ 	}
++
+ 	return ""
+ }
+diff --git a/pkg/gir/util/util.go b/pkg/gir/util/util.go
+index e131520b4bc4de67419c459b04d92a40c34526dc..94ccde8e640130f5e5e264e6d521fa4cadca9025 100644
+--- a/pkg/gir/util/util.go
++++ b/pkg/gir/util/util.go
+@@ -9,8 +9,8 @@ 	ConvertCallbackArgs      = util.ConvertCallbackArgs
+ 	ConvertArgsCommaDeref    = util.ConvertArgsCommaDeref
+ 	ConvertArgsDeref         = util.ConvertArgsDeref
+ 	ConvertCallbackArgsNoErr = util.ConvertCallbackArgsNoErr
+-	PropertyValueSet         = util.PropertyValueSet
+-	PropertyValueGet         = util.PropertyValueGet
+-	PropertySetArray         = util.PropertySetArray
+-	PropertyGetArray         = util.PropertyGetArray
++	PropertyScalarSet        = util.PropertyScalarSet
++	PropertyScalarGet        = util.PropertyScalarGet
++	PropertyVectorSet        = util.PropertyVectorSet
++	PropertyVectorGet        = util.PropertyVectorGet
+ )
+diff --git a/templates/go b/templates/go
+index fb87a6a8a420b87b25facc7e4664dfc2da807336..d157a0bd67cef159bc70bd429f4b6f2db8c45d9e 100644
+--- a/templates/go
++++ b/templates/go
+@@ -186,9 +186,9 @@ {{if .Doc}}// SetProperty{{.Name}} sets the "{{.CName}}" property.
+ {{.Doc}}
+ {{else}}// SetProperty{{.Name}} sets the "{{.CName}}" property.
+ {{end}}func (x *{{$outer.Name}}Base) SetProperty{{.Name}}(value {{.GoType}}) {
+-     {{if or (eq .GoType "[]string") (eq .GoType "[]byte")}}{{if $NotGObject}}{{arraysetprop .GoType "gobject." "glib." .CName true}}{{else}}{{arraysetprop .GoType "" "" .CName true}}{{end}}{{else}}var v {{if $NotGObject}}gobject.{{end}}Value
++     {{if or (eq .GoType "[]string") (eq .GoType "[]byte")}}{{if $NotGObject}}{{propvset .GoType "gobject." "glib." .CName true}}{{else}}{{propvset .GoType "" "" .CName true}}{{end}}{{else}}var v {{if $NotGObject}}gobject.{{end}}Value
+      v.Init({{if $NotGObject}}gobject.{{end}}{{.GLibType}})
+-     {{if $NotGObject}}{{valueset .GoType .GLibType "value" "gobject."}}{{else}}{{valueset .GoType .GLibType "value" ""}}{{end}}
++     {{if $NotGObject}}{{propsset .GoType .GLibType "value" "gobject."}}{{else}}{{propsset .GoType .GLibType "value" ""}}{{end}}
+      obj := {{if $NotGObject}}gobject.{{end}}Object{Ptr: x.GoPointer()}
+      obj.SetProperty("{{.CName}}", &v){{end}}
+ }
+@@ -199,10 +199,10 @@ {{if .Doc}}// GetProperty{{.Name}} gets the "{{.CName}}" property.
+ {{.Doc}}
+ {{else}}// GetProperty{{.Name}} gets the "{{.CName}}" property.
+ {{end}}func (x *{{$outer.Name}}Base) GetProperty{{.Name}}() {{.GoType}} {
+-     {{if or (eq .GoType "[]string") (eq .GoType "[]byte")}}{{if $NotGObject}}{{arraygetprop .GoType "gobject." "core." .CName true}}{{else}}{{arraygetprop .GoType "" "" .CName true}}{{end}}{{else}}var v {{if $NotGObject}}gobject.{{end}}Value
++     {{if or (eq .GoType "[]string") (eq .GoType "[]byte")}}{{if $NotGObject}}{{propvget .GoType "gobject." "core." .CName true}}{{else}}{{propvget .GoType "" "" .CName true}}{{end}}{{else}}var v {{if $NotGObject}}gobject.{{end}}Value
+      obj := {{if $NotGObject}}gobject.{{end}}Object{Ptr: x.GoPointer()}
+      obj.GetProperty("{{.CName}}", &v)
+-     {{valueget .GoType .GLibType .BaseGoType .IsInterface .IsRecord}}{{end}}
++     {{propsget .GoType .GLibType .BaseGoType .IsInterface .IsRecord}}{{end}}
+ }
+ {{end}}
+ {{end}}
+@@ -325,9 +325,9 @@ {{if .Doc}}// SetProperty{{.Name}} sets the "{{.CName}}" property.
+ {{.Doc}}
+ {{else}}// SetProperty{{.Name}} sets the "{{.CName}}" property.
+ {{end}}func (x *{{$outer.Name}}) SetProperty{{.Name}}(value {{.GoType}}) {
+-     {{if or (eq .GoType "[]string") (eq .GoType "[]byte")}}{{if $NotGObject}}{{arraysetprop .GoType "gobject." "glib." .CName false}}{{else}}{{arraysetprop .GoType "" "" .CName false}}{{end}}{{else}}var v {{if $NotGObject}}gobject.{{end}}Value
++     {{if or (eq .GoType "[]string") (eq .GoType "[]byte")}}{{if $NotGObject}}{{propvset .GoType "gobject." "glib." .CName false}}{{else}}{{propvset .GoType "" "" .CName false}}{{end}}{{else}}var v {{if $NotGObject}}gobject.{{end}}Value
+      v.Init({{if $NotGObject}}gobject.{{end}}{{.GLibType}})
+-     {{if $NotGObject}}{{valueset .GoType .GLibType "value" "gobject."}}{{else}}{{valueset .GoType .GLibType "value" ""}}{{end}}
++     {{if $NotGObject}}{{propsset .GoType .GLibType "value" "gobject."}}{{else}}{{propsset .GoType .GLibType "value" ""}}{{end}}
+      x.SetProperty("{{.CName}}", &v){{end}}
+ }
+ {{end}}
+@@ -337,9 +337,9 @@ {{if .Doc}}// GetProperty{{.Name}} gets the "{{.CName}}" property.
+ {{.Doc}}
+ {{else}}// GetProperty{{.Name}} gets the "{{.CName}}" property.
+ {{end}}func (x *{{$outer.Name}}) GetProperty{{.Name}}() {{.GoType}} {
+-     {{if or (eq .GoType "[]string") (eq .GoType "[]byte")}}{{if $NotGObject}}{{arraygetprop .GoType "gobject." "core." .CName false}}{{else}}{{arraygetprop .GoType "" "" .CName false}}{{end}}{{else}}var v {{if $NotGObject}}gobject.{{end}}Value
++     {{if or (eq .GoType "[]string") (eq .GoType "[]byte")}}{{if $NotGObject}}{{propvget .GoType "gobject." "core." .CName false}}{{else}}{{propvget .GoType "" "" .CName false}}{{end}}{{else}}var v {{if $NotGObject}}gobject.{{end}}Value
+      x.GetProperty("{{.CName}}", &v)
+-     {{valueget .GoType .GLibType .BaseGoType .IsInterface .IsRecord}}{{end}}
++     {{propsget .GoType .GLibType .BaseGoType .IsInterface .IsRecord}}{{end}}
+ }
+ {{end}}
+ {{end}}
+
