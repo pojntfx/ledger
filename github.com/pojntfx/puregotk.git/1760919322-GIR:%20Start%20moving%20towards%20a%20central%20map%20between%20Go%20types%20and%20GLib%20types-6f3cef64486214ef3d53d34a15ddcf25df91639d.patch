@@ -1,0 +1,386 @@
+From 6f3cef64486214ef3d53d34a15ddcf25df91639d Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Sun, 19 Oct 2025 17:15:22 -0700
+Subject: [PATCH] GIR: Start moving towards a central map between Go types and GLib types
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/internal/gir/pass/pass.go b/internal/gir/pass/pass.go
+index 83fff75dda951be6bed9d2157234c57c84dc75a5..1d2756beeea265d10a7986cc09e0c0ad214d245c 100644
+--- a/internal/gir/pass/pass.go
++++ b/internal/gir/pass/pass.go
+@@ -342,10 +342,10 @@ 			}
+ 		}
+ 		properties := make([]types.PropertyTemplate, 0, len(cls.Properties))
+ 		for _, prop := range cls.Properties {
+-			// Skip properties that are not introspectable
+ 			if !prop.IsIntrospectable() {
+ 				continue
+ 			}
++
+ 			properties = append(properties, prop.Template(ns.Name, p.Types))
+ 		}
+ 		receivers := make([]types.FuncTemplate, len(cls.Methods))
+diff --git a/internal/gir/types/interface.go b/internal/gir/types/interface.go
+index a701af3994c5a8c3e2795f9d2316f802c84fa1f8..be27370f2740aa89e5eb6c224d2bdf7af667cdcc 100644
+--- a/internal/gir/types/interface.go
++++ b/internal/gir/types/interface.go
+@@ -34,13 +34,12 @@ 			},
+ 		})
+ 	}
+ 
+-	// Process properties
+ 	properties := make([]PropertyTemplate, 0, len(inter.Properties))
+ 	for _, prop := range inter.Properties {
+-		// Skip properties that are not introspectable
+ 		if !prop.IsIntrospectable() {
+ 			continue
+ 		}
++
+ 		properties = append(properties, prop.Template(currns, kinds))
+ 	}
+ 
+diff --git a/internal/gir/types/types.go b/internal/gir/types/types.go
+index 00a74e1855849bf59e360bf12ac165ea1020d0f1..48fe9c3441ea2fd38b609f604497fd7f0f6846d0 100644
+--- a/internal/gir/types/types.go
++++ b/internal/gir/types/types.go
+@@ -707,12 +707,12 @@ type Property struct {
+ 	XMLName xml.Name `xml:"http://www.gtk.org/introspection/core/1.0 property"`
+ 	Name    string   `xml:"name,attr"`
+ 
+-	Writable      *bool  `xml:"writable,attr"`      // default false for properties
+-	Readable      *bool  `xml:"readable,attr"`      // default true
+-	Construct     bool   `xml:"construct,attr"`     // can be set at construction
+-	ConstructOnly bool   `xml:"construct-only,attr"` // can only be set at construction
+-	Setter        string `xml:"setter,attr"`        // setter method name if any
+-	Getter        string `xml:"getter,attr"`        // getter method name if any
++	Writable      *bool  `xml:"writable,attr"` // default false
++	Readable      *bool  `xml:"readable,attr"` // default true
++	Construct     bool   `xml:"construct,attr"`
++	ConstructOnly bool   `xml:"construct-only,attr"`
++	Setter        string `xml:"setter,attr"`
++	Getter        string `xml:"getter,attr"`
+ 
+ 	TransferOwnership
+ 	AnyType
+@@ -720,17 +720,14 @@ 	InfoAttrs
+ 	InfoElements
+ }
+ 
+-// IsWritable returns true if the property is writable.
+ func (p Property) IsWritable() bool {
+ 	return p.Writable != nil && *p.Writable
+ }
+ 
+-// IsReadable returns true if the property is readable.
+ func (p Property) IsReadable() bool {
+ 	return p.Readable == nil || *p.Readable
+ }
+ 
+-// Template converts a Property to a PropertyTemplate for code generation
+ func (p *Property) Template(ns string, kinds KindMap) PropertyTemplate {
+ 	// Get the Go type for this property
+ 	goType := p.AnyType.Translate(ns, kinds)
+@@ -761,8 +758,8 @@ 	propName := util.DashToCamel(p.Name)
+ 
+ 	// Create BaseGoType by stripping the leading * if present
+ 	baseGoType := goType
+-	if strings.HasPrefix(baseGoType, "*") {
+-		baseGoType = strings.TrimPrefix(baseGoType, "*")
++	if after, ok := strings.CutPrefix(baseGoType, "*"); ok {
++		baseGoType = after
+ 	}
+ 
+ 	return PropertyTemplate{
+@@ -808,34 +805,12 @@ 			}
+ 		}
+ 	}
+ 
+-	// Map primitive types
+-	switch baseType {
+-	case "bool":
+-		return "TypeBooleanVal"
+-	case "int":
+-		return "TypeIntVal"
+-	case "uint":
+-		return "TypeUintVal"
+-	case "int32":
+-		return "TypeIntVal"
+-	case "uint32":
+-		return "TypeUintVal"
+-	case "int64":
+-		return "TypeInt64Val"
+-	case "uint64":
+-		return "TypeUint64Val"
+-	case "float32":
+-		return "TypeFloatVal"
+-	case "float64":
+-		return "TypeDoubleVal"
+-	case "string":
+-		return "TypeStringVal"
+-	case "byte":
+-		return "TypeUcharVal"
+-	default:
+-		// For classes and other complex types, use TypeObjectVal
+-		return "TypeObjectVal"
++	if glibType := util.GGLibTypeByGoType(baseType); glibType != "" {
++		return glibType
+ 	}
++
++	// For classes and other complex types, use TypeObjectVal
++	return "TypeObjectVal"
+ }
+ 
+ type Record struct {
+diff --git a/internal/gir/util/util.go b/internal/gir/util/util.go
+index 7484461aa2298c6f0ebc51c2c309a59bb13c6c55..2900c70c8f68200660d458ad01fc589e47c9077f 100644
+--- a/internal/gir/util/util.go
++++ b/internal/gir/util/util.go
+@@ -9,6 +9,16 @@ 	"path/filepath"
+ 	"strings"
+ )
+ 
++// glibTypeConfig defines a mapping between Go types, GLib types, and their getter/setter methods
++type glibTypeConfig struct {
++	GoType         string
++	GLibType       string
++	SetterMethod   string
++	GetterMethod   string
++	SetterTemplate string
++	GetterTemplate string
++}
++
+ var (
+ 	// Variable names that should not be dereferenced when using ConvertPtr() in handlePtr mode
+ 	// TODO: This was mostly discovered via trial and error, and might point towards issues in
+@@ -19,7 +29,78 @@ 		"TreeModelVar",
+ 		"OutChildVar",
+ 		"ChildVar",
+ 	}
++
++	goToGLibTypeConfigs = []glibTypeConfig{
++		{GoType: "bool", GLibType: "TypeBooleanVal", SetterMethod: "SetBoolean", GetterMethod: "GetBoolean"},
++		{GoType: "int", GLibType: "TypeIntVal", SetterMethod: "SetInt", GetterMethod: "GetInt"},
++		{GoType: "int64", GLibType: "TypeInt64Val", SetterMethod: "SetInt64", GetterMethod: "GetInt64"},
++		{GoType: "uint", GLibType: "TypeUintVal", SetterMethod: "SetUint", GetterMethod: "GetUint"},
++		{GoType: "uint64", GLibType: "TypeUint64Val", SetterMethod: "SetUint64", GetterMethod: "GetUint64"},
++		{GoType: "float32", GLibType: "TypeFloatVal", SetterMethod: "SetFloat", GetterMethod: "GetFloat"},
++		{GoType: "float64", GLibType: "TypeDoubleVal", SetterMethod: "SetDouble", GetterMethod: "GetDouble"},
++		{GoType: "string", GLibType: "TypeStringVal", SetterMethod: "SetString", GetterMethod: "GetString"},
++		{GoType: "uintptr", GLibType: "TypePointerVal", SetterMethod: "SetPointer", GetterMethod: "GetPointer"},
++		{GoType: "byte", GLibType: "TypeUcharVal", SetterMethod: "SetUchar", GetterMethod: "GetUchar"},
++		// int32 and uint32 are handled separately with explicit casts in PropertyScalarSet/Get
++	}
++
++	internalGLibTypeConfigs = map[string]glibTypeConfig{
++		"TypeEnumVal": {
++			GLibType:       "TypeEnumVal",
++			SetterTemplate: "v.SetEnum(int(%s))",
++			GetterTemplate: "%s(v.GetEnum())",
++		},
++		"TypeFlagsVal": {
++			GLibType:       "TypeFlagsVal",
++			SetterTemplate: "v.SetFlags(uint(%s))",
++			GetterTemplate: "%s(v.GetFlags())",
++		},
++		"TypeGtypeVal": {
++			GLibType:     "TypeGtypeVal",
++			SetterMethod: "SetGtype",
++			GetterMethod: "GetGtype",
++		},
++		"TypeObjectVal": {
++			GLibType:       "TypeObjectVal",
++			SetterTemplate: "v.SetObject(&%sObject{Ptr: %s.GoPointer()})",
++		},
++	}
+ )
++
++func gGLibTypeConfigByGoType(goType string) *glibTypeConfig {
++	for _, config := range goToGLibTypeConfigs {
++		if config.GoType == goType {
++			return &config
++		}
++	}
++
++	return nil
++}
++
++func gLibTypeConfigByGLibType(glibType string) *glibTypeConfig {
++	if mapping, ok := internalGLibTypeConfigs[glibType]; ok {
++		return &mapping
++	}
++
++	return nil
++}
++
++// GGLibTypeByGoType returns the GLib type constant for a given Go type
++func GGLibTypeByGoType(goType string) string {
++	if goType == "int32" {
++		return "TypeIntVal"
++	}
++
++	if goType == "uint32" {
++		return "TypeUintVal"
++	}
++
++	if config := gGLibTypeConfigByGoType(goType); config != nil {
++		return config.GLibType
++	}
++
++	return ""
++}
+ 
+ // delimToCamel to camel converts a string with parts separated by `delim` to CamelCase
+ func delimToCamel(s string, delim string) string {
+@@ -216,72 +297,75 @@ }
+ 
+ // PropertyScalarSet generates the appropriate v.SetXXX(value) call based on the property's GoType and GLibType
+ func PropertyScalarSet(goType, glibType, valueName, objPrefix string) string {
+-	switch goType {
+-	case "bool":
+-		return "v.SetBoolean(" + valueName + ")"
+-	case "int":
+-		return "v.SetInt(" + valueName + ")"
+-	case "int64":
+-		return "v.SetInt64(" + valueName + ")"
+-	case "uint":
+-		return "v.SetUint(" + valueName + ")"
+-	case "uint64":
+-		return "v.SetUint64(" + valueName + ")"
+-	case "float32":
+-		return "v.SetFloat(" + valueName + ")"
+-	case "float64":
+-		return "v.SetDouble(" + valueName + ")"
+-	case "string":
+-		return "v.SetString(" + valueName + ")"
+-	case "uintptr":
+-		return "v.SetPointer(" + valueName + ")"
++	// First, try to find by Go type
++	if mapping := gGLibTypeConfigByGoType(goType); mapping != nil {
++		return "v." + mapping.SetterMethod + "(" + valueName + ")"
+ 	}
+ 
+-	switch glibType {
+-	case "TypeEnumVal":
+-		return "v.SetEnum(int(" + valueName + "))"
+-	case "TypeFlagsVal":
+-		return "v.SetFlags(uint(" + valueName + "))"
+-	case "TypeGtypeVal":
+-		return "v.SetGtype(" + valueName + ")"
+-	case "TypeObjectVal":
+-		return "v.SetObject(&" + objPrefix + "Object{Ptr: " + valueName + ".GoPointer()})"
+-	default:
+-		return "v.SetPointer(uintptr(" + valueName + "))"
++	// Handle int32/uint32 which need casting to int/uint
++	if goType == "int32" {
++		return "v.SetInt(int(" + valueName + "))"
++	}
++
++	if goType == "uint32" {
++		return "v.SetUint(uint(" + valueName + "))"
++	}
++
++	// Try to find by GLib type for special types
++	if mapping := gLibTypeConfigByGLibType(glibType); mapping != nil {
++		if mapping.SetterTemplate != "" {
++			// Handle templates that need formatting
++			switch glibType {
++			case "TypeEnumVal", "TypeFlagsVal":
++				return strings.Replace(mapping.SetterTemplate, "%s", valueName, 1)
++
++			case "TypeObjectVal":
++				// Replace first %s with objPrefix, second %s with valueName
++				return strings.Replace(strings.Replace(mapping.SetterTemplate, "%s", objPrefix, 1), "%s", valueName, 1)
++			}
++		}
++
++		if mapping.SetterMethod != "" {
++			return "v." + mapping.SetterMethod + "(" + valueName + ")"
++		}
+ 	}
++
++	return "v.SetPointer(uintptr(" + valueName + "))"
+ }
+ 
+ // PropertyScalarGet generates the appropriate v.GetXXX() expression based on the property's GoType and GLibType
+ func PropertyScalarGet(goType, glibType, baseGoType string, isInterface, isRecord bool) string {
+-	switch goType {
+-	case "bool":
+-		return "return v.GetBoolean()"
+-	case "int":
+-		return "return v.GetInt()"
+-	case "int64":
+-		return "return v.GetInt64()"
+-	case "uint":
+-		return "return v.GetUint()"
+-	case "uint64":
+-		return "return v.GetUint64()"
+-	case "float32":
+-		return "return v.GetFloat()"
+-	case "float64":
+-		return "return v.GetDouble()"
+-	case "string":
+-		return "return v.GetString()"
+-	case "uintptr":
+-		return "return v.GetPointer()"
++	// First, try to find by Go type
++	if mapping := gGLibTypeConfigByGoType(goType); mapping != nil {
++		return "return v." + mapping.GetterMethod + "()"
++	}
++
++	// Handle int32/uint32 which need casting from int/uint
++	if goType == "int32" {
++		return "return int32(v.GetInt())"
++	}
++
++	if goType == "uint32" {
++		return "return uint32(v.GetUint())"
++	}
++
++	// Then, try to find by GLib type for special types
++	if mapping := gLibTypeConfigByGLibType(glibType); mapping != nil {
++		if mapping.GetterTemplate != "" {
++			// Handle templates that need formatting
++			switch glibType {
++			case "TypeEnumVal", "TypeFlagsVal":
++				return "return " + strings.Replace(mapping.GetterTemplate, "%s", goType, 1)
++			}
++		}
++
++		if mapping.GetterMethod != "" {
++			return "return v." + mapping.GetterMethod + "()"
++		}
+ 	}
+ 
+-	switch glibType {
+-	case "TypeEnumVal":
+-		return "return " + goType + "(v.GetEnum())"
+-	case "TypeFlagsVal":
+-		return "return " + goType + "(v.GetFlags())"
+-	case "TypeGtypeVal":
+-		return "return v.GetGtype()"
+-	case "TypeObjectVal":
++	// Special handling for TypeObjectVal
++	if glibType == "TypeObjectVal" {
+ 		result := "ptr := v.GetObject().GoPointer(); if ptr == 0 { return nil }; "
+ 		if isInterface {
+ 			result += "result := &" + baseGoType + "Base{}; result.Ptr = ptr; return result"
+@@ -291,11 +375,14 @@ 		} else {
+ 			result += "result := &" + baseGoType + "{}; result.Ptr = ptr; return result"
+ 		}
+ 		return result
+-	case "TypePointerVal":
++	}
++
++	// Special handling for TypePointerVal
++	if glibType == "TypePointerVal" {
+ 		return "return nil"
+-	default:
+-		return "return " + goType + "(v.GetPointer())"
+ 	}
++
++	return "return " + goType + "(v.GetPointer())"
+ }
+ 
+ // PropertyVectorSet generates the array conversion and v.SetXXX(value) call for array types
+
