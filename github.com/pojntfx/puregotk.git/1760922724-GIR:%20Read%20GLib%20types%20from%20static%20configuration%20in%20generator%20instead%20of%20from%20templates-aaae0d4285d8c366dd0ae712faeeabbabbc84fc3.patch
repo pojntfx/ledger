@@ -1,0 +1,181 @@
+From aaae0d4285d8c366dd0ae712faeeabbabbc84fc3 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Sun, 19 Oct 2025 18:12:04 -0700
+Subject: [PATCH] GIR: Read GLib types from static configuration in generator instead of from templates
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/gen.go b/gen.go
+index d0248e15591f9d260e2c4e67912b7e7f6c3a4635..c07ecc055159d89d8d20272fed681fb91ccb3525 100644
+--- a/gen.go
++++ b/gen.go
+@@ -30,7 +30,7 @@ 	}
+ 	// collect basic type info
+ 	p.First()
+ 
+-	// Create the template
++	// Create the Go template
+ 	gotemp, err := template.New("go").Funcs(template.FuncMap{
+ 		"conv":     util.ConvertArgs,
+ 		"convc":    util.ConvertArgsComma,
+@@ -50,12 +50,26 @@
+ 	// Write go files by making the second pass
+ 	p.Second(dir, gotemp)
+ 
+-	// Finally copy some extra code that we want in the API
+-	data, err := os.ReadFile("templates/gobject")
+-	if err == nil {
+-		os.WriteFile("v4/gobject/more.go", data, 0o644)
++	// Create and write the gobject template
++	gobjecttemp, err := template.New("gobject").Funcs(template.FuncMap{
++		"glibtypes": util.GetGLibTypeConstants,
++	}).ParseFiles("templates/gobject")
++	if err != nil {
++		panic(err)
+ 	}
+-	data, err = os.ReadFile("templates/gtype")
++	gobjectFile, err := os.OpenFile("v4/gobject/more.go", os.O_CREATE|os.O_WRONLY, 0o644)
++	if err != nil {
++		panic(err)
++	}
++	defer gobjectFile.Close()
++
++	err = gobjecttemp.Execute(gobjectFile, nil)
++	if err != nil {
++		panic(err)
++	}
++
++	// Finally copy some extra code that we want in the API
++	data, err := os.ReadFile("templates/gtype")
+ 	if err == nil {
+ 		mkerr := os.MkdirAll("v4/gobject/types", 0o755)
+ 		if mkerr != nil {
+diff --git a/internal/gir/util/util.go b/internal/gir/util/util.go
+index 2900c70c8f68200660d458ad01fc589e47c9077f..756c3a7e511b6667facf89a731c27fe92d4f5afb 100644
+--- a/internal/gir/util/util.go
++++ b/internal/gir/util/util.go
+@@ -11,12 +11,13 @@ )
+ 
+ // glibTypeConfig defines a mapping between Go types, GLib types, and their getter/setter methods
+ type glibTypeConfig struct {
+-	GoType         string
+-	GLibType       string
+-	SetterMethod   string
+-	GetterMethod   string
+-	SetterTemplate string
+-	GetterTemplate string
++// glibTypeConstant defines a GLib type constant with its name and value
++// This matches the constants defined in templates/gobject
++type glibTypeConstant struct {
++	Name  string // The constant name (e.g. "TypeBooleanVal")
++	Value string // The constant value expression (e.g. "5 << 2")
++}
++
+ }
+ 
+ var (
+@@ -61,9 +62,34 @@ 			SetterMethod: "SetGtype",
+ 			GetterMethod: "GetGtype",
+ 		},
+ 		"TypeObjectVal": {
+-			GLibType:       "TypeObjectVal",
+-			SetterTemplate: "v.SetObject(&%sObject{Ptr: %s.GoPointer()})",
+-		},
++	glibTypeConstants = []glibTypeConstant{
++		{Name: "TypeInvalidVal", Value: "0"},
++		{Name: "TypeNoneVal", Value: "1 << 2"},
++		{Name: "TypeInterfaceVal", Value: "2 << 2"},
++		{Name: "TypeCharVal", Value: "3 << 2"},
++		{Name: "TypeUcharVal", Value: "4 << 2"},
++		{Name: "TypeBooleanVal", Value: "5 << 2"},
++		{Name: "TypeIntVal", Value: "6 << 2"},
++		{Name: "TypeUintVal", Value: "7 << 2"},
++		{Name: "TypeLongVal", Value: "8 << 2"},
++		{Name: "TypeUlongVal", Value: "9 << 2"},
++		{Name: "TypeInt64Val", Value: "10 << 2"},
++		{Name: "TypeUint64Val", Value: "11 << 2"},
++		{Name: "TypeEnumVal", Value: "12 << 2"},
++		{Name: "TypeFlagsVal", Value: "13 << 2"},
++		{Name: "TypeFloatVal", Value: "14 << 2"},
++		{Name: "TypeDoubleVal", Value: "15 << 2"},
++		{Name: "TypeStringVal", Value: "16 << 2"},
++		{Name: "TypePointerVal", Value: "17 << 2"},
++		{Name: "TypeBoxedVal", Value: "18 << 2"},
++		{Name: "TypeParamVal", Value: "19 << 2"},
++		{Name: "TypeObjectVal", Value: "20 << 2"},
++		{Name: "TypeReservedGLibLastVal", Value: "31 << 2"},
++		{Name: "TypeReservedBseFirstVal", Value: "32 << 2"},
++		{Name: "TypeReservedBseLastVal", Value: "48 << 2"},
++		{Name: "TypeReservedUserFirstVal", Value: "49 << 2"},
++		// TypeGtypeVal is special, it's initialized at runtime via g_gtype_get_type()
++	}
+ 	}
+ )
+ 
+@@ -83,6 +109,25 @@ 		return &mapping
+ 	}
+ 
+ 	return nil
++}
++
++// GetGLibTypeConstants generates the Go const block for all GLib type constants
++// This is used in templates to generate the type constants block
++func GetGLibTypeConstants() string {
++	var result strings.Builder
++	result.WriteString("// types\n")
++	result.WriteString("const (\n")
++	for i, constant := range glibTypeConstants {
++		if i == 0 {
++			// First constant gets the Type annotation
++			result.WriteString("\t" + constant.Name + " Type = " + constant.Value + "\n")
++		} else {
++			// Subsequent constants omit the type
++			result.WriteString("\t" + constant.Name + " = " + constant.Value + "\n")
++		}
++	}
++	result.WriteString(")\n")
++	return result.String()
+ }
+ 
+ // GGLibTypeByGoType returns the GLib type constant for a given Go type
+diff --git a/templates/gobject b/templates/gobject
+index 1301175f1a11ee4257a182ba344b3575088fb93c..08121d63e6e47b0ef8fb4afffd73d1b77a8e7518 100644
+--- a/templates/gobject
++++ b/templates/gobject
+@@ -44,34 +44,7 @@ func (o Object) DisconnectSignal(handler uint32) {
+ 	SignalHandlerDisconnect(&o, handler)
+ }
+ 
+-// types
+-const (
+-	TypeInvalidVal           Type = 0
+-	TypeNoneVal                   = 1 << 2
+-	TypeInterfaceVal              = 2 << 2
+-	TypeCharVal                   = 3 << 2
+-	TypeUcharVal                  = 4 << 2
+-	TypeBooleanVal                = 5 << 2
+-	TypeIntVal                    = 6 << 2
+-	TypeUintVal                   = 7 << 2
+-	TypeLongVal                   = 8 << 2
+-	TypeUlongVal                  = 9 << 2
+-	TypeInt64Val                  = 10 << 2
+-	TypeUint64Val                 = 11 << 2
+-	TypeEnumVal                   = 12 << 2
+-	TypeFlagsVal                  = 13 << 2
+-	TypeFloatVal                  = 14 << 2
+-	TypeDoubleVal                 = 15 << 2
+-	TypeStringVal                 = 16 << 2
+-	TypePointerVal                = 17 << 2
+-	TypeBoxedVal                  = 18 << 2
+-	TypeParamVal                  = 19 << 2
+-	TypeObjectVal                 = 20 << 2
+-	TypeReservedGLibLastVal       = 31 << 2
+-	TypeReservedBseFirstVal       = 32 << 2
+-	TypeReservedBseLastVal        = 48 << 2
+-	TypeReservedUserFirstVal      = 49 << 2
+-)
++{{glibtypes}}
+ 
+ // TypeGtypeVal is initialized at runtime via g_gtype_get_type()
+ var TypeGtypeVal Type
+
