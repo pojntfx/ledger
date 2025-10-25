@@ -1,0 +1,80 @@
+From aa2eecaa9877ecc0c62b3556edb2286d6908cf05 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Sat, 25 Oct 2025 16:25:51 -0700
+Subject: [PATCH] fix: Use new bindings with support for getting the starting drag point
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/go.mod b/go.mod
+index 88d2a86e2b524d919dbc68d627bc6185b6bac794..19695a662bd59512fb9bb9de7244aa3916134ff8 100644
+--- a/go.mod
++++ b/go.mod
+@@ -14,3 +14,5 @@ 	github.com/dennwc/flatpak-go-mod v0.1.1-0.20250809093520-ddf8d84264aa // indirect
+ 	github.com/goccy/go-yaml v1.18.0 // indirect
+ 	golang.org/x/mod v0.27.0 // indirect
+ )
++
++replace github.com/jwijenbergh/puregotk => github.com/pojntfx/puregotk v0.0.0-20251025231904-c77cab625c00
+diff --git a/go.mod.json b/go.mod.json
+index d51727b03bd4df90293a8701415ac1cf2dbac545..e81e438fdf81831f78fe6983e09ccf6666f3f5fc 100644
+--- a/go.mod.json
++++ b/go.mod.json
+@@ -13,10 +13,10 @@     "url": "https://proxy.golang.org/github.com/jwijenbergh/purego/@v/v0.0.0-20251017112123-b71757b9ba42.zip"
+   },
+   {
+     "dest": "vendor/github.com/jwijenbergh/puregotk",
+-    "sha256": "da185d44c60970452693f68df88840c18193effa17194c8630fe8f31445ca6a3",
++    "sha256": "e0250ddaa1fcbf9fabf60e1bc132994ca32cd007032d112c684353f30ef6b729",
+     "strip-components": 3,
+     "type": "archive",
+-    "url": "https://proxy.golang.org/github.com/jwijenbergh/puregotk/@v/v0.0.0-20251022075221-eae1610c7d83.zip"
++    "url": "https://proxy.golang.org/github.com/pojntfx/puregotk/@v/v0.0.0-20251025231904-c77cab625c00.zip"
+   },
+   {
+     "dest": "vendor/github.com/dennwc/flatpak-go-mod",
+diff --git a/go.sum b/go.sum
+index 654f3f8496d0f6630c0f3c5acbfab5767b757e10..e0fc25160b737b599f69c720fc1b1d67c1a7f4bd 100644
+--- a/go.sum
++++ b/go.sum
+@@ -4,7 +4,7 @@ github.com/goccy/go-yaml v1.18.0 h1:8W7wMFS12Pcas7KU+VVkaiCng+kG8QiFeFwzFb+rwuw=
+ github.com/goccy/go-yaml v1.18.0/go.mod h1:XBurs7gK8ATbW4ZPGKgcbrY1Br56PdM69F7LkFRi1kA=
+ github.com/jwijenbergh/purego v0.0.0-20251017112123-b71757b9ba42 h1:kQ0LX4ffJvtONhymro3HzrB8XUa6dIGgrbnkl38Rgl0=
+ github.com/jwijenbergh/purego v0.0.0-20251017112123-b71757b9ba42/go.mod h1:amE5lVGstyh2GTEIHFEbgJHmoMD0llIuapnzIlZx7Fc=
+-github.com/jwijenbergh/puregotk v0.0.0-20251022075221-eae1610c7d83 h1:YtQzIuK6PEOw/ii7yMX7hHETUOUyjRNAZrodAQcZlYM=
+-github.com/jwijenbergh/puregotk v0.0.0-20251022075221-eae1610c7d83/go.mod h1:mZu8qSvCSqtVL+xoiebZuicnJijwrLfGRs6/eTVgFlc=
++github.com/pojntfx/puregotk v0.0.0-20251025231904-c77cab625c00 h1:QcUtU02mMNMHLe/BvMZ069G6fNsEnBEFe+pL0uI4kAw=
++github.com/pojntfx/puregotk v0.0.0-20251025231904-c77cab625c00/go.mod h1:mZu8qSvCSqtVL+xoiebZuicnJijwrLfGRs6/eTVgFlc=
+ golang.org/x/mod v0.27.0 h1:kb+q2PyFnEADO2IEF935ehFUXlWiNjJWtRNgBLSfbxQ=
+ golang.org/x/mod v0.27.0/go.mod h1:rWI627Fq0DEoudcK+MBkNkCe0EetEaDSwJJkCcjpazc=
+diff --git a/internal/components/main_window.go b/internal/components/main_window.go
+index e09b5965ae5fb1296eb6e94f35ee66d945c0efc3..c9eec643252ebf454ca28c454ef0dfe523709827 100644
+--- a/internal/components/main_window.go
++++ b/internal/components/main_window.go
+@@ -199,7 +199,7 @@ 	drag.ConnectDragBegin(&onDragBegin)
+ 	onDragUpdate := func(drag gtk.GestureDrag, dx float64, dy float64) {
+ 		if w.dragging {
+ 			var x, y float64
+-			drag.GetStartPoint(x, y) // TODO: Use fixed bindings here (we should be passing in pointers or returning those values)
++			drag.GetStartPoint(&x, &y)
+ 			w.handleDialing(x+dx, y+dy)
+ 		}
+ 	}
+diff --git a/modules.txt b/modules.txt
+index 5238b70041093284c8a7263f96c960dc6b5c3b0c..9b7a736f4a2edb4a8663aed1df175e58c8fb8ae2 100644
+--- a/modules.txt
++++ b/modules.txt
+@@ -19,7 +19,7 @@ github.com/jwijenbergh/purego/internal/cgo
+ github.com/jwijenbergh/purego/internal/fakecgo
+ github.com/jwijenbergh/purego/internal/strings
+ github.com/jwijenbergh/purego/internal/xreflect
+-# github.com/jwijenbergh/puregotk v0.0.0-20251022075221-eae1610c7d83
++# github.com/jwijenbergh/puregotk v0.0.0-20251022075221-eae1610c7d83 => github.com/pojntfx/puregotk v0.0.0-20251025231904-c77cab625c00
+ ## explicit; go 1.23.0
+ github.com/jwijenbergh/puregotk/internal/core
+ github.com/jwijenbergh/puregotk/pkg/core
+@@ -42,3 +42,4 @@ golang.org/x/mod/internal/lazyregexp
+ golang.org/x/mod/modfile
+ golang.org/x/mod/module
+ golang.org/x/mod/semver
++# github.com/jwijenbergh/puregotk => github.com/pojntfx/puregotk v0.0.0-20251025231904-c77cab625c00
+
