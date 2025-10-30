@@ -1,0 +1,280 @@
+From 3fca33260aecd62c1f0941aedf545a45b5667673 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Wed, 29 Oct 2025 23:42:45 -0700
+Subject: [PATCH] GIR: Add property getters and setters generation support for primitive types
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/internal/gir/pass/pass.go b/internal/gir/pass/pass.go
+index beea0a1e2d2c6c575ab3e2e703ceee3569ebe440..899b000c457343194b5346cd8d40cf32bc8cb0d9 100644
+--- a/internal/gir/pass/pass.go
++++ b/internal/gir/pass/pass.go
+@@ -365,6 +365,15 @@ 		}
+ 		for _, impl := range cls.Implements {
+ 			interfaces = append(interfaces, types.GetInterfaceFuncs(ns.Name, impl.Name, implemented, p.Types))
+ 		}
++		properties := make([]types.PropertyTemplate, 0, len(cls.Properties))
++		for _, prop := range cls.Properties {
++			propTemp := prop.Template(ns.Name, p.Types)
++
++			// TODO: Implement non-primitive types, then remove this
++			if propTemp.GValueType != "" {
++				properties = append(properties, propTemp)
++			}
++		}
+ 		classes[fn] = append(classes[fn], types.ClassTemplate{
+ 			Doc:          cls.Doc.StringSafe(),
+ 			Name:         cls.Name,
+@@ -373,6 +382,7 @@ 			Constructors: constructors,
+ 			Receivers:    receivers,
+ 			Interfaces:   interfaces,
+ 			Functions:    functions,
++			Properties:   properties,
+ 			Signals:      signals,
+ 			TypeGetter:   cls.GLibGetType,
+ 		})
+diff --git a/internal/gir/types/interface.go b/internal/gir/types/interface.go
+index 953ea5fa799024ef7ef3e7d29762629fe6b309f8..30d4525104532847049ef6f5aad10d64e52ee2e9 100644
+--- a/internal/gir/types/interface.go
++++ b/internal/gir/types/interface.go
+@@ -33,11 +33,23 @@ 				Ret:   m.ReturnValue.Template(currns, ins, kinds, m.Throws),
+ 			},
+ 		})
+ 	}
++
++	properties := make([]PropertyTemplate, 0, len(inter.Properties))
++	for _, prop := range inter.Properties {
++		propTemp := prop.Template(currns, kinds)
++
++		// TODO: Implement non-primitive types, then remove this
++		if propTemp.GValueType != "" {
++			properties = append(properties, propTemp)
++		}
++	}
++
+ 	name := util.SnakeToCamel(inter.Name)
+ 	return InterfaceTemplate{
+ 		Name:       name,
+ 		Doc:        inter.Doc.StringSafe(),
+ 		Methods:    methods,
++		Properties: properties,
+ 		TypeGetter: inter.GLibGetType,
+ 	}
+ }
+diff --git a/internal/gir/types/template.go b/internal/gir/types/template.go
+index 2e166362489baff9d2c91b0d6b6a07b6d52ae2c7..401978c5927f7cc9a49973dd9bafa460e499d7d8 100644
+--- a/internal/gir/types/template.go
++++ b/internal/gir/types/template.go
+@@ -391,6 +391,27 @@ 	Args  funcArgsTemplate
+ 	Ret   funcRetTemplate
+ }
+ 
++type PropertyTemplate struct {
++	// Doc is the documentation for the property
++	Doc string
++	// Name is the Go name for the property
++	Name string
++	// CName is the raw c name
++	CName string
++	// GoType is the Go type for the property
++	GoType string
++	// GValueType is the GObject Type constant (e.g. "TypeBooleanVal")
++	GValueType string
++	// SetMethod is the Value setter method name (e.g. "SetBoolean")
++	SetMethod string
++	// GetMethod is the Value getter method name (e.g. "GetBoolean")
++	GetMethod string
++	// Readable indicates if this property can be read
++	Readable bool
++	// Writable indicates if this property can be written
++	Writable bool
++}
++
+ type ClassTemplate struct {
+ 	// Doc is the documentation for the class
+ 	Doc string
+@@ -406,6 +427,8 @@ 	// Interfaces are receiver methods that are implemented because it needs to satisfy a certain interface
+ 	Interfaces []InterfaceTemplate
+ 	// Functions are the Go function declarations
+ 	Functions []FuncTemplate
++	// Properties are the property getters and setters
++	Properties []PropertyTemplate
+ 	// Signals are helpers for ConnectX receivers
+ 	Signals []SignalsTemplate
+ 	// TypeGetter is the function to get the GLib type
+@@ -417,6 +440,8 @@ 	Doc  string
+ 	Name string
+ 	// Methods is the methods that this interface defines
+ 	Methods []InterfaceFuncTemplate
++	// Properties are the property getters and setters
++	Properties []PropertyTemplate
+ 	// TypeGetter is the function to get the GLib type
+ 	TypeGetter string
+ }
+diff --git a/internal/gir/types/types.go b/internal/gir/types/types.go
+index 1ffa1f87dc8fec01b65caef3348cc81ef8e024a8..6988a22c3df61007f8b273415c292de15b87e342 100644
+--- a/internal/gir/types/types.go
++++ b/internal/gir/types/types.go
+@@ -376,6 +376,7 @@ 	Constructors   []Constructor   `xml:"http://www.gtk.org/introspection/core/1.0 constructor"`
+ 	Methods        []Method        `xml:"http://www.gtk.org/introspection/core/1.0 method"`
+ 	VirtualMethods []VirtualMethod `xml:"http://www.gtk.org/introspection/core/1.0 virtual-method"`
+ 	Fields         []Field         `xml:"http://www.gtk.org/introspection/core/1.0 field"`
++	Properties     []Property      `xml:"http://www.gtk.org/introspection/core/1.0 property"`
+ 	Signals        []Signal        `xml:"http://www.gtk.org/introspection/glib/1.0 signal"`
+ }
+ 
+@@ -565,6 +566,7 @@ 	Functions      []Function      `xml:"http://www.gtk.org/introspection/core/1.0 function"`
+ 	Methods        []Method        `xml:"http://www.gtk.org/introspection/core/1.0 method"`
+ 	VirtualMethods []VirtualMethod `xml:"http://www.gtk.org/introspection/core/1.0 virtual-method"`
+ 	Prerequisites  []Prerequisite  `xml:"http://www.gtk.org/introspection/core/1.0 prerequisite"`
++	Properties     []Property      `xml:"http://www.gtk.org/introspection/core/1.0 property"`
+ 	Signals        []Signal        `xml:"http://www.gtk.org/introspection/glib/1.0 signal"`
+ 
+ 	InfoAttrs
+@@ -701,7 +703,76 @@ 	XMLName xml.Name `xml:"http://www.gtk.org/introspection/core/1.0 prerequisite"`
+ 	Name    string   `xml:"name,attr"`
+ }
+ 
+-type Property struct{}
++type Property struct {
++	XMLName           xml.Name `xml:"http://www.gtk.org/introspection/core/1.0 property"`
++	Name              string   `xml:"name,attr"`
++	Writable          bool     `xml:"writable,attr"`
++	Readable          *bool    `xml:"readable,attr"` // default true
++	Construct         bool     `xml:"construct,attr"`
++	ConstructOnly     bool     `xml:"construct-only,attr"`
++	DefaultValue      string   `xml:"default-value,attr"`
++	Getter            string   `xml:"getter,attr"`
++	Setter            string   `xml:"setter,attr"`
++	TransferOwnership string   `xml:"transfer-ownership,attr"`
++
++	AnyType
++	InfoElements
++}
++
++func (p Property) IsReadable() bool {
++	return p.Readable == nil || *p.Readable
++}
++
++func (p *Property) Template(ns string, kinds KindMap) PropertyTemplate {
++	var (
++		goType                           = p.AnyType.Translate(ns, kinds)
++		cName                            = p.Name
++		gvalueType, setMethod, getMethod = mapGoTypeToGValue(goType)
++	)
++
++	return PropertyTemplate{
++		Doc:        p.Doc.StringSafe(),
++		Name:       util.DashToCamel(cName),
++		CName:      cName,
++		GoType:     goType,
++		GValueType: gvalueType,
++		SetMethod:  setMethod,
++		GetMethod:  getMethod,
++		Readable:   p.IsReadable(),
++		Writable:   p.Writable,
++	}
++}
++
++func mapGoTypeToGValue(goType string) (gvalueType, setMethod, getMethod string) {
++	switch strings.TrimPrefix(goType, "*") {
++	case "bool":
++		return "TypeBooleanVal", "SetBoolean", "GetBoolean"
++	case "byte":
++		return "TypeUcharVal", "SetUchar", "GetUchar"
++	case "int8":
++		return "TypeCharVal", "SetSchar", "GetSchar"
++	case "int":
++		return "TypeIntVal", "SetInt", "GetInt"
++	case "uint":
++		return "TypeUintVal", "SetUint", "GetUint"
++	case "int32":
++		return "TypeLongVal", "SetLong", "GetLong"
++	case "uint32":
++		return "TypeUlongVal", "SetUlong", "GetUlong"
++	case "int64":
++		return "TypeInt64Val", "SetInt64", "GetInt64"
++	case "uint64":
++		return "TypeUint64Val", "SetUint64", "GetUint64"
++	case "float32":
++		return "TypeFloatVal", "SetFloat", "GetFloat"
++	case "float64":
++		return "TypeDoubleVal", "SetDouble", "GetDouble"
++	case "string":
++		return "TypeStringVal", "SetString", "GetString"
++	default:
++		return "", "", ""
++	}
++}
+ 
+ type Record struct {
+ 	XMLName              xml.Name `xml:"http://www.gtk.org/introspection/core/1.0 record"`
+diff --git a/templates/go b/templates/go
+index 991011fa2e24ca9610d833a241c28cf192632fdc..146d48d29d0390359865036b4dc915fe47bc75e4 100644
+--- a/templates/go
++++ b/templates/go
+@@ -164,6 +164,33 @@      {{.Ret.Fmt $NotGObject}}
+ }
+ {{end}}
+ 
++{{range .Properties -}}
++{{if .Writable}}
++// SetProperty{{.Name}} sets the "{{.CName}}" property.
++{{.Doc}}
++func (x *{{$outer.Name}}Base) SetProperty{{.Name}}(value {{.GoType}}) {
++	obj := {{if $NotGObject}}gobject.{{end}}Object{}
++	obj.Ptr = x.GoPointer()
++	var v {{if $NotGObject}}gobject.{{end}}Value
++	v.Init({{if $NotGObject}}gobject.{{end}}{{.GValueType}})
++	v.{{.SetMethod}}(value)
++	obj.SetProperty("{{.CName}}", &v)
++}
++{{end}}
++
++{{if .Readable}}
++// GetProperty{{.Name}} gets the "{{.CName}}" property.
++{{.Doc}}
++func (x *{{$outer.Name}}Base) GetProperty{{.Name}}() {{.GoType}} {
++	obj := {{if $NotGObject}}gobject.{{end}}Object{}
++	obj.Ptr = x.GoPointer()
++	var v {{if $NotGObject}}gobject.{{end}}Value
++	obj.GetProperty("{{.CName}}", &v)
++	return v.{{.GetMethod}}()
++}
++{{end}}
++{{end}}
++
+ {{range .Methods -}}
+ var {{.Namespace}}X{{.FullName}} func(uintptr {{convc .Args.Pure.Types}}) {{.Ret.Raw}}
+ {{end}}
+@@ -275,6 +302,29 @@
+ func (c *{{.Name}}) SetGoPointer(ptr uintptr) {
+      c.Ptr = ptr
+ }
++
++{{range .Properties -}}
++{{if .Writable}}
++// SetProperty{{.Name}} sets the "{{.CName}}" property.
++{{.Doc}}
++func (x *{{$outer.Name}}) SetProperty{{.Name}}(value {{.GoType}}) {
++	var v {{if $NotGObject}}gobject.{{end}}Value
++	v.Init({{if $NotGObject}}gobject.{{end}}{{.GValueType}})
++	v.{{.SetMethod}}(value)
++	x.SetProperty("{{.CName}}", &v)
++}
++{{end}}
++
++{{if .Readable}}
++// GetProperty{{.Name}} gets the "{{.CName}}" property.
++{{.Doc}}
++func (x *{{$outer.Name}}) GetProperty{{.Name}}() {{.GoType}} {
++	var v {{if $NotGObject}}gobject.{{end}}Value
++	x.GetProperty("{{.CName}}", &v)
++	return v.{{.GetMethod}}()
++}
++{{end}}
++{{end}}
+ 
+ {{range .Signals -}}
+ 
+
