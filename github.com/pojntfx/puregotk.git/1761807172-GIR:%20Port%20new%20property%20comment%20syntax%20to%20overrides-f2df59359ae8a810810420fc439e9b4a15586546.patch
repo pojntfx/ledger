@@ -1,0 +1,108 @@
+From f2df59359ae8a810810420fc439e9b4a15586546 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Wed, 29 Oct 2025 23:52:52 -0700
+Subject: [PATCH] GIR: Port new property comment syntax to overrides
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/internal/gir/pass/pass.go b/internal/gir/pass/pass.go
+index 899b000c457343194b5346cd8d40cf32bc8cb0d9..366150e934b1d5ca2970cbab2efa0256c33f6f71 100644
+--- a/internal/gir/pass/pass.go
++++ b/internal/gir/pass/pass.go
+@@ -169,6 +169,7 @@ 				}
+ 
+ 				callbackAccessors = append(callbackAccessors, types.CallbackAccessor{
+ 					Name:         callbackName,
++					CName:        f.Name,
+ 					Doc:          doc,
+ 					CallbackType: "func(" + strings.Join(apiTypes, ", ") + ") " + ret.Value,
+ 					Args:         args,
+diff --git a/internal/gir/types/template.go b/internal/gir/types/template.go
+index 401978c5927f7cc9a49973dd9bafa460e499d7d8..b4519414cf58c350626e95a7f6e3e01c0342a83d 100644
+--- a/internal/gir/types/template.go
++++ b/internal/gir/types/template.go
+@@ -191,6 +191,9 @@ type CallbackAccessor struct {
+ 	// Name is the Go name of the callback field (without x prefix)
+ 	Name string
+ 
++	// CName is the raw c name
++	CName string
++
+ 	// Doc is the documentation for the callback
+ 	Doc string
+ 
+diff --git a/templates/go b/templates/go
+index 146d48d29d0390359865036b4dc915fe47bc75e4..5b410e49b5f9075a2676e67f61835de0c530682e 100644
+--- a/templates/go
++++ b/templates/go
+@@ -84,9 +84,9 @@ }
+ {{end}}
+ 
+ {{range .CallbackAccessors -}}
+-{{if .Doc}}// Override{{.Name}} sets the callback function.
+-{{.Doc}}{{else}}// Override{{.Name}} sets the callback function.{{end}}
+-func (x *{{$outer.Name}}) Override{{.Name}}(cb {{.CallbackType}}) {
++// Override{{.Name}} sets the "{{.CName}}" callback function.
++{{if .Doc}}{{.Doc}}
++{{end}}func (x *{{$outer.Name}}) Override{{.Name}}(cb {{.CallbackType}}) {
+      if cb == nil {
+           x.x{{.Name}} = 0
+      } else {
+@@ -100,9 +100,9 @@           })
+      }
+ }
+ 
+-{{if .Doc}}// Get{{.Name}} gets the callback function.
+-{{.Doc}}{{else}}// Get{{.Name}} gets the callback function.{{end}}
+-func (x *{{$outer.Name}}) Get{{.Name}}() {{.CallbackType}} {
++// Get{{.Name}} gets the "{{.CName}}" callback function.
++{{if .Doc}}{{.Doc}}
++{{end}}func (x *{{$outer.Name}}) Get{{.Name}}() {{.CallbackType}} {
+      if x.x{{.Name}} == 0 {
+           return nil
+      }
+@@ -167,8 +167,8 @@
+ {{range .Properties -}}
+ {{if .Writable}}
+ // SetProperty{{.Name}} sets the "{{.CName}}" property.
+-{{.Doc}}
+-func (x *{{$outer.Name}}Base) SetProperty{{.Name}}(value {{.GoType}}) {
++{{if .Doc}}{{.Doc}}
++{{end}}func (x *{{$outer.Name}}Base) SetProperty{{.Name}}(value {{.GoType}}) {
+ 	obj := {{if $NotGObject}}gobject.{{end}}Object{}
+ 	obj.Ptr = x.GoPointer()
+ 	var v {{if $NotGObject}}gobject.{{end}}Value
+@@ -180,8 +180,8 @@ {{end}}
+ 
+ {{if .Readable}}
+ // GetProperty{{.Name}} gets the "{{.CName}}" property.
+-{{.Doc}}
+-func (x *{{$outer.Name}}Base) GetProperty{{.Name}}() {{.GoType}} {
++{{if .Doc}}{{.Doc}}
++{{end}}func (x *{{$outer.Name}}Base) GetProperty{{.Name}}() {{.GoType}} {
+ 	obj := {{if $NotGObject}}gobject.{{end}}Object{}
+ 	obj.Ptr = x.GoPointer()
+ 	var v {{if $NotGObject}}gobject.{{end}}Value
+@@ -306,8 +306,8 @@
+ {{range .Properties -}}
+ {{if .Writable}}
+ // SetProperty{{.Name}} sets the "{{.CName}}" property.
+-{{.Doc}}
+-func (x *{{$outer.Name}}) SetProperty{{.Name}}(value {{.GoType}}) {
++{{if .Doc}}{{.Doc}}
++{{end}}func (x *{{$outer.Name}}) SetProperty{{.Name}}(value {{.GoType}}) {
+ 	var v {{if $NotGObject}}gobject.{{end}}Value
+ 	v.Init({{if $NotGObject}}gobject.{{end}}{{.GValueType}})
+ 	v.{{.SetMethod}}(value)
+@@ -317,8 +317,8 @@ {{end}}
+ 
+ {{if .Readable}}
+ // GetProperty{{.Name}} gets the "{{.CName}}" property.
+-{{.Doc}}
+-func (x *{{$outer.Name}}) GetProperty{{.Name}}() {{.GoType}} {
++{{if .Doc}}{{.Doc}}
++{{end}}func (x *{{$outer.Name}}) GetProperty{{.Name}}() {{.GoType}} {
+ 	var v {{if $NotGObject}}gobject.{{end}}Value
+ 	x.GetProperty("{{.CName}}", &v)
+ 	return v.{{.GetMethod}}()
+
