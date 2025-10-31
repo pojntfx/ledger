@@ -1,0 +1,139 @@
+From b5a1f4310405c0998670bf7c6ef906ddb4302ee9 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Thu, 30 Oct 2025 22:13:04 -0700
+Subject: [PATCH] GIR: Add property getters and setters generation support for `[]string`
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/internal/gir/types/types.go b/internal/gir/types/types.go
+index 6988a22c3df61007f8b273415c292de15b87e342..883baefda07cc8081728a1808b17fac8eb99330b 100644
+--- a/internal/gir/types/types.go
++++ b/internal/gir/types/types.go
+@@ -769,6 +769,8 @@ 	case "float64":
+ 		return "TypeDoubleVal", "SetDouble", "GetDouble"
+ 	case "string":
+ 		return "TypeStringVal", "SetString", "GetString"
++	case "[]string":
++		return "BoxedStrv", "SetBoxed", "GetBoxed"
+ 	default:
+ 		return "", "", ""
+ 	}
+diff --git a/templates/go b/templates/go
+index 5b410e49b5f9075a2676e67f61835de0c530682e..0311fe217eb909304e651a005f18ab3188f016c5 100644
+--- a/templates/go
++++ b/templates/go
+@@ -172,8 +172,20 @@ {{end}}func (x *{{$outer.Name}}Base) SetProperty{{.Name}}(value {{.GoType}}) {
+ 	obj := {{if $NotGObject}}gobject.{{end}}Object{}
+ 	obj.Ptr = x.GoPointer()
+ 	var v {{if $NotGObject}}gobject.{{end}}Value
+-	v.Init({{if $NotGObject}}gobject.{{end}}{{.GValueType}})
+-	v.{{.SetMethod}}(value)
++	{{if eq .GValueType "BoxedStrv"}}v.Init({{if $NotGLib}}glib.{{end}}StrvGetType())
++
++	cStrBytes := make([][]byte, len(value))
++	cStrings := make([]uintptr, len(value)+1)
++	for i, s := range value {
++		cStrBytes[i] = make([]byte, len(s)+1)
++		copy(cStrBytes[i], s)
++		cStrBytes[i][len(s)] = 0
++		cStrings[i] = uintptr(unsafe.Pointer(&cStrBytes[i][0]))
++	}
++	cStrings[len(value)] = 0
++
++	v.SetBoxed(uintptr(unsafe.Pointer(&cStrings[0]))){{else}}v.Init({{if $NotGObject}}gobject.{{end}}{{.GValueType}})
++	v.{{.SetMethod}}(value){{end}}
+ 	obj.SetProperty("{{.CName}}", &v)
+ }
+ {{end}}
+@@ -186,7 +198,32 @@ 	obj := {{if $NotGObject}}gobject.{{end}}Object{}
+ 	obj.Ptr = x.GoPointer()
+ 	var v {{if $NotGObject}}gobject.{{end}}Value
+ 	obj.GetProperty("{{.CName}}", &v)
+-	return v.{{.GetMethod}}()
++	{{if eq .GValueType "BoxedStrv"}}cStrvPtr := v.GetBoxed()
++	if cStrvPtr == 0 {
++		return nil
++	}
++
++	var result []string
++	ptr := cStrvPtr
++	for {
++		strPtr := *(*uintptr)(unsafe.Pointer(ptr))
++		if strPtr == 0 {
++			break
++		}
++
++		var length int
++		for i := 0; ; i++ {
++			if *(*byte)(unsafe.Pointer(strPtr + uintptr(i))) == 0 {
++				length = i
++				break
++			}
++		}
++
++		bytes := unsafe.Slice((*byte)(unsafe.Pointer(strPtr)), length)
++		result = append(result, string(bytes))
++		ptr += unsafe.Sizeof(uintptr(0))
++	}
++	return result{{else}}return v.{{.GetMethod}}(){{end}}
+ }
+ {{end}}
+ {{end}}
+@@ -309,8 +346,20 @@ // SetProperty{{.Name}} sets the "{{.CName}}" property.
+ {{if .Doc}}{{.Doc}}
+ {{end}}func (x *{{$outer.Name}}) SetProperty{{.Name}}(value {{.GoType}}) {
+ 	var v {{if $NotGObject}}gobject.{{end}}Value
+-	v.Init({{if $NotGObject}}gobject.{{end}}{{.GValueType}})
+-	v.{{.SetMethod}}(value)
++	{{if eq .GValueType "BoxedStrv"}}v.Init({{if $NotGLib}}glib.{{end}}StrvGetType())
++
++	cStrBytes := make([][]byte, len(value))
++	cStrings := make([]uintptr, len(value)+1)
++	for i, s := range value {
++		cStrBytes[i] = make([]byte, len(s)+1)
++		copy(cStrBytes[i], s)
++		cStrBytes[i][len(s)] = 0
++		cStrings[i] = uintptr(unsafe.Pointer(&cStrBytes[i][0]))
++	}
++	cStrings[len(value)] = 0
++
++	v.SetBoxed(uintptr(unsafe.Pointer(&cStrings[0]))){{else}}v.Init({{if $NotGObject}}gobject.{{end}}{{.GValueType}})
++	v.{{.SetMethod}}(value){{end}}
+ 	x.SetProperty("{{.CName}}", &v)
+ }
+ {{end}}
+@@ -321,7 +370,32 @@ {{if .Doc}}{{.Doc}}
+ {{end}}func (x *{{$outer.Name}}) GetProperty{{.Name}}() {{.GoType}} {
+ 	var v {{if $NotGObject}}gobject.{{end}}Value
+ 	x.GetProperty("{{.CName}}", &v)
+-	return v.{{.GetMethod}}()
++	{{if eq .GValueType "BoxedStrv"}}cStrvPtr := v.GetBoxed()
++	if cStrvPtr == 0 {
++		return nil
++	}
++
++	var result []string
++	ptr := cStrvPtr
++	for {
++		strPtr := *(*uintptr)(unsafe.Pointer(ptr))
++		if strPtr == 0 {
++			break
++		}
++
++		var length int
++		for i := 0; ; i++ {
++			if *(*byte)(unsafe.Pointer(strPtr + uintptr(i))) == 0 {
++				length = i
++				break
++			}
++		}
++
++		bytes := unsafe.Slice((*byte)(unsafe.Pointer(strPtr)), length)
++		result = append(result, string(bytes))
++		ptr += unsafe.Sizeof(uintptr(0))
++	}
++	return result{{else}}return v.{{.GetMethod}}(){{end}}
+ }
+ {{end}}
+ {{end}}
+
