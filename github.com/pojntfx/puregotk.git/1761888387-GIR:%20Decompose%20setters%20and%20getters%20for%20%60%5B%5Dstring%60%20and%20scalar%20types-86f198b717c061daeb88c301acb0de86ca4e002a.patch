@@ -1,0 +1,237 @@
+From 86f198b717c061daeb88c301acb0de86ca4e002a Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Thu, 30 Oct 2025 22:26:27 -0700
+Subject: [PATCH] GIR: Decompose setters and getters for `[]string` and scalar types
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/gen.go b/gen.go
+index 40bf95b64316d389cbb40d78b006ebedbc89d3b0..d0248e15591f9d260e2c4e67912b7e7f6c3a4635 100644
+--- a/gen.go
++++ b/gen.go
+@@ -38,6 +38,10 @@ 		"convcb":   util.ConvertCallbackArgs,
+ 		"convcd":   util.ConvertArgsCommaDeref,
+ 		"convd":    util.ConvertArgsDeref,
+ 		"convcbne": util.ConvertCallbackArgsNoErr,
++		"propsset": util.PropertyScalarSet,
++		"propsget": util.PropertyScalarGet,
++		"propvset": util.PropertyVectorSet,
++		"propvget": util.PropertyVectorGet,
+ 	}).ParseFiles("templates/go")
+ 	if err != nil {
+ 		panic(err)
+diff --git a/internal/gir/util/util.go b/internal/gir/util/util.go
+index 4fa86cb2b68b4ff000427632fd176c081373224e..7dde18710277683fe7f123eafd9ab828f912a677 100644
+--- a/internal/gir/util/util.go
++++ b/internal/gir/util/util.go
+@@ -213,3 +213,69 @@ 	}
+ 	// the default is just a concatenation if the constructor doesn't start with New
+ 	return outer + cname
+ }
++
++// PropertyScalarSet returns the code for setting a scalar property value
++func PropertyScalarSet(notGObject bool, gvalueType, setMethod string) string {
++	prefix := ""
++	if notGObject {
++		prefix = "gobject."
++	}
++	return prefix + gvalueType + ")\n\tv." + setMethod + "(value"
++}
++
++// PropertyScalarGet returns the code for getting a scalar property value
++func PropertyScalarGet(getMethod string) string {
++	return "v." + getMethod + "()"
++}
++
++// PropertyVectorSet returns the code for setting a vector property value
++func PropertyVectorSet(notGLib bool) string {
++	prefix := ""
++	if notGLib {
++		prefix = "glib."
++	}
++
++	return prefix + `StrvGetType())
++
++	cStrBytes := make([][]byte, len(value))
++	cStrings := make([]uintptr, len(value)+1)
++	for i, s := range value {
++		cStrBytes[i] = make([]byte, len(s)+1)
++		copy(cStrBytes[i], s)
++		cStrBytes[i][len(s)] = 0
++		cStrings[i] = uintptr(unsafe.Pointer(&cStrBytes[i][0]))
++	}
++	cStrings[len(value)] = 0
++
++	v.SetBoxed(uintptr(unsafe.Pointer(&cStrings[0])))`
++}
++
++// PropertyVectorGet returns the code for getting a vector property value
++func PropertyVectorGet() string {
++	return `cStrvPtr := v.GetBoxed()
++	if cStrvPtr == 0 {
++		return nil
++	}
++
++	var result []string
++	ptr := cStrvPtr
++	for {
++		strPtr := *(*uintptr)(unsafe.Pointer(ptr))
++		if strPtr == 0 {
++			break
++		}
++
++		var length int
++		for i := 0; ; i++ {
++			if *(*byte)(unsafe.Pointer(strPtr + uintptr(i))) == 0 {
++				length = i
++				break
++			}
++		}
++
++		bytes := unsafe.Slice((*byte)(unsafe.Pointer(strPtr)), length)
++		result = append(result, string(bytes))
++		ptr += unsafe.Sizeof(uintptr(0))
++	}
++	return result`
++}
+diff --git a/pkg/gir/util/util.go b/pkg/gir/util/util.go
+index 14ed3422c6ebec3a21b94ba4e71ffa8232e7c70c..94ccde8e640130f5e5e264e6d521fa4cadca9025 100644
+--- a/pkg/gir/util/util.go
++++ b/pkg/gir/util/util.go
+@@ -3,10 +3,14 @@
+ import "github.com/jwijenbergh/puregotk/internal/gir/util"
+ 
+ var (
+-	ConvertArgs            = util.ConvertArgs
+-	ConvertArgsComma       = util.ConvertArgsComma
+-	ConvertCallbackArgs    = util.ConvertCallbackArgs
+-	ConvertArgsCommaDeref  = util.ConvertArgsCommaDeref
+-	ConvertArgsDeref       = util.ConvertArgsDeref
++	ConvertArgs              = util.ConvertArgs
++	ConvertArgsComma         = util.ConvertArgsComma
++	ConvertCallbackArgs      = util.ConvertCallbackArgs
++	ConvertArgsCommaDeref    = util.ConvertArgsCommaDeref
++	ConvertArgsDeref         = util.ConvertArgsDeref
+ 	ConvertCallbackArgsNoErr = util.ConvertCallbackArgsNoErr
++	PropertyScalarSet        = util.PropertyScalarSet
++	PropertyScalarGet        = util.PropertyScalarGet
++	PropertyVectorSet        = util.PropertyVectorSet
++	PropertyVectorGet        = util.PropertyVectorGet
+ )
+diff --git a/templates/go b/templates/go
+index 0311fe217eb909304e651a005f18ab3188f016c5..9048e03d0f76d6f3d0cf43bfe599319f72a5ecab 100644
+--- a/templates/go
++++ b/templates/go
+@@ -172,20 +172,7 @@ {{end}}func (x *{{$outer.Name}}Base) SetProperty{{.Name}}(value {{.GoType}}) {
+ 	obj := {{if $NotGObject}}gobject.{{end}}Object{}
+ 	obj.Ptr = x.GoPointer()
+ 	var v {{if $NotGObject}}gobject.{{end}}Value
+-	{{if eq .GValueType "BoxedStrv"}}v.Init({{if $NotGLib}}glib.{{end}}StrvGetType())
+-
+-	cStrBytes := make([][]byte, len(value))
+-	cStrings := make([]uintptr, len(value)+1)
+-	for i, s := range value {
+-		cStrBytes[i] = make([]byte, len(s)+1)
+-		copy(cStrBytes[i], s)
+-		cStrBytes[i][len(s)] = 0
+-		cStrings[i] = uintptr(unsafe.Pointer(&cStrBytes[i][0]))
+-	}
+-	cStrings[len(value)] = 0
+-
+-	v.SetBoxed(uintptr(unsafe.Pointer(&cStrings[0]))){{else}}v.Init({{if $NotGObject}}gobject.{{end}}{{.GValueType}})
+-	v.{{.SetMethod}}(value){{end}}
++	{{if eq .GValueType "BoxedStrv"}}v.Init({{propvset $NotGLib}}{{else}}v.Init({{propsset $NotGObject .GValueType .SetMethod}}){{end}}
+ 	obj.SetProperty("{{.CName}}", &v)
+ }
+ {{end}}
+@@ -198,32 +185,7 @@ 	obj := {{if $NotGObject}}gobject.{{end}}Object{}
+ 	obj.Ptr = x.GoPointer()
+ 	var v {{if $NotGObject}}gobject.{{end}}Value
+ 	obj.GetProperty("{{.CName}}", &v)
+-	{{if eq .GValueType "BoxedStrv"}}cStrvPtr := v.GetBoxed()
+-	if cStrvPtr == 0 {
+-		return nil
+-	}
+-
+-	var result []string
+-	ptr := cStrvPtr
+-	for {
+-		strPtr := *(*uintptr)(unsafe.Pointer(ptr))
+-		if strPtr == 0 {
+-			break
+-		}
+-
+-		var length int
+-		for i := 0; ; i++ {
+-			if *(*byte)(unsafe.Pointer(strPtr + uintptr(i))) == 0 {
+-				length = i
+-				break
+-			}
+-		}
+-
+-		bytes := unsafe.Slice((*byte)(unsafe.Pointer(strPtr)), length)
+-		result = append(result, string(bytes))
+-		ptr += unsafe.Sizeof(uintptr(0))
+-	}
+-	return result{{else}}return v.{{.GetMethod}}(){{end}}
++	{{if eq .GValueType "BoxedStrv"}}{{propvget}}{{else}}return {{propsget .GetMethod}}{{end}}
+ }
+ {{end}}
+ {{end}}
+@@ -346,20 +308,7 @@ // SetProperty{{.Name}} sets the "{{.CName}}" property.
+ {{if .Doc}}{{.Doc}}
+ {{end}}func (x *{{$outer.Name}}) SetProperty{{.Name}}(value {{.GoType}}) {
+ 	var v {{if $NotGObject}}gobject.{{end}}Value
+-	{{if eq .GValueType "BoxedStrv"}}v.Init({{if $NotGLib}}glib.{{end}}StrvGetType())
+-
+-	cStrBytes := make([][]byte, len(value))
+-	cStrings := make([]uintptr, len(value)+1)
+-	for i, s := range value {
+-		cStrBytes[i] = make([]byte, len(s)+1)
+-		copy(cStrBytes[i], s)
+-		cStrBytes[i][len(s)] = 0
+-		cStrings[i] = uintptr(unsafe.Pointer(&cStrBytes[i][0]))
+-	}
+-	cStrings[len(value)] = 0
+-
+-	v.SetBoxed(uintptr(unsafe.Pointer(&cStrings[0]))){{else}}v.Init({{if $NotGObject}}gobject.{{end}}{{.GValueType}})
+-	v.{{.SetMethod}}(value){{end}}
++	{{if eq .GValueType "BoxedStrv"}}v.Init({{propvset $NotGLib}}{{else}}v.Init({{propsset $NotGObject .GValueType .SetMethod}}){{end}}
+ 	x.SetProperty("{{.CName}}", &v)
+ }
+ {{end}}
+@@ -370,32 +319,7 @@ {{if .Doc}}{{.Doc}}
+ {{end}}func (x *{{$outer.Name}}) GetProperty{{.Name}}() {{.GoType}} {
+ 	var v {{if $NotGObject}}gobject.{{end}}Value
+ 	x.GetProperty("{{.CName}}", &v)
+-	{{if eq .GValueType "BoxedStrv"}}cStrvPtr := v.GetBoxed()
+-	if cStrvPtr == 0 {
+-		return nil
+-	}
+-
+-	var result []string
+-	ptr := cStrvPtr
+-	for {
+-		strPtr := *(*uintptr)(unsafe.Pointer(ptr))
+-		if strPtr == 0 {
+-			break
+-		}
+-
+-		var length int
+-		for i := 0; ; i++ {
+-			if *(*byte)(unsafe.Pointer(strPtr + uintptr(i))) == 0 {
+-				length = i
+-				break
+-			}
+-		}
+-
+-		bytes := unsafe.Slice((*byte)(unsafe.Pointer(strPtr)), length)
+-		result = append(result, string(bytes))
+-		ptr += unsafe.Sizeof(uintptr(0))
+-	}
+-	return result{{else}}return v.{{.GetMethod}}(){{end}}
++	{{if eq .GValueType "BoxedStrv"}}{{propvget}}{{else}}return {{propsget .GetMethod}}{{end}}
+ }
+ {{end}}
+ {{end}}
+
