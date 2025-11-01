@@ -1,0 +1,121 @@
+From 53b764cffe3dcefc5254c34a393b2314f39cec31 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Fri, 31 Oct 2025 20:13:11 -0700
+Subject: [PATCH] GIR: Add support for generating enum property getters and setters
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/internal/gir/pass/pass.go b/internal/gir/pass/pass.go
+index 366150e934b1d5ca2970cbab2efa0256c33f6f71..3c1c969029780cdc8d318ecbd67e9014251b7c79 100644
+--- a/internal/gir/pass/pass.go
++++ b/internal/gir/pass/pass.go
+@@ -50,15 +50,13 @@ 	for _, rec := range ns.Records {
+ 		p.Types.Add(ns.Name, rec.Name, types.RecordsType, rec)
+ 	}
+ 	for _, en := range ns.Enums {
+-		// TODO: This probably shouldn't be aliastype, but we should make dedicated types
+-		p.Types.Add(ns.Name, en.Name, types.AliasType, en)
++		p.Types.Add(ns.Name, en.Name, types.EnumsType, en)
+ 	}
+ 	for _, cb := range ns.Callbacks {
+ 		p.Types.Add(ns.Name, cb.Name, types.CallbackType, cb)
+ 	}
+ 	for _, b := range ns.Bitfields {
+-		// TODO: This probably shouldn't be aliastype, but we should make dedicated types
+-		p.Types.Add(ns.Name, b.Name, types.AliasType, b)
++		p.Types.Add(ns.Name, b.Name, types.BitfieldsType, b)
+ 	}
+ 	for _, inter := range ns.Interfaces {
+ 		p.Types.Add(ns.Name, inter.Name, types.InterfacesType, inter)
+diff --git a/internal/gir/types/kind.go b/internal/gir/types/kind.go
+index b525627465a69e2221d5c9db0a050f5104c5ac49..94cb0f39997d6b363c182c7f53ad646186c77cec 100644
+--- a/internal/gir/types/kind.go
++++ b/internal/gir/types/kind.go
+@@ -16,6 +16,8 @@ 	ClassesType
+ 	InterfacesType
+ 	RecordsType
+ 	SliceType
++	EnumsType
++	BitfieldsType
+ 	OtherType
+ )
+ 
+diff --git a/internal/gir/types/types.go b/internal/gir/types/types.go
+index bc9d4447f15d5b624a4351392675d6ba7ee3f54d..d2e7528a875f65c1f3683319e4e35902289e9455 100644
+--- a/internal/gir/types/types.go
++++ b/internal/gir/types/types.go
+@@ -727,7 +727,7 @@ func (p *Property) Template(ns string, kinds KindMap) PropertyTemplate {
+ 	var (
+ 		goType                           = p.AnyType.Translate(ns, kinds)
+ 		cName                            = p.Name
+-		gvalueType, setMethod, getMethod = mapGoTypeToGValue(goType)
++		gvalueType, setMethod, getMethod = mapGoTypeToGValue(goType, ns, kinds)
+ 	)
+ 
+ 	return PropertyTemplate{
+@@ -743,8 +743,9 @@ 		Writable:   p.Writable,
+ 	}
+ }
+ 
+-func mapGoTypeToGValue(goType string) (gvalueType, setMethod, getMethod string) {
+-	switch strings.TrimPrefix(goType, "*") {
++func mapGoTypeToGValue(goType string, ns string, kinds KindMap) (gvalueType, setMethod, getMethod string) {
++	// Primitive types
++	switch goType {
+ 	case "bool":
+ 		return "TypeBooleanVal", "SetBoolean", "GetBoolean"
+ 	case "byte":
+@@ -777,6 +778,13 @@ 	case "[]byte":
+ 		return "BoxedByteArray", "SetBoxed", "GetBoxed"
+ 	case "[]uintptr":
+ 		return "BoxedPtrArray", "SetBoxed", "GetBoxed"
++	}
++
++	// Complex types
++	kind := kinds.Kind(ns, goType)
++	switch kind {
++	case EnumsType, BitfieldsType:
++		return "TypeEnumVal", "SetEnum", "GetEnum" // These are just ints internally
+ 	default:
+ 		return "", "", ""
+ 	}
+diff --git a/internal/gir/util/util.go b/internal/gir/util/util.go
+index d460a1811c9e8e83ad025bd49e619d2f0e338292..2582b609108d24feb8d04b8d07ae4f3341922cdc 100644
+--- a/internal/gir/util/util.go
++++ b/internal/gir/util/util.go
+@@ -220,6 +220,12 @@ 	prefix := ""
+ 	if notGObject {
+ 		prefix = "gobject."
+ 	}
++
++	// For enums, we need to cast to int
++	if gvalueType == "TypeEnumVal" {
++		return prefix + gvalueType + ")\n\tv." + setMethod + "(int(value)"
++	}
++
+ 	return prefix + gvalueType + ")\n\tv." + setMethod + "(value"
+ }
+ 
+diff --git a/templates/go b/templates/go
+index e09fa8542667a67e484e4ef631c6f9aa20950baa..8922f7f644c35a512081db5d1a0a725168e998a8 100644
+--- a/templates/go
++++ b/templates/go
+@@ -185,7 +185,7 @@ 	obj := {{if $NotGObject}}gobject.{{end}}Object{}
+ 	obj.Ptr = x.GoPointer()
+ 	var v {{if $NotGObject}}gobject.{{end}}Value
+ 	obj.GetProperty("{{.CName}}", &v)
+-	{{if or (eq .GValueType "BoxedStrv") (eq .GValueType "BoxedByteArray") (eq .GValueType "BoxedPtrArray")}}{{propvget .GoType}}{{else}}return {{propsget .GetMethod}}{{end}}
++	{{if or (eq .GValueType "BoxedStrv") (eq .GValueType "BoxedByteArray") (eq .GValueType "BoxedPtrArray")}}{{propvget .GoType}}{{else if eq .GValueType "TypeEnumVal"}}return {{.GoType}}({{propsget .GetMethod}}){{else}}return {{propsget .GetMethod}}{{end}}
+ }
+ {{end}}
+ {{end}}
+@@ -319,7 +319,7 @@ {{if .Doc}}{{.Doc}}
+ {{end}}func (x *{{$outer.Name}}) GetProperty{{.Name}}() {{.GoType}} {
+ 	var v {{if $NotGObject}}gobject.{{end}}Value
+ 	x.GetProperty("{{.CName}}", &v)
+-	{{if or (eq .GValueType "BoxedStrv") (eq .GValueType "BoxedByteArray") (eq .GValueType "BoxedPtrArray")}}{{propvget .GoType}}{{else}}return {{propsget .GetMethod}}{{end}}
++	{{if or (eq .GValueType "BoxedStrv") (eq .GValueType "BoxedByteArray") (eq .GValueType "BoxedPtrArray")}}{{propvget .GoType}}{{else if eq .GValueType "TypeEnumVal"}}return {{.GoType}}({{propsget .GetMethod}}){{else}}return {{propsget .GetMethod}}{{end}}
+ }
+ {{end}}
+ {{end}}
+
