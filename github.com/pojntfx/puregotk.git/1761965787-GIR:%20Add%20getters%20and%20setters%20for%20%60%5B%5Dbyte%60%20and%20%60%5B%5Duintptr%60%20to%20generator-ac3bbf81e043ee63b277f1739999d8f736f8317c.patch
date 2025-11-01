@@ -1,0 +1,118 @@
+From ac3bbf81e043ee63b277f1739999d8f736f8317c Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Fri, 31 Oct 2025 19:56:27 -0700
+Subject: [PATCH] GIR: Add getters and setters for `[]byte` and `[]uintptr` to generator
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/internal/gir/types/types.go b/internal/gir/types/types.go
+index d86568943b6c05efe65ba18d2c13c4bf034d71c0..bc9d4447f15d5b624a4351392675d6ba7ee3f54d 100644
+--- a/internal/gir/types/types.go
++++ b/internal/gir/types/types.go
+@@ -773,6 +773,10 @@ 	case "uintptr":
+ 		return "TypePointerVal", "SetPointer", "GetPointer"
+ 	case "[]string":
+ 		return "BoxedStrv", "SetBoxed", "GetBoxed"
++	case "[]byte":
++		return "BoxedByteArray", "SetBoxed", "GetBoxed"
++	case "[]uintptr":
++		return "BoxedPtrArray", "SetBoxed", "GetBoxed"
+ 	default:
+ 		return "", "", ""
+ 	}
+diff --git a/internal/gir/util/util.go b/internal/gir/util/util.go
+index 1c351a40263e2d660c4a4bcd72bd32e1a5d4206d..d460a1811c9e8e83ad025bd49e619d2f0e338292 100644
+--- a/internal/gir/util/util.go
++++ b/internal/gir/util/util.go
+@@ -229,17 +229,46 @@ 	return "v." + getMethod + "()"
+ }
+ 
+ // PropertyVectorSet returns the code for setting a vector property value
+-func PropertyVectorSet(notGLib bool) string {
++func PropertyVectorSet(notGLib bool, goType string) string {
+ 	prefix := ""
+ 	if notGLib {
+ 		prefix = "glib."
+ 	}
+ 
+-	return prefix + `StrvGetType())
++	switch goType {
++	case "[]string":
++		return prefix + `StrvGetType())
++	v.SetBoxed(uintptr(unsafe.Pointer(core.ByteSlice(value))))`
++	case "[]byte":
++		return prefix + `ByteArrayGLibType())
++	v.SetBoxed(uintptr(unsafe.Pointer(&value[0])))`
++	case "[]uintptr":
++		return prefix + `PtrArrayGLibType())
++	v.SetBoxed(uintptr(unsafe.Pointer(&value[0])))`
++	default:
++		return prefix + `StrvGetType())
+ 	v.SetBoxed(uintptr(unsafe.Pointer(core.ByteSlice(value))))`
++	}
+ }
+ 
+ // PropertyVectorGet returns the code for getting a vector property value
+-func PropertyVectorGet() string {
+-	return `return core.GoStringSlice(v.GetBoxed())`
++func PropertyVectorGet(goType string) string {
++	switch goType {
++	case "[]string":
++		return `return core.GoStringSlice(v.GetBoxed())`
++	case "[]byte":
++		return `ptr := v.GetBoxed()
++	if ptr == 0 {
++		return nil
++	}
++	return unsafe.Slice((*byte)(unsafe.Pointer(ptr)), 0)[:0]`
++	case "[]uintptr":
++		return `ptr := v.GetBoxed()
++	if ptr == 0 {
++		return nil
++	}
++	return unsafe.Slice((*uintptr)(unsafe.Pointer(ptr)), 0)[:0]`
++	default:
++		return `return core.GoStringSlice(v.GetBoxed())`
++	}
+ }
+diff --git a/templates/go b/templates/go
+index 9048e03d0f76d6f3d0cf43bfe599319f72a5ecab..e09fa8542667a67e484e4ef631c6f9aa20950baa 100644
+--- a/templates/go
++++ b/templates/go
+@@ -172,7 +172,7 @@ {{end}}func (x *{{$outer.Name}}Base) SetProperty{{.Name}}(value {{.GoType}}) {
+ 	obj := {{if $NotGObject}}gobject.{{end}}Object{}
+ 	obj.Ptr = x.GoPointer()
+ 	var v {{if $NotGObject}}gobject.{{end}}Value
+-	{{if eq .GValueType "BoxedStrv"}}v.Init({{propvset $NotGLib}}{{else}}v.Init({{propsset $NotGObject .GValueType .SetMethod}}){{end}}
++	{{if or (eq .GValueType "BoxedStrv") (eq .GValueType "BoxedByteArray") (eq .GValueType "BoxedPtrArray")}}v.Init({{propvset $NotGLib .GoType}}{{else}}v.Init({{propsset $NotGObject .GValueType .SetMethod}}){{end}}
+ 	obj.SetProperty("{{.CName}}", &v)
+ }
+ {{end}}
+@@ -185,7 +185,7 @@ 	obj := {{if $NotGObject}}gobject.{{end}}Object{}
+ 	obj.Ptr = x.GoPointer()
+ 	var v {{if $NotGObject}}gobject.{{end}}Value
+ 	obj.GetProperty("{{.CName}}", &v)
+-	{{if eq .GValueType "BoxedStrv"}}{{propvget}}{{else}}return {{propsget .GetMethod}}{{end}}
++	{{if or (eq .GValueType "BoxedStrv") (eq .GValueType "BoxedByteArray") (eq .GValueType "BoxedPtrArray")}}{{propvget .GoType}}{{else}}return {{propsget .GetMethod}}{{end}}
+ }
+ {{end}}
+ {{end}}
+@@ -308,7 +308,7 @@ // SetProperty{{.Name}} sets the "{{.CName}}" property.
+ {{if .Doc}}{{.Doc}}
+ {{end}}func (x *{{$outer.Name}}) SetProperty{{.Name}}(value {{.GoType}}) {
+ 	var v {{if $NotGObject}}gobject.{{end}}Value
+-	{{if eq .GValueType "BoxedStrv"}}v.Init({{propvset $NotGLib}}{{else}}v.Init({{propsset $NotGObject .GValueType .SetMethod}}){{end}}
++	{{if or (eq .GValueType "BoxedStrv") (eq .GValueType "BoxedByteArray") (eq .GValueType "BoxedPtrArray")}}v.Init({{propvset $NotGLib .GoType}}{{else}}v.Init({{propsset $NotGObject .GValueType .SetMethod}}){{end}}
+ 	x.SetProperty("{{.CName}}", &v)
+ }
+ {{end}}
+@@ -319,7 +319,7 @@ {{if .Doc}}{{.Doc}}
+ {{end}}func (x *{{$outer.Name}}) GetProperty{{.Name}}() {{.GoType}} {
+ 	var v {{if $NotGObject}}gobject.{{end}}Value
+ 	x.GetProperty("{{.CName}}", &v)
+-	{{if eq .GValueType "BoxedStrv"}}{{propvget}}{{else}}return {{propsget .GetMethod}}{{end}}
++	{{if or (eq .GValueType "BoxedStrv") (eq .GValueType "BoxedByteArray") (eq .GValueType "BoxedPtrArray")}}{{propvget .GoType}}{{else}}return {{propsget .GetMethod}}{{end}}
+ }
+ {{end}}
+ {{end}}
+
