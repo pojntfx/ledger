@@ -1,0 +1,39 @@
+From f53afb7b4a4a7f9b4da3942b1c8a570524e33dfd Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Mon, 17 Nov 2025 19:08:53 -0800
+Subject: [PATCH] GIR: Don't use `unsafe.Pointer` where we don't have to
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/internal/gir/types/template.go b/internal/gir/types/template.go
+index 6f988e27f4ec05f624350c05378a1d0015f57838..42ea22df97bca67b3f82f7e1b8885d30c5855546 100644
+--- a/internal/gir/types/template.go
++++ b/internal/gir/types/template.go
+@@ -47,7 +47,7 @@ 			// For out parameters, the C type already has a pointer, and so do non-primitive Go types.
+ 			// For primitive Go types we need to manually add the *
+ 			t = "*" + t
+ 		}
+-		c = fmt.Sprintf("uintptr(unsafe.Pointer(%s))", n)
++		c = n
+ 	} else {
+ 		switch k {
+ 		case CallbackType:
+@@ -96,14 +96,12 @@ 	c := n
+ 	stars := strings.Count(t, "*")
+ 
+ 	if isOut {
+-		// Out parameters are always pointers in C, so we can use uintptr for the type
+-		goPointerType := t
++		// Out parameters are always pointers in C
+ 		if stars == 0 {
+ 			// For primitive Go types we need to manually add the *
+-			goPointerType = "*" + t
++			t = "*" + t
+ 		}
+-		t = "uintptr"
+-		c = fmt.Sprintf("(%s)(unsafe.Pointer(%s))", goPointerType, n)
++		c = n
+ 	} else {
+ 		switch k {
+ 		case RecordsType:
+
