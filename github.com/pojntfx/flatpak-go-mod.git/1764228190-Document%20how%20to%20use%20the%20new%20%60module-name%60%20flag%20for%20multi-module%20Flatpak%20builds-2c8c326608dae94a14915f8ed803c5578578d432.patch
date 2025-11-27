@@ -1,0 +1,58 @@
+From 2c8c326608dae94a14915f8ed803c5578578d432 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Wed, 26 Nov 2025 23:23:10 -0800
+Subject: [PATCH] Document how to use the new `module-name` flag for multi-module Flatpak builds
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/README.md b/README.md
+index 6011c9ba767c0cdf5eac705853023e36e83b7942..bf7e65f24861b2410f64379be8988b3f37fefc08 100644
+--- a/README.md
++++ b/README.md
+@@ -59,8 +59,44 @@
+ ## Options
+ 
+ - `line-pref` customizes indentation in YAML/JSON file
+-- `dest-pref` sets a prefix for `sources.dest` paths in YAML/JSON file 
++- `dest-pref` sets a prefix for `sources.dest` paths in YAML/JSON file
+ - `json` changes the output format to JSON instead of YAML
++- `module-name` optional Flatpak module name (`mymodule` produces `mymodule.go.mod.json` and `mymodule.modules.txt`)
++
++## Multi-module Flatpak builds
++
++When building multiple Go modules in a single Flatpak (e.g. a GObject library written in Go and a main app written in Go that imports said GObject library), use `-module-name` to generate separate vendored dependencies for each:
++
++```bash
++go run github.com/dennwc/flatpak-go-mod@latest -json -module-name mylibgtk ../mylib-gtk/ # Generate for the library
++go run github.com/dennwc/flatpak-go-mod@latest -json . # Generate for the main app
++```
++
++If you're working with Go workspaces, make sure to `export GOWORK=off`.
++
++Then reference them in your Flatpak manifest:
++
++```jsonc
++// ...
++{
++  "modules": [
++    {
++      "name": "mylibgtk",
++      "buildsystem": "meson",
++      "sources": [
++        { "type": "dir", "path": "../mylib-gtk/" },
++        "mylibgtk.go.mod.json"
++      ]
++    },
++    {
++      "name": "mymainapp",
++      "buildsystem": "meson",
++      "sources": [{ "type": "dir", "path": "." }, "go.mod.json"]
++    }
++  ]
++}
++// ...
++```
+ 
+ ## License
+ 
+
