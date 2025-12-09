@@ -1,0 +1,27 @@
+From ed21dde50daaa58c9a5e60a01e5c76a6155e05ee Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Thu, 02 Oct 2025 23:41:00 -0700
+Subject: [PATCH] fix: Truncate long commit subjects to prevent issues with max file name lengths
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/cmd/pledge/cmd/submit.go b/cmd/pledge/cmd/submit.go
+index ba85339ba0918acfa14ca4dc86912aecbbfbdac5..9aba3948172cfcd3fc30efd3dea320f0254aff45 100644
+--- a/cmd/pledge/cmd/submit.go
++++ b/cmd/pledge/cmd/submit.go
+@@ -139,8 +139,13 @@ Subject: [PATCH] %v---
+ %v
+ `, currentCommit.Hash.String(), currentCommit.Author.String(), currentCommit.Author.When.Format(time.RFC1123Z), currentCommit.Message, patch.String())
+ 
++			commitSubject := strings.Split(currentCommit.Message, "\n")[0]
++			if len(commitSubject) > 100 {
++				commitSubject = commitSubject[:100]
++			}
++
+ 			var (
+-				patchFileName = fmt.Sprintf("%v", currentCommit.Author.When.Unix()) + "-" + url.PathEscape(strings.Split(currentCommit.Message, "\n")[0]) + "-" + currentCommit.Hash.String() + ".patch"
++				patchFileName = fmt.Sprintf("%v", currentCommit.Author.When.Unix()) + "-" + url.PathEscape(commitSubject) + "-" + currentCommit.Hash.String() + ".patch"
+ 				patchFilePath = filepath.Join(ledgerRepoDirectory, remoteDir, patchFileName)
+ 			)
+ 
+
