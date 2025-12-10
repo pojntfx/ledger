@@ -1,0 +1,93 @@
+From a0836f07aa685499fe07abf1d87774992b73a0cf Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Tue, 09 Dec 2025 23:17:26 -0800
+Subject: [PATCH] Examples: Add documentation for `mylib-gtk-meson-go`, `myapp-gnome-meson` and `myapp-gnome-gomod`
+---
+diff --git a/docs/screenshot-myapp-gnome-gomod.png b/docs/screenshot-myapp-gnome-gomod.png
+new file mode 100644
+index 0000000000000000000000000000000000000000..87cc4f5860cb128fc380182cf103221fae3255ef
+Binary files /dev/null and b/docs/screenshot-myapp-gnome-gomod.png differ
+diff --git a/docs/screenshot-myapp-gnome-meson.png b/docs/screenshot-myapp-gnome-meson.png
+new file mode 100644
+index 0000000000000000000000000000000000000000..a6cb38b9e8e86657b726964eeac1f97add1558d1
+Binary files /dev/null and b/docs/screenshot-myapp-gnome-meson.png differ
+diff --git a/examples/myapp-gnome-gomod/README.md b/examples/myapp-gnome-gomod/README.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..d933755943de7785f91b806958875a3485fa84b7
+--- /dev/null
++++ b/examples/myapp-gnome-gomod/README.md
+@@ -0,0 +1,25 @@
++# myapp-gnome-gomod
++
++This example implements a GNOME application using puregotk with the standard Go build system. For GTK applications, the [Meson build system](https://mesonbuild.com/) is commonly used instead, but using it is not required, and if you're just trying out GTK app development as a Go developer or trying to add a GTK app to an existing project, Meson might be confusing for you at first, which is why this example exists. For the functionally identical Meson-based example, see[../myapp-gnome-meson](../myapp-gnome-meson/). Like the Meson example, `myapp-gnome-gomod` uses the custom GTK widget from [../mylib-gtk-meson](../mylib-gtk-meson/) via the generated Go bindings from [../mylib-gtk-meson-go](../mylib-gtk-meson-go/). It also shows how to use Blueprint files, [GResources](https://docs.gtk.org/gio/struct.Resource.html) and `gettext` (for i18n) in puregotk-based applications.
++
++First, make sure the `mylib-gtk-meson` library is built and installed on your system (see [../mylib-gtk-meson](../mylib-gtk-meson/) for instructions).
++
++To then run the application using the standard Go build system, run:
++
++```shell
++go generate ./...
++
++go run -ldflags="-X main.LocaleDir=\"${PWD}/po\"" ./src/
++```
++
++Note the `ldflags` flag; without using Meson, the `.mo` files for i18n don't get installed to `/usr/share/locale` automatically, so we instead point `gettext` to read them from the local directory instead. If you install them manually, that is not something you have to do.
++
++Alternatively, you can build and run the application using Flatpak, which will also build `mylib-gtk-meson` for you and install the `.mo` files for i18n:
++
++```shell
++flatpak-builder --force-clean --force-clean --user --repo=repo --install builddir io.github.puregotk.MyAppGnomeGomod.json
++
++flatpak run io.github.puregotk.MyAppGnomeMeson
++```
++
++![Screenshot of myapp-gnome-gomod showing the main application window](../../docs/screenshot-myapp-gnome-gomod.png)
+diff --git a/examples/myapp-gnome-meson/README.md b/examples/myapp-gnome-meson/README.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..9fc4276122a3886910a81a9b41d93495c8fa30d6
+--- /dev/null
++++ b/examples/myapp-gnome-meson/README.md
+@@ -0,0 +1,23 @@
++# myapp-gnome-meson
++
++This example implements a GNOME application using puregotk with the [Meson build system](https://mesonbuild.com/), which is the default build system for GTK applications. It uses the custom GTK widget from [../mylib-gtk-meson](../mylib-gtk-meson/) via the generated Go bindings from [../mylib-gtk-meson-go](../mylib-gtk-meson-go/). It also shows how to use Blueprint files, [GResources](https://docs.gtk.org/gio/struct.Resource.html) and `gettext` (for i18n) in puregotk-based applications.
++
++First, make sure the `mylib-gtk-meson` library is built and installed on your system (see [../mylib-gtk-meson](../mylib-gtk-meson/) for instructions).
++
++To then build and install the application using Meson, run:
++
++```shell
++meson setup _build --prefix=/usr --wipe && meson compile -C _build && sudo meson install -C _build
++
++myapp-gnome-meson
++```
++
++![Screenshot of myapp-gnome-meson showing the main application window](../../docs/screenshot-myapp-gnome-meson.png)
++
++Alternatively, you can build and run the application using Flatpak, which will also build `mylib-gtk-meson` for you:
++
++```shell
++flatpak-builder --force-clean --force-clean --user --repo=repo --install builddir io.github.puregotk.MyAppGnomeMeson.json
++
++flatpak run io.github.puregotk.MyAppGnomeMeson
++```
+diff --git a/examples/mylib-gtk-meson-go/README.md b/examples/mylib-gtk-meson-go/README.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..aa2cf2596b347bf1e47912e633a95d52defd8c76
+--- /dev/null
++++ b/examples/mylib-gtk-meson-go/README.md
+@@ -0,0 +1,13 @@
++# mylib-gtk-meson-go
++
++This example shows how to generate Go bindings from the custom GTK library created in [../mylib-gtk-meson](../mylib-gtk-meson/). It uses puregotk's code generation pipeline to create type-safe Go bindings from the library's GIR (GObject Introspection Repository) file.
++
++First, make sure the `mylib-gtk-meson` library is built (see [../mylib-gtk-meson](../mylib-gtk-meson/) for instructions). Then copy the resulting GIR file from [../mylib-gtk-meson/\_build/src/MyLibGtkMeson-0.1.gir](../mylib-gtk-meson/_build/src/MyLibGtkMeson-0.1.gir) to [internal/gir/spec/MyLibGtkMeson-0.1.gir](./internal/gir/spec/MyLibGtkMeson-0.1.gir); this GIR file is what the bindings are generated from.
++
++To generate the Go bindings from this GIR file, run:
++
++```shell
++./gen.sh
++```
++
++The generated Go bindings can then be imported from [mylibgtkmeson](./mylibgtkmeson/) and used from other Go applications, as demonstrated in [../myapp-gnome-meson](../myapp-gnome-meson/) and [../myapp-gnome-gomod](../myapp-gnome-gomod/).
+
