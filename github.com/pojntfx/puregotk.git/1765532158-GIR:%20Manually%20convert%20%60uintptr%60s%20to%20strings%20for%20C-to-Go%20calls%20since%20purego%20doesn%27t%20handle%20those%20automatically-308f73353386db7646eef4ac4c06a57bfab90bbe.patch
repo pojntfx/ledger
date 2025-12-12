@@ -1,0 +1,98 @@
+From 308f73353386db7646eef4ac4c06a57bfab90bbe Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Fri, 12 Dec 2025 01:35:58 -0800
+Subject: [PATCH] GIR: Manually convert `uintptr`s to strings for C-to-Go calls since purego doesn't handle those automatically
+---
+diff --git a/internal/gir/types/template.go b/internal/gir/types/template.go
+index 4f940b4611b736cd81d1c2e628f9501d38282b66..e47b5312a53b9932acf3cfccf86acf7147131b28 100644
+--- a/internal/gir/types/template.go
++++ b/internal/gir/types/template.go
+@@ -18,6 +18,11 @@ 	// Call are the variables as given in a function call
+ 	Call []string
+ 
+ 	Full []string
++
++	// CallCToGo are the variables as given in a C-to-Go callback call
++	CallCToGo []string
++
++	FullCToGo []string
+ }
+ 
+ type funcArgsTemplate struct {
+@@ -140,6 +145,16 @@ 	f.Pure.Names = append(f.Pure.Names, n)
+ 	f.Pure.Types = append(f.Pure.Types, t)
+ 	f.Pure.Call = append(f.Pure.Call, c)
+ 	f.Pure.Full = append(f.Pure.Full, n+" "+t)
++
++	// For C-to-Go callbacks, purego doesn't automatically convert strings, we need to manually convert them with GoString
++	cToGoType := t
++	cToGoCall := c
++	if t == "string" {
++		cToGoType = "uintptr"
++		cToGoCall = fmt.Sprintf("core.GoString(%s)", n)
++	}
++	f.Pure.FullCToGo = append(f.Pure.FullCToGo, n+" "+cToGoType)
++	f.Pure.CallCToGo = append(f.Pure.CallCToGo, cToGoCall)
+ }
+ 
+ // isGoPrimitive checks if a type name (without [] or *) is a Go primitive type
+diff --git a/templates/go b/templates/go
+index 4023ce0f71171208c6f7e4e013ae41af82241c16..bdaf52762146b35e2e3742ab0ffdd7536d07ad07 100644
+--- a/templates/go
++++ b/templates/go
+@@ -11,6 +11,7 @@   {{end}}
+ {{end}}
+ {{ $NeedsUnsafe := or .Records $HasSignals }}
+ {{ $NeedsPurego := or .NeedsInit $HasSignals }}
++{{ $NeedsCore := or .NeedsInit $HasSignals }}
+ {{ $AnyImports := or .NeedsInit .Records $HasSignals }}
+ 
+ {{if $AnyImports}}
+@@ -24,7 +25,7 @@ {{- end}}
+ {{- if $NeedsPurego}}
+ 	"github.com/jwijenbergh/purego"
+ {{- end}}
+-{{- if .NeedsInit}}
++{{- if $NeedsCore}}
+ 	"github.com/jwijenbergh/puregotk/pkg/core"
+ {{- end}}
+ )
+@@ -90,12 +91,12 @@ {{end}}func (x *{{$outer.Name}}) Override{{.Name}}(cb {{.CallbackType}}) {
+      if cb == nil {
+           x.x{{.Name}} = 0
+      } else {
+-          x.x{{.Name}} = purego.NewCallback(func({{conv .Args.Pure.Full}}) {{.Ret.Raw}} {
+-               {{if .Ret.Value}}{{if .Ret.Class}}ret := cb({{convcb .Args.Pure.Call}})
++          x.x{{.Name}} = purego.NewCallback(func({{conv .Args.Pure.FullCToGo}}) {{.Ret.Raw}} {
++               {{if .Ret.Value}}{{if .Ret.Class}}ret := cb({{convcb .Args.Pure.CallCToGo}})
+                if ret == nil {
+                     return 0
+                }
+-               return ret.GoPointer(){{else}}return cb({{convcb .Args.Pure.Call}}){{end}}{{else}}cb({{convcb .Args.Pure.Call}}){{end}}
++               return ret.GoPointer(){{else}}return cb({{convcb .Args.Pure.CallCToGo}}){{end}}{{else}}cb({{convcb .Args.Pure.CallCToGo}}){{end}}
+           })
+      }
+ }
+@@ -333,17 +334,17 @@      if cbRefPtr, ok := {{if $NotGLib}}glib.{{end}}GetCallback(cbPtr); ok {
+           return {{if $NotGObject}}gobject.{{end}}SignalConnect(x.GoPointer(), "{{.CName}}", cbRefPtr)
+      }
+ 
+-     fcb := func(clsPtr uintptr {{convc .Args.Pure.Full}}) {{.Ret.Raw}} {
++     fcb := func(clsPtr uintptr {{convc .Args.Pure.FullCToGo}}) {{.Ret.Raw}} {
+           fa := {{$outer.Name}}{}
+           fa.Ptr = clsPtr
+           cbFn := *cb
+           {{if .Ret.Class}}
+-          {{.Name}}Cls := cbFn(fa {{convc .Args.Pure.Call}})
++          {{.Name}}Cls := cbFn(fa {{convc .Args.Pure.CallCToGo}})
+           return {{.Name}}Cls.Ptr
+           {{else if .Ret.Value}}
+-          return cbFn(fa {{convc .Args.Pure.Call}})
++          return cbFn(fa {{convc .Args.Pure.CallCToGo}})
+           {{else}}
+-          cbFn(fa {{convc .Args.Pure.Call}})
++          cbFn(fa {{convc .Args.Pure.CallCToGo}})
+           {{end}}
+      }
+      cbRefPtr := purego.NewCallback(fcb)
+
