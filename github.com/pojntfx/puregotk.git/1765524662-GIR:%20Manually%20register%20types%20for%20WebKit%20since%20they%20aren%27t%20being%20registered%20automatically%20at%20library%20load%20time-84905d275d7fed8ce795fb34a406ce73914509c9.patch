@@ -1,0 +1,74 @@
+From 84905d275d7fed8ce795fb34a406ce73914509c9 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Thu, 11 Dec 2025 23:31:02 -0800
+Subject: [PATCH] GIR: Manually register types for WebKit since they aren't being registered automatically at library load time
+---
+diff --git a/internal/gir/pass/pass.go b/internal/gir/pass/pass.go
+index 366150e934b1d5ca2970cbab2efa0256c33f6f71..adf86e2fe6de6003f732862fc789a30c3b29138e 100644
+--- a/internal/gir/pass/pass.go
++++ b/internal/gir/pass/pass.go
+@@ -423,12 +423,17 @@ 		// we do not need to add the length of interfaces in here
+ 		// as they should only be loaded when there are classes
+ 		needsInit := (len(functions[fn]) + methods) > 0
+ 
++		// Packages that need to have their types manually registered
++		// See https://bugs.webkit.org/show_bug.cgi?id=175937
++		registerTypes := pkgName == "webkit"
++
+ 		args := types.TemplateArg{
+ 			PkgName:         pkgName,
+ 			PkgEnv:          strings.ToUpper(pkgName),
+ 			PkgConfigName:   pkgConfigName,
+ 			SharedLibraries: sharedLibraries,
+ 			NeedsInit:       needsInit,
++			RegisterTypes:   registerTypes,
+ 			Aliases:         aliases[fn],
+ 			Callbacks:       callbacks[fn],
+ 			Records:         records[fn],
+diff --git a/internal/gir/types/template.go b/internal/gir/types/template.go
+index 68ec681863ea0f7fedfb194102f23fdae081f30d..4f940b4611b736cd81d1c2e628f9501d38282b66 100644
+--- a/internal/gir/types/template.go
++++ b/internal/gir/types/template.go
+@@ -499,6 +499,9 @@ 	// SharedLibraries is the list of shared library names from the GIR file
+ 	SharedLibraries []string
+ 	// NeedsInit declares whether or not this file needs an init code to register functions with purego
+ 	NeedsInit bool
++	// RegisterTypes declares whether the types in the GIR file need to be manually registered
++	// See https://bugs.webkit.org/show_bug.cgi?id=175937
++	RegisterTypes bool
+ 	// Imports defines the package imports that we need
+ 	// This does not include purego
+ 	// As the template already includes that if `NeedsInit` is set to true
+diff --git a/templates/go b/templates/go
+index e09fa8542667a67e484e4ef631c6f9aa20950baa..4023ce0f71171208c6f7e4e013ae41af82241c16 100644
+--- a/templates/go
++++ b/templates/go
+@@ -447,5 +447,27 @@     {{range .Methods -}}
+     core.PuregoSafeRegister(&{{.Namespace}}X{{.FullName}}, libs, "{{.CName}}")
+     {{end}}
+     {{end}}
++
++{{- if .RegisterTypes}}
++     {{- $hasTypes := false}}
++     {{- range .Classes}}{{if .TypeGetter}}{{$hasTypes = true}}{{end}}{{end}}
++     {{- range .Interfaces}}{{if .TypeGetter}}{{$hasTypes = true}}{{end}}{{end}}
++     {{- if $hasTypes}}
++
++     // Manually register types since they aren't being automatically registered when
++     // the library is loaded
++     // See https://bugs.webkit.org/show_bug.cgi?id=175937
++     {{- range .Classes}}
++     {{- if .TypeGetter}}
++         {{.Name}}GLibType()
++     {{- end}}
++     {{- end}}
++     {{- range .Interfaces}}
++     {{- if .TypeGetter}}
++         {{.Name}}GLibType()
++     {{- end}}
++     {{- end}}
++     {{- end}}
++{{- end}}
+ }
+ {{end}}
+
