@@ -1,0 +1,171 @@
+From b8345d1f18fa4e5b7d40da78461744a8586b5a77 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Wed, 18 Feb 2026 23:54:15 -0800
+Subject: [PATCH] Examples: Calculate type sizes for subclassing correctly now that `NewTypeQuery` uses `uint32`
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/examples/myapp-gnome-gomod/src/application.go b/examples/myapp-gnome-gomod/src/application.go
+index f2ae2be4c3ba28b41b3d536f6325a49826fabf6b..5c1d025c1493ce90bd170c6df3d1a0c15f289256 100644
+--- a/examples/myapp-gnome-gomod/src/application.go
++++ b/examples/myapp-gnome-gomod/src/application.go
+@@ -87,7 +87,7 @@ 		appParentQuery.Type,
+ 		"MyAppGnomeGomodApplication",
+ 		appParentQuery.ClassSize,
+ 		&appClassInit,
+-		appParentQuery.InstanceSize+uint(unsafe.Sizeof(Application{}))+uint(unsafe.Sizeof(&Application{}))+uint(unsafe.Sizeof(&adw.ApplicationWindow{})),
++		appParentQuery.InstanceSize,
+ 		&appInstanceInit,
+ 		0,
+ 	)
+diff --git a/examples/myapp-gnome-gomod/src/main.go b/examples/myapp-gnome-gomod/src/main.go
+index 883a9b673501bc2bddef66a1a96277236e6e77c7..fb884afa6df4f49faf0954fc83d2ee035f93447b 100644
+--- a/examples/myapp-gnome-gomod/src/main.go
++++ b/examples/myapp-gnome-gomod/src/main.go
+@@ -28,5 +28,5 @@ 		"application_id", AppID,
+ 		"flags", gio.GApplicationDefaultFlagsValue,
+ 	)
+ 
+-	os.Exit(app.Run(len(os.Args), os.Args))
++	os.Exit(int(app.Run(int32(len(os.Args)), os.Args)))
+ }
+diff --git a/examples/myapp-gnome-gomod/src/window.go b/examples/myapp-gnome-gomod/src/window.go
+index 486aea5df73f66b2d725fd38ce8ae012921ccd4c..b2a0c44de05378dc546413719c517f69d01b957f 100644
+--- a/examples/myapp-gnome-gomod/src/window.go
++++ b/examples/myapp-gnome-gomod/src/window.go
+@@ -122,7 +122,7 @@ 		windowParentQuery.Type,
+ 		"MyAppGnomeGomodWindow",
+ 		windowParentQuery.ClassSize,
+ 		&windowClassInit,
+-		windowParentQuery.InstanceSize+uint(unsafe.Sizeof(Window{}))+uint(unsafe.Sizeof(&Window{}))+uint(unsafe.Sizeof(&gtk.Button{})),
++		windowParentQuery.InstanceSize,
+ 		&windowInstanceInit,
+ 		0,
+ 	)
+diff --git a/examples/myapp-gnome-meson/src/application.go b/examples/myapp-gnome-meson/src/application.go
+index da778d639772d35ec6b3810f6290f1d59f93fa71..08e3fb37f696211dadbbb743ebbb05fa44600f68 100644
+--- a/examples/myapp-gnome-meson/src/application.go
++++ b/examples/myapp-gnome-meson/src/application.go
+@@ -87,7 +87,7 @@ 		appParentQuery.Type,
+ 		"MyAppGnomeMesonApplication",
+ 		appParentQuery.ClassSize,
+ 		&appClassInit,
+-		appParentQuery.InstanceSize+uint(unsafe.Sizeof(Application{}))+uint(unsafe.Sizeof(&Application{}))+uint(unsafe.Sizeof(&adw.ApplicationWindow{})),
++		appParentQuery.InstanceSize,
+ 		&appInstanceInit,
+ 		0,
+ 	)
+diff --git a/examples/myapp-gnome-meson/src/main.go b/examples/myapp-gnome-meson/src/main.go
+index 883a9b673501bc2bddef66a1a96277236e6e77c7..fb884afa6df4f49faf0954fc83d2ee035f93447b 100644
+--- a/examples/myapp-gnome-meson/src/main.go
++++ b/examples/myapp-gnome-meson/src/main.go
+@@ -28,5 +28,5 @@ 		"application_id", AppID,
+ 		"flags", gio.GApplicationDefaultFlagsValue,
+ 	)
+ 
+-	os.Exit(app.Run(len(os.Args), os.Args))
++	os.Exit(int(app.Run(int32(len(os.Args)), os.Args)))
+ }
+diff --git a/examples/myapp-gnome-meson/src/window.go b/examples/myapp-gnome-meson/src/window.go
+index c7a5e177091680010e1e1ff3558364fb1ea74bb9..7056e2da147fc0465b0fecd52461e19df9f4ce60 100644
+--- a/examples/myapp-gnome-meson/src/window.go
++++ b/examples/myapp-gnome-meson/src/window.go
+@@ -122,7 +122,7 @@ 		windowParentQuery.Type,
+ 		"MyAppGnomeMesonWindow",
+ 		windowParentQuery.ClassSize,
+ 		&windowClassInit,
+-		windowParentQuery.InstanceSize+uint(unsafe.Sizeof(Window{}))+uint(unsafe.Sizeof(&Window{}))+uint(unsafe.Sizeof(&gtk.Button{})),
++		windowParentQuery.InstanceSize,
+ 		&windowInstanceInit,
+ 		0,
+ 	)
+diff --git a/examples/mylib-gtk-meson-go/mylibgtkmeson/window.go b/examples/mylib-gtk-meson-go/mylibgtkmeson/window.go
+index 2098d47ee75bfe4d0b8c312517515e8247453a02..9f774067772d8e24189f7e86af5c9062cd302a72 100644
+--- a/examples/mylib-gtk-meson-go/mylibgtkmeson/window.go
++++ b/examples/mylib-gtk-meson-go/mylibgtkmeson/window.go
+@@ -373,7 +373,7 @@ //	  return G_ACTION_GROUP (group);
+ //	}
+ //
+ // ```
+-func (x *MainApplicationWindow) AddActionEntries(EntriesVar []gio.ActionEntry, NEntriesVar int, UserDataVar uintptr) {
++func (x *MainApplicationWindow) AddActionEntries(EntriesVar []gio.ActionEntry, NEntriesVar int32, UserDataVar uintptr) {
+ 
+ 	gio.XGActionMapAddActionEntries(x.GoPointer(), EntriesVar, NEntriesVar, UserDataVar)
+ 
+@@ -430,7 +430,7 @@ //	  g_action_map_remove_action_entries (map, entries, G_N_ELEMENTS (entries));
+ //	}
+ //
+ // ```
+-func (x *MainApplicationWindow) RemoveActionEntries(EntriesVar []gio.ActionEntry, NEntriesVar int) {
++func (x *MainApplicationWindow) RemoveActionEntries(EntriesVar []gio.ActionEntry, NEntriesVar int32) {
+ 
+ 	gio.XGActionMapRemoveActionEntries(x.GoPointer(), EntriesVar, NEntriesVar)
+ 
+@@ -493,7 +493,7 @@ //
+ // This functionality can be overridden by `GtkAccessible`
+ // implementations, e.g. to get the bounds from an ignored
+ // child widget.
+-func (x *MainApplicationWindow) GetBounds(XVar *int, YVar *int, WidthVar *int, HeightVar *int) bool {
++func (x *MainApplicationWindow) GetBounds(XVar *int32, YVar *int32, WidthVar *int32, HeightVar *int32) bool {
+ 
+ 	cret := gtk.XGtkAccessibleGetBounds(x.GoPointer(), XVar, YVar, WidthVar, HeightVar)
+ 	return cret
+@@ -625,7 +625,7 @@ // This function should be called by `GtkWidget` types whenever an accessible
+ // property change must be communicated to assistive technologies.
+ //
+ // This function is meant to be used by language bindings.
+-func (x *MainApplicationWindow) UpdatePropertyValue(NPropertiesVar int, PropertiesVar []gtk.AccessibleProperty, ValuesVar []gobject.Value) {
++func (x *MainApplicationWindow) UpdatePropertyValue(NPropertiesVar int32, PropertiesVar []gtk.AccessibleProperty, ValuesVar []gobject.Value) {
+ 
+ 	gtk.XGtkAccessibleUpdatePropertyValue(x.GoPointer(), NPropertiesVar, PropertiesVar, ValuesVar)
+ 
+@@ -661,7 +661,7 @@ // This function should be called by `GtkWidget` types whenever an accessible
+ // relation change must be communicated to assistive technologies.
+ //
+ // This function is meant to be used by language bindings.
+-func (x *MainApplicationWindow) UpdateRelationValue(NRelationsVar int, RelationsVar []gtk.AccessibleRelation, ValuesVar []gobject.Value) {
++func (x *MainApplicationWindow) UpdateRelationValue(NRelationsVar int32, RelationsVar []gtk.AccessibleRelation, ValuesVar []gobject.Value) {
+ 
+ 	gtk.XGtkAccessibleUpdateRelationValue(x.GoPointer(), NRelationsVar, RelationsVar, ValuesVar)
+ 
+@@ -698,7 +698,7 @@ // This function should be called by `GtkWidget` types whenever an accessible
+ // state change must be communicated to assistive technologies.
+ //
+ // This function is meant to be used by language bindings.
+-func (x *MainApplicationWindow) UpdateStateValue(NStatesVar int, StatesVar []gtk.AccessibleState, ValuesVar []gobject.Value) {
++func (x *MainApplicationWindow) UpdateStateValue(NStatesVar int32, StatesVar []gtk.AccessibleState, ValuesVar []gobject.Value) {
+ 
+ 	gtk.XGtkAccessibleUpdateStateValue(x.GoPointer(), NStatesVar, StatesVar, ValuesVar)
+ 
+diff --git a/examples/mylib-gtk-meson/src/window.go b/examples/mylib-gtk-meson/src/window.go
+index 7b53cc50d43221bc8f7d7d219d14af9c9471e1e3..74461b3365750b4e67805286002b778548d9a373 100644
+--- a/examples/mylib-gtk-meson/src/window.go
++++ b/examples/mylib-gtk-meson/src/window.go
+@@ -99,7 +99,7 @@
+ 			buttonTest.ConnectClicked(&onButtonTestClicked)
+ 		})
+ 
+-		objClass.OverrideSetProperty(func(o *gobject.Object, u uint, v *gobject.Value, ps *gobject.ParamSpec) {
++		objClass.OverrideSetProperty(func(o *gobject.Object, u uint32, v *gobject.Value, ps *gobject.ParamSpec) {
+ 			switch u {
+ 			case propertyIdTestButtonSensitive:
+ 				w := (*myLibGtkMesonMainApplicationWindow)(unsafe.Pointer(o.GetData(dataKeyGoInstance)))
+@@ -108,7 +108,7 @@ 				w.buttonTest.SetSensitive(v.GetBoolean())
+ 			}
+ 		})
+ 
+-		objClass.OverrideGetProperty(func(o *gobject.Object, u uint, v *gobject.Value, ps *gobject.ParamSpec) {
++		objClass.OverrideGetProperty(func(o *gobject.Object, u uint32, v *gobject.Value, ps *gobject.ParamSpec) {
+ 			switch u {
+ 			case propertyIdTestButtonSensitive:
+ 				w := (*myLibGtkMesonMainApplicationWindow)(unsafe.Pointer(o.GetData(dataKeyGoInstance)))
+@@ -138,7 +138,7 @@ 		parentQuery.Type,
+ 		"MyLibGtkMesonMainApplicationWindow",
+ 		parentQuery.ClassSize,
+ 		&classInit,
+-		parentQuery.InstanceSize+uint(unsafe.Sizeof(myLibGtkMesonMainApplicationWindow{}))+uint(unsafe.Sizeof(&myLibGtkMesonMainApplicationWindow{})),
++		parentQuery.InstanceSize,
+ 		&instanceInit,
+ 		0,
+ 	)
+
