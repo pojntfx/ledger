@@ -1,0 +1,44 @@
+From c04624177a281ccade8e9d125737982fd1fa2855 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Mon, 23 Feb 2026 00:44:02 -0800
+Subject: [PATCH] docs: Add personal kernel hacking script
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/docs/pojntfx/kernel-hacking-on-physical-hardware.md b/docs/pojntfx/kernel-hacking-on-physical-hardware.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..2274a8c7a5c2aaf878453b7b3e8b0e70ad94863e
+--- /dev/null
++++ b/docs/pojntfx/kernel-hacking-on-physical-hardware.md
+@@ -0,0 +1,30 @@
++# Build GNOME OS with custom kernel and install changes to local system
++
++```shell
++#!/bin/bash
++
++make -C files/boot-keys clean
++
++make -C files/boot-keys IMPORT_MODE=local
++
++bst --no-strict build gnomeos/live-image.bst
++
++bst workspace open freedesktop-sdk.bst:components/linux.bst --directory ../linux/
++
++# Now make the changes you want to make to `../linux/`
++
++bst --no-strict build freedesktop-sdk.bst:components/linux.bst # No need to `cd ../linux` - BuildStream figures that out for you automatically
++
++# To rollout the kernel on your local system, either run this (you'll need your disk recovery key when you reboot):
++
++utils/run-sysupdate-repo.sh --devel --same-version
++run0 utils/enable-local-repo.sh --local
++
++updatectl update host@l.1
++
++# Now, reboot and choose version `l.1`. It will prompt you to enter the TPM PIN - here you will need to enter the recovery key instead despite what the prompt says!
++
++# Or run this to build a fresh ISO to test with:
++
++bst artifact checkout gnomeos/live-image.bst --directory ./iso
++```
+
