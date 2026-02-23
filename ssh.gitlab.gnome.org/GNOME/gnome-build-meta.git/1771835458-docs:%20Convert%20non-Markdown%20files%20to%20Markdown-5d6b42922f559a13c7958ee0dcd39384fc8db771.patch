@@ -1,0 +1,944 @@
+From 5d6b42922f559a13c7958ee0dcd39384fc8db771 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Mon, 23 Feb 2026 00:30:58 -0800
+Subject: [PATCH] docs: Convert non-Markdown files to Markdown
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/docs/gnome-build-meta/README.md b/docs/gnome-build-meta/README.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..60751cfbde47398de2546745700c01c3dd3f0955
+--- /dev/null
++++ b/docs/gnome-build-meta/README.md
+@@ -0,0 +1,186 @@
++[![CVE Reports](https://img.shields.io/badge/Release--contents-CVE%20Reports-blue?labelColor=grey&color=green)](https://gnome.pages.gitlab.gnome.org/gnome-build-meta/release-contents.html)
++
++# GNOME Build Metadata
++
++The GNOME Build Metadata repository is where the GNOME release team manages
++build metadata for building the GNOME software stack, the GNOME flatpak runtime and GNOME OS.
++
++## Getting started
++
++The content of this repository is a [BuildStream](https://www.buildstream.build/) project.
++
++You can get Buildstream in a toolbox container:
++
++```
++$ toolbox create -i registry.gitlab.com/freedesktop-sdk/infrastructure/freedesktop-sdk-docker-images/bst2
++```
++
++Alternatively, if you are on GNOME OS you can enable the `devel` extension which contains buildstream and other development tools:
++
++```
++$ updatectl enable devel --now
++```
++
++If you are new to buildstream you should read its [user guide](https://docs.buildstream.build/2.6/main_using.html). You can also consult the [reference documentation](https://docs.buildstream.build/2.6/main_using.html) for all available features and options.
++
++You can find definitions for components, their build steps and dependencies under `elements/`.
++
++Elements can depend on other elements and composed together to build complete targets like the ones below. Adding a new component or dependency generally means adding a new buildstream element and modifying existing ones to include it in its list dependencies.
++
++We use the [freedesktop-sdk](https://freedesktop-sdk.io/) as a base for a lot of our components, using a buildstream junction. This means that some components are shared and changes to those components should be done upstream in freedesktop-sdk. Such components are prefixed with `freedesktop-sdk.bst:` when listed as a dependency, so they are easy to spot.
++
++Due to buildstream's guarantee of reproducibility, modifying a lower level component that is part of a long dependency chain in the stack can result in abysmally long build times as you are building every element in between that and your target. You may need to [disable strict mode](https://docs.buildstream.build/2.6/developing/strict-mode.html) in those cases.
++
++The first time you build a component it can take a while until all caches are downloaded, this is normal.
++
++### Hacking on a component
++
++If you want to test a local change, you can use workspaces to instruct Buildstream to
++build the element from there (If you don't have an existing checkout, omit --no-checkout).
++
++```
++$ bst workspace open --no-checkout core/gnome-initial-setup.bst --directory ../gnome-initial-setup/
++$ cd ../gnome-initial-setup/
++$ cat .bstproject.yaml
++projects:
++- project-path: /home/alatiera/Projects/gnome-build-meta
++  element-name: core/gnome-initial-setup.bst
++format-version: 1
++$ bst build core/gnome-initial-setup.bst
++```
++
++Afterwards you can drop into a runtime shell with following command:
++
++```
++$ bst -o toolbox true shell core/gnome-initial-setup.bst
++$ /usr/libexec/gnome-initial-setup
++```
++
++You can also get a build shell to inspect the environment.
++Note that only the specified dependencies are staged. If you need a utility for debugging (vim, strace, etc) you will have to add them as build-dependencies.
++
++```
++$ bst shell --build core/gnome-initial-setup.bst
++```
++
++You can also checkout the contents of the built artifact to a directory:
++
++```
++$ bst artifact checkout core/gnome-initial-setup.bst --directory setup
++```
++
++## Build outputs
++
++The major outputs of this repository and some of our common workflows are documented below.
++
++### Flatpak runtimes
++
++To build and use a runtime locally:
++
++```
++$ bst build flatpak/runtimes-repo.bst
++$ bst checkout flatpak/runtimes-repo.bst repo
++$ flatpak remote-add --user --no-gpg-verify testrepo repo
++$ flatpak install testrepo org.gnome.Platform
++```
++
++### GNOME OS
++
++To build the GNOME OS ISO installer locally:
++
++1. Generate keys:
++
++   ```
++   $ make -C files/boot-keys clean
++   $ make -C files/boot-keys
++   ```
++
++2. Build the image:
++
++   ```
++   $ bst build gnomeos/live-image.bst
++   ```
++
++3. Checkout image:
++
++   ```
++   $ bst artifact checkout gnomeos/live-image.bst --directory ./iso
++   ```
++
++#### Using system extensions for development
++
++If you are developing on GNOME OS, you can build systemd-sysext images and overlay them on the system like this:
++
++Note that sysexts are applied alphabetically, so you might want to prefix them in order to avoid being overwritten by other images that will be loaded.
++
++```
++$ bst build sdk/gnome-text-editor.bst
++$ sysext-build-element --verbose zz-text-editor sdk/gnome-text-editor.bst
++$ run0 sysext-add --persistent zz-gnome-text-editor.sysext.raw
++$ run0 systemd-sysext refresh
++```
++
++And optionally reload services if applicable to your usecase.
++
++```
++$ run0 systemctl daemon-reload
++```
++
++#### Additional platforms
++
++We experimentally support the [OnePlus 6](docs/ONEPLUS5.md) and [Fairphone 5](docs/FP5.md). Installation on those devices requires special steps and some things may not work, so please consult the respective linked documentation.
++
++### OCI Images
++
++We provide OCI images for development. See the [OCI documentation](elements/oci/README.md).
++
++## Build for different architectures
++
++It's possible to build for another architecture using BuildStream and Qemu
++
++This can be combined with the toolbox image we use for bst2 as it
++has qemu and everything else needed.
++
++1. Open Workspace for the element you need (Optional):
++
++   ```
++   $ toolbox enter bst2
++   $ bst workspace open --no-checkout sdk/gjs.bst --directory ~/Projects/gjs/
++   ```
++
++2. Build the element:
++
++   ```
++   $ bst -o arch aarch64 build sdk/gjs.bst
++   ```
++
++3. Get a build or runtime shell for testing:
++
++   ```
++   $ bst -o arch aarch64 shell --build sdk/gjs.bst
++   $ bst -o arch aarch64 shell sdk/gjs.bst
++   ```
++
++## Updating the refs
++
++To update the refs you can use Toolbox along with the script in `.gitlab-ci/scripts/update-refs.py` and git push options to create a merge request.
++
++```
++$ toolbox create -i registry.gitlab.com/freedesktop-sdk/infrastructure/freedesktop-sdk-docker-images/bst2
++$ toolbox run -c bst2 ./.gitlab-ci/scripts/update-refs.py --new-branch
++$ git push -o merge_request.create -o merge_request.assign="marge-bot" -o merge_request.remove_source_branch -f origin -u HEAD
++```
++
++## Continuous Integration
++
++The following is a summary of what is being exported by this repository CI pipelines:
++
++| Output                                       | When                                                | Example                                                                      |
++| -------------------------------------------- | --------------------------------------------------- | ---------------------------------------------------------------------------- |
++| Flatpak runtimes (master)                    | Merged to master                                    | `flatpak install flathub org.gnome.Platform//master`                         |
++| Flatpak runtimes (beta)                      | Merged to stable branch (and flagged as "beta")     | `flatpak install flathub-beta org.gnome.Platform//47beta`                    |
++| Flatpak runtimes (stable)                    | Merged to stable branch                             | `flatpak install flathub org.gnome.Platform//46`                             |
++| GNOME OS installer and disks images (latest) | Merged to master (and tests passed or ran manually) | `wget https://os.gnome.org/download/latest/gnome_os_installer.iso`           |
++| GNOME OS installer and disks images (stable) | On tag added                                        | `wget https://os.gnome.org/download/stable/47/gnome_os_installer_x86_64.iso` |
++| OCI Images (latest, master and nightly)      | Merged to master                                    | `podman pull quay.io/gnome_infrastructure/gnome-build-meta:core-nightly`     |
++| OCI Images (stable)                          | On tag added                                        | `podman pull quay.io/gnome_infrastructure/gnome-build-meta:core-47`          |
+diff --git a/docs/gnome-build-meta/README.openqa b/docs/gnome-build-meta/README.openqa.md
+rename from docs/gnome-build-meta/README.openqa
+rename to docs/gnome-build-meta/README.openqa.md
+diff --git a/docs/gnome-build-meta/README.rst b/docs/gnome-build-meta/README.rst
+deleted file mode 100644
+index 61d02e9be34c43c3e3f65d5731158b1dccb16384..0000000000000000000000000000000000000000
+--- a/docs/gnome-build-meta/README.rst
++++ /dev/null
+@@ -1,186 +0,0 @@
+-.. image:: https://img.shields.io/badge/Release--contents-CVE%20Reports-blue?labelColor=grey&color=green
+-   :target: https://gnome.pages.gitlab.gnome.org/gnome-build-meta/release-contents.html
+-   :alt: CVE reports
+-
+-GNOME Build Metadata
+-====================
+-
+-The GNOME Build Metadata repository is where the GNOME release team manages
+-build metadata for building the GNOME software stack, the GNOME flatpak runtime and GNOME OS.
+-
+-Getting started
+----------------
+-
+-The content of this repository is a `BuildStream <https://www.buildstream.build/>`_ project.
+-
+-You can get Buildstream in a toolbox container::
+-
+-  $ toolbox create -i registry.gitlab.com/freedesktop-sdk/infrastructure/freedesktop-sdk-docker-images/bst2
+-
+-Alternatively, if you are on GNOME OS you can enable the ``devel`` extension which contains buildstream and other development tools::
+-
+-  $ updatectl enable devel --now
+-
+-If you are new to buildstream you should read its `user guide <https://docs.buildstream.build/2.6/main_using.html>`_. You can also consult the `reference documentation <https://docs.buildstream.build/2.6/main_using.html>`_ for all available features and options.
+-
+-You can find definitions for components, their build steps and dependencies under ``elements/``.
+-
+-Elements can depend on other elements and composed together to build complete targets like the ones below. Adding a new component or dependency generally means adding a new buildstream element and modifying existing ones to include it in its list dependencies.
+-
+-We use the `freedesktop-sdk <https://freedesktop-sdk.io/>`_ as a base for a lot of our components, using a buildstream junction. This means that some components are shared and changes to those components should be done upstream in freedesktop-sdk. Such components are prefixed with `freedesktop-sdk.bst:` when listed as a dependency, so they are easy to spot.
+-
+-Due to buildstream's guarantee of reproducibility, modifying a lower level component that is part of a long dependency chain in the stack can result in abysmally long build times as you are building every element in between that and your target. You may need to `disable strict mode <https://docs.buildstream.build/2.6/developing/strict-mode.html>`_ in those cases.
+-
+-The first time you build a component it can take a while until all caches are downloaded, this is normal.
+-
+-Hacking on a component
+-~~~~~~~~~~~~~~~~~~~~~~
+-
+-If you want to test a local change, you can use workspaces to instruct Buildstream to
+-build the element from there (If you don't have an existing checkout, omit --no-checkout).::
+-
+-  $ bst workspace open --no-checkout core/gnome-initial-setup.bst --directory ../gnome-initial-setup/
+-  $ cd ../gnome-initial-setup/
+-  $ cat .bstproject.yaml
+-  projects:
+-  - project-path: /home/alatiera/Projects/gnome-build-meta
+-    element-name: core/gnome-initial-setup.bst
+-  format-version: 1
+-  $ bst build core/gnome-initial-setup.bst
+-
+-Afterwards you can drop into a runtime shell with following command::
+-
+-  $ bst -o toolbox true shell core/gnome-initial-setup.bst
+-  $ /usr/libexec/gnome-initial-setup
+-
+-You can also get a build shell to inspect the environment.
+-Note that only the specified dependencies are staged. If you need a utility for debugging (vim, strace, etc) you will have to add them as build-dependencies.::
+-
+-  $ bst shell --build core/gnome-initial-setup.bst
+-
+-You can also checkout the contents of the built artifact to a directory::
+-
+-  $ bst artifact checkout core/gnome-initial-setup.bst --directory setup
+-
+-Build outputs
+--------------
+-
+-The major outputs of this repository and some of our common workflows are documented below.
+-
+-Flatpak runtimes
+-~~~~~~~~~~~~~~~~
+-
+-To build and use a runtime locally::
+-
+-  $ bst build flatpak/runtimes-repo.bst
+-  $ bst checkout flatpak/runtimes-repo.bst repo
+-  $ flatpak remote-add --user --no-gpg-verify testrepo repo
+-  $ flatpak install testrepo org.gnome.Platform
+-
+-GNOME OS
+-~~~~~~~~
+-
+-To build the GNOME OS ISO installer locally:
+-
+-1. Generate keys::
+-
+-    $ make -C files/boot-keys clean
+-    $ make -C files/boot-keys
+-
+-2. Build the image::
+-
+-    $ bst build gnomeos/live-image.bst
+-
+-3. Checkout image::
+-
+-    $ bst artifact checkout gnomeos/live-image.bst --directory ./iso
+-
+-Using system extensions for development
+-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+-
+-If you are developing on GNOME OS, you can build systemd-sysext images and overlay them on the system like this:
+-
+-Note that sysexts are applied alphabetically, so you might want to prefix them in order to avoid being overwritten by other images that will be loaded.::
+-
+-  $ bst build sdk/gnome-text-editor.bst
+-  $ sysext-build-element --verbose zz-text-editor sdk/gnome-text-editor.bst
+-  $ run0 sysext-add --persistent zz-gnome-text-editor.sysext.raw
+-  $ run0 systemd-sysext refresh
+-
+-And optionally reload services if applicable to your usecase.::
+-
+-  $ run0 systemctl daemon-reload
+-
+-Additional platforms
+-^^^^^^^^^^^^^^^^^^^^
+-
+-We experimentally support the `OnePlus 6 <docs/ONEPLUS5.md>_` and `Fairphone 5 <docs/FP5.md>_`. Installation on those devices requires special steps and some things may not work, so please consult the respective linked documentation.
+-
+-OCI Images
+-~~~~~~~~~~
+-
+-We provide OCI images for development. See the `OCI documentation <elements/oci/README.md>_`.
+-
+-Build for different architectures
+----------------------------------
+-
+-It's possible to build for another architecture using BuildStream and Qemu
+-
+-This can be combined with the toolbox image we use for bst2 as it
+-has qemu and everything else needed.
+-
+-1. Open Workspace for the element you need (Optional)::
+-
+-    $ toolbox enter bst2
+-    $ bst workspace open --no-checkout sdk/gjs.bst --directory ~/Projects/gjs/
+-
+-2. Build the element::
+-
+-    $  bst -o arch aarch64 build sdk/gjs.bst
+-
+-3. Get a build or runtime shell for testing::
+-
+-    $  bst -o arch aarch64 shell --build sdk/gjs.bst
+-    $  bst -o arch aarch64 shell sdk/gjs.bst
+-
+-Updating the refs
+------------------
+-
+-To update the refs you can use Toolbox along with the script in ``.gitlab-ci/scripts/update-refs.py`` and git push options to create a merge request.::
+-
+-  $ toolbox create -i registry.gitlab.com/freedesktop-sdk/infrastructure/freedesktop-sdk-docker-images/bst2
+-  $ toolbox run -c bst2 ./.gitlab-ci/scripts/update-refs.py --new-branch
+-  $ git push -o merge_request.create -o merge_request.assign="marge-bot" -o merge_request.remove_source_branch -f origin -u HEAD
+-
+-Continuous Integration
+-----------------------
+-
+-The following is a summary of what is being exported by this repository CI pipelines:
+-
+-.. list-table::
+-   :header-rows: 1
+-
+-   * - Output
+-     - When
+-     - Example
+-   * - Flatpak runtimes (master)
+-     - Merged to master
+-     - :code:`flatpak install flathub org.gnome.Platform//master`
+-   * - Flatpak runtimes (beta)
+-     - Merged to stable branch (and flagged as "beta")
+-     - :code:`flatpak install flathub-beta org.gnome.Platform//47beta`
+-   * - Flatpak runtimes (stable)
+-     - Merged to stable branch
+-     - :code:`flatpak install flathub org.gnome.Platform//46`
+-   * - GNOME OS installer and disks images (latest)
+-     - Merged to master (and tests passed or ran manually)
+-     - :code:`wget https://os.gnome.org/download/latest/gnome_os_installer.iso`
+-   * - GNOME OS installer and disks images (stable)
+-     - On tag added
+-     - :code:`wget https://os.gnome.org/download/stable/47/gnome_os_installer_x86_64.iso`
+-   * - OCI Images (latest, master and nightly)
+-     - Merged to master
+-     - :code:`podman pull quay.io/gnome_infrastructure/gnome-build-meta:core-nightly`
+-   * - OCI Images (stable)
+-     - On tag added
+-     - :code:`podman pull quay.io/gnome_infrastructure/gnome-build-meta:core-47`
+diff --git a/docs/gnome-os-site/index.html b/docs/gnome-os-site/index.html
+deleted file mode 100644
+index db263636f3bb608a3f917c2cbd597ef074a5c146..0000000000000000000000000000000000000000
+--- a/docs/gnome-os-site/index.html
++++ /dev/null
+@@ -1,162 +0,0 @@
+-<!DOCTYPE html>
+-<html lang="en">
+-<!--
+-  
+-  Found an issue with the website? Outdated information? 
+-  Thank you for filing an issue or merge request: 
+-
+-  https://gitlab.gnome.org/Teams/Releng/gnome-os-site
+-  
+--->
+-<head>
+-  <meta charset="UTF-8">
+-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+-
+-
+-      <!-- Meta -->
+-  <title>GNOME OS Nightly</title>
+-  <meta name="title" content="GNOME OS Nightly">
+-  <meta itemprop="name" content="GNOME OS Nightly">
+-  <meta name="description" content="Try the latest and greatest GNOME software in a VM or on real hardware">
+-  <meta itemprop="description" content="Try the latest and greatest GNOME software in a VM or on real hardware">
+-
+-  <!-- Twitter -->
+-  <meta property="twitter:title" content="GNOME OS Nightly">
+-  <meta property="twitter:card" content="summary_large_image">
+-  <meta property="twitter:description" content="Try the latest and greatest GNOME software in a VM or on real hardware">
+-  <meta property="og:image" content="https://os.gnome.org/assets/card.png">
+-
+-  <!-- Open Graph -->
+-  <meta property="og:title" content="GNOME OS Nightly">
+-  <meta property="og:url" content="https://developer.gnome.org">
+-  <meta property="og:description" content="Try the latest and greatest GNOME software in a VM or on real hardware">
+-  <meta property="og:image" content="https://os.gnome.org/assets/card.png">
+-
+-  <link rel="stylesheet" href="https://static.gnome.org/css/inter.css">
+-  <link rel="stylesheet" href="/assets/style.css">
+-  <link rel="icon" type="image/png" href="/assets/favicon.png">
+-  <link rel="apple-touch-icon" href="/assets/apple-touch-icon.png" sizes="180x180">
+-</head>
+-
+-<body>
+-
+-  <div class="hero">
+-    <section class="header">
+-      <h2 id="logo">GNOME OS Nightly</h2>
+-      <ul class="nav">
+-        <li><a href="https://www.gnome.org/about/">About Us</a></li>
+-        <li><a href="https://handbook.gnome.org">Get Involved</a></li>
+-        <!--<li><a href="https://shop.gnome.org/">Shop</a></li>-->
+-        <li><a href="https://www.gnome.org/donate.html" class="btn" id="nav-donate">Donate</a></li>
+-      </ul>
+-    </section>
+-    
+-    <div class="punchline">
+-      
+-    <svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" xml:space="preserve" viewBox="0 0 1920 800"><defs><linearGradient xlink:href="#a" id="b" x1="740.016" x2="1178.265" y1="451.936" y2="451.936" gradientTransform="matrix(1 0 0 .24107 0 298.155)" gradientUnits="userSpaceOnUse"/><linearGradient id="a"><stop offset="0" style="stop-color:#c0bfbc;stop-opacity:1"/><stop offset=".029" style="stop-color:#e9e8e5;stop-opacity:1"/><stop offset=".047" style="stop-color:#c0bfbc;stop-opacity:1"/><stop offset=".958" style="stop-color:#c0bfbc;stop-opacity:1"/><stop offset=".978" style="stop-color:#dbdad7;stop-opacity:1"/><stop offset="1" style="stop-color:#9c9b98;stop-opacity:1"/></linearGradient><clipPath id="c" clipPathUnits="userSpaceOnUse"><path d="M754.244-256.721c-4.543 0-8.037 3.495-8.037 8.039V1.764c0 4.543 3.494 8.039 8.037 8.039h411.504c4.543 0 8.04-3.497 8.04-8.04v-250.445c0-4.543-3.498-8.04-8.04-8.04z" style="vector-effect:none;fill:#c061cb;fill-opacity:1;stroke:none;stroke-width:7.30045;stroke-linecap:round;stroke-linejoin:miter;stroke-miterlimit:4;stroke-dasharray:none;stroke-dashoffset:0;stroke-opacity:1;marker:none;marker-start:none;marker-mid:none;marker-end:none;paint-order:normal"/></clipPath><clipPath id="d" clipPathUnits="userSpaceOnUse"><path d="M754.244-256.721c-4.543 0-8.037 3.495-8.037 8.039V1.764c0 4.543 3.494 8.039 8.037 8.039h411.504c4.543 0 8.04-3.497 8.04-8.04v-250.445c0-4.543-3.498-8.04-8.04-8.04z" style="vector-effect:none;fill:#c061cb;fill-opacity:1;stroke:none;stroke-width:7.30045;stroke-linecap:round;stroke-linejoin:miter;stroke-miterlimit:4;stroke-dasharray:none;stroke-dashoffset:0;stroke-opacity:1;marker:none;marker-start:none;marker-mid:none;marker-end:none;paint-order:normal"/></clipPath></defs><g style="fill:#3584e4;stroke-width:.14903"><path fill="none" d="M40 40h16v16H40z" style="opacity:.5;fill:#3584e4;fill-opacity:0;stroke:none;stroke-width:.14903;stroke-dashoffset:26.4" transform="translate(-971.984 -1969.264) scale(49.40953)"/><path d="M53.11 41h-3.234a.876.876 135 0 0-.876.876v3.235a.783.783 22.5 0 0 1.336.553l3.328-3.328A.783.783 67.5 0 0 53.111 41" style="display:inline;fill:#3584e4;fill-opacity:1;stroke:none;stroke-width:.273222px;stroke-linecap:butt;stroke-linejoin:miter;stroke-opacity:1" transform="translate(-1495.725 -2459.752) scale(60.0978)"/><path d="M50.867 47h1.406a.727.727 45 0 1 .727.727v1.406a.773.773 157.5 0 1-1.32.547l-1.36-1.36a.773.773 112.5 0 1 .547-1.32" style="display:inline;fill:#3584e4;fill-opacity:1;stroke:none;stroke-width:.204917px;stroke-linecap:butt;stroke-linejoin:miter;stroke-opacity:1" transform="translate(-1823.607 -2768.315) scale(66.40987)"/><path d="M42.366 47h5.415A1.22 1.22 45 0 1 49 48.219v5.415a.98.98 157.5 0 1-1.673.693l-5.654-5.654A.98.98 112.5 0 1 42.366 47" style="display:inline;fill:#3584e4;fill-opacity:1;stroke:none;stroke-width:.273222px;stroke-linecap:butt;stroke-linejoin:miter;stroke-opacity:1" transform="translate(-1412.717 -2392.012) scale(58.40404)"/></g><g transform="matrix(3.78205 0 0 3.78205 -1770.302 -509.04)"><path d="M582.608 134.594h279.728a8.995 8.995 0 0 1 9.015 9.015V323.9H573.593V143.61a8.995 8.995 0 0 1 9.015-9.016z" style="vector-effect:none;stroke-width:4.96263;stroke-linecap:round;marker:none;marker-start:none;marker-mid:none;marker-end:none"/><path d="m870.789 323.9 31.25 9.205H541.781l31.249-9.205Z" style="fill:#d5d4d1;fill-opacity:1;stroke-width:.558023"/><g style="stroke-width:1.07177"><path d="M1177.604 395.317v6.53a9.263 9.263 135 0 1-9.264 9.263H751.66a9.263 9.263 45 0 1-9.264-9.264v-6.529z" style="vector-effect:none;fill:url(#b);stroke-width:3.56139;stroke-linecap:round;marker:none;marker-start:none;marker-mid:none;marker-end:none" transform="translate(-72.756 5.811) scale(.82778)"/><path d="M997.005 395.417a7.296 7.296 0 0 1-7.312 7.312h-59.386a7.296 7.296 0 0 1-7.312-7.312z" style="fill:#9a9996;stroke-width:1.90105" transform="translate(-72.756 5.811) scale(.82778)"/></g><image xlink:href="/assets/nightly-dark.webp" width="425.175" height="265.735" x="747.411" y="-256.326" class="dark" clip-path="url(#c)" preserveAspectRatio="none" style="stroke-width:.736519" transform="translate(75.029 312.51) scale(.67442)"/><image xlink:href="/assets/nightly.webp" width="425.175" height="265.735" x="747.411" y="-256.326" class="light" clip-path="url(#d)" preserveAspectRatio="none" style="stroke-width:.736519" transform="translate(75.029 312.51) scale(.67442)"/><path d="m573.363 326.205-10.414 3.068a.78.78 81.793 0 0 .22 1.528h317.482a.78.78 98.207 0 0 .22-1.528l-10.414-3.068z" style="fill:#9a9996;stroke-width:.558023" transform="matrix(.80195 0 0 1.30102 142.974 -100.499)"/></g></svg>
+-      
+-    <h1 id="subtitle" class="title">Try the latest GNOME software</h1>
+-      <a class="btn suggested" href="https://os.gnome.org/download/latest/gnome_os_nightly.iso">Download</a>
+-      <p class="warning">This is pre-release software. Bad things may happen if you use it in production.</p>
+-    </div>
+-  </div><!--hero-->
+-
+-  <div class="container">
+-    <div class="tiles">
+-      <div class="tile">
+-        <img alt="Boxes" class="icon-dropshadow" src="assets/tile-boxes.svg">
+-        <div class="description">
+-          <h4>Install in Boxes</h4>
+-          <p>Choose GNOME OS in the virtual machine creation dialog in Boxes<sup>*</sup>.</p>
+-          <a class="btn" href="https://flathub.org/apps/details/org.gnome.Boxes">Get Boxes</a>
+-          <p class="warning">* Only works in Boxes from Flathub.</p>
+-        </div>
+-      </div><!--tile-->
+-      <div class="tile">
+-        <img alt="Thinkpad" class="icon-dropshadow" src="assets/tile-hw.svg">
+-        <div class="description">
+-          <h4>Install on real hardware</h4>
+-          <p>The ISO can be installed and should just work on many computers.</p>
+-          <a class="btn" href="/install">Installation Guide</a>
+-        </div>
+-      </div><!--tile-->
+-    </div><!-- tiles -->
+-  </div><!-- container-->
+-
+-  <div class="container">
+-    <div class="tiles">
+-      <div class="tile">
+-        <img alt="Bugs" class="icon-dropshadow" src="assets/tile-bug.svg">
+-        <div class="description">
+-          <h4>Found a bug? File it!</h4>
+-          <p>If you run into issues, file bugs against the relevant project.</p>
+-          <a class="btn warning" href="https://gitlab.gnome.org/GNOME/gnome-build-meta/-/issues?label_name%5B%5D=GNOME%20OS">GNOME OS Issues</a>
+-          <a class="btn" href="https://gitlab.gnome.org/groups/GNOME/-/issues">Other Issues</a>
+-        </div>
+-      </div><!--tile-->
+-      <div class="tile">
+-        <img alt="Thinkpad" class="icon-dropshadow" src="assets/tile-chat.svg">
+-        <div class="description">
+-          <h4>Get involved</h4>
+-          <p>Get set up with Buildstream, start building images, and join the fun.</p>
+-          <a class="btn suggested" href="https://gitlab.gnome.org/GNOME/gnome-build-meta/-/wikis/gnome_os/Start-GNOME-OS">Starter Tutorial</a>
+-          <a class="btn" href="https://matrix.to/#/#gnome-os:gnome.org">Matrix</a>
+-        </div>
+-      </div><!--tile-->
+-    </div><!-- tiles -->
+-  </div><!-- container-->
+-    
+-    
+-  <div class="colored-row nogap" id="donate">
+-    <div class="container">
+-    <h2>Support Us</h2>
+-
+-    <p class="narrow">
+-      Donations are essential for us to improve our development infrastructure, host community events, and keep Flathub running. Every contribution makes a difference and allows us to do more.
+-    </p>
+-    </div>
+-    <div id="support-us-container">
+-        <a class="btn dark standalone" href="https://donate.gnome.org">Donate</a>
+-    </div>
+-  </div><!--colored-row-->
+-
+-
+-  <footer>
+-    <nav>
+-      <ul class="bottomlinks">
+-        <li><a href="https://handbook.gnome.org/get-in-touch.html">Contact Us</a></li>
+-        <li><a href="https://www.gnome.org/about/">About Us</a></li>
+-        <li><a href="https://donate.gnome.org">Donate</a></li>
+-        <!--<li><a href="https://shop.gnome.org/">GNOME Shop</a></li>-->
+-        <li><a href="https://foundation.gnome.org/">GNOME Foundation</a></li>
+-        <li><a href="https://conduct.gnome.org">Code of Conduct</a></li>
+-        <li><a href="https://www.gnome.org/privacy-policy.html">Privacy</a></li>
+-        <li><a href="https://welcome.gnome.org/">Welcome to GNOME</a></li>
+-        <li><a href="https://handbook.gnome.org/">GNOME Handbook</a></li>
+-        <li><a href="https://gitlab.gnome.org/">Issue Tracker</a></li>
+-        <li><a href="https://www.gnome.org/">GNOME Project</a></li>
+-        <li><a href="http://release.gnome.org/">Latest Releases</a></li>
+-        <li><a href="https://thisweek.gnome.org/">This Week in GNOME</a></li>
+-        <li><a href="https://handbook.gnome.org/events.html">Events</a></li>
+-        <li><a href="https://discourse.gnome.org/">Forum</a></li>
+-        <li><a href="https://planet.gnome.org/">Planet GNOME</a></li>
+-        <li><a href="https://brand.gnome.org/">Logo &amp; Brand</a></li>
+-        <li>
+-          <span class="socials">
+-        <a title="Mastodon" href="https://floss.social/@gnome" class="social" rel="me"><svg viewBox="0 0 16 16" id="mastodon" xmlns="http://www.w3.org/2000/svg"><path d="M7.478 0C5.56.016 3.716.223 2.64.717c0 0-2.132.954-2.132 4.208 0 .745-.015 1.636.009 2.58.077 3.183.583 6.319 3.525 7.098 1.357.359 2.522.434 3.46.382 1.7-.094 2.656-.607 2.656-.607l-.057-1.234s-1.215.383-2.58.337c-1.353-.047-2.781-.146-3-1.807a3.406 3.406 0 0 1-.03-.466s1.328.325 3.01.402c1.03.047 1.994-.06 2.974-.177 1.88-.225 3.516-1.383 3.722-2.44.324-1.668.297-4.068.297-4.068 0-3.254-2.132-4.208-2.132-4.208C11.288.223 9.443.016 7.525 0Zm-2.17 2.542c.798 0 1.403.308 1.803.922l.389.651.389-.651c.4-.614 1.005-.922 1.803-.922.69 0 1.247.243 1.672.717.412.473.617 1.113.617 1.918v3.94H10.42V5.293c0-.806-.34-1.215-1.018-1.215-.75 0-1.126.485-1.126 1.445v2.093H6.724V5.523c0-.96-.376-1.445-1.126-1.445-.678 0-1.018.409-1.018 1.215v3.824H3.02v-3.94c0-.805.204-1.445.616-1.918.425-.474.981-.717 1.672-.717Z"></path></svg>
+-</a>
+-        <a title="YouTube" href="https://www.youtube.com/user/GNOMEDesktop" class="social"><svg version="1.1" viewBox="0 0 59.999998 60" xml:space="preserve">
+-<path d="m 30.000873,8.994939 c 0,0 -18.780858,8.79e-5 -23.4758621,1.235673 C 4.0044287,10.922546 1.9279732,12.9988 1.2360734,15.568785 4.840194e-4,20.264042 4e-4,29.999958 4e-4,29.999958 c 0,0 8.78843e-5,9.78658 1.2356734,14.432854 0.6919334,2.569985 2.7189519,4.595357 5.2889375,5.287341 4.7446601,1.284992 23.4758621,1.284908 23.4758621,1.284908 0,0 18.780857,-8.8e-5 23.475862,-1.235673 2.569985,-0.691933 4.595357,-2.717272 5.287341,-5.287341 1.235589,-4.695256 1.235673,-14.432853 1.235673,-14.432853 0,0 0.04934,-9.7849 -1.235673,-14.479905 C 58.072142,12.999304 56.046804,10.972252 53.476735,10.280352 48.781478,8.9953591 30.000873,8.9954431 30.000873,8.9954431 Z m -5.981426,12.010574 15.619208,8.994277 -15.619208,8.995958 z"></path>
+-</svg>
+-</a>
+-        <a title="Matrix" href="https://matrix.to/#/#community:gnome.org" class="social"><svg role="img" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path d="M.632.55v22.9H2.28V24H0V0h2.28v.55zm7.043 7.26v1.157h.033c.309-.443.683-.784 1.117-1.024.433-.245.936-.365 1.5-.365.54 0 1.033.107 1.481.314.448.208.785.582 1.02 1.108.254-.374.6-.706 1.034-.992.434-.287.95-.43 1.546-.43.453 0 .872.056 1.26.167.388.11.716.286.993.53.276.245.489.559.646.951.152.392.23.863.23 1.417v5.728h-2.349V11.52c0-.286-.01-.559-.032-.812a1.755 1.755 0 0 0-.18-.66 1.106 1.106 0 0 0-.438-.448c-.194-.11-.457-.166-.785-.166-.332 0-.6.064-.803.189a1.38 1.38 0 0 0-.48.499 1.946 1.946 0 0 0-.231.696 5.56 5.56 0 0 0-.06.785v4.768h-2.35v-4.8c0-.254-.004-.503-.018-.752a2.074 2.074 0 0 0-.143-.688 1.052 1.052 0 0 0-.415-.503c-.194-.125-.476-.19-.854-.19-.111 0-.259.024-.439.074-.18.051-.36.143-.53.282-.171.138-.319.337-.439.595-.12.259-.18.6-.18 1.02v4.966H5.46V7.81zm15.693 15.64V.55H21.72V0H24v24h-2.28v-.55z"></path></svg></a>
+-
+-      </span>
+-        </li>
+-      </ul>
+-    </nav>
+-    <p class="copy">&copy; 2025 &nbsp; <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 80 32"><g style="fill:#fff"><g class="logofill" style="fill:#fff;stroke-width:1.84261"><g style="fill:#fff;fill-opacity:1;fill-rule:nonzero;stroke:none;stroke-width:1.84261;stroke-miterlimit:4"><path d="M86.068 0C61.466 0 56.851 35.041 70.691 35.041 84.529 35.041 110.671 0 86.068 0M45.217 30.699c7.369.45 15.454-28.122 1.604-26.325-13.845 1.797-8.976 25.875-1.604 26.325M11.445 48.453c5.241-2.307.675-24.872-8.237-18.718-8.908 6.155 2.996 21.024 8.237 18.718m14.767-11.811c6.239-1.272 6.581-26.864-4.545-22.273-11.128 4.592-1.689 23.547 4.545 22.273m32.579 57.271c1.107 8.454-6.202 12.629-13.36 7.179-22.787-17.349 37.729-26.004 33.74-49.706-3.311-19.674-63.676-13.617-70.55 17.167-4.653 20.821 19.153 49.707 43.993 49.707 12.22 0 26.315-11.034 28.952-25.012 2.014-10.659-23.699-6.388-22.775.665" style="fill:#fff;fill-opacity:1;stroke-width:1.84261" transform="matrix(.22264 0 0 .22342 .872 2.79)"/></g><g style="fill:#fff;stroke-width:1.84261"><path d="M4176.296 1214.44c-15.108.407-27.038 5.837-35.812 16.25-9.086 10.837-13.657 25.81-13.657 44.906 0 19.044 4.57 33.976 13.657 44.813 9.13 10.837 21.666 16.25 37.656 16.25 16.034 0 28.601-5.413 37.687-16.25s13.626-25.77 13.625-44.813c0-19.095-4.539-34.069-13.625-44.906s-21.653-16.25-37.687-16.25c-.625 0-1.23-.016-1.844 0m1.125 22c.242-.01.474 0 .719 0 7.883 0 13.992 3.411 18.313 10.25s6.5 16.491 6.5 28.906c0 12.363-2.18 21.943-6.5 28.782s-10.43 10.28-18.313 10.28c-7.84 0-13.898-3.441-18.219-10.28-4.32-6.839-6.5-16.42-6.5-28.782 0-12.414 2.18-22.067 6.5-28.906 4.185-6.625 10.013-10.043 17.5-10.25m-171.791 89.172c-13.308 11.176-33.107 11.047-41.356 11.047q-24.92 0-39.484-16.413-14.565-16.492-14.564-44.662 0-28.485 14.831-44.82 14.832-16.335 40.62-16.334 9.955 0 19.041 2.21 9.153 2.209 17.237 6.549l-6.921 20.46c-3.03-1.658-6.499-3.293-9.715-4.442q-8.217-2.76-16.501-2.762-15.367 0-23.718 10.18-8.284 10.1-8.284 28.959 0 18.702 8.017 28.88c5.345 6.787 13.377 10.18 22.782 10.18 9.555 0 15.473-2.409 18.629-4.946v-20.384h-20.7v-20.358h40.085m17.581-52.396h16.229l51.277 70.803v-70.802h21.885v117.81h-16.227l-51.278-70.802v70.802h-21.885zm223.125-.001h32.737l22.715 73.548 22.849-73.547h27.67l12.5 117.81h-24.32l-7.5-73.668-22.982 74.021h-16.301l-22.982-76.521-7.5 76.168h-24.386l12.5-117.81m131.024-.001h69.414v22.963h-43.693v24.436h33.588v20.463h-33.588v26.986h45.163v22.963h-70.884z" style="font-style:normal;font-variant:normal;font-weight:700;font-stretch:normal;font-size:148.7px;line-height:125%;font-family:&quot;Bitstream Vera Sans&quot;;text-align:start;writing-mode:lr-tb;text-anchor:start;fill:#fff;fill-opacity:1;stroke:none;stroke-width:1.84261pt;stroke-linecap:butt;stroke-linejoin:miter;stroke-opacity:1" transform="matrix(.0913 0 0 .09162 -333.274 -99.223)"/><g style="font-size:30.6896px;font-family:&quot;Bitstream Vera Sans&quot;;stroke-width:1.84261pt"><path d="M4474.528 1193.37h18.926v2.548h-7.942v19.825h-3.042v-19.825h-7.942zm22.101 0h4.51l5.71 15.225 5.74-15.225h4.51v22.373h-2.952v-19.645l-5.77 15.344h-3.042l-5.769-15.344v19.645h-2.937z" aria-label="TM" style="letter-spacing:.252382" transform="matrix(.0913 0 0 .09162 -333.274 -99.223)"/></g></g></g></g></svg></p>
+-    <p>CDN kindly provided by <a href="https://www.cdn77.com/">CDN77</a></p>
+-  </footer>
+-</body>
+-</html>
+diff --git a/docs/gnome-os-site/index.md b/docs/gnome-os-site/index.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..a6f3bfebcf6a7a4f10d25d9924c0f141504ec612
+--- /dev/null
++++ b/docs/gnome-os-site/index.md
+@@ -0,0 +1,63 @@
++# GNOME OS Nightly
++
++Try the latest and greatest GNOME software in a VM or on real hardware.
++
++[Download](https://os.gnome.org/download/latest/gnome_os_nightly.iso)
++
++> This is pre-release software. Bad things may happen if you use it in production.
++
++## Install in Boxes
++
++Choose GNOME OS in the virtual machine creation dialog in Boxes\*.
++
++[Get Boxes](https://flathub.org/apps/details/org.gnome.Boxes)
++
++\* Only works in Boxes from Flathub.
++
++## Install on real hardware
++
++The ISO can be installed and should just work on many computers.
++
++[Installation Guide](https://os.gnome.org/install)
++
++## Found a bug? File it!
++
++If you run into issues, file bugs against the relevant project.
++
++- [GNOME OS Issues](https://gitlab.gnome.org/GNOME/gnome-build-meta/-/issues?label_name%5B%5D=GNOME%20OS)
++- [Other Issues](https://gitlab.gnome.org/groups/GNOME/-/issues)
++
++## Get involved
++
++Get set up with Buildstream, start building images, and join the fun.
++
++- [Starter Tutorial](https://gitlab.gnome.org/GNOME/gnome-build-meta/-/wikis/gnome_os/Start-GNOME-OS)
++- [Matrix](https://matrix.to/#/#gnome-os:gnome.org)
++
++## Support Us
++
++Donations are essential for us to improve our development infrastructure, host community events, and keep Flathub running. Every contribution makes a difference and allows us to do more.
++
++[Donate](https://donate.gnome.org)
++
++## Links
++
++- [Contact Us](https://handbook.gnome.org/get-in-touch.html)
++- [About Us](https://www.gnome.org/about/)
++- [Donate](https://donate.gnome.org)
++- [GNOME Foundation](https://foundation.gnome.org/)
++- [Code of Conduct](https://conduct.gnome.org)
++- [Privacy](https://www.gnome.org/privacy-policy.html)
++- [Welcome to GNOME](https://welcome.gnome.org/)
++- [GNOME Handbook](https://handbook.gnome.org/)
++- [Issue Tracker](https://gitlab.gnome.org/)
++- [GNOME Project](https://www.gnome.org/)
++- [Latest Releases](http://release.gnome.org/)
++- [This Week in GNOME](https://thisweek.gnome.org/)
++- [Events](https://handbook.gnome.org/events.html)
++- [Forum](https://discourse.gnome.org/)
++- [Planet GNOME](https://planet.gnome.org/)
++- [Logo & Brand](https://brand.gnome.org/)
++- [Mastodon](https://floss.social/@gnome)
++- [YouTube](https://www.youtube.com/user/GNOMEDesktop)
++- [Matrix](https://matrix.to/#/#community:gnome.org)
+diff --git a/docs/gnome-os-site/install.html b/docs/gnome-os-site/install.html
+deleted file mode 100644
+index 467c3edd0f2817052aeada180be2f7ebd892096a..0000000000000000000000000000000000000000
+--- a/docs/gnome-os-site/install.html
++++ /dev/null
+@@ -1,198 +0,0 @@
+-<!DOCTYPE html>
+-<html lang="en">
+-<!--
+-  
+-  Found an issue with the website? Outdated information? 
+-  Thank you for filing an issue or merge request: 
+-
+-  https://gitlab.gnome.org/Teams/Releng/gnome-os-site
+-  
+--->
+-<head>
+-  <meta charset="UTF-8">
+-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+-
+-
+-      <!-- Meta -->
+-  <title>GNOME OS Nightly</title>
+-  <meta name="title" content="GNOME OS Nightly">
+-  <meta itemprop="name" content="GNOME OS Nightly">
+-  <meta name="description" content="Try the latest and greatest GNOME software in a VM or on real hardware">
+-  <meta itemprop="description" content="Try the latest and greatest GNOME software in a VM or on real hardware">
+-
+-  <!-- Twitter -->
+-  <meta property="twitter:title" content="GNOME OS Nightly">
+-  <meta property="twitter:card" content="summary_large_image">
+-  <meta property="twitter:description" content="Try the latest and greatest GNOME software in a VM or on real hardware">
+-  <meta property="og:image" content="https://os.gnome.org/assets/card.png">
+-
+-  <!-- Open Graph -->
+-  <meta property="og:title" content="GNOME OS Nightly">
+-  <meta property="og:url" content="https://developer.gnome.org">
+-  <meta property="og:description" content="Try the latest and greatest GNOME software in a VM or on real hardware">
+-  <meta property="og:image" content="https://os.gnome.org/assets/card.png">
+-
+-  <link rel="stylesheet" href="https://static.gnome.org/css/inter.css">
+-  <link rel="stylesheet" href="/assets/style.css">
+-  <link rel="icon" type="image/png" href="/assets/favicon.png">
+-  <link rel="apple-touch-icon" href="/assets/apple-touch-icon.png" sizes="180x180">
+-</head>
+-
+-<body>
+-
+-  <div class="hero">
+-    <section class="header">
+-      <h2 id="logo"><a href="/">GNOME OS Nightly</a></h2>
+-      <ul class="nav">
+-        <li><a href="https://www.gnome.org/about/">About Us</a></li>
+-        <li><a href="https://handbook.gnome.org">Get Involved</a></li>
+-        <!--<li><a href="https://shop.gnome.org/">Shop</a></li>-->
+-        <li><a href="https://www.gnome.org/donate.html" class="btn" id="nav-donate">Donate</a></li>
+-      </ul>
+-    </section>
+-    
+-    <div class="punchline">
+-      <picture id="platform">
+-        <source media="(prefers-color-scheme: dark)" srcset="/assets/install-dark.svg">
+-        <img alt="Form factors running GNOME" src="/assets/install.svg">
+-      </picture>
+-      <h1 id="subtitle" class="title">GNOME OS Installation Guide</h1>
+-    </div>
+-  </div><!--hero-->
+-
+-  <div class="container">
+-      <p>You can run GNOME OS on real hardware now, with a few caveats: Hardware support is limited, there is no dedicated security team and some features are missing.</p>
+-      <p>This is bleeding edge, in-development software, and not recommended for daily usage if you're not a developer.</p>
+-    <div class="instructions-step">
+-      <h2>1. Prepare USB Drive</h2>
+-      <p>The standard GNOME OS Nightly ISO can be installed and should just work on many computers, depending on how well the hardware components are supported by Linux. If you have Intel graphics and Wifi it's likely to work without problems. We are constantly trying to improve hardware support, so if you run into issues with your specific components, please <a href="https://gitlab.gnome.org/GNOME/gnome-build-meta/-/issues/new">report them here</a>.
+-
+-      <ul>
+-        <li>Download the latest <a href="https://os.gnome.org/download/latest/live-x86_64.iso">GNOME OS ISO</a></li>
+-        <li>Plug in a USB drive and select it in GNOME Disks</li>
+-        <li>In the <code>⋮</code> menu select <strong>Restore Disk Image...</strong>, open the ISO and click <strong>Start Restoring...</strong>. <span class="warning">Warning: This erases all data on the USB drive.</span></li>
+-      </ul>
+-
+-    </div>
+-
+-    <div class="instructions-step">
+-      <h2>2. Boot and install from USB</h2>
+-      <p>In order to run GNOME OS you need UEFI to be enabled, and secure boot to be disabled.</p>
+-
+-      <ul>
+-        <li>Reboot into BIOS options and disable secure boot</li>
+-        <li>Boot from the USB drive</li>
+-        <li>Choose <strong>GNOME OS Nightly</strong> in the menu</li>
+-        <li>Go through initial setup and create a user</li>
+-        <li>If your destination disk contains data, erase it in GNOME Disks using <strong>Format disk...</strong> and selecting <strong>No Partitioning</strong>. <span class="warning">Warning: This erases all data on the disk.</span></li>
+-        <li>Upon logging in, a window will have proposed to install GNOME OS. Choose "Install now".</li>
+-        <li>Select the disk to install to, and press <strong>Install</strong></li>
+-        <li>If the installer gives you a recovery key, your data is encrypted. Write the key down on a different device</li>
+-        <li>You can then continue using GNOME OS</li>
+-      </ul>
+-    </div>
+-
+-    <div class="instructions-step">
+-      <h2>3. Post-Install Tips</h2>
+-      <p>Now you should have a working GNOME OS setup on real hardware. Since GNOME OS is quite different from other Linux operating systems, here are some tips for how to do common stuff.</p>
+-
+-      <h3>Installing software</h3>
+-      <p>GNOME OS does not have a traditional package manager, but you can install software in a variety of ways. Graphical applications are available via flatpak and are easily installed from GNOME Software. Podman, toolbox and distrobox are also available.<p>
+-
+-      <p>You can also use snap after enabling it and rebooting:</p>
+-
+-      <code class="code-block">updatectl enable --now snapd apparmor</code>
+-
+-      <h3>Setup a pin to unlock the disk</h3>
+-      <p>By default we encrypt your hard drive if there's a tpm2 device available. The long term plan is to use systemd homed to encrypt user data,
+-      but until then you can replace the unattended luks decryption with a tpm2+pin key in luks using the following command.</p>
+-
+-      <code class="code-block">sudo systemd-cryptenroll --wipe-slot=tpm2 --tpm2-with-pin=true --tpm2-device=auto --tpm2-pcrs='' /dev/disk/by-partlabel/root</code>
+-
+-      <h3>Update via command line</h3>
+-      <p>System updates are handled by systemd-sysupdate. GNOME Software should work just fine for that, but you can also do updates via terminal like so:</p>
+-
+-      <code class="code-block">updatectl update</code>
+-
+-      <p>After that you can directly reboot into the new image.</p>
+-
+-      <h3>Enable development tooling and utilities</h3>
+-      <p>If you want to install the development toolchain of GNOME OS you can do so by enabling the following System Extensions. These include compilers, headers, along with common utilities used for GNOME development, such as flatpak-builder, GNOME Builder and so on.</p>
+-
+-      <code class="code-block">sudo updatectl enable devel --now</code>
+-
+-      <h3>Enable the Nvidia driver</h3>
+-      <p>GNOME OS ships with the upstream open source drivers for Nvidia graphics cards, which are enough for light use but have subpar performance and don't support features like CUDA. If you want the best performance or need to use features like CUDA and OptiX, you should enable the Nvidia driver extension like so:</p>
+-
+-      <code class="code-block">sudo updatectl enable nvidia-driver --now</code>
+-
+-      <p>After rebooting, you should be using the Nvidia driver.</p>
+-
+-      <p><b>Note:</b> This extension only supports RTX 1600/2000 series or newer cards.</p>
+-
+-      <h3>Boot into older versions</h3>
+-      <p>If an update breaks something, you can always boot into an older version. You can do this quickly by pressing any key during boot to enter the menu, and then choosing a different version from the list.</p>
+-
+-      <h3>Updating firmware</h3>
+-      <p>Before applying a firmware update, you need to unlock the firmware PCR values. This will automatically recreate
+-        a pcrlock policy on next boot</p>
+-
+-      <code class="code-block">sudo /usr/lib/systemd/systemd-pcrlock unlock-firmware-code
+-sudo /usr/lib/systemd/systemd-pcrlock unlock-firmware-config</code>
+-
+-      <h3>Re-enroll tpm2 if needed</h3>
+-      <p>If you update your firmware or reset the uefi settings, you might be asked to manually unlock your hard drive, instead of happening
+-        automatically. This is because the state of the machine has changed without the OS knowing about it. In such
+-        case you will need to re-enroll the tpm2 values for the updated firmware keys. (We are exploring ways to make
+-        this easier in the future)</p>
+-
+-      <code class="code-block">sudo /usr/lib/systemd/systemd-pcrlock remove-policy
+-sudo /usr/lib/systemd/systemd-pcrlock make-policy --location=770 --pcr=0+1+2+3+4+5+7+11+14+15
+-sudo systemd-cryptenroll --wipe-slot=tpm2 --tpm2-device=auto --tpm2-pcrs='' /dev/disk/by-partlabel/root</code>
+-
+-
+-    </div>
+-
+-       
+-  </div><!-- container-->
+-
+-
+-  <footer>
+-    <nav>
+-      <ul class="bottomlinks">
+-        <li><a href="https://handbook.gnome.org/get-in-touch.html">Contact Us</a></li>
+-        <li><a href="https://www.gnome.org/about/">About Us</a></li>
+-        <li><a href="https://donate.gnome.org">Donate</a></li>
+-        <!--<li><a href="https://shop.gnome.org/">GNOME Shop</a></li>-->
+-        <li><a href="https://foundation.gnome.org/">GNOME Foundation</a></li>
+-        <li><a href="https://conduct.gnome.org">Code of Conduct</a></li>
+-        <li><a href="https://www.gnome.org/privacy-policy.html">Privacy</a></li>
+-        <li><a href="https://welcome.gnome.org/">Welcome to GNOME</a></li>
+-        <li><a href="https://handbook.gnome.org/">GNOME Handbook</a></li>
+-        <li><a href="https://gitlab.gnome.org/">Issue Tracker</a></li>
+-        <li><a href="https://www.gnome.org/">GNOME Project</a></li>
+-        <li><a href="http://release.gnome.org/">Latest Releases</a></li>
+-        <li><a href="https://thisweek.gnome.org/">This Week in GNOME</a></li>
+-        <li><a href="https://handbook.gnome.org/events.html">Events</a></li>
+-        <li><a href="https://discourse.gnome.org/">Forum</a></li>
+-        <li><a href="https://planet.gnome.org/">Planet GNOME</a></li>
+-        <li><a href="https://brand.gnome.org/">Logo &amp; Brand</a></li>
+-        <li>
+-          <span class="socials">
+-        <a title="Mastodon" href="https://floss.social/@gnome" class="social" rel="me"><svg viewBox="0 0 16 16" id="mastodon" xmlns="http://www.w3.org/2000/svg"><path d="M7.478 0C5.56.016 3.716.223 2.64.717c0 0-2.132.954-2.132 4.208 0 .745-.015 1.636.009 2.58.077 3.183.583 6.319 3.525 7.098 1.357.359 2.522.434 3.46.382 1.7-.094 2.656-.607 2.656-.607l-.057-1.234s-1.215.383-2.58.337c-1.353-.047-2.781-.146-3-1.807a3.406 3.406 0 0 1-.03-.466s1.328.325 3.01.402c1.03.047 1.994-.06 2.974-.177 1.88-.225 3.516-1.383 3.722-2.44.324-1.668.297-4.068.297-4.068 0-3.254-2.132-4.208-2.132-4.208C11.288.223 9.443.016 7.525 0Zm-2.17 2.542c.798 0 1.403.308 1.803.922l.389.651.389-.651c.4-.614 1.005-.922 1.803-.922.69 0 1.247.243 1.672.717.412.473.617 1.113.617 1.918v3.94H10.42V5.293c0-.806-.34-1.215-1.018-1.215-.75 0-1.126.485-1.126 1.445v2.093H6.724V5.523c0-.96-.376-1.445-1.126-1.445-.678 0-1.018.409-1.018 1.215v3.824H3.02v-3.94c0-.805.204-1.445.616-1.918.425-.474.981-.717 1.672-.717Z"></path></svg>
+-</a>
+-        <a title="YouTube" href="https://www.youtube.com/user/GNOMEDesktop" class="social"><svg version="1.1" viewBox="0 0 59.999998 60" xml:space="preserve">
+-<path d="m 30.000873,8.994939 c 0,0 -18.780858,8.79e-5 -23.4758621,1.235673 C 4.0044287,10.922546 1.9279732,12.9988 1.2360734,15.568785 4.840194e-4,20.264042 4e-4,29.999958 4e-4,29.999958 c 0,0 8.78843e-5,9.78658 1.2356734,14.432854 0.6919334,2.569985 2.7189519,4.595357 5.2889375,5.287341 4.7446601,1.284992 23.4758621,1.284908 23.4758621,1.284908 0,0 18.780857,-8.8e-5 23.475862,-1.235673 2.569985,-0.691933 4.595357,-2.717272 5.287341,-5.287341 1.235589,-4.695256 1.235673,-14.432853 1.235673,-14.432853 0,0 0.04934,-9.7849 -1.235673,-14.479905 C 58.072142,12.999304 56.046804,10.972252 53.476735,10.280352 48.781478,8.9953591 30.000873,8.9954431 30.000873,8.9954431 Z m -5.981426,12.010574 15.619208,8.994277 -15.619208,8.995958 z"></path>
+-</svg>
+-</a>
+-        <a title="Matrix" href="https://matrix.to/#/#community:gnome.org" class="social"><svg role="img" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path d="M.632.55v22.9H2.28V24H0V0h2.28v.55zm7.043 7.26v1.157h.033c.309-.443.683-.784 1.117-1.024.433-.245.936-.365 1.5-.365.54 0 1.033.107 1.481.314.448.208.785.582 1.02 1.108.254-.374.6-.706 1.034-.992.434-.287.95-.43 1.546-.43.453 0 .872.056 1.26.167.388.11.716.286.993.53.276.245.489.559.646.951.152.392.23.863.23 1.417v5.728h-2.349V11.52c0-.286-.01-.559-.032-.812a1.755 1.755 0 0 0-.18-.66 1.106 1.106 0 0 0-.438-.448c-.194-.11-.457-.166-.785-.166-.332 0-.6.064-.803.189a1.38 1.38 0 0 0-.48.499 1.946 1.946 0 0 0-.231.696 5.56 5.56 0 0 0-.06.785v4.768h-2.35v-4.8c0-.254-.004-.503-.018-.752a2.074 2.074 0 0 0-.143-.688 1.052 1.052 0 0 0-.415-.503c-.194-.125-.476-.19-.854-.19-.111 0-.259.024-.439.074-.18.051-.36.143-.53.282-.171.138-.319.337-.439.595-.12.259-.18.6-.18 1.02v4.966H5.46V7.81zm15.693 15.64V.55H21.72V0H24v24h-2.28v-.55z"></path></svg></a>
+-
+-      </span>
+-        </li>
+-      </ul>
+-    </nav>
+-    <p class="copy">&copy; 2025 &nbsp; <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 80 32"><g style="fill:#fff"><g class="logofill" style="fill:#fff;stroke-width:1.84261"><g style="fill:#fff;fill-opacity:1;fill-rule:nonzero;stroke:none;stroke-width:1.84261;stroke-miterlimit:4"><path d="M86.068 0C61.466 0 56.851 35.041 70.691 35.041 84.529 35.041 110.671 0 86.068 0M45.217 30.699c7.369.45 15.454-28.122 1.604-26.325-13.845 1.797-8.976 25.875-1.604 26.325M11.445 48.453c5.241-2.307.675-24.872-8.237-18.718-8.908 6.155 2.996 21.024 8.237 18.718m14.767-11.811c6.239-1.272 6.581-26.864-4.545-22.273-11.128 4.592-1.689 23.547 4.545 22.273m32.579 57.271c1.107 8.454-6.202 12.629-13.36 7.179-22.787-17.349 37.729-26.004 33.74-49.706-3.311-19.674-63.676-13.617-70.55 17.167-4.653 20.821 19.153 49.707 43.993 49.707 12.22 0 26.315-11.034 28.952-25.012 2.014-10.659-23.699-6.388-22.775.665" style="fill:#fff;fill-opacity:1;stroke-width:1.84261" transform="matrix(.22264 0 0 .22342 .872 2.79)"/></g><g style="fill:#fff;stroke-width:1.84261"><path d="M4176.296 1214.44c-15.108.407-27.038 5.837-35.812 16.25-9.086 10.837-13.657 25.81-13.657 44.906 0 19.044 4.57 33.976 13.657 44.813 9.13 10.837 21.666 16.25 37.656 16.25 16.034 0 28.601-5.413 37.687-16.25s13.626-25.77 13.625-44.813c0-19.095-4.539-34.069-13.625-44.906s-21.653-16.25-37.687-16.25c-.625 0-1.23-.016-1.844 0m1.125 22c.242-.01.474 0 .719 0 7.883 0 13.992 3.411 18.313 10.25s6.5 16.491 6.5 28.906c0 12.363-2.18 21.943-6.5 28.782s-10.43 10.28-18.313 10.28c-7.84 0-13.898-3.441-18.219-10.28-4.32-6.839-6.5-16.42-6.5-28.782 0-12.414 2.18-22.067 6.5-28.906 4.185-6.625 10.013-10.043 17.5-10.25m-171.791 89.172c-13.308 11.176-33.107 11.047-41.356 11.047q-24.92 0-39.484-16.413-14.565-16.492-14.564-44.662 0-28.485 14.831-44.82 14.832-16.335 40.62-16.334 9.955 0 19.041 2.21 9.153 2.209 17.237 6.549l-6.921 20.46c-3.03-1.658-6.499-3.293-9.715-4.442q-8.217-2.76-16.501-2.762-15.367 0-23.718 10.18-8.284 10.1-8.284 28.959 0 18.702 8.017 28.88c5.345 6.787 13.377 10.18 22.782 10.18 9.555 0 15.473-2.409 18.629-4.946v-20.384h-20.7v-20.358h40.085m17.581-52.396h16.229l51.277 70.803v-70.802h21.885v117.81h-16.227l-51.278-70.802v70.802h-21.885zm223.125-.001h32.737l22.715 73.548 22.849-73.547h27.67l12.5 117.81h-24.32l-7.5-73.668-22.982 74.021h-16.301l-22.982-76.521-7.5 76.168h-24.386l12.5-117.81m131.024-.001h69.414v22.963h-43.693v24.436h33.588v20.463h-33.588v26.986h45.163v22.963h-70.884z" style="font-style:normal;font-variant:normal;font-weight:700;font-stretch:normal;font-size:148.7px;line-height:125%;font-family:&quot;Bitstream Vera Sans&quot;;text-align:start;writing-mode:lr-tb;text-anchor:start;fill:#fff;fill-opacity:1;stroke:none;stroke-width:1.84261pt;stroke-linecap:butt;stroke-linejoin:miter;stroke-opacity:1" transform="matrix(.0913 0 0 .09162 -333.274 -99.223)"/><g style="font-size:30.6896px;font-family:&quot;Bitstream Vera Sans&quot;;stroke-width:1.84261pt"><path d="M4474.528 1193.37h18.926v2.548h-7.942v19.825h-3.042v-19.825h-7.942zm22.101 0h4.51l5.71 15.225 5.74-15.225h4.51v22.373h-2.952v-19.645l-5.77 15.344h-3.042l-5.769-15.344v19.645h-2.937z" aria-label="TM" style="letter-spacing:.252382" transform="matrix(.0913 0 0 .09162 -333.274 -99.223)"/></g></g></g></g></svg></p>
+-    <p>CDN kindly provided by <a href="https://www.cdn77.com/">CDN77</a></p>
+-  </footer>
+-</body>
+-</html>
+diff --git a/docs/gnome-os-site/install.md b/docs/gnome-os-site/install.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..839daa8f67aeb8f4b7f182e620758556ac9aef98
+--- /dev/null
++++ b/docs/gnome-os-site/install.md
+@@ -0,0 +1,102 @@
++# GNOME OS Installation Guide
++
++You can run GNOME OS on real hardware now, with a few caveats: Hardware support is limited, there is no dedicated security team and some features are missing.
++
++This is bleeding edge, in-development software, and not recommended for daily usage if you're not a developer.
++
++## 1. Prepare USB Drive
++
++The standard GNOME OS Nightly ISO can be installed and should just work on many computers, depending on how well the hardware components are supported by Linux. If you have Intel graphics and Wifi it's likely to work without problems. We are constantly trying to improve hardware support, so if you run into issues with your specific components, please [report them here](https://gitlab.gnome.org/GNOME/gnome-build-meta/-/issues/new).
++
++- Download the latest [GNOME OS ISO](https://os.gnome.org/download/latest/live-x86_64.iso)
++- Plug in a USB drive and select it in GNOME Disks
++- In the `⋮` menu select **Restore Disk Image...**, open the ISO and click **Start Restoring...**. **Warning: This erases all data on the USB drive.**
++
++## 2. Boot and install from USB
++
++In order to run GNOME OS you need UEFI to be enabled, and secure boot to be disabled.
++
++- Reboot into BIOS options and disable secure boot
++- Boot from the USB drive
++- Choose **GNOME OS Nightly** in the menu
++- Go through initial setup and create a user
++- If your destination disk contains data, erase it in GNOME Disks using **Format disk...** and selecting **No Partitioning**. **Warning: This erases all data on the disk.**
++- Upon logging in, a window will have proposed to install GNOME OS. Choose "Install now".
++- Select the disk to install to, and press **Install**
++- If the installer gives you a recovery key, your data is encrypted. Write the key down on a different device
++- You can then continue using GNOME OS
++
++## 3. Post-Install Tips
++
++Now you should have a working GNOME OS setup on real hardware. Since GNOME OS is quite different from other Linux operating systems, here are some tips for how to do common stuff.
++
++### Installing software
++
++GNOME OS does not have a traditional package manager, but you can install software in a variety of ways. Graphical applications are available via flatpak and are easily installed from GNOME Software. Podman, toolbox and distrobox are also available.
++
++You can also use snap after enabling it and rebooting:
++
++```
++updatectl enable --now snapd apparmor
++```
++
++### Setup a pin to unlock the disk
++
++By default we encrypt your hard drive if there's a tpm2 device available. The long term plan is to use systemd homed to encrypt user data, but until then you can replace the unattended luks decryption with a tpm2+pin key in luks using the following command.
++
++```
++sudo systemd-cryptenroll --wipe-slot=tpm2 --tpm2-with-pin=true --tpm2-device=auto --tpm2-pcrs='' /dev/disk/by-partlabel/root
++```
++
++### Update via command line
++
++System updates are handled by systemd-sysupdate. GNOME Software should work just fine for that, but you can also do updates via terminal like so:
++
++```
++updatectl update
++```
++
++After that you can directly reboot into the new image.
++
++### Enable development tooling and utilities
++
++If you want to install the development toolchain of GNOME OS you can do so by enabling the following System Extensions. These include compilers, headers, along with common utilities used for GNOME development, such as flatpak-builder, GNOME Builder and so on.
++
++```
++sudo updatectl enable devel --now
++```
++
++### Enable the Nvidia driver
++
++GNOME OS ships with the upstream open source drivers for Nvidia graphics cards, which are enough for light use but have subpar performance and don't support features like CUDA. If you want the best performance or need to use features like CUDA and OptiX, you should enable the Nvidia driver extension like so:
++
++```
++sudo updatectl enable nvidia-driver --now
++```
++
++After rebooting, you should be using the Nvidia driver.
++
++**Note:** This extension only supports RTX 1600/2000 series or newer cards.
++
++### Boot into older versions
++
++If an update breaks something, you can always boot into an older version. You can do this quickly by pressing any key during boot to enter the menu, and then choosing a different version from the list.
++
++### Updating firmware
++
++Before applying a firmware update, you need to unlock the firmware PCR values. This will automatically recreate a pcrlock policy on next boot.
++
++```
++sudo /usr/lib/systemd/systemd-pcrlock unlock-firmware-code
++sudo /usr/lib/systemd/systemd-pcrlock unlock-firmware-config
++```
++
++### Re-enroll tpm2 if needed
++
++If you update your firmware or reset the uefi settings, you might be asked to manually unlock your hard drive, instead of happening automatically. This is because the state of the machine has changed without the OS knowing about it. In such case you will need to re-enroll the tpm2 values for the updated firmware keys. (We are exploring ways to make this easier in the future)
++
++```
++sudo /usr/lib/systemd/systemd-pcrlock remove-policy
++sudo /usr/lib/systemd/systemd-pcrlock make-policy --location=770 --pcr=0+1+2+3+4+5+7+11+14+15
++sudo systemd-cryptenroll --wipe-slot=tpm2 --tpm2-device=auto --tpm2-pcrs='' /dev/disk/by-partlabel/root
++```
+
