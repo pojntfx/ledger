@@ -1,0 +1,99 @@
+From 0ae1ac1dc945f6c31116f65a7104d58035a76843 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Tue, 24 Feb 2026 23:55:11 -0800
+Subject: [PATCH] docs: Add initial section on builds for new docs about secure boot keys, VMs and ISOs
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/docs/new/build.md b/docs/new/build.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..cadae0bd5a7dd60658f31f8d021fd9eb78da844e
+--- /dev/null
++++ b/docs/new/build.md
+@@ -0,0 +1,85 @@
++# Building GNOME OS
++
++## Setting up the build environment
++
++GNOME OS a [BuildStream](https://www.buildstream.build/) project. If you're using GNOME OS as your developer workstation, you can set up all the tools and dependencies you need to build GNOME OS by enabling the `devel` extension:
++
++```shell
++$ updatectl enable devel --now
++```
++
++Alternatively, you can use [Toolbox](https://containertoolbx.org/) to get a containerised build environment like so:
++
++```shell
++$ toolbox create -i registry.gitlab.com/freedesktop-sdk/infrastructure/freedesktop-sdk-docker-images/bst2
++$ toolbox enter bst2
++```
++
++## Making changes
++
++First, create a workspace for the GNOME OS components you want to work on; for example for the kernel:
++
++```shell
++$ bst workspace open freedesktop-sdk.bst:components/linux.bst --directory ../linux/
++```
++
++Or for [Text Editor](https://apps.gnome.org/TextEditor/):
++
++```shell
++$ bst workspace open sdk/gnome-text-editor.bst --directory ../gnome-text-editor/
++```
++
++Now make the changes you want to make in your workspace, for example `../linux`. BuildStream will pick up your changes from this workspace automatically after you make them.
++
++## Setting up secure boot keys
++
++First, generate secure boot keys:
++
++```shell
++$ make -C files/boot-keys clean
++$ make -C files/boot-keys
++```
++
++If you plan on deploying to your workstation, you can also import the keys you're already using:
++
++```shell
++$ make -C files/boot-keys clean
++$ make -C files/boot-keys IMPORT_MODE=local
++```
++
++## Option 1: Building and starting a VM
++
++To build the virtual machine image, run the following:
++
++```shell
++$ bst build vm-secure/image.bst # You can pass --no-strict to avoid rebuilding the whole chain on the next run
++```
++
++You can now start it by running the following:
++
++```shell
++$ ./utils/run-secure-vm.sh --debug --reset
++```
++
++## Option 2: Building an ISO
++
++To build an ISO with BuildStream, run the following:
++
++```shell
++$ bst build gnomeos/live-image.bst # You can pass --no-strict to avoid rebuilding the whole chain on the next run
++$ bst artifact checkout gnomeos/live-image.bst --directory ./iso
++```
++
++You can now write the ISO to a USB stick and boot it on physical hardware or boot it in a virtual machine.
++
++## Option 3: Building and deploying to your workstation via systemd-sysext
++
++<!-- TODO: Add instructions -->
++
++## Option 4: Deploying to your workstation via systemd-sysupdate
++
++<!-- TODO: Add instructions -->
++
++## Option 5: Deploying to a different workstation via systemd-sysupdate
++
++<!-- TODO: Add instructions -->
+
