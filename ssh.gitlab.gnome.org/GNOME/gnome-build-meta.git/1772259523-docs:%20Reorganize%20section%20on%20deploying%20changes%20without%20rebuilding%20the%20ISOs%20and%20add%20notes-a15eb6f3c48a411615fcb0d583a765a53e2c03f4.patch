@@ -1,0 +1,86 @@
+From a15eb6f3c48a411615fcb0d583a765a53e2c03f4 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Fri, 27 Feb 2026 22:18:43 -0800
+Subject: [PATCH] docs: Reorganize section on deploying changes without rebuilding the ISOs and add notes
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/docs/new/build.md b/docs/new/build.md
+index 8ba9c5369cb8d5a2748a6ffb12aacf9af2aa11d8..b3fe96c2059e3ad5f62c8f059b89e5bde77c6da5 100644
+--- a/docs/new/build.md
++++ b/docs/new/build.md
+@@ -119,48 +119,9 @@ ```
+ 
+ Here, `strict: false` avoids rebuilding the whole chain on the next build, and `override-project-caches: true` disables remote cache lookups which, while helpful on the first build, can significantly slow down things on subsequent builds.
+ 
+-## Setting up secure boot keys
+-
+-First, generate secure boot keys:
+-
+-```shell
+-$ make -C files/boot-keys clean
+-$ make -C files/boot-keys
+-```
++### 6.1 Option 1: By building and installing a system extension (`systemd-sysext`)
+ 
+-If you plan on deploying to your workstation, you can also import the keys you're already using:
+-
+-```shell
+-$ make -C files/boot-keys clean
+-$ make -C files/boot-keys IMPORT_MODE=local
+-```
+-
+-## Option 1: Building and starting a VM
+-
+-To build the virtual machine image, run the following:
+-
+-```shell
+-$ bst build vm-secure/image.bst # Use `bst --no-strict` to avoid rebuilding the whole chain on the next run
+-```
+-
+-You can now start it by running the following:
+-
+-```shell
+-$ ./utils/run-secure-vm.sh --debug --reset
+-```
+-
+-## Option 2: Building an ISO
+-
+-To build an ISO with BuildStream, run the following:
+-
+-```shell
+-$ bst build gnomeos/live-image.bst # Use `bst --no-strict` to avoid rebuilding the whole chain on the next run
+-$ bst artifact checkout gnomeos/live-image.bst --directory ./iso
+-```
+-
+-You can now write the ISO to a USB stick and boot from it on physical hardware, or manually boot from it in a virtual machine.
+-
+-## Option 3: Building and deploying to your workstation via system extensions (`systemd-sysext`)
++<!-- TODO: Add note that this is for local workstation deployments -->
+ 
+ > While this works for any of the included apps too, not just system components, iterating on apps directly using Flatpak via for example [GNOME Builder](https://apps.gnome.org/Builder/) or [Foundry](https://gitlab.gnome.org/GNOME/foundry) is preferred.
+ 
+@@ -195,13 +156,21 @@ $ run0 rm /var/lib/extensions/zz-gnome-control-center.raw
+ $ run0 systemd-sysext refresh
+ ```
+ 
+-## Option 4: Deploying to your workstation via `systemd-sysupdate`
++### 6.2 Option 2: By building, serving and updating from a local sysupdate repository (`systemd-sysupdate`)
++
++<!-- TODO: Add note that this is for local workstation deployments, deploying to a VM or to a different workstation -->
++
++<!-- TODO: Add note that running the `run-sysupdate-repo.sh` script is not necessary if you've used `./utils/run-secure-vm.sh` to start the VM earlier -->
+ 
+ To build the sysupdate images and serve them by starting a local sysupdate repository, run the following:
+ 
+ ```shell
+ $ utils/run-sysupdate-repo.sh --devel # Append `--same-version` to avoid rebuilding the whole chain on the next run
+ ```
++
++<!-- TODO: Add note here and above in the sysext section that this rebuilds with your changes each time you run it -->
++
++<!-- TODO: Add note on how to manually use our local sysupdate repo on a remote system -->
+ 
+ In a second terminal, configure sysupdate to use the local repository and update to the images you've built by running the following:
+ 
+
