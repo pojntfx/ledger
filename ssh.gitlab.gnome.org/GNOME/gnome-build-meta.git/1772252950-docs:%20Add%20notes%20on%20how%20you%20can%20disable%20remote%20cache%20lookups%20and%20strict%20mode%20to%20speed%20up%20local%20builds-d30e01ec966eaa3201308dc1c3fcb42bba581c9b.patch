@@ -1,0 +1,51 @@
+From d30e01ec966eaa3201308dc1c3fcb42bba581c9b Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Fri, 27 Feb 2026 20:29:10 -0800
+Subject: [PATCH] docs: Add notes on how you can disable remote cache lookups and strict mode to speed up local builds
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/docs/new/build.md b/docs/new/build.md
+index 7d15ef789fe423db1fa48378ddf57142117b9120..0c1b2b681bb09261301e44451a285a2dc8504e19 100644
+--- a/docs/new/build.md
++++ b/docs/new/build.md
+@@ -37,6 +37,22 @@ ```
+ 
+ Now make the changes you want to make in your workspace, for example in `../linux` or `../gnome-control-center`. BuildStream will pick up your changes from this workspace automatically after you make them.
+ 
++The first build might take a while depending on your workstation's specs. You can significantly speed up subsequent builds by running the following:
++
++```shell
++$ cat > ~/.config/buildstream.conf << 'EOT'
++artifacts:
++  override-project-caches: true
++source-caches:
++  override-project-caches: true
++projects:
++  gnome-build-meta:
++    strict: false
++EOT
++```
++
++Here, `strict: false` avoids rebuilding the whole chain on the next build, and `override-project-caches: true` disables remote cache lookups which, while helpful on the first build, can significantly slow down things on subsequent builds.
++
+ ## Setting up secure boot keys
+ 
+ First, generate secure boot keys:
+@@ -85,11 +101,13 @@
+ To build a component, first open a workspace for it as described in [Making changes](#making-changes), then run the following to build a system extension for it:
+ 
+ ```shell
+-$ bst build core/gnome-control-center.bst # Use `bst --no-strict` to avoid rebuilding the whole chain on the next run
++$ bst build core/gnome-control-center.bst
+ $ sysext-build-element --verbose zz-gnome-control-center core/gnome-control-center.bst
+ ```
+ 
+-> System extensions are applied alphabetically, so you want to prefix them (as we did above with `zz-`) in order to avoid being overwritten by other images that will be loaded.
++The system extension should now be available at `./zz-gnome-control-center.sysext.raw`.
++
++> System extensions are applied alphabetically, so you want to prefix them (as we did above with `zz-`) in order to avoid being overwritten by other system extensions that will be loaded.
+ 
+ Now you can deploy it to your workstation:
+ 
+
