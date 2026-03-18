@@ -1,0 +1,133 @@
+From d1821de6629dd4c7f5f0f11424636365794dd809 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Tue, 17 Mar 2026 23:54:51 -0700
+Subject: [PATCH] feat: Add initial SLP port from pilot-link
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/pkg/slp/constants.go b/pkg/slp/constants.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..3227ffb07104ce32ee2f5b569bc5e8e8d797e331
+--- /dev/null
++++ b/pkg/slp/constants.go
+@@ -0,0 +1,14 @@
++package slp
++
++import "github.com/sigurn/crc16"
++
++var (
++	Signature = [3]byte{0xBE, 0xEF, 0xED}
++	CRCTable  = crc16.MakeTable(crc16.CRC16_XMODEM)
++)
++
++const (
++	HeaderLen = 10
++	TypePADP  = 2
++	SocketDLP = 3
++)
+diff --git a/pkg/slp/frame.go b/pkg/slp/frame.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..8b7a5cf6d0b14a3e358c2f788e9a7bec2ca17545
+--- /dev/null
++++ b/pkg/slp/frame.go
+@@ -0,0 +1,7 @@
++package slp
++
++type Frame struct {
++	Type    byte
++	XID     byte
++	Payload []byte
++}
+diff --git a/pkg/slp/recv.go b/pkg/slp/recv.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..9931d1f48bdab75fc25959352a8a47ce65183c9a
+--- /dev/null
++++ b/pkg/slp/recv.go
+@@ -0,0 +1,48 @@
++package slp
++
++// pilot-link: libpisock/slp.c slp_rx
++
++import (
++	"encoding/binary"
++	"io"
++
++	"github.com/sigurn/crc16"
++	"go.bug.st/serial"
++)
++
++func ReadFrame(port serial.Port) Frame {
++	sig := [3]byte{}
++	for {
++		var b [1]byte
++		if _, err := io.ReadFull(port, b[:]); err != nil {
++			panic(err)
++		}
++
++		sig[0], sig[1], sig[2] = sig[1], sig[2], b[0]
++		if sig == Signature {
++			break
++		}
++	}
++
++	hdr := make([]byte, 7)
++	if _, err := io.ReadFull(port, hdr); err != nil {
++		panic(err)
++	}
++
++	dataLen := binary.BigEndian.Uint16(hdr[3:5])
++	body := make([]byte, int(dataLen)+2)
++	if _, err := io.ReadFull(port, body); err != nil {
++		panic(err)
++	}
++
++	frame := make([]byte, HeaderLen+int(dataLen))
++	copy(frame[:3], Signature[:])
++	copy(frame[3:], hdr)
++	copy(frame[HeaderLen:], body[:dataLen])
++
++	if crc16.Checksum(frame, CRCTable) != binary.BigEndian.Uint16(body[dataLen:]) {
++		panic("SLP CRC mismatch")
++	}
++
++	return Frame{Type: hdr[2], XID: hdr[5], Payload: body[:dataLen]}
++}
+diff --git a/pkg/slp/send.go b/pkg/slp/send.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..2f914daa284fdfe023b644d21a95d599e6453945
+--- /dev/null
++++ b/pkg/slp/send.go
+@@ -0,0 +1,32 @@
++package slp
++
++// pilot-link: libpisock/slp.c slp_tx
++
++import (
++	"encoding/binary"
++
++	"github.com/sigurn/crc16"
++	"go.bug.st/serial"
++)
++
++func WriteFrame(port serial.Port, xid byte, payload []byte) {
++	buf := make([]byte, HeaderLen+len(payload)+2)
++	copy(buf[:3], Signature[:])
++	buf[3] = SocketDLP
++	buf[4] = SocketDLP
++	buf[5] = TypePADP
++	binary.BigEndian.PutUint16(buf[6:8], uint16(len(payload)))
++	buf[8] = xid
++
++	var ck byte
++	for i := range 9 {
++		ck += buf[i]
++	}
++	buf[9] = ck
++	copy(buf[HeaderLen:], payload)
++	binary.BigEndian.PutUint16(buf[HeaderLen+len(payload):], crc16.Checksum(buf[:HeaderLen+len(payload)], CRCTable))
++
++	if _, err := port.Write(buf); err != nil {
++		panic(err)
++	}
++}
+
