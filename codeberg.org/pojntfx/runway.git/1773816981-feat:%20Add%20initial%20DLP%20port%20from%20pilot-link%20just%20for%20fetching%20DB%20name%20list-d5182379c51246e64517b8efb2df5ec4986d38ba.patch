@@ -1,0 +1,131 @@
+From d5182379c51246e64517b8efb2df5ec4986d38ba Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Tue, 17 Mar 2026 23:56:21 -0700
+Subject: [PATCH] feat: Add initial DLP port from pilot-link just for fetching DB name list
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/pkg/dlp/constants.go b/pkg/dlp/constants.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..d74f03968a87aeb30f62d10fdc35f554ee17d50b
+--- /dev/null
++++ b/pkg/dlp/constants.go
+@@ -0,0 +1,9 @@
++package dlp
++
++const (
++	ArgIDBase   = 0x20
++	ResponseBit = 0x80
++
++	FuncReadDBList = 0x16
++	FuncEndOfSync  = 0x2F
++)
+diff --git a/pkg/dlp/endofsync.go b/pkg/dlp/endofsync.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..23459936e357b28c070a001f46b1c1c59b013eee
+--- /dev/null
++++ b/pkg/dlp/endofsync.go
+@@ -0,0 +1,9 @@
++package dlp
++
++// pilot-link: libpisock/dlp.c dlp_EndOfSync
++
++import "go.bug.st/serial"
++
++func EndOfSync(port serial.Port, xid *byte) {
++	Exec(port, xid, FuncEndOfSync, []byte{0, 0})
++}
+diff --git a/pkg/dlp/exec.go b/pkg/dlp/exec.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..94ee2f059918379491bcd84d7cffcd717c3c57cc
+--- /dev/null
++++ b/pkg/dlp/exec.go
+@@ -0,0 +1,32 @@
++package dlp
++
++// pilot-link: libpisock/dlp.c dlp_request_write + dlp_response_read
++
++import (
++	"encoding/binary"
++	"fmt"
++
++	"go.bug.st/serial"
++
++	"codeberg.org/pojntfx/runway/pkg/padp"
++)
++
++func Exec(port serial.Port, xid *byte, funcID byte, argData []byte) []byte {
++	req := make([]byte, 4+len(argData))
++	req[0] = funcID
++	req[1] = 1
++	req[2] = ArgIDBase
++	req[3] = byte(len(argData))
++	copy(req[4:], argData)
++
++	padp.Send(port, *xid, req)
++
++	resp := padp.Recv(port)
++	*xid = (*xid)%0xFE + 1
++
++	if len(resp) < 4 || resp[0] != funcID|ResponseBit || binary.BigEndian.Uint16(resp[2:4]) != 0 {
++		panic(fmt.Sprintf("DLP 0x%02x failed", funcID))
++	}
++
++	return resp[4:]
++}
+diff --git a/pkg/dlp/readdblist.go b/pkg/dlp/readdblist.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..340cb70202cdb049003776a7d0df01e9d6ae99ed
+--- /dev/null
++++ b/pkg/dlp/readdblist.go
+@@ -0,0 +1,49 @@
++package dlp
++
++// pilot-link: libpisock/dlp.c dlp_ReadDBList
++
++import (
++	"encoding/binary"
++
++	"go.bug.st/serial"
++)
++
++type DBEntry struct {
++	Name string
++}
++
++func ReadDBList(port serial.Port, xid *byte, startIndex uint16) (entries []DBEntry, lastIndex uint16, more bool) {
++	arg := make([]byte, 4)
++	arg[0] = 0x80 | 0x20
++	binary.BigEndian.PutUint16(arg[2:4], startIndex)
++	resp := Exec(port, xid, FuncReadDBList, arg)
++
++	var body []byte
++	switch resp[0] & 0xC0 {
++	case 0x00:
++		body = resp[2 : 2+int(resp[1])]
++	case 0x80:
++		body = resp[4 : 4+int(binary.BigEndian.Uint16(resp[2:4]))]
++	case 0x40:
++		body = resp[6 : 6+int(binary.BigEndian.Uint32(resp[2:6]))]
++	}
++
++	lastIndex = binary.BigEndian.Uint16(body[0:2])
++	more = body[2]&0x80 != 0
++	p := body[4:]
++	for range int(body[3]) {
++		size := int(p[0])
++		name := p[44:size]
++		for i, b := range name {
++			if b == 0 {
++				name = name[:i]
++				break
++			}
++		}
++
++		entries = append(entries, DBEntry{Name: string(name)})
++		p = p[size:]
++	}
++
++	return
++}
+
