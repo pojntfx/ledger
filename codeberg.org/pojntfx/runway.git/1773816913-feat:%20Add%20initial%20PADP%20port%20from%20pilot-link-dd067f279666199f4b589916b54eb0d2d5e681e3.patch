@@ -1,0 +1,105 @@
+From dd067f279666199f4b589916b54eb0d2d5e681e3 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Tue, 17 Mar 2026 23:55:13 -0700
+Subject: [PATCH] feat: Add initial PADP port from pilot-link
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/pkg/padp/constants.go b/pkg/padp/constants.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..71c56ed06cbd347856d48b62da56e7bc533b7340
+--- /dev/null
++++ b/pkg/padp/constants.go
+@@ -0,0 +1,8 @@
++package padp
++
++const (
++	TypeData  = 0x01
++	TypeACK   = 0x02
++	FlagFirst = 0x80
++	FlagLast  = 0x40
++)
+diff --git a/pkg/padp/recv.go b/pkg/padp/recv.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..3fd829655b6c6f0e18119fe0bb8c070d95f258e8
+--- /dev/null
++++ b/pkg/padp/recv.go
+@@ -0,0 +1,43 @@
++package padp
++
++// pilot-link: libpisock/padp.c padp_rx
++
++import (
++	"encoding/binary"
++
++	"go.bug.st/serial"
++
++	"codeberg.org/pojntfx/runway/pkg/slp"
++)
++
++func Recv(port serial.Port) []byte {
++	var (
++		assembled []byte
++		total     int
++	)
++	for {
++		f := slp.ReadFrame(port)
++		if f.Type != slp.TypePADP || len(f.Payload) < 4 || f.Payload[0] != TypeData {
++			continue
++		}
++
++		flags := f.Payload[1]
++		sizeOrOffset := binary.BigEndian.Uint16(f.Payload[2:4])
++		if flags&FlagFirst != 0 {
++			total = int(sizeOrOffset)
++		}
++
++		assembled = append(assembled, f.Payload[4:]...)
++
++		ack := make([]byte, 4)
++		ack[0] = TypeACK
++		ack[1] = FlagFirst | FlagLast
++		binary.BigEndian.PutUint16(ack[2:4], sizeOrOffset)
++
++		slp.WriteFrame(port, f.XID, ack)
++
++		if flags&FlagLast != 0 || len(assembled) >= total {
++			return assembled[:total]
++		}
++	}
++}
+diff --git a/pkg/padp/send.go b/pkg/padp/send.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..a9f37013adff2aa40448265f012d45a8939aadd9
+--- /dev/null
++++ b/pkg/padp/send.go
+@@ -0,0 +1,28 @@
++package padp
++
++// pilot-link: libpisock/padp.c padp_tx
++
++import (
++	"encoding/binary"
++
++	"go.bug.st/serial"
++
++	"codeberg.org/pojntfx/runway/pkg/slp"
++)
++
++func Send(port serial.Port, xid byte, data []byte) {
++	padp := make([]byte, 4+len(data))
++	padp[0] = TypeData
++	padp[1] = FlagFirst | FlagLast
++	binary.BigEndian.PutUint16(padp[2:4], uint16(len(data)))
++	copy(padp[4:], data)
++
++	slp.WriteFrame(port, xid, padp)
++
++	for {
++		f := slp.ReadFrame(port)
++		if f.Type == slp.TypePADP && len(f.Payload) >= 4 && f.Payload[0] == TypeACK && f.XID == xid {
++			return
++		}
++	}
++}
+
