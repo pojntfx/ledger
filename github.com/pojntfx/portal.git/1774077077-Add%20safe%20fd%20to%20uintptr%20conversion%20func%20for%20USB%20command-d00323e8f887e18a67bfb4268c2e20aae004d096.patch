@@ -1,0 +1,50 @@
+From d00323e8f887e18a67bfb4268c2e20aae004d096 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Sat, 21 Mar 2026 00:11:17 -0700
+Subject: [PATCH] Add safe fd to uintptr conversion func for USB command
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/internal/convert/basic.go b/internal/convert/basic.go
+index e533bcade708730b950fb89a5d919a3912d4ccb6..163d7d15db6b2cad73bec2b6fd4585a34548b499 100644
+--- a/internal/convert/basic.go
++++ b/internal/convert/basic.go
+@@ -37,3 +37,12 @@ 	}
+ 
+ 	return dbus.UnixFD(input), nil
+ }
++
++// UnixFDToUintptr is a fast converter from a dbus UnixFD to a uintptr.
++func UnixFDToUintptr(input dbus.UnixFD) (uintptr, error) {
++	if input < 0 {
++		return 0, errors.New("invalid unix fd")
++	}
++
++	return uintptr(input), nil
++}
+diff --git a/usb/finish.go b/usb/finish.go
+index e963687d80d0d1728f5da771f35f869f85a69279..bd9732cc9a254ff7dc85a583d7b98e90f5aefdae 100644
+--- a/usb/finish.go
++++ b/usb/finish.go
+@@ -5,6 +5,7 @@ 	"os"
+ 
+ 	"github.com/godbus/dbus/v5"
+ 	"github.com/rymdport/portal/internal/apis"
++	"github.com/rymdport/portal/internal/convert"
+ )
+ 
+ const finishAcquireDevicesCallName = interfaceName + ".FinishAcquireDevices"
+@@ -54,8 +55,10 @@ 		if v, ok := info["success"]; ok {
+ 			r.Success = v.Value().(bool)
+ 		}
+ 		if v, ok := info["fd"]; ok {
+-			fd := v.Value().(dbus.UnixFD)
+-			r.File = os.NewFile(uintptr(fd), id)
++			fd, err := convert.UnixFDToUintptr(v.Value().(dbus.UnixFD))
++			if err == nil {
++				r.File = os.NewFile(fd, id)
++			}
+ 		}
+ 		if v, ok := info["error"]; ok {
+ 			r.Error = v.Value().(string)
+
