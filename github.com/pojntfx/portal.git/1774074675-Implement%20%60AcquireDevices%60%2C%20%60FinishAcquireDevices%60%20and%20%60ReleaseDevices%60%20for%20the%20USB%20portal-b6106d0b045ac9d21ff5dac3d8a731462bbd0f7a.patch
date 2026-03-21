@@ -1,0 +1,219 @@
+From b6106d0b045ac9d21ff5dac3d8a731462bbd0f7a Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Fri, 20 Mar 2026 23:31:15 -0700
+Subject: [PATCH] Implement `AcquireDevices`, `FinishAcquireDevices` and `ReleaseDevices` for the USB portal
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/internal/apis/call.go b/internal/apis/call.go
+index 509fc06b7c45e967f14f643517454abd6e7b6297..548404aae7a9658d878378afd4fdd2044d1f01f2 100644
+--- a/internal/apis/call.go
++++ b/internal/apis/call.go
+@@ -9,14 +9,19 @@ }
+ 
+ // Call calls the given call name for a portal using passed arguments and returns the output.
+ func Call(callName string, args ...any) (any, error) {
++	var result any
++	err := CallStore(callName, []any{&result}, args...)
++	return result, err
++}
++
++// CallStore calls the given call name and stores the results into the provided pointers.
++func CallStore(callName string, results []any, args ...any) error {
+ 	call, err := callOnObject(ObjectPath, callName, args...)
+ 	if err != nil {
+-		return nil, err
++		return err
+ 	}
+ 
+-	var result any
+-	err = call.Store(&result)
+-	return result, err
++	return call.Store(results...)
+ }
+ 
+ // CallOnObject calls the specified callName on the given object.
+diff --git a/usb/acquire.go b/usb/acquire.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..3229fb5805b2e36459a3b2853e79636df605cc44
+--- /dev/null
++++ b/usb/acquire.go
+@@ -0,0 +1,58 @@
++package usb
++
++import (
++	"github.com/godbus/dbus/v5"
++
++	"github.com/rymdport/portal/internal/apis"
++	"github.com/rymdport/portal/internal/convert"
++	"github.com/rymdport/portal/internal/request"
++)
++
++const acquireDevicesCallName = interfaceName + ".AcquireDevices"
++
++// AcquireDeviceOptions contains a device ID and access options for AcquireDevices.
++// Each element of the devices array contains the device ID, and an access option vardict with the following keys.
++type AcquireDeviceOptions struct {
++	ID       string // Device ID.
++	Writable bool   // Whether the device will be opened in read-write or read-only mode. Default: False.
++}
++
++type dbusAcquireDevice struct {
++	ID      string
++	Options map[string]dbus.Variant
++}
++
++// AcquireDevices requests to acquire (i.e. open) the given device nodes.
++// The process of acquiring is finished by calling FinishAcquireDevices after the request emitted a Success response.
++//
++// The org.freedesktop.portal.Request::Response signal is emitted without any extra information.
++func AcquireDevices(parentWindow string, options []AcquireDeviceOptions) (dbus.ObjectPath, error) {
++	devices := make([]dbusAcquireDevice, len(options))
++	for i, dev := range options {
++		opts := map[string]dbus.Variant{}
++		if dev.Writable {
++			opts["writable"] = convert.FromBool(true)
++		}
++
++		devices[i] = dbusAcquireDevice{
++			ID:      dev.ID,
++			Options: opts,
++		}
++	}
++
++	data := map[string]dbus.Variant{}
++
++	result, err := apis.Call(acquireDevicesCallName, parentWindow, devices, data)
++	if err != nil {
++		return "", err
++	}
++
++	status, _, err := request.OnSignalResponse(result.(dbus.ObjectPath))
++	if err != nil {
++		return "", err
++	} else if status >= request.Cancelled {
++		return "", nil
++	}
++
++	return result.(dbus.ObjectPath), nil
++}
+diff --git a/usb/enumerate.go b/usb/enumerate.go
+index f379b4b31abf69a40b2107c6e81e8943ae770b1e..df631ecab92004d248d4a080eb41e10ff9e1b77c 100644
+--- a/usb/enumerate.go
++++ b/usb/enumerate.go
+@@ -24,9 +24,9 @@ }
+ 
+ // EnumerateDevices enumerates all connected USB devices that this application has permission to see.
+ func EnumerateDevices() ([]Device, error) {
+-	options := map[string]dbus.Variant{}
++	data := map[string]dbus.Variant{}
+ 
+-	result, err := apis.Call(enumerateDevicesCallName, options)
++	result, err := apis.Call(enumerateDevicesCallName, data)
+ 	if err != nil {
+ 		return nil, err
+ 	}
+diff --git a/usb/finish.go b/usb/finish.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..e963687d80d0d1728f5da771f35f869f85a69279
+--- /dev/null
++++ b/usb/finish.go
+@@ -0,0 +1,71 @@
++package usb
++
++import (
++	"os"
++
++	"github.com/godbus/dbus/v5"
++	"github.com/rymdport/portal/internal/apis"
++)
++
++const finishAcquireDevicesCallName = interfaceName + ".FinishAcquireDevices"
++
++// AcquireResult contains the result of acquiring a single device.
++// Each element of the results array contains the device ID, and a vardict with the result.
++type AcquireResult struct {
++	ID      string   // Device ID.
++	Success bool     // Whether the device access was successful or not.
++	File    *os.File // The file descriptor representing the device. The file descriptor is meant to be passed on to the USB library. Only present if this was a successful device access.
++	Error   string   // Error message describing why accessing the device was not successful. Only present if this was an failed device access.
++}
++
++// FinishAcquireDevicesResult contains the results of FinishAcquireDevices.
++type FinishAcquireDevicesResult struct {
++	Results  []AcquireResult // Array of device ids, and the result of the access.
++	Finished bool            // Whether all device results were reported.
++}
++
++// FinishAcquireDevices retrieves the file descriptors of the devices requested during AcquireDevices.
++// The file descriptors remain usable until the underlying device is removed, they are released with ReleaseDevices,
++// the D-Bus connections is closed, or the portal revokes the file descriptor which can happen at any point.
++// Devices which are not needed anymore should be passed to ReleaseDevices.
++//
++// If not all devices could be send, Finished will be false and FinishAcquireDevices must be called again
++// until Finished is true, before calling AcquireDevices again.
++//
++// This method can only be called once for a given token, and only after calling AcquireDevices.
++func FinishAcquireDevices(handle dbus.ObjectPath) (*FinishAcquireDevicesResult, error) {
++	data := map[string]dbus.Variant{}
++
++	var (
++		rawResults [][]any
++		finished   bool
++	)
++	if err := apis.CallStore(finishAcquireDevicesCallName, []any{&rawResults, &finished}, handle, data); err != nil {
++		return nil, err
++	}
++
++	results := make([]AcquireResult, len(rawResults))
++	for i, raw := range rawResults {
++		id := raw[0].(string)
++		info := raw[1].(map[string]dbus.Variant)
++
++		r := AcquireResult{ID: id}
++		if v, ok := info["success"]; ok {
++			r.Success = v.Value().(bool)
++		}
++		if v, ok := info["fd"]; ok {
++			fd := v.Value().(dbus.UnixFD)
++			r.File = os.NewFile(uintptr(fd), id)
++		}
++		if v, ok := info["error"]; ok {
++			r.Error = v.Value().(string)
++		}
++
++		results[i] = r
++	}
++
++	return &FinishAcquireDevicesResult{
++		Results:  results,
++		Finished: finished,
++	}, nil
++}
+diff --git a/usb/release.go b/usb/release.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..33825cbf1934d60aad8514bcaaf3852c6bd9a4de
+--- /dev/null
++++ b/usb/release.go
+@@ -0,0 +1,20 @@
++package usb
++
++import (
++	"github.com/godbus/dbus/v5"
++
++	"github.com/rymdport/portal/internal/apis"
++)
++
++const releaseDevicesCallName = interfaceName + ".ReleaseDevices"
++
++// ReleaseDevices releases previously acquired devices.
++// The file descriptors of those devices might become unusable as a result of this.
++//
++// Each element of the devices array contains the device ID of the device.
++// There are no supported keys in the options vardict.
++func ReleaseDevices(deviceIDs []string) error {
++	data := map[string]dbus.Variant{}
++
++	return apis.CallWithoutResult(releaseDevicesCallName, deviceIDs, data)
++}
+
