@@ -1,0 +1,50 @@
+From b068d171d1c9b508d52af353e42c549b617f1484 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Fri, 20 Mar 2026 22:59:47 -0700
+Subject: [PATCH] Add simple CLI to test new USB portal, starting with `EnumerateDevices`
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/cmd/usb/main.go b/cmd/usb/main.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..f261a5276548e8e22c2ec4b811a5001d6f7dccd0
+--- /dev/null
++++ b/cmd/usb/main.go
+@@ -0,0 +1,36 @@
++package main
++
++import (
++	"encoding/json"
++	"maps"
++	"os"
++
++	"github.com/rymdport/portal/usb"
++)
++
++func main() {
++	devices, err := usb.EnumerateDevices()
++	if err != nil {
++		panic(err)
++	}
++
++	enc := json.NewEncoder(os.Stdout)
++	for _, dev := range devices {
++		if err := enc.Encode(map[string]any{
++			"ID":         dev.ID,
++			"Parent":     dev.Parent,
++			"Readable":   dev.Readable,
++			"Writable":   dev.Writable,
++			"DeviceFile": dev.DeviceFile,
++			"Properties": maps.Collect(func(yield func(string, any) bool) {
++				for k, v := range dev.Properties {
++					if !yield(k, v.Value()) {
++						return
++					}
++				}
++			}),
++		}); err != nil {
++			panic(err)
++		}
++	}
++}
+
