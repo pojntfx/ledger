@@ -1,0 +1,69 @@
+From 76d4d173aac56454a8c9fd357c05b37fd3ad6c2a Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Sat, 21 Mar 2026 00:14:59 -0700
+Subject: [PATCH] Drop leading-edge Go features since the module still is on Go 1.19
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/cmd/usb/main.go b/cmd/usb/main.go
+index 2dd202536254d03b62f38cd5da119620422b6055..93d13d8183a312eba048ae3aef441ef60add27b7 100644
+--- a/cmd/usb/main.go
++++ b/cmd/usb/main.go
+@@ -3,7 +3,6 @@
+ import (
+ 	"encoding/json"
+ 	"flag"
+-	"maps"
+ 	"os"
+ 
+ 	"github.com/rymdport/portal/usb"
+@@ -42,19 +41,18 @@ 		panic(err)
+ 	}
+ 
+ 	for _, dev := range devices {
++		props := make(map[string]any, len(dev.Properties))
++		for k, v := range dev.Properties {
++			props[k] = v.Value()
++		}
++
+ 		if err := enc.Encode(map[string]any{
+ 			"ID":         dev.ID,
+ 			"Parent":     dev.Parent,
+ 			"Readable":   dev.Readable,
+ 			"Writable":   dev.Writable,
+ 			"DeviceFile": dev.DeviceFile,
+-			"Properties": maps.Collect(func(yield func(string, any) bool) {
+-				for k, v := range dev.Properties {
+-					if !yield(k, v.Value()) {
+-						return
+-					}
+-				}
+-			}),
++			"Properties": props,
+ 		}); err != nil {
+ 			panic(err)
+ 		}
+@@ -113,16 +111,15 @@ 	})
+ 
+ 	if err := sess.SetOnDeviceEvents(func(events []usb.DeviceEvent) {
+ 		for _, ev := range events {
++			device := make(map[string]any, len(ev.Device))
++			for k, v := range ev.Device {
++				device[k] = v.Value()
++			}
++
+ 			if err := enc.Encode(map[string]any{
+ 				"Action": ev.Action,
+ 				"ID":     ev.ID,
+-				"Device": maps.Collect(func(yield func(string, any) bool) {
+-					for k, v := range ev.Device {
+-						if !yield(k, v.Value()) {
+-							return
+-						}
+-					}
+-				}),
++				"Device": device,
+ 			}); err != nil {
+ 				panic(err)
+ 			}
+
