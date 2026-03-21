@@ -1,0 +1,58 @@
+From a07bb7d521cdb90e529d6b3673af28d7da502fc6 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Fri, 20 Mar 2026 23:47:51 -0700
+Subject: [PATCH] Add `monitor` command to test CLI
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/cmd/usb/main.go b/cmd/usb/main.go
+index 5a4e32279c7c919eebd9ae0d107446d60a848c3c..60966b8b2c0c50a2d73d77d29d51e3d6d55c7efa 100644
+--- a/cmd/usb/main.go
++++ b/cmd/usb/main.go
+@@ -76,7 +76,44 @@ 		if err := usb.ReleaseDevices([]string{*deviceID}); err != nil {
+ 			panic(err)
+ 		}
+ 
++	case "monitor":
++		sess, err := usb.CreateSession()
++		if err != nil {
++			panic(err)
++		}
++		defer sess.Close()
++
++		done := make(chan struct{})
++		sess.SetOnClosed(func(err error) {
++			if err != nil {
++				panic(err)
++			}
++			close(done)
++		})
++
++		if err := sess.SetOnDeviceEvents(func(events []usb.DeviceEvent) {
++			for _, ev := range events {
++				if err := enc.Encode(map[string]any{
++					"Action": ev.Action,
++					"ID":     ev.ID,
++					"Device": maps.Collect(func(yield func(string, any) bool) {
++						for k, v := range ev.Device {
++							if !yield(k, v.Value()) {
++								return
++							}
++						}
++					}),
++				}); err != nil {
++					panic(err)
++				}
++			}
++		}); err != nil {
++			panic(err)
++		}
++
++		<-done
++
+ 	default:
+-		panic("unknown command: " + flag.Arg(0) + " (expected: enumerate, acquire, release)")
++		panic("unknown command: " + flag.Arg(0) + " (expected: enumerate, acquire, release, monitor)")
+ 	}
+ }
+
