@@ -1,0 +1,56 @@
+From 0e6dfef63e4eae9eadd147b035136d0ed9cc711c Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Sun, 29 Mar 2026 23:55:20 -0700
+Subject: [PATCH] docs: Add notes on how to deploy to a remote workstation with `systemd-sysupdate`
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/CONTRIBUTING.md b/CONTRIBUTING.md
+index 8997954956b5259cf36147090b6d48d53a26e468..dcb2038a3ea8f6ee4054854b43935ca981a98622 100644
+--- a/CONTRIBUTING.md
++++ b/CONTRIBUTING.md
+@@ -175,18 +175,24 @@ ```shell
+ $ utils/run-sysupdate-repo.sh --devel # Append `--same-version` to avoid rebuilding the whole chain on the next run
+ ```
+ 
+-<!-- TODO: Add note on how to manually use our local sysupdate repo on a remote system -->
+-
+ In a second terminal, configure sysupdate to use the local repository and update to the images you've built by running the following:
+ 
+-<!-- TODO: Add note that running the `utils/enable-local-repo.sh` script is not necessary if you've used `./utils/run-secure-vm.sh` to start the VM earlier -->
+-
+ ```shell
+-$ run0 utils/enable-local-repo.sh --local
++$ run0 utils/enable-local-repo.sh --local # You can skip this step if you're deploying to a VM started with `./utils/run-secure-vm.sh --local-updates`
+ $ updatectl update host@l.1 # Without passing `--same-version` to run-sysupdate-repo.sh, the number after `l.` increments on each run
++$ systemctl reboot
+ ```
+ 
+-Now reboot and select the new version (`l.1`) from the `systemd-boot` menu. At the TPM PIN prompt, enter your disk recovery key, not your TPM PIN.
++On a remote workstation or a VM not started with `./utils/run-secure-vm.sh --local-updates`, run the following:
++
++```shell
++$ scp -r utils/ files/boot-keys/ user@remote-workstation-hostname-or-ip:/tmp/gnome-build-meta/
++$ ssh user@remote-workstation-hostname-or-ip run0 /tmp/gnome-build-meta/utils/enable-local-repo.sh --pubring /tmp/gnome-build-meta/files/boot-keys/import-pubring.pgp http://your-hostname-or-ip:8080
++$ ssh user@remote-workstation-hostname-or-ip updatectl update host@l.1 # Without passing `--same-version` to run-sysupdate-repo.sh, the number after `l.` increments on each run
++$ ssh user@remote-workstation-hostname-or-ip systemctl reboot
++```
++
++After rebooting, select the new version (`l.1`) from the `systemd-boot` menu. If you're using disk encryption, at the TPM PIN prompt, enter your disk recovery key, not your TPM PIN.
+ 
+ To configure sysupdate on your workstation to longer use your local repository, run the following:
+ 
+@@ -194,7 +200,11 @@ ```shell
+ $ run0 utils/enable-local-repo.sh --clean
+ ```
+ 
+-<!-- TOOD: Add note on how to manually disable it again on a remote system -->
++On a remote workstation or a VM not started with `./utils/run-secure-vm.sh --local-updates`, run the following:
++
++```shell
++$ ssh user@remote-workstation-hostname-or-ip run0 /tmp/gnome-build-meta/utils/enable-local-repo.sh --clean
++```
+ 
+ ## 7. Running automated integration tests
+ 
+
