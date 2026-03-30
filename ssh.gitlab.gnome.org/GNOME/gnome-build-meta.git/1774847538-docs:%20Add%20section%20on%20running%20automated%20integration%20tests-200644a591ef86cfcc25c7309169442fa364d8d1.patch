@@ -1,0 +1,68 @@
+From 200644a591ef86cfcc25c7309169442fa364d8d1 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Sun, 29 Mar 2026 22:12:18 -0700
+Subject: [PATCH] docs: Add section on running automated integration tests
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/CONTRIBUTING.md b/CONTRIBUTING.md
+index ac6a09c1899c6aef631e36cc30daeb891658c01e..814691d3e184983bddbbcba9a2f20a5ef08e6658 100644
+--- a/CONTRIBUTING.md
++++ b/CONTRIBUTING.md
+@@ -19,6 +19,15 @@ $ toolbox create -i registry.gitlab.com/freedesktop-sdk/infrastructure/freedesktop-sdk-docker-images/bst2
+ $ toolbox enter bst2
+ ```
+ 
++For [automated integration tests](#7-running-automated-integration-tests), you also need to install the [ssam_openqa](https://gitlab.gnome.org/sthursfield/ssam_openqa) tool manually like so:
++
++```shell
++curl -Lo ~/.local/bin/ssam_openqa "https://gitlab.gnome.org/api/v4/projects/sthursfield%2Fssam_openqa/packages/generic/x86_64-unknown-linux-gnu/$(curl 'https://gitlab.gnome.org/api/v4/projects/sthursfield%2Fssam_openqa/packages?package_name=x86_64-unknown-linux-gnu&sort=desc' | jq -r '.[0].version')/ssam_openqa"
++chmod +x ~/.local/bin/ssam_openqa
++```
++
++The [TigerVNC viewer](https://flathub.org/fr/apps/org.tigervnc.vncviewer) can be helpful in order to follow along as the automated integration tests are running.
++
+ ## 2. Setting up secure boot keys
+ 
+ Before building images, you need to generate secure boot keys. For fast local development, you can use the `snakeoil` keys; these are the same keys CI/CD uses, which means that you can re-use the CI/CD caches for your local builds instead of rebuilding everything from source. Keep in mind however that these keys are publicly known and as a result provide zero security. To use then, run the following:
+@@ -191,7 +200,38 @@ <!-- TOOD: Add note on how to manually disable it again on a remote system -->
+ 
+ ## 7. Running automated integration tests
+ 
+-<!-- TOOD: Add section on running OpenQA tests -->
++The automated integration tests, which also run in CI/CD, can be used to make sure that your changes didn't break anything that already exists. To get started, fetch the test code and needles:
++
++```shell
++$ git clone https://gitlab.gnome.org/gnome/openqa-utils tests/openqa/utils
++$ git clone https://gitlab.gnome.org/gnome/openqa-needles tests/openqa/needles
++```
++
++Then build the ISO as described in [On physical hardware](#32-option-2-on-physical-hardware). The ISO is required because the tests run in a virtual machine. Once the ISO is ready, convert it to an image by running the following:
++
++```shell
++$ run0 ./utils/to-raw.sh ./iso/disk.iso ./iso/disk.img
++$ run0 ./tests/openqa/utils/expand_disk.sh ./iso/disk.img 12 GB
++```
++
++Next, start the automated integration tests:
++
++```shell
++$ rm -rf ./iso/test-output
++$ ssam_openqa run --hdd-path ./iso/disk.img --iso-path ./iso/disk.iso --tests-path ./tests/openqa --output-path ./iso/test-output
++```
++
++To debug tests interactively or follow along as they are running, press <kbd>Ctrl</kbd>+<kbd>C</kbd>, and enter `t` to get the TigerVNC command you can use to connect. You can then enter `c` to continue or `a` to abort. To connect with TigerVNC, run the following, but swap out the command to the one printed after entering `t`:
++
++```shell
++$ flatpak run org.tigervnc.vncviewer localhost:43681 -Shared -ViewOnly
++```
++
++To debug tests interactively or follow along as they are running, press <kbd>Ctrl</kbd>+<kbd>C</kbd>, and enter `t` to get the TigerVNC command you can use to connect. You can then enter `c` to continue or `a` to abort. To connect with TigerVNC, run the following, replacing the example command below with the one printed after entering `t`:
++
++```shell
++$ flatpak run org.tigervnc.vncviewer localhost:43681 -Shared -ViewOnly
++```
+ 
+ ## 8. Opening a merge request with your changes
+ 
+
