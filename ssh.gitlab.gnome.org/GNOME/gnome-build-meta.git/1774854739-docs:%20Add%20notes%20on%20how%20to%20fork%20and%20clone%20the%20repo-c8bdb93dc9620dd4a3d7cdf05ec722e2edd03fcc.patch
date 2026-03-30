@@ -1,0 +1,137 @@
+From c8bdb93dc9620dd4a3d7cdf05ec722e2edd03fcc Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Mon, 30 Mar 2026 00:12:19 -0700
+Subject: [PATCH] docs: Add notes on how to fork and clone the repo
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/CONTRIBUTING.md b/CONTRIBUTING.md
+index dcb2038a3ea8f6ee4054854b43935ca981a98622..bfef413e3076429d824d784aee4bd3277fa512e3 100644
+--- a/CONTRIBUTING.md
++++ b/CONTRIBUTING.md
+@@ -1,10 +1,6 @@
+-# Contributing to the GNOME Build Metadata repository/GNOME OS
+-
+-## 1. Forking and cloning the GNOME Build Metadata repository
+-
+-<!-- TODO: Add section on forking and cloning the GNOME Build Metadata repository, plus joining Matrix for help -->
++# Contributing to GNOME OS
+ 
+-## 2. Setting up the build environment
++## 1. Setting up the build environment
+ 
+ GNOME OS a [BuildStream](https://www.buildstream.build/) project. If you're using GNOME OS as your developer workstation, you can set up all the tools and dependencies you need to build GNOME OS by enabling the `devel` extension:
+ 
+@@ -22,13 +18,24 @@
+ For [automated integration tests](#7-running-automated-integration-tests), you also need to install the [ssam_openqa](https://gitlab.gnome.org/sthursfield/ssam_openqa) tool manually like so:
+ 
+ ```shell
+-curl -Lo ~/.local/bin/ssam_openqa "https://gitlab.gnome.org/api/v4/projects/sthursfield%2Fssam_openqa/packages/generic/x86_64-unknown-linux-gnu/$(curl 'https://gitlab.gnome.org/api/v4/projects/sthursfield%2Fssam_openqa/packages?package_name=x86_64-unknown-linux-gnu&sort=desc' | jq -r '.[0].version')/ssam_openqa"
++curl -Lo ~/.local/bin/ssam_openqa "https://gitlab.gnome.org/api/v4/projects/sthursfield%2Fssam_openqa/packages/generic/$(x86_64)-unknown-linux-gnu/$(curl "https://gitlab.gnome.org/api/v4/projects/sthursfield%2Fssam_openqa/packages?package_name=$(x86_64)-unknown-linux-gnu&sort=desc" | jq -r '.[0].version')/ssam_openqa"
+ chmod +x ~/.local/bin/ssam_openqa
+ ```
+ 
+ The [TigerVNC viewer](https://flathub.org/fr/apps/org.tigervnc.vncviewer) can be helpful in order to follow along as the automated integration tests are running.
+ 
+-## 2. Setting up secure boot keys
++## 2. Forking and cloning the GNOME Build Metadata repository
++
++First, create a fork of the repo in your account by visiting https://gitlab.gnome.org/GNOME/gnome-build-meta/-/forks/new. Then, clone repository to a local directory on your workstation:
++
++```shell
++$ git clone git@ssh.gitlab.gnome.org:your-username/gnome-build-meta.git
++$ cd gnome-build-meta.git
++```
++
++If you need help with your contributions, ask for help in [`#gnome-os:gnome.org` on Matrix](https://matrix.to/#/#gnome-os:gnome.org).
++
++## 3. Setting up secure boot keys
+ 
+ Before building images, you need to generate secure boot keys. For fast local development, you can use the `snakeoil` keys; these are the same keys CI/CD uses, which means that you can re-use the CI/CD caches for your local builds instead of rebuilding everything from source. Keep in mind however that these keys are publicly known and as a result provide zero security. To use then, run the following:
+ 
+@@ -51,13 +58,13 @@ $ make -C files/boot-keys clean
+ $ make -C files/boot-keys
+ ```
+ 
+-## 3. Building and booting a GNOME OS image
++## 4. Building and booting a GNOME OS image
+ 
+ > If you're already running GNOME OS (e.g. if you installed it by using the [prebuilt images](https://os.gnome.org/)) and want to deploy your changes to it directly, you can skip this step and jump directly to the [Making changes](#5-making-changes) section instead
+ 
+ The first build might take a while depending on your workstation's specs and which secure boot key configuration you've set up earlier.
+ 
+-### 3.1 Option 1: In a virtual machine
++### 4.1 Option 1: In a virtual machine
+ 
+ To build and start a virtual machine with secure boot and a TPM, run the following; secure boot keys are generated automatically if they'd don't already exist:
+ 
+@@ -67,7 +74,7 @@ ```
+ 
+ The virtual machine image and state can be found at `./current-secure-vm/`.
+ 
+-### 3.2 Option 2: On physical hardware
++### 4.2 Option 2: On physical hardware
+ 
+ First, generate the secure boot keys as described in [setting up secure boot keys](#setting-up-secure-boot-keys). Then build the ISO by running the following:
+ 
+@@ -80,13 +87,13 @@ The ISO can be found at `./iso/disk.iso`.
+ 
+ You can now write the ISO to a USB stick and boot from it on physical hardware, or manually boot from it in a virtual machine.
+ 
+-## 4. Installing your locally built GNOME OS image to disk
++## 5. Installing your locally built GNOME OS image to disk
+ 
+ If you have secure boot enabled, systemd-boot will offer to auto-enroll the secure boot keys on the first boot.
+ 
+ After booting, [GNOME Initial Setup](https://gitlab.gnome.org/GNOME/gnome-initial-setup) will ask you to set up the system. After it has completed, the [GNOME OS proto-installer](./files/gnomeos/live/proto-installer) will automatically start and prompt you to install GNOME OS to disk, which you should do.
+ 
+-## 5. Making changes
++## 6. Making changes
+ 
+ First, create a workspace for the GNOME OS components you want to work on; for example for the Linux kernel:
+ 
+@@ -108,7 +115,7 @@ ```
+ 
+ Now make the changes you want to make in your workspace, for example in `../linux` or `../gnome-control-center`. BuildStream will pick up your changes from this workspace automatically after you make them.
+ 
+-## 6. Rebuilding GNOME OS with your changes and deploying them
++## 7. Rebuilding GNOME OS with your changes and deploying them
+ 
+ While it's possible to rebuild the GNOME OS images on each change and reinstall them each time you make changes, this leads to a very slow iteration cycle and not recommended. Instead, the the systemd-systext and/or systemd-sysupdate workflows described in the following section to build and deploy your changes to your local workstation, VM or a different machine in a much faster way.
+ 
+@@ -128,7 +135,7 @@ ```
+ 
+ Here, `strict: false` avoids rebuilding the whole chain on the next build, and `override-project-caches: true` disables remote cache lookups which, while helpful on the first build, can significantly slow down things on subsequent builds.
+ 
+-### 6.1 Option 1: By building and installing a system extension (`systemd-sysext`)
++### 7.1 Option 1: By building and installing a system extension (`systemd-sysext`)
+ 
+ > This option works best if you want to temporarily and quickly deploy your changes to your local workstation. No reboot is required to see your changes in action. The one component that can't be iterated on with system extensions is the kernel - for that, use the [`systemd-sysupdate` option](#62-option-2-by-building-serving-and-updating-from-a-local-sysupdate-repository-systemd-sysupdate) instead.
+ 
+@@ -165,7 +172,7 @@ $ run0 rm /var/lib/extensions/zz-gnome-control-center.raw
+ $ run0 systemd-sysext refresh
+ ```
+ 
+-### 6.2 Option 2: By building, serving and updating from a local sysupdate repository (`systemd-sysupdate`)
++### 7.2 Option 2: By building, serving and updating from a local sysupdate repository (`systemd-sysupdate`)
+ 
+ > This option works best if you want to permanently deploy your changes to your local workstation, or if you want to deploy to a VM or a different workstation. A reboot is required to see your changes in action. Unlike with the [`systemd-sysext` option](#61-option-1-by-building-and-installing-a-system-extension-systemd-sysext), this option can be used to iterate on the kernel.
+ 
+@@ -206,7 +213,7 @@ ```shell
+ $ ssh user@remote-workstation-hostname-or-ip run0 /tmp/gnome-build-meta/utils/enable-local-repo.sh --clean
+ ```
+ 
+-## 7. Running automated integration tests
++## 8. Running automated integration tests
+ 
+ The automated integration tests, which also run in CI/CD, can be used to make sure that your changes didn't break anything that already exists. To get started, fetch the test code and needles:
+ 
+@@ -241,6 +248,6 @@ ```shell
+ $ flatpak run org.tigervnc.vncviewer localhost:43681 -Shared -ViewOnly
+ ```
+ 
+-## 8. Opening a merge request with your changes
++## 9. Opening a merge request with your changes
+ 
+ <!-- TODO: Add section on how to upstream/mainline changes via GitLab, CI/CD etc. -->
+
