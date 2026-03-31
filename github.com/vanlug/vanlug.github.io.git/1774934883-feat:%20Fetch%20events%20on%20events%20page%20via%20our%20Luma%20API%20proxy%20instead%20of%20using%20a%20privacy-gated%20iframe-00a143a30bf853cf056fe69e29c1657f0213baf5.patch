@@ -1,0 +1,436 @@
+From 00a143a30bf853cf056fe69e29c1657f0213baf5 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Mon, 30 Mar 2026 22:28:03 -0700
+Subject: [PATCH] feat: Fetch events on events page via our Luma API proxy instead of using a privacy-gated iframe
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/README.md b/README.md
+index c0b0853e10ce06803345c6b34c4661ea290ff618..63e4c41116541c964ee1874c2db13af0aa12d6fd 100644
+--- a/README.md
++++ b/README.md
+@@ -13,7 +13,7 @@
+ It provides the following:
+ 
+ - Home page with next meeting card (fetched from Luma API via a proxy hosted on Railway), "what to expect" cards, and social links
+-- Events page with embedded Luma calendar iframe and full past event history
++- Events page with upcoming events (fetched from Luma API via a proxy hosted on Railway) and full past event history
+ - About page with mission, purpose mandates, and board of directors
+ - Partners page listing library and community venue partners
+ - Resources page with speaker slides, AGM documents, learning links, and design system
+diff --git a/content/privacy.md b/content/privacy.md
+index 187fc1f5c43e1c1fedb24ca151c58904b70bc039..213e1c84c88fa06c8e8fdce6de169e3f71e893d5 100644
+--- a/content/privacy.md
++++ b/content/privacy.md
+@@ -30,11 +30,9 @@    - Data is processed during regular use of our website and includes the IP address of the requesting computer, the browser and operating system you are using, the date and time of access, the URLs requested on our website, as well as the previously visited website where applicable (referrer URL).
+    - Our website does NOT use cookies or other techniques for user-targeted analytics or advertisements.
+    - Legal basis for processing this data is a legitimate interest of the website operator (Art. 6.1.f GDPR).
+ 
+-#### 3.2 Luma Calendar Embed
+-
+-Our Events page offers an optional embed of the Luma event calendar. This embed is **not loaded by default**. It is only activated when you explicitly click "Load events from Luma". Loading it will connect your browser directly to Luma's servers.
++#### 3.2 Luma Event Data
+ 
+-Our home page fetches the next upcoming event from Luma's API via our proxy on Railway to display the next meeting card. Your browser connects to our proxy, not directly to Luma.
++Our home page and events page fetch event data from Luma's API via our proxy on Railway. Your browser connects to our proxy, not directly to Luma. No data is sent to Luma from your browser.
+ 
+ Luma, Inc.\
+ 548 Market St PMB 36143\
+@@ -52,7 +50,7 @@ San Francisco, CA 94107\
+ United States\
+ Privacy policy: [GitHub Privacy Statement](https://docs.github.com/en/site-policy/privacy-policies/github-general-privacy-statement)
+ 
+-Our Luma event API proxy for the home page is hosted by:
++Our Luma event API proxy is hosted by:
+ 
+ Railway Corporation\
+ 548 Market St PMB 68956\
+diff --git a/layouts/_partials/next-event-template.html b/layouts/_partials/next-event-template.html
+index 1212c27ce9170246c3baf7439944b7dbe1e11333..d5bb77fcfcffdbc743f4259d93a0bb62e8357901 100644
+--- a/layouts/_partials/next-event-template.html
++++ b/layouts/_partials/next-event-template.html
+@@ -1,33 +1,52 @@
+ <template id="next-event-template">
+-  <div class="pf-v6-c-card pf-m-compact">
+-    <div class="pf-v6-c-card__body">
+-      <div class="pf-v6-l-flex pf-m-gap-lg pf-m-align-items-center">
++  <div class="pf-v6-c-card pf-m-compact pf-m-flat">
++    <div class="pf-v6-c-card__header">
++      <div class="pf-v6-c-card__header-main">
+         <div
+-          class="pf-v6-l-flex pf-m-column pf-m-align-items-center pf-m-gap-xs"
++          class="pf-v6-l-flex pf-m-gap-lg pf-m-align-items-center pf-m-nowrap"
+         >
+-          <span class="pf-v6-c-label pf-m-green pf-m-outline">
+-            <span class="pf-v6-c-label__content">
+-              <span class="pf-v6-c-label__text" data-slot="date"></span>
+-            </span>
+-          </span>
+-          <span class="pf-v6-u-font-size-xs" data-slot="relative"></span>
+-        </div>
+-        <div class="pf-v6-l-flex pf-m-column pf-m-gap-sm">
+-          <div class="pf-v6-c-content">
+-            <h4 data-slot="name"></h4>
+-            <p>
+-              <small data-slot="detail"></small>
+-            </p>
++          <div
++            class="pf-v6-l-flex pf-m-gap-lg pf-m-align-items-center pf-m-justify-content-center"
++          >
++            <img
++              data-slot="cover"
++              alt=""
++              style="
++                width: 4rem;
++                height: 4rem;
++                object-fit: cover;
++                border-radius: var(--pf-t--global--border--radius--medium);
++                flex-shrink: 0;
++              "
++            />
++            <div
++              class="pf-v6-l-flex pf-m-column pf-m-align-items-center pf-m-gap-xs"
++            >
++              <span class="pf-v6-c-label pf-m-green pf-m-outline">
++                <span class="pf-v6-c-label__content">
++                  <span class="pf-v6-c-label__text" data-slot="date"></span>
++                </span>
++              </span>
++              <span class="pf-v6-u-font-size-xs" data-slot="relative"></span>
++            </div>
++          </div>
++          <div class="pf-v6-l-flex pf-m-column pf-m-gap-sm">
++            <div class="pf-v6-c-content">
++              <h4 data-slot="name"></h4>
++              <p>
++                <small data-slot="detail"></small>
++              </p>
++            </div>
++            <a
++              data-slot="rsvp"
++              target="_blank"
++              rel="noopener"
++              class="pf-v6-c-button pf-m-link pf-m-inline"
++              ><span class="pf-v6-c-button__text">RSVP on Luma</span
++              ><span class="pf-v6-c-button__icon pf-m-end"
++                ><icon-external></icon-external></span
++            ></a>
+           </div>
+-          <a
+-            data-slot="rsvp"
+-            target="_blank"
+-            rel="noopener"
+-            class="pf-v6-c-button pf-m-link pf-m-inline"
+-            ><span class="pf-v6-c-button__text">RSVP on Luma</span
+-            ><span class="pf-v6-c-button__icon pf-m-end"
+-              ><icon-external></icon-external></span
+-          ></a>
+         </div>
+       </div>
+     </div>
+diff --git a/layouts/_partials/section-events.html b/layouts/_partials/section-events.html
+index ea2e4b4c2280ebccf68641d09d2c2092cd0e7039..c8f9f140796c6bda2afda4313b51b32e0e98985c 100644
+--- a/layouts/_partials/section-events.html
++++ b/layouts/_partials/section-events.html
+@@ -30,49 +30,36 @@             >Luma calendar<icon-external></icon-external></a
+           >. RSVP there to get reminders.
+         </p>
+       </div>
+-      <luma-embed calendar="{{ .Site.Data.links.luma.calendar }}">
+-        <div class="pf-v6-c-empty-state">
+-          <div class="pf-v6-c-empty-state__content">
+-            <div class="pf-v6-c-empty-state__icon">
+-              <i class="fas fa-shield-alt" aria-hidden="true"></i>
+-            </div>
+-            <div class="pf-v6-c-empty-state__title-text">
+-              External content
+-            </div>
+-            <div class="pf-v6-c-empty-state__body">
+-              The event calendar is hosted by Luma. Loading it will
+-              connect your browser to their servers. See Luma's
+-              <a
+-                href="https://luma.com/privacy-policy"
+-                target="_blank"
+-                rel="noopener"
+-                >privacy policy<icon-external></icon-external></a
+-              >.
+-            </div>
+-            <div class="pf-v6-c-empty-state__footer">
+-              <div class="pf-v6-c-empty-state__actions">
+-                <button
+-                  class="pf-v6-c-button pf-m-primary"
+-                  type="button"
+-                  data-slot="load"
+-                >
+-                  Load events from Luma
+-                </button>
++      <luma-upcoming-events
++        calendar="{{ .Site.Data.links.luma.calendar }}"
++        proxy="{{ .Site.Data.links.luma.proxy }}"
++      >
++        <div class="pf-v6-l-flex pf-m-column pf-m-gap-md">
++          {{ range (seq 3) }}
++            <div class="pf-v6-c-card pf-m-compact pf-m-flat">
++              <div class="pf-v6-c-card__header">
++                <div class="pf-v6-c-card__header-main">
++                  <div class="pf-v6-l-flex pf-m-gap-lg pf-m-align-items-center pf-m-nowrap">
++                    <div
++                      class="pf-v6-c-skeleton"
++                      style="
++                        --pf-v6-c-skeleton--Height: 4rem;
++                        --pf-v6-c-skeleton--Width: 4rem;
++                        border-radius: var(--pf-t--global--border--radius--medium);
++                        flex-shrink: 0;
++                      "
++                    ></div>
++                    <div class="pf-v6-l-flex pf-m-column pf-m-gap-sm pf-m-grow">
++                      <div class="pf-v6-c-skeleton pf-m-text-lg pf-m-width-50"></div>
++                      <div class="pf-v6-c-skeleton pf-m-text-sm pf-m-width-75"></div>
++                    </div>
++                  </div>
++                </div>
+               </div>
+-              <a
+-                href="{{ .Site.Data.links.luma.url }}"
+-                target="_blank"
+-                rel="noopener"
+-                class="pf-v6-c-button pf-m-link"
+-                ><span class="pf-v6-c-button__text"
+-                  >Open on Luma instead</span
+-                ><span class="pf-v6-c-button__icon pf-m-end"
+-                  ><icon-external></icon-external></span
+-              ></a>
+             </div>
+-          </div>
++          {{ end }}
+         </div>
+-      </luma-embed>
++      </luma-upcoming-events>
+     </div>
+   </section>
+ 
+diff --git a/layouts/_partials/section-home.html b/layouts/_partials/section-home.html
+index 97d7147edabecfe17e236ebe22130d65fbe368d7..affa44e77ba3b032bfad56f572af6f807b1545b8 100644
+--- a/layouts/_partials/section-home.html
++++ b/layouts/_partials/section-home.html
+@@ -66,27 +66,31 @@       <luma-next-event
+         calendar="{{ .Site.Data.links.luma.calendar }}"
+         proxy="{{ .Site.Data.links.luma.proxy }}"
+       >
+-        <div class="pf-v6-c-card pf-m-compact">
+-          <div class="pf-v6-c-card__body">
+-            <div
+-              class="pf-v6-l-flex pf-m-gap-lg pf-m-align-items-flex-start"
+-            >
+-              <div
+-                class="pf-v6-c-skeleton"
+-                style="
+-                  --pf-v6-c-skeleton--Height: 3rem;
+-                  --pf-v6-c-skeleton--Width: 3.5rem;
+-                "
+-              ></div>
++        <div class="pf-v6-c-card pf-m-compact pf-m-flat">
++          <div class="pf-v6-c-card__header">
++            <div class="pf-v6-c-card__header-main">
+               <div
+-                class="pf-v6-l-flex pf-m-column pf-m-gap-sm pf-m-grow"
++                class="pf-v6-l-flex pf-m-gap-lg pf-m-align-items-center"
+               >
+                 <div
+-                  class="pf-v6-c-skeleton pf-m-text-lg pf-m-width-50"
++                  class="pf-v6-c-skeleton"
++                  style="
++                    --pf-v6-c-skeleton--Height: 4rem;
++                    --pf-v6-c-skeleton--Width: 4rem;
++                    border-radius: var(--pf-t--global--border--radius--medium);
++                    flex-shrink: 0;
++                  "
+                 ></div>
+                 <div
+-                  class="pf-v6-c-skeleton pf-m-text-sm pf-m-width-75"
+-                ></div>
++                  class="pf-v6-l-flex pf-m-column pf-m-gap-sm pf-m-grow"
++                >
++                  <div
++                    class="pf-v6-c-skeleton pf-m-text-lg pf-m-width-50"
++                  ></div>
++                  <div
++                    class="pf-v6-c-skeleton pf-m-text-sm pf-m-width-75"
++                  ></div>
++                </div>
+               </div>
+             </div>
+           </div>
+diff --git a/static/main.js b/static/main.js
+index 3005b4b010a4503a2635b25aa1a045ce1da17454..eb87446a6160f8e136853d3f271215bb915f08df 100644
+--- a/static/main.js
++++ b/static/main.js
+@@ -90,25 +90,52 @@       },
+     );
+   }
+ 
+-  customElements.define(
+-    "luma-embed",
+-    class extends HTMLElement {
+-      connectedCallback() {
+-        this.querySelector("[data-slot=load]").addEventListener("click", () => {
+-          const cal = this.getAttribute("calendar");
+-          const iframe = document.createElement("iframe");
+-          iframe.src = `https://luma.com/embed/calendar/${encodeURIComponent(cal)}/events`;
+-          iframe.allowFullscreen = true;
+-          iframe.setAttribute("aria-label", "Upcoming VanLUG events on Luma");
+-          iframe.frameBorder = "0";
+-          iframe.className = "pf-v6-u-w-100";
+-          iframe.style.cssText =
+-            "height:28rem;border:none;border-radius:var(--pf-t--global--border--radius--medium)";
+-          this.replaceChildren(iframe);
+-        });
+-      }
+-    },
+-  );
++  const eventTemplate = document.getElementById("next-event-template");
++
++  const renderEventCard = (evt) => {
++    const start = new Date(evt.start_at);
++    const now = new Date();
++    const days = Math.ceil((start - now) / 86400000);
++    const relative =
++      days <= 0
++        ? "(today!)"
++        : days === 1
++          ? "(tomorrow)"
++          : days < 7
++            ? "(this week)"
++            : days < 14
++              ? "(next week)"
++              : `(in ${Math.round(days / 7)} weeks)`;
++    const time = start.toLocaleTimeString("en-US", {
++      hour: "numeric",
++      minute: "2-digit",
++    });
++
++    const clone = eventTemplate.content.cloneNode(true);
++    const $ = (s) => clone.querySelector(`[data-slot="${s}"]`);
++    const cover = $("cover");
++    if (evt.cover_url) {
++      cover.src = evt.cover_url;
++      cover.alt = evt.name || "Event cover";
++    } else {
++      cover.remove();
++    }
++    $("date").textContent = start.toLocaleDateString("en-US", {
++      weekday: "short",
++      month: "short",
++      day: "numeric",
++    });
++    $("relative").textContent = relative;
++    $("name").textContent = evt.name || "VanLUG Meeting";
++    $("detail").textContent = evt.location
++      ? `${evt.location} \u00b7 ${time}`
++      : time;
++    const link = $("rsvp");
++    link.href = evt.url
++      ? `https://luma.com/${evt.url}`
++      : "https://luma.com/vanlug";
++    return clone;
++  };
+ 
+   customElements.define(
+     "luma-next-event",
+@@ -116,7 +143,6 @@     class extends HTMLElement {
+       connectedCallback() {
+         const cal = this.getAttribute("calendar");
+         const proxy = this.getAttribute("proxy");
+-        const t = document.getElementById("next-event-template");
+         fetch(`${proxy}/next-event?calendar=${encodeURIComponent(cal)}`)
+           .then((r) => r.json())
+           .then(({ entries }) => {
+@@ -127,48 +153,52 @@                 "No upcoming events right now. Check back soon!";
+               return;
+             }
+ 
+-            const start = new Date(evt.start_at);
+-            const now = new Date();
+-            const days = Math.ceil((start - now) / 86400000);
+-            const relative =
+-              days <= 0
+-                ? "(today!)"
+-                : days === 1
+-                  ? "(tomorrow)"
+-                  : days < 7
+-                    ? "(this week)"
+-                    : days < 14
+-                      ? "(next week)"
+-                      : `(in ${Math.round(days / 7)} weeks)`;
+-            const time = start.toLocaleTimeString("en-US", {
+-              hour: "numeric",
+-              minute: "2-digit",
+-            });
+-
+             this.replaceChildren();
+-            const clone = t.content.cloneNode(true);
+-            const $ = (s) => clone.querySelector(`[data-slot="${s}"]`);
+-            $("date").textContent = start.toLocaleDateString("en-US", {
+-              weekday: "short",
+-              month: "short",
+-              day: "numeric",
+-            });
+-            $("relative").textContent = relative;
+-            $("name").textContent = evt.name || "VanLUG Meeting";
+-            $("detail").textContent = evt.location
+-              ? `${evt.location} \u00b7 ${time}`
+-              : time;
+-            const link = $("rsvp");
+-            link.href = evt.url
+-              ? `https://luma.com/${evt.url}`
+-              : "https://luma.com/vanlug";
+-            this.append(clone);
++            this.append(renderEventCard(evt));
+           })
+           .catch(() => {
+             this.textContent = "Could not load the next event. ";
+             const a = document.createElement("a");
+             a.href = "/events/";
+             a.textContent = "See all events.";
++            this.append(a);
++          });
++      }
++    },
++  );
++
++  customElements.define(
++    "luma-upcoming-events",
++    class extends HTMLElement {
++      connectedCallback() {
++        const cal = this.getAttribute("calendar");
++        const proxy = this.getAttribute("proxy");
++        fetch(`${proxy}/events?calendar=${encodeURIComponent(cal)}`)
++          .then((r) => r.json())
++          .then(({ entries }) => {
++            if (!entries || entries.length === 0) {
++              this.textContent =
++                "No upcoming events right now. Check back soon!";
++              return;
++            }
++
++            this.replaceChildren();
++            const container = document.createElement("div");
++            container.className = "pf-v6-l-flex pf-m-column pf-m-gap-md";
++
++            for (const evt of entries) {
++              container.appendChild(renderEventCard(evt));
++            }
++
++            this.appendChild(container);
++          })
++          .catch(() => {
++            this.textContent = "Could not load upcoming events. ";
++            const a = document.createElement("a");
++            a.href = "https://luma.com/vanlug";
++            a.target = "_blank";
++            a.rel = "noopener";
++            a.textContent = "View on Luma instead.";
+             this.append(a);
+           });
+       }
+
