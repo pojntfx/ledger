@@ -1,0 +1,532 @@
+From 913bf7c4b38d1e9cae79fc9b0ae7494a91a5181f Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Tue, 31 Mar 2026 23:32:44 -0700
+Subject: [PATCH] refactor: Move all templates directly into web components
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/assets/js/events.js b/assets/js/events.js
+index 61c192e199dff7ba3f7a0072883bd711cd476c60..98b524f4bf91faf2b072ae587a11a2916a6f18e4 100644
+--- a/assets/js/events.js
++++ b/assets/js/events.js
+@@ -38,15 +38,4 @@   img.alt = alt;
+   img.style.cssText =
+     "width: 4rem; height: 4rem; object-fit: cover; border-radius: var(--pf-t--global--border--radius--medium);";
+   return img;
+-};
+-
+-export const makeCell = (className, ...children) => {
+-  const td = document.createElement("td");
+-  td.className = className;
+-  td.setAttribute("role", "cell");
+-  td.style.verticalAlign = "middle";
+-  for (const child of children) {
+-    if (child) td.append(child);
+-  }
+-  return td;
+-};
++};
+\ No newline at end of file
+diff --git a/assets/js/icons.js b/assets/js/icons.js
+index 13bc68be3d76eed968dd3cac8d899ab223262bcd..65062fc3bd623bada1ba4eb4f82b76459520447e 100644
+--- a/assets/js/icons.js
++++ b/assets/js/icons.js
+@@ -1,54 +1,42 @@
+-const inButton = (el) => el.closest(".pf-v6-c-button__icon") !== null;
+-const renderFaIcon = (el, faClasses) => {
+-  const i = `<i class="${faClasses}" aria-hidden="true"></i>`;
+-  if (inButton(el)) {
+-    el.innerHTML = i;
+-  } else {
+-    el.style.display = "inline";
+-    el.style.whiteSpace = "nowrap";
+-    el.innerHTML = "\u2060" + i;
+-    el.querySelector("i").classList.add("pf-v6-u-ml-xs");
++class FaIcon extends HTMLElement {
++  static faClass = "";
++
++  connectedCallback() {
++    const inButton = this.closest(".pf-v6-c-button__icon") !== null;
++    const faClass = this.constructor.faClass || this.dataset.icon;
++    const icon = document.createElement("i");
++    icon.className = faClass;
++    icon.setAttribute("aria-hidden", "true");
++
++    if (inButton) {
++      this.replaceChildren(icon);
++    } else {
++      this.style.display = "inline";
++      this.style.whiteSpace = "nowrap";
++      icon.classList.add("pf-v6-u-ml-xs");
++      this.replaceChildren("\u2060", icon);
++    }
+   }
+-};
+-const brandIcons = {
++}
++
++const icons = {
+   "icon-discourse": "fa-brands fa-discourse",
+   "icon-signal": "fa-brands fa-signal-messenger",
+   "icon-mastodon": "fa-brands fa-mastodon",
+   "icon-bluesky": "fa-brands fa-bluesky",
+   "icon-linkedin": "fa-brands fa-linkedin",
+   "icon-paypal": "fa-brands fa-paypal",
++  "icon-external": "fa-solid fa-arrow-up-right-from-square",
++  "icon-email": "fa-solid fa-envelope",
+ };
+-for (const [tag, cls] of Object.entries(brandIcons)) {
++
++for (const [tag, cls] of Object.entries(icons)) {
+   customElements.define(
+     tag,
+-    class extends HTMLElement {
+-      connectedCallback() {
+-        renderFaIcon(this, cls);
+-      }
++    class extends FaIcon {
++      static faClass = cls;
+     },
+   );
+ }
+-customElements.define(
+-  "icon-external",
+-  class extends HTMLElement {
+-    connectedCallback() {
+-      renderFaIcon(this, "fa-solid fa-arrow-up-right-from-square");
+-    }
+-  },
+-);
+-customElements.define(
+-  "icon-email",
+-  class extends HTMLElement {
+-    connectedCallback() {
+-      renderFaIcon(this, "fa-solid fa-envelope");
+-    }
+-  },
+-);
+-customElements.define(
+-  "icon-custom",
+-  class extends HTMLElement {
+-    connectedCallback() {
+-      renderFaIcon(this, this.dataset.icon);
+-    }
+-  },
+-);
++
++customElements.define("icon-custom", FaIcon);
+diff --git a/assets/js/luma-next-event.js b/assets/js/luma-next-event.js
+index 3ea3ad89638742adc87ad3d79c54fe5e8ce5b810..aa327da6b9b27e8f179037bf0f7e6f2a4d86bd83 100644
+--- a/assets/js/luma-next-event.js
++++ b/assets/js/luma-next-event.js
+@@ -1,11 +1,44 @@
+ import { formatEvent } from "./events.js";
+ 
+-const eventTemplate = document.getElementById("next-event-template");
++const template = document.createElement("template");
++template.innerHTML = `
++  <div class="pf-v6-c-card pf-m-compact pf-m-flat">
++    <div class="pf-v6-c-card__header">
++      <div class="pf-v6-c-card__header-main">
++        <div class="pf-v6-l-flex pf-m-gap-lg pf-m-align-items-center pf-m-nowrap">
++          <div class="pf-v6-l-flex pf-m-gap-lg pf-m-align-items-center pf-m-justify-content-center">
++            <img data-slot="cover" alt=""
++              style="width: 4rem; height: 4rem; object-fit: cover;
++                     border-radius: var(--pf-t--global--border--radius--medium); flex-shrink: 0;" />
++            <div class="pf-v6-l-flex pf-m-column pf-m-align-items-center pf-m-gap-xs">
++              <span class="pf-v6-c-label pf-m-green pf-m-outline">
++                <span class="pf-v6-c-label__content">
++                  <span class="pf-v6-c-label__text" data-slot="date"></span>
++                </span>
++              </span>
++              <span class="pf-v6-u-font-size-xs" data-slot="relative"></span>
++            </div>
++          </div>
++          <div class="pf-v6-l-flex pf-m-column pf-m-gap-sm">
++            <div class="pf-v6-c-content">
++              <h4 data-slot="name"></h4>
++              <p><small data-slot="detail"></small></p>
++            </div>
++            <a data-slot="rsvp" target="_blank" rel="noopener"
++              class="pf-v6-c-button pf-m-link pf-m-inline">
++              <span class="pf-v6-c-button__text">RSVP on Luma</span>
++              <span class="pf-v6-c-button__icon pf-m-end"><icon-external></icon-external></span>
++            </a>
++          </div>
++        </div>
++      </div>
++    </div>
++  </div>`;
+ 
+ const renderEventCard = (evt) => {
+   const { name, date, time, relative, lumaUrl, location, coverUrl } =
+     formatEvent(evt);
+-  const clone = eventTemplate.content.cloneNode(true);
++  const clone = template.content.cloneNode(true);
+   const $ = (s) => clone.querySelector(`[data-slot="${s}"]`);
+   const cover = $("cover");
+   if (coverUrl) {
+diff --git a/assets/js/luma-upcoming-events.js b/assets/js/luma-upcoming-events.js
+index f3108e82bbd897ce22f22310cedd80f6f532e5f0..d5959c6a25a5040f21cc751d8e62e1dca85ab212 100644
+--- a/assets/js/luma-upcoming-events.js
++++ b/assets/js/luma-upcoming-events.js
+@@ -1,70 +1,49 @@
+-import { formatEvent, makeCoverImg, makeCell } from "./events.js";
++import { formatEvent, makeCoverImg } from "./events.js";
++
++const rowTemplate = document.createElement("template");
++rowTemplate.innerHTML = `
++  <tr class="pf-v6-c-table__tr" role="row">
++    <td class="pf-v6-c-table__td pf-v6-u-display-none pf-v6-u-display-table-cell-on-md" role="cell" style="vertical-align: middle;" data-slot="cover-desktop"></td>
++    <td class="pf-v6-c-table__td" role="cell" style="vertical-align: middle;">
++      <div class="pf-v6-l-flex pf-m-gap-md pf-m-align-items-center">
++        <span class="pf-v6-u-display-inline-block pf-v6-u-display-none-on-md" data-slot="cover-mobile"></span>
++        <div>
++          <div class="pf-v6-u-font-weight-bold pf-v6-u-display-block pf-v6-u-display-none-on-md" data-slot="name-mobile"></div>
++          <div><span data-slot="date"></span> <span class="pf-v6-u-font-size-xs" data-slot="relative"></span></div>
++          <small class="pf-v6-u-text-color-subtle" data-slot="time"></small>
++        </div>
++      </div>
++    </td>
++    <td class="pf-v6-c-table__td pf-v6-u-display-none pf-v6-u-display-table-cell-on-md" role="cell" style="vertical-align: middle;" data-slot="name-desktop"></td>
++    <td class="pf-v6-c-table__td" role="cell" style="vertical-align: middle;" data-slot="location"></td>
++    <td class="pf-v6-c-table__td" role="cell" style="vertical-align: middle;">
++      <a data-slot="rsvp" target="_blank" rel="noopener" class="pf-v6-c-button pf-m-link pf-m-inline pf-m-small">
++        RSVP<span class="pf-v6-c-button__icon pf-m-end"><icon-external></icon-external></span>
++      </a>
++    </td>
++  </tr>`;
+ 
+ const renderEventRow = (evt) => {
+   const { name, date, time, relative, lumaUrl, location, coverUrl } =
+     formatEvent(evt);
++  const clone = rowTemplate.content.cloneNode(true);
++  const $ = (s) => clone.querySelector(`[data-slot="${s}"]`);
+ 
+-  const tr = document.createElement("tr");
+-  tr.className = "pf-v6-c-table__tr";
+-  tr.setAttribute("role", "row");
++  const desktopCover = makeCoverImg(coverUrl, name);
++  if (desktopCover) $("cover-desktop").append(desktopCover);
+ 
+-  tr.append(
+-    makeCell(
+-      "pf-v6-c-table__td pf-v6-u-display-none pf-v6-u-display-table-cell-on-md",
+-      makeCoverImg(coverUrl, name),
+-    ),
+-  );
++  const mobileCover = makeCoverImg(coverUrl, name);
++  if (mobileCover) $("cover-mobile").append(mobileCover);
+ 
+-  const mobileCover = document.createElement("span");
+-  mobileCover.className =
+-    "pf-v6-u-display-inline-block pf-v6-u-display-none-on-md";
+-  const mobileCoverImg = makeCoverImg(coverUrl, name);
+-  if (mobileCoverImg) mobileCover.append(mobileCoverImg);
++  $("name-mobile").textContent = name;
++  $("date").textContent = date;
++  $("relative").textContent = relative;
++  $("time").textContent = time;
++  $("name-desktop").textContent = name;
++  $("location").textContent = location;
++  $("rsvp").href = lumaUrl;
+ 
+-  const mobileName = document.createElement("div");
+-  mobileName.className =
+-    "pf-v6-u-font-weight-bold pf-v6-u-display-block pf-v6-u-display-none-on-md";
+-  mobileName.textContent = name;
+-
+-  const relativeSpan = document.createElement("span");
+-  relativeSpan.className = "pf-v6-u-font-size-xs";
+-  relativeSpan.textContent = relative;
+-
+-  const dateLine = document.createElement("div");
+-  dateLine.append(`${date} `, relativeSpan);
+-
+-  const timeLine = document.createElement("small");
+-  timeLine.className = "pf-v6-u-text-color-subtle";
+-  timeLine.textContent = time;
+-
+-  const textBlock = document.createElement("div");
+-  textBlock.append(mobileName, dateLine, timeLine);
+-
+-  const flex = document.createElement("div");
+-  flex.className = "pf-v6-l-flex pf-m-gap-md pf-m-align-items-center";
+-  flex.append(mobileCover, textBlock);
+-
+-  tr.append(makeCell("pf-v6-c-table__td", flex));
+-
+-  const nameCell = makeCell(
+-    "pf-v6-c-table__td pf-v6-u-display-none pf-v6-u-display-table-cell-on-md",
+-  );
+-  nameCell.textContent = name;
+-  tr.append(nameCell);
+-
+-  const locCell = makeCell("pf-v6-c-table__td");
+-  locCell.textContent = location;
+-  tr.append(locCell);
+-
+-  const rsvpLink = document.createElement("a");
+-  rsvpLink.href = lumaUrl;
+-  rsvpLink.target = "_blank";
+-  rsvpLink.rel = "noopener";
+-  rsvpLink.className = "pf-v6-c-button pf-m-link pf-m-inline pf-m-small";
+-  rsvpLink.append("RSVP", document.createElement("icon-external"));
+-  tr.append(makeCell("pf-v6-c-table__td", rsvpLink));
+-
+-  return tr;
++  return clone;
+ };
+ 
+ customElements.define(
+diff --git a/assets/js/mastodon-feed.js b/assets/js/mastodon-feed.js
+index 14cfbdb0f69041450b705290c1364d5a8ca8ff2e..6b9842a81838fbb6b64ab5d41a2a253ab9c8aab8 100644
+--- a/assets/js/mastodon-feed.js
++++ b/assets/js/mastodon-feed.js
+@@ -1,5 +1,83 @@
+ import DOMPurify from "dompurify";
+ 
++const tootTemplate = document.createElement("template");
++tootTemplate.innerHTML = `
++  <a target="_blank" rel="noopener" style="text-decoration: none;">
++    <div class="pf-v6-c-content pf-v6-u-font-size-sm" data-slot="body"></div>
++    <div data-slot="media"></div>
++    <div class="pf-v6-l-flex pf-m-gap-sm pf-m-align-items-center pf-v6-u-font-size-xs pf-v6-u-text-color-subtle">
++      <img data-slot="avatar" style="width: 1rem; height: 1rem; border-radius: 50%;" />
++      <span data-slot="timestamp"></span>
++      <span data-slot="stats"></span>
++    </div>
++  </a>`;
++
++const renderToot = (toot, data, { isFirst, isLast, inDrawer, profile }) => {
++  const clone = tootTemplate.content.cloneNode(true);
++  const $ = (s) => clone.querySelector(`[data-slot="${s}"]`);
++  const item = clone.querySelector("a");
++
++  item.href = toot.url || profile;
++  item.className = [
++    "pf-v6-l-flex pf-m-column pf-m-gap-xs pf-v6-u-pt-sm pf-v6-u-text-color-regular",
++    isLast ? "pf-v6-u-pb-0" : "pf-v6-u-pb-sm",
++    inDrawer ? "pf-v6-u-px-md" : "",
++  ]
++    .filter(Boolean)
++    .join(" ");
++
++  if (!isFirst) {
++    item.style.borderTop =
++      "var(--pf-t--global--border--width--divider--default) solid var(--pf-t--global--border--color--default)";
++  }
++
++  const body = $("body");
++  body.innerHTML = DOMPurify.sanitize(toot.body); // In the future, we want to use https://developer.mozilla.org/en-US/docs/Web/API/Element/setHTML for this
++
++  const mediaSlot = $("media");
++  for (const m of toot.media?.slice(0, 1) ?? []) {
++    const el = document.createElement(m.isVideo ? "video" : "img");
++    el.src = m.url;
++    if (m.isVideo) el.controls = true;
++    else el.alt = m.altText || "";
++    el.className = "pf-v6-u-w-100";
++    el.style.maxHeight = "10rem";
++    el.style.objectFit = "cover";
++    el.style.borderRadius = "var(--pf-t--global--border--radius--medium)";
++    mediaSlot.append(el);
++  }
++  if (!mediaSlot.children.length) mediaSlot.remove();
++
++  const avatar = $("avatar");
++  avatar.src = data.userProfilePictureURL;
++  avatar.alt = data.userDisplayName;
++
++  $("timestamp").textContent = new Date(toot.timestamp).toLocaleDateString(
++    "en-CA",
++    { month: "short", day: "numeric" },
++  );
++
++  const statsSlot = $("stats");
++  for (const [icon, count] of [
++    ["fa-heart", toot.favoritesCount],
++    ["fa-retweet", toot.reblogsCount],
++  ]) {
++    if (count > 0) {
++      const i = document.createElement("i");
++      i.className = `fas ${icon}`;
++      i.setAttribute("aria-hidden", "true");
++
++      const stat = document.createElement("span");
++      stat.className = "pf-v6-l-flex pf-m-align-items-center pf-m-gap-xs";
++      stat.append(i, String(count));
++      statsSlot.append(stat);
++    }
++  }
++  if (!statsSlot.children.length) statsSlot.remove();
++
++  return clone;
++};
++
+ customElements.define(
+   "mastodon-feed",
+   class extends HTMLElement {
+@@ -21,81 +99,14 @@         const container = document.createElement("div");
+         container.className = "pf-v6-l-flex pf-m-column";
+ 
+         for (const [i, toot] of data.toots.entries()) {
+-          const item = document.createElement("a");
+-          item.href = toot.url || profile;
+-          item.target = "_blank";
+-          item.rel = "noopener";
+-          item.className = [
+-            "pf-v6-l-flex pf-m-column pf-m-gap-xs pf-v6-u-pt-sm pf-v6-u-text-color-regular",
+-            i === data.toots.length - 1 ? "pf-v6-u-pb-0" : "pf-v6-u-pb-sm",
+-            inDrawer ? "pf-v6-u-px-md" : "",
+-          ]
+-            .filter(Boolean)
+-            .join(" ");
+-          item.style.textDecoration = "none";
+-
+-          if (i > 0) {
+-            item.style.borderTop =
+-              "var(--pf-t--global--border--width--divider--default) solid var(--pf-t--global--border--color--default)";
+-          }
+-
+-          const content = document.createElement("div");
+-          content.className = "pf-v6-c-content pf-v6-u-font-size-sm";
+-          content.innerHTML = DOMPurify.sanitize(toot.body); // In the future, we want to use https://developer.mozilla.org/en-US/docs/Web/API/Element/setHTML for this
+-          item.append(content);
+-
+-          for (const m of toot.media?.slice(0, 1) ?? []) {
+-            const el = document.createElement(m.isVideo ? "video" : "img");
+-            el.src = m.url;
+-            if (m.isVideo) el.controls = true;
+-            else el.alt = m.altText || "";
+-            el.className = "pf-v6-u-w-100";
+-            el.style.maxHeight = "10rem";
+-            el.style.objectFit = "cover";
+-            el.style.borderRadius =
+-              "var(--pf-t--global--border--radius--medium)";
+-            item.append(el);
+-          }
+-
+-          const avatar = document.createElement("img");
+-          avatar.src = data.userProfilePictureURL;
+-          avatar.alt = data.userDisplayName;
+-          avatar.style.cssText =
+-            "width: 1rem; height: 1rem; border-radius: 50%;";
+-
+-          const timestamp = document.createElement("span");
+-          timestamp.textContent = new Date(toot.timestamp).toLocaleDateString(
+-            "en-CA",
+-            {
+-              month: "short",
+-              day: "numeric",
+-            },
++          container.append(
++            renderToot(toot, data, {
++              isFirst: i === 0,
++              isLast: i === data.toots.length - 1,
++              inDrawer,
++              profile,
++            }),
+           );
+-
+-          const meta = document.createElement("div");
+-          meta.className =
+-            "pf-v6-l-flex pf-m-gap-sm pf-m-align-items-center pf-v6-u-font-size-xs pf-v6-u-text-color-subtle";
+-          meta.append(avatar, timestamp);
+-
+-          for (const [icon, count] of [
+-            ["fa-heart", toot.favoritesCount],
+-            ["fa-retweet", toot.reblogsCount],
+-          ]) {
+-            if (count > 0) {
+-              const i = document.createElement("i");
+-              i.className = `fas ${icon}`;
+-              i.setAttribute("aria-hidden", "true");
+-
+-              const stat = document.createElement("span");
+-              stat.className =
+-                "pf-v6-l-flex pf-m-align-items-center pf-m-gap-xs";
+-              stat.append(i, String(count));
+-              meta.append(stat);
+-            }
+-          }
+-
+-          item.append(meta);
+-          container.append(item);
+         }
+ 
+         this.replaceChildren(container);
+diff --git a/layouts/_partials/next-event-template.html b/layouts/_partials/next-event-template.html
+deleted file mode 100644
+index d5bb77fcfcffdbc743f4259d93a0bb62e8357901..0000000000000000000000000000000000000000
+--- a/layouts/_partials/next-event-template.html
++++ /dev/null
+@@ -1,54 +0,0 @@
+-<template id="next-event-template">
+-  <div class="pf-v6-c-card pf-m-compact pf-m-flat">
+-    <div class="pf-v6-c-card__header">
+-      <div class="pf-v6-c-card__header-main">
+-        <div
+-          class="pf-v6-l-flex pf-m-gap-lg pf-m-align-items-center pf-m-nowrap"
+-        >
+-          <div
+-            class="pf-v6-l-flex pf-m-gap-lg pf-m-align-items-center pf-m-justify-content-center"
+-          >
+-            <img
+-              data-slot="cover"
+-              alt=""
+-              style="
+-                width: 4rem;
+-                height: 4rem;
+-                object-fit: cover;
+-                border-radius: var(--pf-t--global--border--radius--medium);
+-                flex-shrink: 0;
+-              "
+-            />
+-            <div
+-              class="pf-v6-l-flex pf-m-column pf-m-align-items-center pf-m-gap-xs"
+-            >
+-              <span class="pf-v6-c-label pf-m-green pf-m-outline">
+-                <span class="pf-v6-c-label__content">
+-                  <span class="pf-v6-c-label__text" data-slot="date"></span>
+-                </span>
+-              </span>
+-              <span class="pf-v6-u-font-size-xs" data-slot="relative"></span>
+-            </div>
+-          </div>
+-          <div class="pf-v6-l-flex pf-m-column pf-m-gap-sm">
+-            <div class="pf-v6-c-content">
+-              <h4 data-slot="name"></h4>
+-              <p>
+-                <small data-slot="detail"></small>
+-              </p>
+-            </div>
+-            <a
+-              data-slot="rsvp"
+-              target="_blank"
+-              rel="noopener"
+-              class="pf-v6-c-button pf-m-link pf-m-inline"
+-              ><span class="pf-v6-c-button__text">RSVP on Luma</span
+-              ><span class="pf-v6-c-button__icon pf-m-end"
+-                ><icon-external></icon-external></span
+-            ></a>
+-          </div>
+-        </div>
+-      </div>
+-    </div>
+-  </div>
+-</template>
+diff --git a/layouts/baseof.html b/layouts/baseof.html
+index 1d48cfe48f0dc2ae3edd099562fe6c48d5db1fa1..f6a65bb1d163747b44a546cf014961411ca73782 100644
+--- a/layouts/baseof.html
++++ b/layouts/baseof.html
+@@ -107,8 +107,6 @@         </div>
+       {{ end }}
+     </div>
+ 
+-    {{ partial "next-event-template" . }}
+-
+     {{ with resources.Get "js/main.js" }}
+       {{ $opts := dict
+         "minify" (not hugo.IsDevelopment)
+
