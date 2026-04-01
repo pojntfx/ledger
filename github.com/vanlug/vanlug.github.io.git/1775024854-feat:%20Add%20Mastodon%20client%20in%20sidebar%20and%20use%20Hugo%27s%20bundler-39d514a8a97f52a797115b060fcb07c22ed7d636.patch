@@ -1,0 +1,1061 @@
+From 39d514a8a97f52a797115b060fcb07c22ed7d636 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Tue, 31 Mar 2026 23:27:34 -0700
+Subject: [PATCH] feat: Add Mastodon client in sidebar and use Hugo's bundler
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/assets/js/events.js b/assets/js/events.js
+new file mode 100644
+index 0000000000000000000000000000000000000000..61c192e199dff7ba3f7a0072883bd711cd476c60
+--- /dev/null
++++ b/assets/js/events.js
+@@ -0,0 +1,52 @@
++export const formatEvent = (evt) => {
++  const start = new Date(evt.start_at);
++  const days = Math.ceil((start - new Date()) / 86400000);
++  return {
++    name: evt.name || "VanLUG Meeting",
++    date: start.toLocaleDateString("en-CA", {
++      weekday: "short",
++      month: "short",
++      day: "numeric",
++    }),
++    time: start.toLocaleTimeString("en-CA", {
++      hour: "numeric",
++      minute: "2-digit",
++    }),
++    relative:
++      days <= 0
++        ? "(today!)"
++        : days === 1
++          ? "(tomorrow)"
++          : days < 7
++            ? "(this week)"
++            : days < 14
++              ? "(next week)"
++              : `(in ${Math.round(days / 7)} weeks)`,
++    lumaUrl: evt.url
++      ? `https://luma.com/${encodeURI(evt.url)}`
++      : "https://luma.com/vanlug",
++    location: evt.location || "",
++    coverUrl: evt.cover_url,
++  };
++};
++
++export const makeCoverImg = (coverUrl, alt) => {
++  if (!coverUrl) return null;
++  const img = document.createElement("img");
++  img.src = coverUrl;
++  img.alt = alt;
++  img.style.cssText =
++    "width: 4rem; height: 4rem; object-fit: cover; border-radius: var(--pf-t--global--border--radius--medium);";
++  return img;
++};
++
++export const makeCell = (className, ...children) => {
++  const td = document.createElement("td");
++  td.className = className;
++  td.setAttribute("role", "cell");
++  td.style.verticalAlign = "middle";
++  for (const child of children) {
++    if (child) td.append(child);
++  }
++  return td;
++};
+diff --git a/assets/js/icons.js b/assets/js/icons.js
+new file mode 100644
+index 0000000000000000000000000000000000000000..13bc68be3d76eed968dd3cac8d899ab223262bcd
+--- /dev/null
++++ b/assets/js/icons.js
+@@ -0,0 +1,54 @@
++const inButton = (el) => el.closest(".pf-v6-c-button__icon") !== null;
++const renderFaIcon = (el, faClasses) => {
++  const i = `<i class="${faClasses}" aria-hidden="true"></i>`;
++  if (inButton(el)) {
++    el.innerHTML = i;
++  } else {
++    el.style.display = "inline";
++    el.style.whiteSpace = "nowrap";
++    el.innerHTML = "\u2060" + i;
++    el.querySelector("i").classList.add("pf-v6-u-ml-xs");
++  }
++};
++const brandIcons = {
++  "icon-discourse": "fa-brands fa-discourse",
++  "icon-signal": "fa-brands fa-signal-messenger",
++  "icon-mastodon": "fa-brands fa-mastodon",
++  "icon-bluesky": "fa-brands fa-bluesky",
++  "icon-linkedin": "fa-brands fa-linkedin",
++  "icon-paypal": "fa-brands fa-paypal",
++};
++for (const [tag, cls] of Object.entries(brandIcons)) {
++  customElements.define(
++    tag,
++    class extends HTMLElement {
++      connectedCallback() {
++        renderFaIcon(this, cls);
++      }
++    },
++  );
++}
++customElements.define(
++  "icon-external",
++  class extends HTMLElement {
++    connectedCallback() {
++      renderFaIcon(this, "fa-solid fa-arrow-up-right-from-square");
++    }
++  },
++);
++customElements.define(
++  "icon-email",
++  class extends HTMLElement {
++    connectedCallback() {
++      renderFaIcon(this, "fa-solid fa-envelope");
++    }
++  },
++);
++customElements.define(
++  "icon-custom",
++  class extends HTMLElement {
++    connectedCallback() {
++      renderFaIcon(this, this.dataset.icon);
++    }
++  },
++);
+diff --git a/assets/js/luma-next-event.js b/assets/js/luma-next-event.js
+new file mode 100644
+index 0000000000000000000000000000000000000000..3ea3ad89638742adc87ad3d79c54fe5e8ce5b810
+--- /dev/null
++++ b/assets/js/luma-next-event.js
+@@ -0,0 +1,50 @@
++import { formatEvent } from "./events.js";
++
++const eventTemplate = document.getElementById("next-event-template");
++
++const renderEventCard = (evt) => {
++  const { name, date, time, relative, lumaUrl, location, coverUrl } =
++    formatEvent(evt);
++  const clone = eventTemplate.content.cloneNode(true);
++  const $ = (s) => clone.querySelector(`[data-slot="${s}"]`);
++  const cover = $("cover");
++  if (coverUrl) {
++    cover.src = coverUrl;
++    cover.alt = name;
++  } else {
++    cover.remove();
++  }
++  $("date").textContent = date;
++  $("relative").textContent = relative;
++  $("name").textContent = name;
++  $("detail").textContent = location ? `${location} \u00b7 ${time}` : time;
++  $("rsvp").href = lumaUrl;
++  return clone;
++};
++
++customElements.define(
++  "luma-next-event",
++  class extends HTMLElement {
++    async connectedCallback() {
++      const cal = this.getAttribute("calendar");
++      const proxy = this.getAttribute("proxy");
++      try {
++        const { entries } = await fetch(
++          `${proxy}/next-event?calendar=${encodeURIComponent(cal)}`,
++        ).then((r) => r.json());
++        const evt = entries?.[0];
++        if (!evt) {
++          this.textContent = "No upcoming events right now. Check back soon!";
++          return;
++        }
++        this.replaceChildren(renderEventCard(evt));
++      } catch {
++        this.textContent = "Could not load the next event. ";
++        const a = document.createElement("a");
++        a.href = "/events/";
++        a.textContent = "See all events.";
++        this.append(a);
++      }
++    }
++  },
++);
+diff --git a/assets/js/luma-upcoming-events.js b/assets/js/luma-upcoming-events.js
+new file mode 100644
+index 0000000000000000000000000000000000000000..f3108e82bbd897ce22f22310cedd80f6f532e5f0
+--- /dev/null
++++ b/assets/js/luma-upcoming-events.js
+@@ -0,0 +1,126 @@
++import { formatEvent, makeCoverImg, makeCell } from "./events.js";
++
++const renderEventRow = (evt) => {
++  const { name, date, time, relative, lumaUrl, location, coverUrl } =
++    formatEvent(evt);
++
++  const tr = document.createElement("tr");
++  tr.className = "pf-v6-c-table__tr";
++  tr.setAttribute("role", "row");
++
++  tr.append(
++    makeCell(
++      "pf-v6-c-table__td pf-v6-u-display-none pf-v6-u-display-table-cell-on-md",
++      makeCoverImg(coverUrl, name),
++    ),
++  );
++
++  const mobileCover = document.createElement("span");
++  mobileCover.className =
++    "pf-v6-u-display-inline-block pf-v6-u-display-none-on-md";
++  const mobileCoverImg = makeCoverImg(coverUrl, name);
++  if (mobileCoverImg) mobileCover.append(mobileCoverImg);
++
++  const mobileName = document.createElement("div");
++  mobileName.className =
++    "pf-v6-u-font-weight-bold pf-v6-u-display-block pf-v6-u-display-none-on-md";
++  mobileName.textContent = name;
++
++  const relativeSpan = document.createElement("span");
++  relativeSpan.className = "pf-v6-u-font-size-xs";
++  relativeSpan.textContent = relative;
++
++  const dateLine = document.createElement("div");
++  dateLine.append(`${date} `, relativeSpan);
++
++  const timeLine = document.createElement("small");
++  timeLine.className = "pf-v6-u-text-color-subtle";
++  timeLine.textContent = time;
++
++  const textBlock = document.createElement("div");
++  textBlock.append(mobileName, dateLine, timeLine);
++
++  const flex = document.createElement("div");
++  flex.className = "pf-v6-l-flex pf-m-gap-md pf-m-align-items-center";
++  flex.append(mobileCover, textBlock);
++
++  tr.append(makeCell("pf-v6-c-table__td", flex));
++
++  const nameCell = makeCell(
++    "pf-v6-c-table__td pf-v6-u-display-none pf-v6-u-display-table-cell-on-md",
++  );
++  nameCell.textContent = name;
++  tr.append(nameCell);
++
++  const locCell = makeCell("pf-v6-c-table__td");
++  locCell.textContent = location;
++  tr.append(locCell);
++
++  const rsvpLink = document.createElement("a");
++  rsvpLink.href = lumaUrl;
++  rsvpLink.target = "_blank";
++  rsvpLink.rel = "noopener";
++  rsvpLink.className = "pf-v6-c-button pf-m-link pf-m-inline pf-m-small";
++  rsvpLink.append("RSVP", document.createElement("icon-external"));
++  tr.append(makeCell("pf-v6-c-table__td", rsvpLink));
++
++  return tr;
++};
++
++customElements.define(
++  "luma-upcoming-events",
++  class extends HTMLElement {
++    async connectedCallback() {
++      const cal = this.getAttribute("calendar");
++      const proxy = this.getAttribute("proxy");
++      try {
++        const { entries } = await fetch(
++          `${proxy}/events?calendar=${encodeURIComponent(cal)}`,
++        ).then((r) => r.json());
++        if (!entries?.length) {
++          this.textContent = "No upcoming events right now. Check back soon!";
++          return;
++        }
++
++        const table = document.createElement("table");
++        table.className = "pf-v6-c-table pf-m-grid-md pf-m-compact";
++        table.setAttribute("role", "grid");
++        table.setAttribute("aria-label", "Upcoming events");
++
++        const thead = document.createElement("thead");
++        thead.className = "pf-v6-c-table__thead";
++        const headRow = document.createElement("tr");
++        headRow.className = "pf-v6-c-table__tr";
++        headRow.setAttribute("role", "row");
++        for (const label of ["", "Date", "Event", "Location", ""]) {
++          const th = document.createElement("th");
++          th.className = "pf-v6-c-table__th";
++          th.setAttribute("role", "columnheader");
++          th.setAttribute("scope", "col");
++          th.textContent = label;
++          headRow.append(th);
++        }
++        thead.append(headRow);
++        table.append(thead);
++
++        const tbody = document.createElement("tbody");
++        tbody.className = "pf-v6-c-table__tbody";
++        tbody.setAttribute("role", "rowgroup");
++        for (const evt of entries) {
++          tbody.append(renderEventRow(evt));
++        }
++        table.append(tbody);
++
++        this.replaceChildren(table);
++      } catch {
++        this.textContent = "Could not load upcoming events. ";
++        const a = document.createElement("a");
++        a.href = "https://luma.com/vanlug";
++        a.target = "_blank";
++        a.rel = "noopener";
++        a.textContent = "View on Luma instead.";
++        this.append(a);
++      }
++    }
++  },
++);
+diff --git a/assets/js/main.js b/assets/js/main.js
+new file mode 100644
+index 0000000000000000000000000000000000000000..5d269c6aa4895a1c276cbd3ae79bfced3af4529a
+--- /dev/null
++++ b/assets/js/main.js
+@@ -0,0 +1,6 @@
++import "./theme.js";
++import "./sidebar.js";
++import "./icons.js";
++import "./luma-next-event.js";
++import "./luma-upcoming-events.js";
++import "./mastodon-feed.js";
+diff --git a/assets/js/mastodon-feed.js b/assets/js/mastodon-feed.js
+new file mode 100644
+index 0000000000000000000000000000000000000000..14cfbdb0f69041450b705290c1364d5a8ca8ff2e
+--- /dev/null
++++ b/assets/js/mastodon-feed.js
+@@ -0,0 +1,113 @@
++import DOMPurify from "dompurify";
++
++customElements.define(
++  "mastodon-feed",
++  class extends HTMLElement {
++    async connectedCallback() {
++      const username = this.getAttribute("username");
++      const proxy = this.getAttribute("proxy");
++      const profile = this.getAttribute("profile");
++      try {
++        const data = await fetch(
++          `${proxy}/mastodon?username=${encodeURIComponent(username)}`,
++        ).then((r) => r.json());
++        if (!data.toots?.length) {
++          this.textContent = "No posts yet.";
++          return;
++        }
++
++        const inDrawer = this.closest(".pf-v6-c-drawer__panel") !== null;
++        const container = document.createElement("div");
++        container.className = "pf-v6-l-flex pf-m-column";
++
++        for (const [i, toot] of data.toots.entries()) {
++          const item = document.createElement("a");
++          item.href = toot.url || profile;
++          item.target = "_blank";
++          item.rel = "noopener";
++          item.className = [
++            "pf-v6-l-flex pf-m-column pf-m-gap-xs pf-v6-u-pt-sm pf-v6-u-text-color-regular",
++            i === data.toots.length - 1 ? "pf-v6-u-pb-0" : "pf-v6-u-pb-sm",
++            inDrawer ? "pf-v6-u-px-md" : "",
++          ]
++            .filter(Boolean)
++            .join(" ");
++          item.style.textDecoration = "none";
++
++          if (i > 0) {
++            item.style.borderTop =
++              "var(--pf-t--global--border--width--divider--default) solid var(--pf-t--global--border--color--default)";
++          }
++
++          const content = document.createElement("div");
++          content.className = "pf-v6-c-content pf-v6-u-font-size-sm";
++          content.innerHTML = DOMPurify.sanitize(toot.body); // In the future, we want to use https://developer.mozilla.org/en-US/docs/Web/API/Element/setHTML for this
++          item.append(content);
++
++          for (const m of toot.media?.slice(0, 1) ?? []) {
++            const el = document.createElement(m.isVideo ? "video" : "img");
++            el.src = m.url;
++            if (m.isVideo) el.controls = true;
++            else el.alt = m.altText || "";
++            el.className = "pf-v6-u-w-100";
++            el.style.maxHeight = "10rem";
++            el.style.objectFit = "cover";
++            el.style.borderRadius =
++              "var(--pf-t--global--border--radius--medium)";
++            item.append(el);
++          }
++
++          const avatar = document.createElement("img");
++          avatar.src = data.userProfilePictureURL;
++          avatar.alt = data.userDisplayName;
++          avatar.style.cssText =
++            "width: 1rem; height: 1rem; border-radius: 50%;";
++
++          const timestamp = document.createElement("span");
++          timestamp.textContent = new Date(toot.timestamp).toLocaleDateString(
++            "en-CA",
++            {
++              month: "short",
++              day: "numeric",
++            },
++          );
++
++          const meta = document.createElement("div");
++          meta.className =
++            "pf-v6-l-flex pf-m-gap-sm pf-m-align-items-center pf-v6-u-font-size-xs pf-v6-u-text-color-subtle";
++          meta.append(avatar, timestamp);
++
++          for (const [icon, count] of [
++            ["fa-heart", toot.favoritesCount],
++            ["fa-retweet", toot.reblogsCount],
++          ]) {
++            if (count > 0) {
++              const i = document.createElement("i");
++              i.className = `fas ${icon}`;
++              i.setAttribute("aria-hidden", "true");
++
++              const stat = document.createElement("span");
++              stat.className =
++                "pf-v6-l-flex pf-m-align-items-center pf-m-gap-xs";
++              stat.append(i, String(count));
++              meta.append(stat);
++            }
++          }
++
++          item.append(meta);
++          container.append(item);
++        }
++
++        this.replaceChildren(container);
++      } catch {
++        this.textContent = "Could not load feed. ";
++        const a = document.createElement("a");
++        a.href = profile;
++        a.target = "_blank";
++        a.rel = "noopener";
++        a.textContent = "View on Mastodon.";
++        this.append(a);
++      }
++    }
++  },
++);
+diff --git a/assets/js/sidebar.js b/assets/js/sidebar.js
+new file mode 100644
+index 0000000000000000000000000000000000000000..7ea372de0811c5f178da0beb43161f45a7661e21
+--- /dev/null
++++ b/assets/js/sidebar.js
+@@ -0,0 +1,22 @@
++const sidebar = document.getElementById("page-sidebar");
++const toggle = document.getElementById("nav-toggle");
++const xlBreakpoint = matchMedia("(min-width: 75rem)");
++
++const setSidebarState = (expanded) => {
++  sidebar.classList.toggle("pf-m-expanded", expanded);
++  sidebar.classList.toggle("pf-m-collapsed", !expanded);
++  toggle.setAttribute("aria-expanded", expanded);
++};
++
++toggle.addEventListener("click", () =>
++  setSidebarState(!sidebar.classList.contains("pf-m-expanded")),
++);
++
++xlBreakpoint.addEventListener("change", (e) => setSidebarState(e.matches));
++setSidebarState(xlBreakpoint.matches);
++
++for (const link of sidebar.querySelectorAll(".pf-v6-c-nav__link")) {
++  link.addEventListener("click", () => {
++    if (!xlBreakpoint.matches) setSidebarState(false);
++  });
++}
+diff --git a/assets/js/theme.js b/assets/js/theme.js
+new file mode 100644
+index 0000000000000000000000000000000000000000..a9b98a695a1b3730bc149ba2eb94ee827cd07fb0
+--- /dev/null
++++ b/assets/js/theme.js
+@@ -0,0 +1,10 @@
++const applyTheme = () =>
++  document.documentElement.classList.toggle(
++    "pf-v6-theme-dark",
++    matchMedia("(prefers-color-scheme: dark)").matches,
++  );
++applyTheme();
++matchMedia("(prefers-color-scheme: dark)").addEventListener(
++  "change",
++  applyTheme,
++);
+diff --git a/data/links.yaml b/data/links.yaml
+index 691d362edc9aebff83c6cf205aae9da39e143fcf..d08e97b1050055fa4d29a6ad7b207311c21b5e65 100644
+--- a/data/links.yaml
++++ b/data/links.yaml
+@@ -49,6 +49,7 @@     description: Questions, talk proposals & more
+ socials:
+   mastodon:
+     url: https://thecanadian.social/@vanlug
++    username: "@vanlug@thecanadian.social"
+     icon: fa-brands fa-mastodon
+   bluesky:
+     url: https://bsky.app/profile/vanlug.thecanadian.social.ap.brid.gy
+@@ -73,6 +74,6 @@   rss: https://thecanadian.social/@vanlug.rss
+ luma:
+   calendar: cal-x23GENOxTsZqSMO
+   url: https://luma.com/vanlug
+-  proxy: https://next-event-production.up.railway.app
++  proxy: http://localhost:8080
+ meetup:
+   url: https://www.meetup.com/vanlug-bc/events/
+diff --git a/hugo.yaml b/hugo.yaml
+index 9f1ce658732d81dffb8ac774844ad0f2b521f263..1da7344d576d581429bf5aa0eab6309f027d89ea 100644
+--- a/hugo.yaml
++++ b/hugo.yaml
+@@ -3,6 +3,8 @@ locale: en-CA
+ languageCode: en-CA
+ title: "VanLUG: Vancouver Linux Users Group"
+ relativeURLs: true
++build:
++  noJSConfigInAssets: true
+ disableKinds:
+   - taxonomy
+   - term
+diff --git a/layouts/_partials/mastodon-feed.html b/layouts/_partials/mastodon-feed.html
+new file mode 100644
+index 0000000000000000000000000000000000000000..94bd1a49e33d50b4dd54ccb79cd4ae5a2b109b6d
+--- /dev/null
++++ b/layouts/_partials/mastodon-feed.html
+@@ -0,0 +1,42 @@
++<div class="pf-v6-l-flex pf-m-column pf-m-gap-md">
++  <div class="pf-v6-l-flex pf-m-align-items-center pf-m-justify-content-space-between pf-v6-u-pb-0 pf-v6-u-pl-0 pf-v6-u-pl-md-on-xl">
++    <div class="pf-v6-c-content">
++      <h3>Latest posts</h3>
++    </div>
++    <a
++      href="{{ .Site.Data.links.socials.mastodon.url }}"
++      target="_blank"
++      rel="noopener"
++      class="pf-v6-c-button pf-m-control pf-m-small"
++      ><span class="pf-v6-c-button__icon pf-m-start"
++        ><i class="fa-brands fa-mastodon" aria-hidden="true"></i></span
++      ><span class="pf-v6-c-button__text">Follow</span
++    ></a>
++  </div>
++  <mastodon-feed
++    username="{{ .Site.Data.links.socials.mastodon.username }}"
++    proxy="{{ .Site.Data.links.luma.proxy }}"
++    profile="{{ .Site.Data.links.socials.mastodon.url }}"
++  >
++    <div class="pf-v6-l-flex pf-m-column pf-m-gap-sm">
++      {{ range (seq 3) }}
++        <div>
++          <div class="pf-v6-c-skeleton pf-m-text-sm pf-v6-u-mb-sm"></div>
++          <div class="pf-v6-c-skeleton pf-m-text-sm pf-m-width-75"></div>
++          <div class="pf-v6-c-skeleton pf-m-text-xs pf-m-width-50 pf-v6-u-mt-sm"></div>
++        </div>
++      {{ end }}
++    </div>
++  </mastodon-feed>
++  <div class="pf-v6-l-flex pf-m-justify-content-center pf-v6-u-pb-sm">
++    <a
++      href="{{ .Site.Data.links.socials.mastodon.url }}"
++      target="_blank"
++      rel="noopener"
++      class="pf-v6-c-button pf-m-link"
++      ><span class="pf-v6-c-button__text">See all posts</span
++      ><span class="pf-v6-c-button__icon pf-m-end"
++        ><icon-external></icon-external></span
++    ></a>
++  </div>
++</div>
+diff --git a/layouts/_partials/section-home.html b/layouts/_partials/section-home.html
+index 89bf0f83ea806a73e170955aec14de85091526b3..de3bdeacd2238efc87ef2f6c85bc3f115227b4e2 100644
+--- a/layouts/_partials/section-home.html
++++ b/layouts/_partials/section-home.html
+@@ -250,3 +250,11 @@         {{ end }}
+       </div>
+     </section>
+   {{ end }}
++
++  <section
++    class="pf-v6-c-page__main-section pf-m-limit-width pf-m-align-center pf-v6-u-display-none-on-xl"
++  >
++    <div class="pf-v6-c-page__main-body">
++      {{ partial "mastodon-feed" . }}
++    </div>
++  </section>
+diff --git a/layouts/baseof.html b/layouts/baseof.html
+index 15c5f056a0c38cb8cf0156588810870fc92f67b6..1d48cfe48f0dc2ae3edd099562fe6c48d5db1fa1 100644
+--- a/layouts/baseof.html
++++ b/layouts/baseof.html
+@@ -72,15 +72,57 @@     >
+       {{ partial "masthead" . }}
+       {{ partial "sidebar" . }}
+ 
+-      <div class="pf-v6-c-page__main-container">
+-        <main class="pf-v6-c-page__main" id="main-content">
+-          {{ block "main" . }}{{ end }}
+-        </main>
+-      </div>
++      {{ if .IsHome }}
++        <div class="pf-v6-c-page__drawer">
++          <div class="pf-v6-c-drawer pf-m-static pf-m-expanded" id="feed-drawer">
++            <div class="pf-v6-c-drawer__main">
++              <div class="pf-v6-c-drawer__content pf-v6-c-page__main-container" style="margin-inline-end: 0;">
++                <div class="pf-v6-c-drawer__body">
++                  <main class="pf-v6-c-page__main" id="main-content">
++                    {{ block "main" . }}{{ end }}
++                  </main>
++                </div>
++              </div>
++              <div class="pf-v6-c-drawer__panel pf-m-secondary pf-m-no-border pf-v6-u-display-none pf-v6-u-display-flex-on-xl" style="
++                --pf-v6-c-drawer__panel--md--FlexBasis: 20rem;
++                --pf-v6-c-drawer__panel--xl--FlexBasis: 20rem;
++                --pf-v6-c-drawer__panel--xl--MinWidth: 20rem;
++                border: 0 !important;
++                border-image: none !important;
++                box-shadow: none !important;
++              ">
++                <div class="pf-v6-c-drawer__body pf-v6-u-pt-sm" style="padding-inline-start: var(--pf-v6-c-page__sidebar-body--PaddingInlineEnd); padding-inline-end: var(--pf-v6-c-page__sidebar-body--PaddingInlineStart);">
++                  {{ partial "mastodon-feed" . }}
++                </div>
++              </div>
++            </div>
++          </div>
++        </div>
++      {{ else }}
++        <div class="pf-v6-c-page__main-container">
++          <main class="pf-v6-c-page__main" id="main-content">
++            {{ block "main" . }}{{ end }}
++          </main>
++        </div>
++      {{ end }}
+     </div>
+ 
+     {{ partial "next-event-template" . }}
+ 
+-    <script src="{{ "main.js" | relURL }}"></script>
++    {{ with resources.Get "js/main.js" }}
++      {{ $opts := dict
++        "minify" (not hugo.IsDevelopment)
++        "sourceMap" (cond hugo.IsDevelopment "linked" "none")
++      }}
++      {{ with . | js.Build $opts }}
++        {{ if hugo.IsDevelopment }}
++          <script src="{{ .RelPermalink }}"></script>
++        {{ else }}
++          {{ with . | fingerprint }}
++            <script src="{{ .RelPermalink }}" integrity="{{ .Data.Integrity }}" crossorigin="anonymous"></script>
++          {{ end }}
++        {{ end }}
++      {{ end }}
++    {{ end }}
+   </body>
+ </html>
+diff --git a/package-lock.json b/package-lock.json
+index 2a73f815a9623e198dfcfda6ca6926a8f9d52aaf..49a321da34d2de38dcf59a8eb197417175c1f0c1 100644
+--- a/package-lock.json
++++ b/package-lock.json
+@@ -8,7 +8,8 @@     "": {
+       "license": "AGPL-3.0-or-later",
+       "dependencies": {
+         "@fortawesome/fontawesome-free": "^7.2.0",
+-        "@patternfly/patternfly": "^6.4.0"
++        "@patternfly/patternfly": "^6.4.0",
++        "dompurify": "^3.3.3"
+       }
+     },
+     "node_modules/@fortawesome/fontawesome-free": {
+@@ -25,6 +26,22 @@       "version": "6.4.0",
+       "resolved": "https://registry.npmjs.org/@patternfly/patternfly/-/patternfly-6.4.0.tgz",
+       "integrity": "sha512-4drFhg74sEc/fftark5wZevODIog17qR4pwLCdB3j5iK3Uu5oMA2SdLhsEeEQggalfnFzve/Km87MdVR0ghhvQ==",
+       "license": "MIT"
++    },
++    "node_modules/@types/trusted-types": {
++      "version": "2.0.7",
++      "resolved": "https://registry.npmjs.org/@types/trusted-types/-/trusted-types-2.0.7.tgz",
++      "integrity": "sha512-ScaPdn1dQczgbl0QFTeTOmVHFULt394XJgOQNoyVhZ6r2vLnMLJfBPd53SB52T/3G36VI1/g2MZaX0cwDuXsfw==",
++      "license": "MIT",
++      "optional": true
++    },
++    "node_modules/dompurify": {
++      "version": "3.3.3",
++      "resolved": "https://registry.npmjs.org/dompurify/-/dompurify-3.3.3.tgz",
++      "integrity": "sha512-Oj6pzI2+RqBfFG+qOaOLbFXLQ90ARpcGG6UePL82bJLtdsa6CYJD7nmiU8MW9nQNOtCHV3lZ/Bzq1X0QYbBZCA==",
++      "license": "(MPL-2.0 OR Apache-2.0)",
++      "optionalDependencies": {
++        "@types/trusted-types": "^2.0.7"
++      }
+     }
+   }
+ }
+diff --git a/package.json b/package.json
+index cf5f8a91e5390ce8469f63320eeabf9c45b1ac48..1d8a8ed58a1629de6f07c5d8e91784d5b744ca7e 100644
+--- a/package.json
++++ b/package.json
+@@ -2,6 +2,7 @@ {
+   "license": "AGPL-3.0-or-later",
+   "dependencies": {
+     "@fortawesome/fontawesome-free": "^7.2.0",
+-    "@patternfly/patternfly": "^6.4.0"
++    "@patternfly/patternfly": "^6.4.0",
++    "dompurify": "^3.3.3"
+   }
+ }
+diff --git a/static/main.js b/static/main.js
+deleted file mode 100644
+index 95d13219c2240254a570be3c54ec5158ffeaa435..0000000000000000000000000000000000000000
+--- a/static/main.js
++++ /dev/null
+@@ -1,351 +0,0 @@
+-{
+-  const applyTheme = () =>
+-    document.documentElement.classList.toggle(
+-      "pf-v6-theme-dark",
+-      matchMedia("(prefers-color-scheme: dark)").matches,
+-    );
+-  applyTheme();
+-  matchMedia("(prefers-color-scheme: dark)").addEventListener(
+-    "change",
+-    applyTheme,
+-  );
+-
+-  const sidebar = document.getElementById("page-sidebar");
+-  const toggle = document.getElementById("nav-toggle");
+-  const xlBreakpoint = matchMedia("(min-width: 75rem)");
+-
+-  const setSidebarState = (expanded) => {
+-    sidebar.classList.toggle("pf-m-expanded", expanded);
+-    sidebar.classList.toggle("pf-m-collapsed", !expanded);
+-    toggle.setAttribute("aria-expanded", expanded);
+-  };
+-
+-  toggle.addEventListener("click", () =>
+-    setSidebarState(!sidebar.classList.contains("pf-m-expanded")),
+-  );
+-
+-  xlBreakpoint.addEventListener("change", (e) => setSidebarState(e.matches));
+-  setSidebarState(xlBreakpoint.matches);
+-
+-  for (const link of sidebar.querySelectorAll(".pf-v6-c-nav__link")) {
+-    link.addEventListener("click", () => {
+-      if (!xlBreakpoint.matches) setSidebarState(false);
+-    });
+-  }
+-
+-  {
+-    const inButton = (el) => el.closest(".pf-v6-c-button__icon") !== null;
+-    const renderFaIcon = (el, faClasses) => {
+-      const i = `<i class="${faClasses}" aria-hidden="true"></i>`;
+-      if (inButton(el)) {
+-        el.innerHTML = i;
+-      } else {
+-        el.style.display = "inline";
+-        el.style.whiteSpace = "nowrap";
+-        el.innerHTML = "\u2060" + i;
+-        el.querySelector("i").classList.add("pf-v6-u-ml-xs");
+-      }
+-    };
+-    const brandIcons = {
+-      "icon-discourse": "fa-brands fa-discourse",
+-      "icon-signal": "fa-brands fa-signal-messenger",
+-      "icon-mastodon": "fa-brands fa-mastodon",
+-      "icon-bluesky": "fa-brands fa-bluesky",
+-      "icon-linkedin": "fa-brands fa-linkedin",
+-      "icon-paypal": "fa-brands fa-paypal",
+-    };
+-    for (const [tag, cls] of Object.entries(brandIcons)) {
+-      customElements.define(
+-        tag,
+-        class extends HTMLElement {
+-          connectedCallback() {
+-            renderFaIcon(this, cls);
+-          }
+-        },
+-      );
+-    }
+-    customElements.define(
+-      "icon-external",
+-      class extends HTMLElement {
+-        connectedCallback() {
+-          renderFaIcon(this, "fa-solid fa-arrow-up-right-from-square");
+-        }
+-      },
+-    );
+-    customElements.define(
+-      "icon-email",
+-      class extends HTMLElement {
+-        connectedCallback() {
+-          renderFaIcon(this, "fa-solid fa-envelope");
+-        }
+-      },
+-    );
+-    customElements.define(
+-      "icon-custom",
+-      class extends HTMLElement {
+-        connectedCallback() {
+-          renderFaIcon(this, this.dataset.icon);
+-        }
+-      },
+-    );
+-  }
+-
+-  const eventTemplate = document.getElementById("next-event-template");
+-
+-  const formatEvent = (evt) => {
+-    const start = new Date(evt.start_at);
+-    const days = Math.ceil((start - new Date()) / 86400000);
+-    return {
+-      name: evt.name || "VanLUG Meeting",
+-      date: start.toLocaleDateString("en-CA", {
+-        weekday: "short",
+-        month: "short",
+-        day: "numeric",
+-      }),
+-      time: start.toLocaleTimeString("en-CA", {
+-        hour: "numeric",
+-        minute: "2-digit",
+-      }),
+-      relative:
+-        days <= 0
+-          ? "(today!)"
+-          : days === 1
+-            ? "(tomorrow)"
+-            : days < 7
+-              ? "(this week)"
+-              : days < 14
+-                ? "(next week)"
+-                : `(in ${Math.round(days / 7)} weeks)`,
+-      lumaUrl: evt.url
+-        ? `https://luma.com/${encodeURI(evt.url)}`
+-        : "https://luma.com/vanlug",
+-      location: evt.location || "",
+-      coverUrl: evt.cover_url,
+-    };
+-  };
+-
+-  const renderEventCard = (evt) => {
+-    const { name, date, time, relative, lumaUrl, location, coverUrl } =
+-      formatEvent(evt);
+-    const clone = eventTemplate.content.cloneNode(true);
+-    const $ = (s) => clone.querySelector(`[data-slot="${s}"]`);
+-    const cover = $("cover");
+-    if (coverUrl) {
+-      cover.src = coverUrl;
+-      cover.alt = name;
+-    } else {
+-      cover.remove();
+-    }
+-    $("date").textContent = date;
+-    $("relative").textContent = relative;
+-    $("name").textContent = name;
+-    $("detail").textContent = location ? `${location} \u00b7 ${time}` : time;
+-    $("rsvp").href = lumaUrl;
+-    return clone;
+-  };
+-
+-  const makeCoverImg = (coverUrl, alt) => {
+-    if (!coverUrl) return null;
+-    const img = document.createElement("img");
+-    img.src = coverUrl;
+-    img.alt = alt;
+-    img.style.cssText =
+-      "width: 4rem; height: 4rem; object-fit: cover; border-radius: var(--pf-t--global--border--radius--medium);";
+-    return img;
+-  };
+-
+-  const makeCell = (className, ...children) => {
+-    const td = document.createElement("td");
+-    td.className = className;
+-    td.setAttribute("role", "cell");
+-    td.style.verticalAlign = "middle";
+-    for (const child of children) {
+-      if (child) td.append(child);
+-    }
+-    return td;
+-  };
+-
+-  const renderEventRow = (evt) => {
+-    const { name, date, time, relative, lumaUrl, location, coverUrl } =
+-      formatEvent(evt);
+-
+-    const tr = document.createElement("tr");
+-    tr.className = "pf-v6-c-table__tr";
+-    tr.setAttribute("role", "row");
+-
+-    tr.append(
+-      makeCell(
+-        "pf-v6-c-table__td pf-v6-u-display-none pf-v6-u-display-table-cell-on-md",
+-        makeCoverImg(coverUrl, name),
+-      ),
+-    );
+-
+-    const mobileCover = document.createElement("span");
+-    mobileCover.className =
+-      "pf-v6-u-display-inline-block pf-v6-u-display-none-on-md";
+-    const mobileCoverImg = makeCoverImg(coverUrl, name);
+-    if (mobileCoverImg) mobileCover.append(mobileCoverImg);
+-
+-    const mobileName = document.createElement("div");
+-    mobileName.className =
+-      "pf-v6-u-font-weight-bold pf-v6-u-display-block pf-v6-u-display-none-on-md";
+-    mobileName.textContent = name;
+-
+-    const relativeSpan = document.createElement("span");
+-    relativeSpan.className = "pf-v6-u-font-size-xs";
+-    relativeSpan.textContent = relative;
+-
+-    const dateLine = document.createElement("div");
+-    dateLine.append(`${date} `, relativeSpan);
+-
+-    const timeLine = document.createElement("small");
+-    timeLine.className = "pf-v6-u-text-color-subtle";
+-    timeLine.textContent = time;
+-
+-    const textBlock = document.createElement("div");
+-    textBlock.append(mobileName, dateLine, timeLine);
+-
+-    const flex = document.createElement("div");
+-    flex.className = "pf-v6-l-flex pf-m-gap-md pf-m-align-items-center";
+-    flex.append(mobileCover, textBlock);
+-
+-    tr.append(makeCell("pf-v6-c-table__td", flex));
+-
+-    const nameCell = makeCell(
+-      "pf-v6-c-table__td pf-v6-u-display-none pf-v6-u-display-table-cell-on-md",
+-    );
+-    nameCell.textContent = name;
+-    tr.append(nameCell);
+-
+-    const locCell = makeCell("pf-v6-c-table__td");
+-    locCell.textContent = location;
+-    tr.append(locCell);
+-
+-    const rsvpLink = document.createElement("a");
+-    rsvpLink.href = lumaUrl;
+-    rsvpLink.target = "_blank";
+-    rsvpLink.rel = "noopener";
+-    rsvpLink.className = "pf-v6-c-button pf-m-link pf-m-inline pf-m-small";
+-    rsvpLink.append("RSVP", document.createElement("icon-external"));
+-    tr.append(makeCell("pf-v6-c-table__td", rsvpLink));
+-
+-    return tr;
+-  };
+-
+-  customElements.define(
+-    "luma-next-event",
+-    class extends HTMLElement {
+-      async connectedCallback() {
+-        const cal = this.getAttribute("calendar");
+-        const proxy = this.getAttribute("proxy");
+-        try {
+-          const { entries } = await fetch(
+-            `${proxy}/next-event?calendar=${encodeURIComponent(cal)}`,
+-          ).then((r) => r.json());
+-          const evt = entries?.[0];
+-          if (!evt) {
+-            this.textContent =
+-              "No upcoming events right now. Check back soon!";
+-            return;
+-          }
+-          this.replaceChildren(renderEventCard(evt));
+-        } catch {
+-          this.textContent = "Could not load the next event. ";
+-          const a = document.createElement("a");
+-          a.href = "/events/";
+-          a.textContent = "See all events.";
+-          this.append(a);
+-        }
+-      }
+-    },
+-  );
+-
+-  customElements.define(
+-    "luma-upcoming-events",
+-    class extends HTMLElement {
+-      async connectedCallback() {
+-        const cal = this.getAttribute("calendar");
+-        const proxy = this.getAttribute("proxy");
+-        try {
+-          const { entries } = await fetch(
+-            `${proxy}/events?calendar=${encodeURIComponent(cal)}`,
+-          ).then((r) => r.json());
+-          if (!entries?.length) {
+-            this.textContent =
+-              "No upcoming events right now. Check back soon!";
+-            return;
+-          }
+-
+-          const table = document.createElement("table");
+-          table.className = "pf-v6-c-table pf-m-grid-md pf-m-compact";
+-          table.setAttribute("role", "grid");
+-          table.setAttribute("aria-label", "Upcoming events");
+-
+-          const thead = document.createElement("thead");
+-          thead.className = "pf-v6-c-table__thead";
+-          const headRow = document.createElement("tr");
+-          headRow.className = "pf-v6-c-table__tr";
+-          headRow.setAttribute("role", "row");
+-          for (const label of ["", "Date", "Event", "Location", ""]) {
+-            const th = document.createElement("th");
+-            th.className = "pf-v6-c-table__th";
+-            th.setAttribute("role", "columnheader");
+-            th.setAttribute("scope", "col");
+-            th.textContent = label;
+-            headRow.append(th);
+-          }
+-          thead.append(headRow);
+-          table.append(thead);
+-
+-          const tbody = document.createElement("tbody");
+-          tbody.className = "pf-v6-c-table__tbody";
+-          tbody.setAttribute("role", "rowgroup");
+-          for (const evt of entries) {
+-            tbody.append(renderEventRow(evt));
+-          }
+-          table.append(tbody);
+-
+-          this.replaceChildren(table);
+-        } catch {
+-          this.textContent = "Could not load upcoming events. ";
+-          const a = document.createElement("a");
+-          a.href = "https://luma.com/vanlug";
+-          a.target = "_blank";
+-          a.rel = "noopener";
+-          a.textContent = "View on Luma instead.";
+-          this.append(a);
+-        }
+-      }
+-    },
+-  );
+-          .then((r) => r.json())
+-          .then(({ entries }) => {
+-            if (!entries || entries.length === 0) {
+-              this.textContent =
+-                "No upcoming events right now. Check back soon!";
+-              return;
+-            }
+-
+-            this.replaceChildren();
+-            const container = document.createElement("div");
+-            container.className = "pf-v6-l-flex pf-m-column pf-m-gap-md";
+-
+-            for (const evt of entries) {
+-              container.appendChild(renderEventCard(evt));
+-            }
+-
+-            this.appendChild(container);
+-          })
+-          .catch(() => {
+-            this.textContent = "Could not load upcoming events. ";
+-            const a = document.createElement("a");
+-            a.href = "https://luma.com/vanlug";
+-            a.target = "_blank";
+-            a.rel = "noopener";
+-            a.textContent = "View on Luma instead.";
+-            this.append(a);
+-          });
+-      }
+-    },
+-  );
+-}
+
