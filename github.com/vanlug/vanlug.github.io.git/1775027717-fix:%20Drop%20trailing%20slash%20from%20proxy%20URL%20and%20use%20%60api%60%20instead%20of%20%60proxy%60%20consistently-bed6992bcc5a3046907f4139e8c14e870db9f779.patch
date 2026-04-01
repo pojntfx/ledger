@@ -1,0 +1,158 @@
+From bed6992bcc5a3046907f4139e8c14e870db9f779 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Wed, 01 Apr 2026 00:15:17 -0700
+Subject: [PATCH] fix: Drop trailing slash from proxy URL and use `api` instead of `proxy` consistently
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/assets/js/luma-next-event.js b/assets/js/luma-next-event.js
+index aa327da6b9b27e8f179037bf0f7e6f2a4d86bd83..cb6e1592ed8501b167d23ffff70ecd1b3cabb023 100644
+--- a/assets/js/luma-next-event.js
++++ b/assets/js/luma-next-event.js
+@@ -60,10 +60,10 @@   "luma-next-event",
+   class extends HTMLElement {
+     async connectedCallback() {
+       const cal = this.getAttribute("calendar");
+-      const proxy = this.getAttribute("proxy");
++      const api = this.getAttribute("api");
+       try {
+         const { entries } = await fetch(
+-          `${proxy}/next-event?calendar=${encodeURIComponent(cal)}`,
++          `${api}/next-event?calendar=${encodeURIComponent(cal)}`,
+         ).then((r) => r.json());
+         const evt = entries?.[0];
+         if (!evt) {
+diff --git a/assets/js/luma-upcoming-events.js b/assets/js/luma-upcoming-events.js
+index d5959c6a25a5040f21cc751d8e62e1dca85ab212..4f3d23a74bb04bbbae1ef59423d31a7d6f7a141f 100644
+--- a/assets/js/luma-upcoming-events.js
++++ b/assets/js/luma-upcoming-events.js
+@@ -51,10 +51,10 @@   "luma-upcoming-events",
+   class extends HTMLElement {
+     async connectedCallback() {
+       const cal = this.getAttribute("calendar");
+-      const proxy = this.getAttribute("proxy");
++      const api = this.getAttribute("api");
+       try {
+         const { entries } = await fetch(
+-          `${proxy}/events?calendar=${encodeURIComponent(cal)}`,
++          `${api}/events?calendar=${encodeURIComponent(cal)}`,
+         ).then((r) => r.json());
+         if (!entries?.length) {
+           this.textContent = "No upcoming events right now. Check back soon!";
+diff --git a/assets/js/mastodon-feed.js b/assets/js/mastodon-feed.js
+index 6b9842a81838fbb6b64ab5d41a2a253ab9c8aab8..7b30770ce6d05ee2781f703b35899fb06f365e51 100644
+--- a/assets/js/mastodon-feed.js
++++ b/assets/js/mastodon-feed.js
+@@ -83,11 +83,11 @@   "mastodon-feed",
+   class extends HTMLElement {
+     async connectedCallback() {
+       const username = this.getAttribute("username");
+-      const proxy = this.getAttribute("proxy");
++      const api = this.getAttribute("api");
+       const profile = this.getAttribute("profile");
+       try {
+         const data = await fetch(
+-          `${proxy}/mastodon?username=${encodeURIComponent(username)}`,
++          `${api}/mastodon?username=${encodeURIComponent(username)}`,
+         ).then((r) => r.json());
+         if (!data.toots?.length) {
+           this.textContent = "No posts yet.";
+diff --git a/data/links.yaml b/data/links.yaml
+index 894ca06fb18cb9c446c0a42a2ce67aeb599475c9..5cbe3e53d10f99bc9212ac410ba3a4cdd01e5974 100644
+--- a/data/links.yaml
++++ b/data/links.yaml
+@@ -77,9 +77,9 @@   url: https://www.paypal.com/ncp/payment/5LJ46YPC7JJ7E
+   icon: fa-brands fa-paypal
+ feed:
+   mastodon: https://thecanadian.social/@vanlug.rss
++api: https://vanlug-website-backend.up.railway.app
+ luma:
+   calendar: cal-x23GENOxTsZqSMO
+   url: https://luma.com/vanlug
+-  proxy: https://vanlug-website-backend.up.railway.app/
+ meetup:
+   url: https://www.meetup.com/vanlug-bc/events/
+diff --git a/layouts/_partials/mastodon-feed.html b/layouts/_partials/mastodon-feed.html
+index f77ef636f82b187d2b0f993f618af22d2e833c55..ef206418ce2da38d0877d148dec2231498b8d16b 100644
+--- a/layouts/_partials/mastodon-feed.html
++++ b/layouts/_partials/mastodon-feed.html
+@@ -15,7 +15,7 @@     ></a>
+   </div>
+   <mastodon-feed
+     username="{{ .Site.Data.links.socials.mastodon.username }}"
+-    proxy="{{ .Site.Data.links.luma.proxy }}"
++    api="{{ .Site.Data.links.api }}"
+     profile="{{ .Site.Data.links.socials.mastodon.url }}"
+   >
+     <div class="pf-v6-l-flex pf-m-column pf-m-gap-sm">
+diff --git a/layouts/_partials/section-events.html b/layouts/_partials/section-events.html
+index b039b0727373edec6d4a229f6d12a6280273cc8b..a4113e113fd5264e39e856e37cadad9ae3bbb82f 100644
+--- a/layouts/_partials/section-events.html
++++ b/layouts/_partials/section-events.html
+@@ -29,7 +29,7 @@             rel="noopener"
+             >Luma calendar<icon-external></icon-external></a
+           >. RSVP there to get reminders, or subscribe via
+           <a
+-            href="{{ .Site.Data.links.luma.proxy }}/events/feed?calendar={{ .Site.Data.links.luma.calendar }}"
++            href="{{ .Site.Data.links.api }}/events/feed?calendar={{ .Site.Data.links.luma.calendar }}"
+             target="_blank"
+             rel="noopener"
+             >RSS<icon-custom data-icon="fa-solid fa-rss"></icon-custom></a
+@@ -38,7 +38,7 @@         </p>
+       </div>
+       <luma-upcoming-events
+         calendar="{{ .Site.Data.links.luma.calendar }}"
+-        proxy="{{ .Site.Data.links.luma.proxy }}"
++        api="{{ .Site.Data.links.api }}"
+       >
+         <table
+           class="pf-v6-c-table pf-m-grid-md pf-m-compact"
+diff --git a/layouts/_partials/section-home.html b/layouts/_partials/section-home.html
+index d32f221e6437ac1c5a2140bb0ba5234b795e1f5e..a42a488ec0d9d678344424cb260e7e9fab85801a 100644
+--- a/layouts/_partials/section-home.html
++++ b/layouts/_partials/section-home.html
+@@ -62,7 +62,7 @@         <h3>{{ $c.next_meeting.title }}</h3>
+       </div>
+       <luma-next-event
+         calendar="{{ .Site.Data.links.luma.calendar }}"
+-        proxy="{{ .Site.Data.links.luma.proxy }}"
++        api="{{ .Site.Data.links.api }}"
+       >
+         <div class="pf-v6-c-card pf-m-compact pf-m-flat">
+           <div class="pf-v6-c-card__header">
+@@ -100,7 +100,7 @@           {{ $c.next_meeting.body }}
+           See
+           <a href="{{ "/events/" | relURL }}">full schedule</a>, or subscribe via
+           <a
+-            href="{{ .Site.Data.links.luma.proxy }}/events/feed?calendar={{ .Site.Data.links.luma.calendar }}"
++            href="{{ .Site.Data.links.api }}/events/feed?calendar={{ .Site.Data.links.luma.calendar }}"
+             target="_blank"
+             rel="noopener"
+             >RSS<icon-custom data-icon="fa-solid fa-rss"></icon-custom></a
+diff --git a/layouts/_partials/sidebar.html b/layouts/_partials/sidebar.html
+index aad7662c0e10f87abf109babdd7091b9b9723ba9..7af4e1b58583e865eebd661db97941a0e04ad006 100644
+--- a/layouts/_partials/sidebar.html
++++ b/layouts/_partials/sidebar.html
+@@ -10,7 +10,7 @@           {{ else if .eventsFeed }}
+             <li class="pf-v6-c-nav__item">
+               <a
+                 class="pf-v6-c-nav__link"
+-                href="{{ $.Site.Data.links.luma.proxy }}/events/feed?calendar={{ $.Site.Data.links.luma.calendar }}"
++                href="{{ $.Site.Data.links.api }}/events/feed?calendar={{ $.Site.Data.links.luma.calendar }}"
+                 target="_blank"
+                 rel="noopener"
+                 ><span
+diff --git a/layouts/baseof.html b/layouts/baseof.html
+index 6045826f4f87ecbebf763718eab703c8cb5d1e3f..e26267595455cb32f3c3b7f442c43d0a3aae9012 100644
+--- a/layouts/baseof.html
++++ b/layouts/baseof.html
+@@ -35,7 +35,7 @@     {{ range .Site.Data.links.me }}
+       <link rel="me" href="{{ . }}" />
+     {{ end }}
+     <link rel="alternate" type="application/rss+xml" title="Mastodon posts from {{ .Site.Title }}" href="{{ .Site.Data.links.feed.mastodon }}" />
+-    <link rel="alternate" type="application/atom+xml" title="Upcoming events from {{ .Site.Title }}" href="{{ .Site.Data.links.luma.proxy }}/events/feed?calendar={{ .Site.Data.links.luma.calendar }}" />
++    <link rel="alternate" type="application/atom+xml" title="Upcoming events from {{ .Site.Title }}" href="{{ .Site.Data.links.api }}/events/feed?calendar={{ .Site.Data.links.luma.calendar }}" />
+ 
+     <meta name="author" content="{{ .Site.Data.site.author }}" />
+     <meta name="fediverse:creator" content="@vanlug@thecanadian.social" />
+
