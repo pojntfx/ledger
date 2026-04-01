@@ -1,0 +1,374 @@
+From faf924ef9ccc6fd2f08dbdcd292b4ec3074f254a Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Tue, 31 Mar 2026 23:58:52 -0700
+Subject: [PATCH] feat: Add RSS/Atom feed for Luma events via our proxy
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/data/links.yaml b/data/links.yaml
+index d08e97b1050055fa4d29a6ad7b207311c21b5e65..dd0e17af4f06382f17775df7b87b2dab4aded28a 100644
+--- a/data/links.yaml
++++ b/data/links.yaml
+@@ -30,10 +30,14 @@   - title: Mastodon
+     url: https://thecanadian.social/@vanlug
+     icon: fa-brands fa-mastodon
+     description: Follow us on the fediverse
+-  - title: RSS
++  - title: Posts RSS
+     url: https://thecanadian.social/@vanlug.rss
+     icon: fa-solid fa-rss
+-    description: Subscribe to our posts
++    description: Subscribe to our Mastodon posts
++  - title: Events RSS
++    icon: fa-solid fa-rss
++    description: Subscribe to upcoming events
++    eventsFeed: true
+   - title: Bluesky
+     url: https://bsky.app/profile/vanlug.thecanadian.social.ap.brid.gy
+     icon: fa-brands fa-bluesky
+@@ -70,10 +74,10 @@ donate:
+   url: https://www.paypal.com/ncp/payment/5LJ46YPC7JJ7E
+   icon: fa-brands fa-paypal
+ feed:
+-  rss: https://thecanadian.social/@vanlug.rss
++  mastodon: https://thecanadian.social/@vanlug.rss
+ luma:
+   calendar: cal-x23GENOxTsZqSMO
+   url: https://luma.com/vanlug
+-  proxy: http://localhost:8080
++  proxy: https://vanlug-website-backend.up.railway.app/
+ meetup:
+   url: https://www.meetup.com/vanlug-bc/events/
+diff --git a/go.mod b/go.mod
+index b3c00ee419dd95e6e862bd874059ba9c66dca5cb..19cd6103b845d1f854a3eb1d82a75a4f9feff9f8 100644
+--- a/go.mod
++++ b/go.mod
+@@ -7,6 +7,8 @@ 	github.com/mattn/go-mastodon v0.0.11 // indirect
+ 	github.com/pojntfx/felicitas.pojtinger.com v0.4.1
+ )
+ 
++require github.com/gorilla/feeds v1.2.0
++
+ require (
+ 	github.com/gorilla/websocket v1.5.3 // indirect
+ 	github.com/tomnomnom/linkheader v0.0.0-20250811210735-e5fe3b51442e // indirect
+diff --git a/go.sum b/go.sum
+index 87df3f71656366cd6a0f5c25d9a38a5e0e385511..d067d40b9516b6bc3f974518a7c2f5157c7e65d2 100644
+--- a/go.sum
++++ b/go.sum
+@@ -1,8 +1,16 @@
++github.com/gorilla/feeds v1.2.0 h1:O6pBiXJ5JHhPvqy53NsjKOThq+dNFm8+DFrxBEdzSCc=
++github.com/gorilla/feeds v1.2.0/go.mod h1:WMib8uJP3BbY+X8Szd1rA5Pzhdfh+HCCAYT2z7Fza6Y=
+ github.com/gorilla/websocket v1.5.3 h1:saDtZ6Pbx/0u+bgYQ3q96pZgCzfhKXGPqt7kZ72aNNg=
+ github.com/gorilla/websocket v1.5.3/go.mod h1:YR8l580nyteQvAITg2hZ9XVh4b55+EU/adAjf1fMHhE=
++github.com/kr/pretty v0.3.1 h1:flRD4NNwYAUpkphVc1HcthR4KEIFJ65n8Mw5qdRn3LE=
++github.com/kr/pretty v0.3.1/go.mod h1:hoEshYVHaxMs3cyo3Yncou5ZscifuDolrwPKZanG3xk=
++github.com/kr/text v0.2.0 h1:5Nx0Ya0ZqY2ygV366QzturHI13Jq95ApcVaJBhpS+AY=
++github.com/kr/text v0.2.0/go.mod h1:eLer722TekiGuMkidMxC/pM04lWEeraHUUmBw8l2grE=
+ github.com/mattn/go-mastodon v0.0.11 h1:Zcvc/8EHpf3os1mwAuUUB5es5VnfVdAeb4ed6ByJnCY=
+ github.com/mattn/go-mastodon v0.0.11/go.mod h1:0DcwYEkqigrvknMvjmfKXLP0vYyeYm+vBdUOvoHcczg=
+ github.com/pojntfx/felicitas.pojtinger.com v0.4.1 h1:bTUaI/b8csLNWjsEBqb2d3Xao6njUst5XPOREuOfkiM=
+ github.com/pojntfx/felicitas.pojtinger.com v0.4.1/go.mod h1:XaKmAAyinrHKMlRAXF7/rhBeENkC6e/Zf2SrhIGMgbo=
++github.com/rogpeppe/go-internal v1.9.0 h1:73kH8U+JUqXU8lRuOHeVHaa/SZPifC7BkcraZVejAe8=
++github.com/rogpeppe/go-internal v1.9.0/go.mod h1:WtVeX8xhTBvf0smdhujwtBcq4Qrzq/fJaraNFVN+nFs=
+ github.com/tomnomnom/linkheader v0.0.0-20250811210735-e5fe3b51442e h1:tD38/4xg4nuQCASJ/JxcvCHNb46w0cdAaJfkzQOO1bA=
+ github.com/tomnomnom/linkheader v0.0.0-20250811210735-e5fe3b51442e/go.mod h1:krvJ5AY/MjdPkTeRgMYbIDhbbbVvnPQPzsIsDJO8xrY=
+diff --git a/layouts/_partials/section-events.html b/layouts/_partials/section-events.html
+index 59f35d006f9990b07cc4725087a103fc0995f26d..b039b0727373edec6d4a229f6d12a6280273cc8b 100644
+--- a/layouts/_partials/section-events.html
++++ b/layouts/_partials/section-events.html
+@@ -27,7 +27,13 @@             href="{{ .Site.Data.links.luma.url }}"
+             target="_blank"
+             rel="noopener"
+             >Luma calendar<icon-external></icon-external></a
+-          >. RSVP there to get reminders.
++          >. RSVP there to get reminders, or subscribe via
++          <a
++            href="{{ .Site.Data.links.luma.proxy }}/events/feed?calendar={{ .Site.Data.links.luma.calendar }}"
++            target="_blank"
++            rel="noopener"
++            >RSS<icon-custom data-icon="fa-solid fa-rss"></icon-custom></a
++          >.
+         </p>
+       </div>
+       <luma-upcoming-events
+diff --git a/layouts/_partials/section-home.html b/layouts/_partials/section-home.html
+index de3bdeacd2238efc87ef2f6c85bc3f115227b4e2..d32f221e6437ac1c5a2140bb0ba5234b795e1f5e 100644
+--- a/layouts/_partials/section-home.html
++++ b/layouts/_partials/section-home.html
+@@ -97,7 +97,14 @@       </luma-next-event>
+       <div class="pf-v6-c-content">
+         <p>
+           {{ $c.next_meeting.body }}
+-          <a href="{{ "/events/" | relURL }}">Full schedule</a>
++          See
++          <a href="{{ "/events/" | relURL }}">full schedule</a>, or subscribe via
++          <a
++            href="{{ .Site.Data.links.luma.proxy }}/events/feed?calendar={{ .Site.Data.links.luma.calendar }}"
++            target="_blank"
++            rel="noopener"
++            >RSS<icon-custom data-icon="fa-solid fa-rss"></icon-custom></a
++          >.
+         </p>
+       </div>
+     </div>
+diff --git a/layouts/_partials/sidebar.html b/layouts/_partials/sidebar.html
+index 7302da9cba708c855ebdeb83b318e7962d391342..aad7662c0e10f87abf109babdd7091b9b9723ba9 100644
+--- a/layouts/_partials/sidebar.html
++++ b/layouts/_partials/sidebar.html
+@@ -6,6 +6,21 @@         {{ $current := $.RelPermalink }}
+         {{ range .Site.Data.links.sidebar }}
+           {{ if .separator }}
+             <li class="pf-v6-c-divider" role="presentation"></li>
++          {{ else if .eventsFeed }}
++            <li class="pf-v6-c-nav__item">
++              <a
++                class="pf-v6-c-nav__link"
++                href="{{ $.Site.Data.links.luma.proxy }}/events/feed?calendar={{ $.Site.Data.links.luma.calendar }}"
++                target="_blank"
++                rel="noopener"
++                ><span
++                  >{{ .title }}{{ partial "icon" .icon }}<br /><small
++                    class="pf-v6-u-font-size-xs pf-v6-u-text-color-subtle"
++                    >{{ .description }}</small
++                  ></span
++                ></a
++              >
++            </li>
+           {{ else if .url }}
+             <li class="pf-v6-c-nav__item">
+               <a
+diff --git a/layouts/baseof.html b/layouts/baseof.html
+index f6a65bb1d163747b44a546cf014961411ca73782..6045826f4f87ecbebf763718eab703c8cb5d1e3f 100644
+--- a/layouts/baseof.html
++++ b/layouts/baseof.html
+@@ -34,7 +34,8 @@
+     {{ range .Site.Data.links.me }}
+       <link rel="me" href="{{ . }}" />
+     {{ end }}
+-    <link rel="alternate" type="application/rss+xml" title="Fediverse posts from {{ .Site.Title }}" href="{{ .Site.Data.links.feed.rss }}" />
++    <link rel="alternate" type="application/rss+xml" title="Mastodon posts from {{ .Site.Title }}" href="{{ .Site.Data.links.feed.mastodon }}" />
++    <link rel="alternate" type="application/atom+xml" title="Upcoming events from {{ .Site.Title }}" href="{{ .Site.Data.links.luma.proxy }}/events/feed?calendar={{ .Site.Data.links.luma.calendar }}" />
+ 
+     <meta name="author" content="{{ .Site.Data.site.author }}" />
+     <meta name="fediverse:creator" content="@vanlug@thecanadian.social" />
+@@ -54,7 +55,7 @@       property="og:description"
+       content="{{ .Site.Data.site.description }}"
+     />
+     <meta property="og:image" content="/design/header.png" />
+-    <meta property="og:url" content="https://vanlug.github.io/" />
++    <meta property="og:url" content="{{ .Site.BaseURL }}" />
+     <meta property="og:type" content="website" />
+     <meta property="og:site_name" content="{{ .Site.Data.site.author }}" />
+     <meta property="og:locale" content="en_CA" />
+diff --git a/main.go b/main.go
+index a302329a98094c1ccada489d96d750a01f85d4c7..92b60549b90aa4e16d516db8e3e7f04b28d0a3ed 100644
+--- a/main.go
++++ b/main.go
+@@ -32,6 +32,11 @@ 	if apiBase == "" {
+ 		apiBase = defaultLumaAPIBase
+ 	}
+ 
++	siteURL := os.Getenv("SITE_URL")
++	if siteURL == "" {
++		siteURL = "https://vanlug.github.io/"
++	}
++
+ 	mastodonServer := os.Getenv("MASTODON_SERVER")
+ 	if mastodonServer == "" {
+ 		mastodonServer = "https://thecanadian.social"
+@@ -85,6 +90,20 @@ 			}
+ 		}()
+ 
+ 		handlers.EventsHandler(w, r, apiBase)
++	}))
++
++	mux.HandleFunc("/events/feed", cors(func(w http.ResponseWriter, r *http.Request) {
++		defer func() {
++			if err := recover(); err != nil {
++				log.Println("Error occured in events feed API:", err)
++
++				http.Error(w, "Error occured in events feed API", http.StatusInternalServerError)
++
++				return
++			}
++		}()
++
++		handlers.EventsFeedHandler(w, r, apiBase, siteURL)
+ 	}))
+ 
+ 	mux.HandleFunc("/mastodon", cors(func(w http.ResponseWriter, r *http.Request) {
+diff --git a/pkg/handlers/luma.go b/pkg/handlers/luma.go
+index a14dbcc8114ca690284d3f239bc937bb916a1409..958b9db23f7d1459be919dcaa9786672ff5dfccf 100644
+--- a/pkg/handlers/luma.go
++++ b/pkg/handlers/luma.go
+@@ -3,9 +3,13 @@
+ import (
+ 	"encoding/json"
+ 	"fmt"
++	"html"
+ 	"io"
+ 	"net/http"
+ 	"net/url"
++	"time"
++
++	"github.com/gorilla/feeds"
+ )
+ 
+ type LumaEvent struct {
+@@ -39,12 +43,10 @@ type EventOutput struct {
+ 	Entries []EventItem `json:"entries"`
+ }
+ 
+-func lumaFetch(w http.ResponseWriter, r *http.Request, apiBase string, limit string) {
++func lumaFetchItems(r *http.Request, apiBase string, limit string) ([]EventItem, error) {
+ 	cal := r.URL.Query().Get("calendar")
+ 	if cal == "" {
+-		w.Write([]byte("missing calendar query parameter"))
+-
+-		panic("missing calendar query parameter")
++		return nil, fmt.Errorf("missing calendar query parameter")
+ 	}
+ 
+ 	u := apiBase + "?" + url.Values{
+@@ -55,22 +57,21 @@ 	}.Encode()
+ 
+ 	resp, err := http.Get(u)
+ 	if err != nil {
+-		panic(err)
++		return nil, err
+ 	}
+ 	defer resp.Body.Close()
+ 
+ 	body, err := io.ReadAll(resp.Body)
+ 	if err != nil {
+-		panic(err)
++		return nil, err
+ 	}
+ 
+ 	var lr LumaResponse
+ 	if err := json.Unmarshal(body, &lr); err != nil {
+-		panic(err)
++		return nil, err
+ 	}
+ 
+-	output := EventOutput{}
+-
++	var items []EventItem
+ 	for _, entry := range lr.Entries {
+ 		evt := entry.Event
+ 
+@@ -82,7 +83,7 @@ 				loc = evt.GeoAddr.ShortAddress
+ 			}
+ 		}
+ 
+-		output.Entries = append(output.Entries, EventItem{
++		items = append(items, EventItem{
+ 			Name:     evt.Name,
+ 			StartAt:  evt.StartAt,
+ 			URL:      evt.URL,
+@@ -91,7 +92,18 @@ 			CoverURL: evt.CoverURL,
+ 		})
+ 	}
+ 
+-	j, err := json.Marshal(output)
++	return items, nil
++}
++
++func lumaJSON(w http.ResponseWriter, r *http.Request, apiBase string, limit string) {
++	items, err := lumaFetchItems(r, apiBase, limit)
++	if err != nil {
++		w.Write([]byte(err.Error()))
++
++		panic(err)
++	}
++
++	j, err := json.Marshal(EventOutput{Entries: items})
+ 	if err != nil {
+ 		panic(err)
+ 	}
+@@ -100,9 +112,81 @@ 	fmt.Fprintf(w, "%v", string(j))
+ }
+ 
+ func NextEventHandler(w http.ResponseWriter, r *http.Request, apiBase string) {
+-	lumaFetch(w, r, apiBase, "1")
++	lumaJSON(w, r, apiBase, "1")
+ }
+ 
+ func EventsHandler(w http.ResponseWriter, r *http.Request, apiBase string) {
+-	lumaFetch(w, r, apiBase, "20")
++	lumaJSON(w, r, apiBase, "20")
++}
++
++func EventsFeedHandler(w http.ResponseWriter, r *http.Request, apiBase string, siteURL string) {
++	items, err := lumaFetchItems(r, apiBase, "20")
++	if err != nil {
++		w.Write([]byte(err.Error()))
++
++		panic(err)
++	}
++
++	now := time.Now()
++
++	feed := &feeds.Feed{
++		Title:       "VanLUG Events",
++		Link:        &feeds.Link{Href: siteURL + "events/"},
++		Description: "Upcoming events from the Vancouver Linux Users Group",
++		Author:      &feeds.Author{Name: "Vancouver Linux Users Group"},
++		Updated:     now,
++		Created:     now,
++		Id:          siteURL + "events/",
++	}
++
++	for _, item := range items {
++		link := "https://luma.com/vanlug"
++		if item.URL != "" {
++			link = "https://luma.com/" + item.URL
++		}
++
++		published := now
++		if t, err := time.Parse(time.RFC3339, item.StartAt); err == nil {
++			published = t
++		}
++
++		description := item.StartAt
++		if item.Location != "" {
++			description = item.Location + " — " + description
++		}
++
++		content := "<p>" + html.EscapeString(item.Name) + "</p>"
++		if item.Location != "" {
++			content += "<p>" + html.EscapeString(item.Location) + "</p>"
++		}
++		if item.CoverURL != "" {
++			content += `<p><img src="` + html.EscapeString(item.CoverURL) + `" alt="` + html.EscapeString(item.Name) + `" /></p>`
++		}
++
++		feedItem := &feeds.Item{
++			Title:       item.Name,
++			Link:        &feeds.Link{Href: link},
++			Description: description,
++			Id:          link,
++			Created:     published,
++			Updated:     published,
++			Content:     content,
++		}
++
++		if item.CoverURL != "" {
++			feedItem.Enclosure = &feeds.Enclosure{
++				Url:  item.CoverURL,
++				Type: "image/jpeg",
++			}
++		}
++
++		feed.Add(feedItem)
++	}
++
++	w.Header().Set("Content-Type", "application/atom+xml; charset=utf-8")
++	w.Header().Set("Cache-Control", "public, max-age=900")
++
++	if err := feed.WriteAtom(w); err != nil {
++		panic(err)
++	}
+ }
+
