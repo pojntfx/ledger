@@ -1,0 +1,751 @@
+From dd7c3f7f826db89ef8a33ca442dc929db2d7d011 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Wed, 01 Apr 2026 23:47:52 -0700
+Subject: [PATCH] feat: Add "details" modal for Luma and event handler API that fetches individual event data
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/assets/js/event-detail-modal.js b/assets/js/event-detail-modal.js
+new file mode 100644
+index 0000000000000000000000000000000000000000..4ac238c67fe856e9c5f9df1ab0a52a9cca8195c0
+--- /dev/null
++++ b/assets/js/event-detail-modal.js
+@@ -0,0 +1,211 @@
++import DOMPurify from "dompurify";
++import { proxyImageUrl } from "./events.js";
++
++const backdropClass = "pf-v6-c-backdrop";
++
++const modalTemplate = document.createElement("template");
++modalTemplate.innerHTML = `
++  <div class="${backdropClass}" style="display: none;">
++    <div class="pf-v6-l-bullseye">
++    <div class="pf-v6-c-modal-box pf-m-md" role="dialog" aria-modal="true"
++         aria-labelledby="event-detail-title" aria-describedby="event-detail-body">
++      <div class="pf-v6-c-modal-box__close">
++        <button class="pf-v6-c-button pf-m-plain" type="button" aria-label="Close" data-slot="close">
++          <span class="pf-v6-c-button__icon">
++            <i class="fas fa-times" aria-hidden="true"></i>
++          </span>
++        </button>
++      </div>
++      <header class="pf-v6-c-modal-box__header">
++        <div class="pf-v6-c-modal-box__header-main">
++          <h1 class="pf-v6-c-modal-box__title" id="event-detail-title" data-slot="title"></h1>
++        </div>
++      </header>
++      <div class="pf-v6-c-modal-box__body" id="event-detail-body" tabindex="0" data-slot="body">
++        <div data-slot="content">
++          <div class="pf-v6-c-skeleton pf-v6-u-mb-md" style="--pf-v6-c-skeleton--Height: 10rem; border-radius: var(--pf-t--global--border--radius--medium);"></div>
++          <div class="pf-v6-c-skeleton pf-m-text-sm pf-m-width-75 pf-v6-u-mb-sm"></div>
++          <div class="pf-v6-c-skeleton pf-m-text-sm pf-m-width-50 pf-v6-u-mb-sm"></div>
++          <div class="pf-v6-c-skeleton pf-m-text-sm pf-m-width-75 pf-v6-u-mb-sm"></div>
++          <div class="pf-v6-c-skeleton pf-m-text-sm pf-m-width-50 pf-v6-u-mb-md"></div>
++          <div class="pf-v6-c-skeleton pf-m-text-sm pf-v6-u-mb-sm"></div>
++          <div class="pf-v6-c-skeleton pf-m-text-sm pf-m-width-75 pf-v6-u-mb-sm"></div>
++          <div class="pf-v6-c-skeleton pf-m-text-sm pf-m-width-50"></div>
++        </div>
++      </div>
++      <footer class="pf-v6-c-modal-box__footer">
++        <a data-slot="rsvp" target="_blank" rel="noopener"
++           class="pf-v6-c-button pf-m-primary">RSVP on Luma</a>
++        <button data-slot="cancel" type="button"
++                class="pf-v6-c-button pf-m-link">Close</button>
++      </footer>
++    </div>
++    </div>
++  </div>`;
++
++const detailTemplate = document.createElement("template");
++detailTemplate.innerHTML = `
++  <div>
++    <img data-slot="cover" alt="" style="width: 100%; max-height: 16rem; object-fit: cover;
++         border-radius: var(--pf-t--global--border--radius--medium); margin-bottom: 1rem;" />
++    <div class="pf-v6-c-description-list pf-m-horizontal pf-m-compact">
++      <div class="pf-v6-c-description-list__group" data-slot="date-group">
++        <dt class="pf-v6-c-description-list__term"><span class="pf-v6-c-description-list__text">Date</span></dt>
++        <dd class="pf-v6-c-description-list__description"><div class="pf-v6-c-description-list__text" data-slot="date"></div></dd>
++      </div>
++      <div class="pf-v6-c-description-list__group" data-slot="time-group">
++        <dt class="pf-v6-c-description-list__term"><span class="pf-v6-c-description-list__text">Time</span></dt>
++        <dd class="pf-v6-c-description-list__description"><div class="pf-v6-c-description-list__text" data-slot="time"></div></dd>
++      </div>
++      <div class="pf-v6-c-description-list__group" data-slot="venue-group">
++        <dt class="pf-v6-c-description-list__term"><span class="pf-v6-c-description-list__text">Venue</span></dt>
++        <dd class="pf-v6-c-description-list__description"><div class="pf-v6-c-description-list__text"><span data-slot="venue"></span><br data-slot="map-br" /><span data-slot="map-link"></span></div></dd>
++      </div>
++      <div class="pf-v6-c-description-list__group" data-slot="hosts-group">
++        <dt class="pf-v6-c-description-list__term"><span class="pf-v6-c-description-list__text">Hosted by</span></dt>
++        <dd class="pf-v6-c-description-list__description"><div class="pf-v6-c-description-list__text" data-slot="hosts"></div></dd>
++      </div>
++      <div class="pf-v6-c-description-list__group" data-slot="admission-group">
++        <dt class="pf-v6-c-description-list__term"><span class="pf-v6-c-description-list__text">Admission</span></dt>
++        <dd class="pf-v6-c-description-list__description"><div class="pf-v6-c-description-list__text" data-slot="admission"></div></dd>
++      </div>
++    </div>
++    <hr class="pf-v6-u-mt-md pf-v6-u-mb-md" data-slot="desc-divider" />
++    <div class="pf-v6-c-content" data-slot="description"></div>
++  </div>`;
++
++customElements.define(
++  "event-detail-modal",
++  class extends HTMLElement {
++    connectedCallback() {
++      this.append(modalTemplate.content.cloneNode(true));
++      this._backdrop = this.querySelector(`.${backdropClass}`);
++      this._$ = (s) => this.querySelector(`[data-slot="${s}"]`);
++
++      this._$("close").addEventListener("click", () => this.close());
++      this._$("cancel").addEventListener("click", () => this.close());
++      this._backdrop.addEventListener("click", (e) => {
++        if (e.target === this._backdrop) this.close();
++      });
++      this._keyHandler = (e) => {
++        if (e.key === "Escape") this.close();
++      };
++    }
++
++    async open(eventApiId, api) {
++      this._backdrop.style.display = "";
++      document.documentElement.style.overflow = "hidden";
++      document.addEventListener("keydown", this._keyHandler);
++
++      this._$("title").innerHTML = '<div class="pf-v6-c-skeleton pf-m-text-lg pf-m-width-50"></div>';
++      const content = this._$("content");
++      content.innerHTML = `
++        <div class="pf-v6-c-skeleton pf-v6-u-mb-md" style="--pf-v6-c-skeleton--Height: 10rem; border-radius: var(--pf-t--global--border--radius--medium);"></div>
++        <div class="pf-v6-c-skeleton pf-m-text-sm pf-m-width-75 pf-v6-u-mb-sm"></div>
++        <div class="pf-v6-c-skeleton pf-m-text-sm pf-m-width-50 pf-v6-u-mb-sm"></div>
++        <div class="pf-v6-c-skeleton pf-m-text-sm pf-m-width-75 pf-v6-u-mb-sm"></div>
++        <div class="pf-v6-c-skeleton pf-m-text-sm pf-m-width-50 pf-v6-u-mb-md"></div>
++        <div class="pf-v6-c-skeleton pf-m-text-sm pf-v6-u-mb-sm"></div>
++        <div class="pf-v6-c-skeleton pf-m-text-sm pf-m-width-75 pf-v6-u-mb-sm"></div>
++        <div class="pf-v6-c-skeleton pf-m-text-sm pf-m-width-50"></div>`;
++      this._$("rsvp").style.display = "none";
++
++      try {
++        const data = await fetch(
++          `${api}/events/detail?event_api_id=${encodeURIComponent(eventApiId)}`,
++        ).then((r) => r.json());
++
++        this._$("title").textContent = data.name;
++        this._$("rsvp").href = data.link;
++        this._$("rsvp").style.display = "";
++
++        const detail = detailTemplate.content.cloneNode(true);
++        const $ = (s) => detail.querySelector(`[data-slot="${s}"]`);
++
++        const cover = $("cover");
++        if (data.cover_url) {
++          cover.src = proxyImageUrl(data.cover_url, api, "luma");
++          cover.alt = data.name;
++        } else {
++          cover.remove();
++        }
++
++        const start = new Date(data.start_at);
++        const dateOpts = {
++          weekday: "long",
++          year: "numeric",
++          month: "long",
++          day: "numeric",
++          timeZone: data.timezone || undefined,
++        };
++        $("date").textContent = start.toLocaleDateString("en-CA", dateOpts);
++
++        const timeOpts = {
++          hour: "numeric",
++          minute: "2-digit",
++          timeZone: data.timezone || undefined,
++          timeZoneName: data.timezone ? "short" : undefined,
++        };
++        let timeText = start.toLocaleTimeString("en-CA", timeOpts);
++        if (data.end_at) {
++          const end = new Date(data.end_at);
++          timeText += " – " + end.toLocaleTimeString("en-CA", timeOpts);
++        }
++        $("time").textContent = timeText;
++
++        if (data.location) {
++          const venueText = data.full_address
++            ? `${data.location} — ${data.full_address}`
++            : data.location;
++          $("venue").textContent = venueText;
++
++          if (data.map_url) {
++            const mapLink = document.createElement("a");
++            mapLink.href = data.map_url;
++            mapLink.target = "_blank";
++            mapLink.rel = "noopener";
++            mapLink.className = "pf-v6-c-button pf-m-link pf-m-inline pf-m-small";
++            mapLink.innerHTML =
++              'View on map <span class="pf-v6-c-button__icon pf-m-end"><icon-external></icon-external></span>';
++            $("map-link").append(mapLink);
++          } else {
++            $("map-br").remove();
++            $("map-link").remove();
++          }
++        } else {
++          $("venue-group").remove();
++        }
++
++        if (data.hosts) {
++          $("hosts").textContent = data.hosts;
++        } else {
++          $("hosts-group").remove();
++        }
++
++        if (data.admission) {
++          $("admission").textContent = data.admission;
++        } else {
++          $("admission-group").remove();
++        }
++
++        if (data.description) {
++          $("description").innerHTML = DOMPurify.sanitize(data.description);
++        } else {
++          $("desc-divider").remove();
++          $("description").remove();
++        }
++
++        content.replaceChildren(detail);
++      } catch {
++        content.innerHTML =
++          "<p>Could not load event details. Please try again later.</p>";
++      }
++    }
++
++    close() {
++      this._backdrop.style.display = "none";
++      document.documentElement.style.overflow = "";
++      document.removeEventListener("keydown", this._keyHandler);
++    }
++  },
++);
+diff --git a/assets/js/luma-next-event.js b/assets/js/luma-next-event.js
+index cb6e1592ed8501b167d23ffff70ecd1b3cabb023..ddb8bea55b96e9399fa717360cd89a32c949c47b 100644
+--- a/assets/js/luma-next-event.js
++++ b/assets/js/luma-next-event.js
+@@ -24,20 +24,27 @@             <div class="pf-v6-c-content">
+               <h4 data-slot="name"></h4>
+               <p><small data-slot="detail"></small></p>
+             </div>
+-            <a data-slot="rsvp" target="_blank" rel="noopener"
+-              class="pf-v6-c-button pf-m-link pf-m-inline">
+-              <span class="pf-v6-c-button__text">RSVP on Luma</span>
+-              <span class="pf-v6-c-button__icon pf-m-end"><icon-external></icon-external></span>
+-            </a>
++            <div class="pf-v6-l-flex pf-m-gap-sm pf-m-align-items-center">
++              <button data-slot="details" type="button"
++                class="pf-v6-c-button pf-m-control pf-m-small">
++                <span class="pf-v6-c-button__text">View details</span>
++              </button>
++              <span class="pf-v6-u-text-color-subtle pf-v6-u-font-size-sm">or</span>
++              <a data-slot="rsvp" target="_blank" rel="noopener"
++                class="pf-v6-c-button pf-m-link pf-m-inline">
++                <span class="pf-v6-c-button__text">RSVP on Luma</span>
++                <span class="pf-v6-c-button__icon pf-m-end"><icon-external></icon-external></span>
++              </a>
++            </div>
+           </div>
+         </div>
+       </div>
+     </div>
+   </div>`;
+ 
+-const renderEventCard = (evt) => {
+-  const { name, date, time, relative, lumaUrl, location, coverUrl } =
+-    formatEvent(evt);
++const renderEventCard = (evt, api) => {
++  const { apiId, name, date, time, relative, lumaUrl, location, coverUrl } =
++    formatEvent(evt, api);
+   const clone = template.content.cloneNode(true);
+   const $ = (s) => clone.querySelector(`[data-slot="${s}"]`);
+   const cover = $("cover");
+@@ -52,6 +59,9 @@   $("relative").textContent = relative;
+   $("name").textContent = name;
+   $("detail").textContent = location ? `${location} \u00b7 ${time}` : time;
+   $("rsvp").href = lumaUrl;
++  $("details").addEventListener("click", () => {
++    document.querySelector("event-detail-modal").open(apiId, api);
++  });
+   return clone;
+ };
+ 
+@@ -70,7 +80,7 @@         if (!evt) {
+           this.textContent = "No upcoming events right now. Check back soon!";
+           return;
+         }
+-        this.replaceChildren(renderEventCard(evt));
++        this.replaceChildren(renderEventCard(evt, api));
+       } catch {
+         this.textContent = "Could not load the next event. ";
+         const a = document.createElement("a");
+diff --git a/assets/js/luma-upcoming-events.js b/assets/js/luma-upcoming-events.js
+index 4f3d23a74bb04bbbae1ef59423d31a7d6f7a141f..170c01bcb2b102de5532e7e7a4739c113341fcd8 100644
+--- a/assets/js/luma-upcoming-events.js
++++ b/assets/js/luma-upcoming-events.js
+@@ -17,15 +17,20 @@     </td>
+     <td class="pf-v6-c-table__td pf-v6-u-display-none pf-v6-u-display-table-cell-on-md" role="cell" style="vertical-align: middle;" data-slot="name-desktop"></td>
+     <td class="pf-v6-c-table__td" role="cell" style="vertical-align: middle;" data-slot="location"></td>
+     <td class="pf-v6-c-table__td" role="cell" style="vertical-align: middle;">
+-      <a data-slot="rsvp" target="_blank" rel="noopener" class="pf-v6-c-button pf-m-link pf-m-inline pf-m-small">
+-        RSVP<span class="pf-v6-c-button__icon pf-m-end"><icon-external></icon-external></span>
+-      </a>
++      <div class="pf-v6-l-flex pf-m-gap-sm">
++        <button data-slot="details" type="button" class="pf-v6-c-button pf-m-control pf-m-small">
++          Details
++        </button>
++        <a data-slot="rsvp" target="_blank" rel="noopener" class="pf-v6-c-button pf-m-link pf-m-inline pf-m-small">
++          RSVP<span class="pf-v6-c-button__icon pf-m-end"><icon-external></icon-external></span>
++        </a>
++      </div>
+     </td>
+   </tr>`;
+ 
+-const renderEventRow = (evt) => {
+-  const { name, date, time, relative, lumaUrl, location, coverUrl } =
+-    formatEvent(evt);
++const renderEventRow = (evt, api) => {
++  const { apiId, name, date, time, relative, lumaUrl, location, coverUrl } =
++    formatEvent(evt, api);
+   const clone = rowTemplate.content.cloneNode(true);
+   const $ = (s) => clone.querySelector(`[data-slot="${s}"]`);
+ 
+@@ -42,6 +47,9 @@   $("time").textContent = time;
+   $("name-desktop").textContent = name;
+   $("location").textContent = location;
+   $("rsvp").href = lumaUrl;
++  $("details").addEventListener("click", () => {
++    document.querySelector("event-detail-modal").open(apiId, api);
++  });
+ 
+   return clone;
+ };
+@@ -86,7 +94,7 @@         const tbody = document.createElement("tbody");
+         tbody.className = "pf-v6-c-table__tbody";
+         tbody.setAttribute("role", "rowgroup");
+         for (const evt of entries) {
+-          tbody.append(renderEventRow(evt));
++          tbody.append(renderEventRow(evt, api));
+         }
+         table.append(tbody);
+ 
+diff --git a/assets/js/main.js b/assets/js/main.js
+index 5d269c6aa4895a1c276cbd3ae79bfced3af4529a..130b8592c93e53eec98bd2975ea959b14d46f214 100644
+--- a/assets/js/main.js
++++ b/assets/js/main.js
+@@ -1,6 +1,7 @@
+ import "./theme.js";
+ import "./sidebar.js";
+ import "./icons.js";
++import "./event-detail-modal.js";
+ import "./luma-next-event.js";
+ import "./luma-upcoming-events.js";
+ import "./mastodon-feed.js";
+diff --git a/layouts/baseof.html b/layouts/baseof.html
+index e26267595455cb32f3c3b7f442c43d0a3aae9012..7ff785870cbe6fb3637bc0a150592fec48cd4345 100644
+--- a/layouts/baseof.html
++++ b/layouts/baseof.html
+@@ -106,6 +106,8 @@             {{ block "main" . }}{{ end }}
+           </main>
+         </div>
+       {{ end }}
++
++      <event-detail-modal></event-detail-modal>
+     </div>
+ 
+     {{ with resources.Get "js/main.js" }}
+diff --git a/main.go b/main.go
+index 1a2af26c706d052e201560251e7d4c06a279e1d5..8d89caaed556bbc834fe5f745a5dbbe713a74711 100644
+--- a/main.go
++++ b/main.go
+@@ -130,6 +130,20 @@
+ 		handlers.EventsFeedHandler(w, r, apiBase, eventDetailBase, lumaBase, mapBase, siteURL)
+ 	}))
+ 
++	mux.HandleFunc("/events/detail", cors(func(w http.ResponseWriter, r *http.Request) {
++		defer func() {
++			if err := recover(); err != nil {
++				log.Println("Error occured in event detail API:", err)
++
++				http.Error(w, "Error occured in event detail API", http.StatusInternalServerError)
++
++				return
++			}
++		}()
++
++		handlers.EventDetailHandler(w, r, eventDetailBase, lumaBase, mapBase)
++	}))
++
+ 	mux.HandleFunc("/mastodon", cors(func(w http.ResponseWriter, r *http.Request) {
+ 		defer func() {
+ 			if err := recover(); err != nil {
+diff --git a/pkg/handlers/feed_entry.html.tmpl b/pkg/handlers/feed_entry.html.tmpl
+index 4796351d73ea8ab0e76aad13cb071bcf7af34903..02a8890e159b73f2824cec8539dd39110e10e7a6 100644
+--- a/pkg/handlers/feed_entry.html.tmpl
++++ b/pkg/handlers/feed_entry.html.tmpl
+@@ -26,7 +26,7 @@ {{ end -}}
+ 
+ {{ if .Description -}}
+ <hr/>
+-{{ .Description }}
++{{ .Description | safeHTML }}
+ {{ end -}}
+ 
+ <p><a href="{{ .Link }}">RSVP on Luma</a></p>
+diff --git a/pkg/handlers/luma.go b/pkg/handlers/luma.go
+index 7e4c303ed773e34b745ae43082f18b5181131e90..d488a551f06a36f3365a48f75f6b078fb86b540e 100644
+--- a/pkg/handlers/luma.go
++++ b/pkg/handlers/luma.go
+@@ -13,27 +13,34 @@ 	"strings"
+ 	"time"
+ 
+ 	"github.com/gorilla/feeds"
+-	"golang.org/x/sync/errgroup"
+ 	prosemirror "github.com/nicksrandall/prosemirror-go"
++	"golang.org/x/sync/errgroup"
+ )
+ 
+ //go:embed feed_entry.html.tmpl
+ var feedEntryTmplStr string
+ 
+-var feedEntryTmpl = template.Must(template.New("feed_entry").Parse(feedEntryTmplStr))
++var feedEntryTmpl = template.Must(
++	template.New("feed_entry").
++		Funcs(template.FuncMap{
++			"safeHTML": func(s string) template.HTML {
++				return template.HTML(s)
++			},
++		}).
++		Parse(feedEntryTmplStr))
+ 
+ type feedEntryData struct {
+-	CoverURL    string
+-	Name        string
+-	DateLine    string
+-	TimeLine    string
+-	Location    string
+-	FullAddress string
+-	Hosts       string
+-	Admission   string
+-	Description template.HTML
+-	Link        string
+-	MapURL      string
++	CoverURL    string `json:"cover_url,omitempty"`
++	Name        string `json:"name"`
++	DateLine    string `json:"date_line"`
++	TimeLine    string `json:"time_line"`
++	Location    string `json:"location,omitempty"`
++	FullAddress string `json:"full_address,omitempty"`
++	Hosts       string `json:"hosts,omitempty"`
++	Admission   string `json:"admission,omitempty"`
++	Description string `json:"description,omitempty"`
++	Link        string `json:"link"`
++	MapURL      string `json:"map_url,omitempty"`
+ }
+ 
+ func caTime(s string) string {
+@@ -246,6 +253,205 @@ 	state := &prosemirror.EditorState{Doc: detail.DescriptionMirror}
+ 	return prosemirror.Render(state, cfg), nil
+ }
+ 
++func buildEntryData(item EventItem, description string, lumaBase string, mapBase string) feedEntryData {
++	now := time.Now()
++
++	link := lumaBase
++	if item.URL != "" {
++		link = lumaBase + "/" + item.URL
++	}
++
++	startTime := now
++	if t, err := time.Parse(time.RFC3339, item.StartAt); err == nil {
++		startTime = t
++	}
++
++	var endTime *time.Time
++	if item.EndAt != "" {
++		if t, err := time.Parse(time.RFC3339, item.EndAt); err == nil {
++			endTime = &t
++		}
++	}
++
++	loc := time.UTC
++	if item.Timezone != "" {
++		if l, err := time.LoadLocation(item.Timezone); err == nil {
++			loc = l
++		}
++	}
++
++	localStart := startTime.In(loc)
++	dateLine := localStart.Format("Monday, January 2, 2006")
++	timeLine := caTime(localStart.Format("3:04 PM"))
++	if endTime != nil {
++		localEnd := endTime.In(loc)
++		if localStart.Day() == localEnd.Day() {
++			timeLine += " – " + caTime(localEnd.Format("3:04 PM"))
++		} else {
++			timeLine += " – " + caTime(localEnd.Format("Monday, January 2, 3:04 PM"))
++		}
++	}
++	if item.Timezone != "" {
++		timeLine += " " + localStart.Format("MST")
++	}
++
++	var admission string
++	if item.IsFree {
++		admission = "Free"
++		if item.IsSoldOut {
++			admission += " (Sold out)"
++		} else if item.SpotsRemaining > 0 {
++			admission += fmt.Sprintf(" (%d spots remaining)", item.SpotsRemaining)
++		}
++	}
++
++	var mapURL string
++	if item.Latitude != 0 && item.Longitude != 0 {
++		mapURL = fmt.Sprintf("%s?clic=%.5f%%7C%.5f#16/%.5f/%.5f",
++			mapBase, item.Latitude, item.Longitude, item.Latitude, item.Longitude)
++	}
++
++	return feedEntryData{
++		CoverURL:    item.CoverURL,
++		Name:        item.Name,
++		DateLine:    dateLine,
++		TimeLine:    timeLine,
++		Location:    item.Location,
++		FullAddress: item.FullAddress,
++		Hosts:       strings.Join(item.Hosts, ", "),
++		Admission:   admission,
++		Description: description,
++		Link:        link,
++		MapURL:      mapURL,
++	}
++}
++
++type eventDetailResponse struct {
++	CoverURL    string  `json:"cover_url,omitempty"`
++	Name        string  `json:"name"`
++	StartAt     string  `json:"start_at"`
++	EndAt       string  `json:"end_at,omitempty"`
++	Timezone    string  `json:"timezone,omitempty"`
++	Location    string  `json:"location,omitempty"`
++	FullAddress string  `json:"full_address,omitempty"`
++	Hosts       string  `json:"hosts,omitempty"`
++	Admission   string  `json:"admission,omitempty"`
++	Description string  `json:"description,omitempty"`
++	Link        string  `json:"link"`
++	MapURL      string  `json:"map_url,omitempty"`
++	Latitude    float64 `json:"latitude,omitempty"`
++	Longitude   float64 `json:"longitude,omitempty"`
++}
++
++func EventDetailHandler(w http.ResponseWriter, r *http.Request, eventDetailBase string, lumaBase string, mapBase string) {
++	eventAPIId := r.URL.Query().Get("event_api_id")
++	if eventAPIId == "" {
++		http.Error(w, "missing event_api_id query parameter", http.StatusBadRequest)
++		return
++	}
++
++	resp, err := http.Get(eventDetailBase + "?" + url.Values{"event_api_id": {eventAPIId}}.Encode())
++	if err != nil {
++		panic(err)
++	}
++	defer resp.Body.Close()
++
++	body, err := io.ReadAll(resp.Body)
++	if err != nil {
++		panic(err)
++	}
++
++	var raw struct {
++		LumaEventDetail
++		Event      LumaEvent      `json:"event"`
++		Hosts      []LumaHost     `json:"hosts"`
++		TicketInfo LumaTicketInfo `json:"ticket_info"`
++	}
++	if err := json.Unmarshal(body, &raw); err != nil {
++		panic(err)
++	}
++
++	var descHTML string
++	if raw.DescriptionMirror != nil {
++		cfg := prosemirror.NewHTMLConfig()
++		cfg.MarkRenderers["bold"] = prosemirror.SimpleOption{Before: "<strong>", After: "</strong>"}
++		state := &prosemirror.EditorState{Doc: raw.DescriptionMirror}
++		descHTML = prosemirror.Render(state, cfg)
++	}
++
++	evt := raw.Event
++
++	link := lumaBase
++	if evt.URL != "" {
++		link = lumaBase + "/" + evt.URL
++	}
++
++	loc := ""
++	fullAddr := ""
++	if evt.GeoAddr != nil {
++		loc = evt.GeoAddr.Address
++		if loc == "" {
++			loc = evt.GeoAddr.ShortAddress
++		}
++		fullAddr = evt.GeoAddr.FullAddress
++	}
++
++	var lat, lng float64
++	if evt.Coordinate != nil {
++		lat = evt.Coordinate.Latitude
++		lng = evt.Coordinate.Longitude
++	}
++
++	var mapURL string
++	if lat != 0 && lng != 0 {
++		mapURL = fmt.Sprintf("%s?clic=%.5f%%7C%.5f#16/%.5f/%.5f",
++			mapBase, lat, lng, lat, lng)
++	}
++
++	var hosts []string
++	for _, h := range raw.Hosts {
++		name := h.FirstName + " " + h.LastName
++		if name == " " {
++			name = h.Name
++		}
++		hosts = append(hosts, name)
++	}
++
++	var admission string
++	if raw.TicketInfo.IsFree {
++		admission = "Free"
++		if raw.TicketInfo.IsSoldOut {
++			admission += " (Sold out)"
++		} else if raw.TicketInfo.SpotsRemaining > 0 {
++			admission += fmt.Sprintf(" (%d spots remaining)", raw.TicketInfo.SpotsRemaining)
++		}
++	}
++
++	data := eventDetailResponse{
++		CoverURL:    evt.CoverURL,
++		Name:        evt.Name,
++		StartAt:     evt.StartAt,
++		EndAt:       evt.EndAt,
++		Timezone:    evt.Timezone,
++		Location:    loc,
++		FullAddress: fullAddr,
++		Hosts:       strings.Join(hosts, ", "),
++		Admission:   admission,
++		Description: descHTML,
++		Link:        link,
++		MapURL:      mapURL,
++		Latitude:    lat,
++		Longitude:   lng,
++	}
++
++	j, err := json.Marshal(data)
++	if err != nil {
++		panic(err)
++	}
++
++	fmt.Fprintf(w, "%v", string(j))
++}
++
+ func EventsFeedHandler(w http.ResponseWriter, r *http.Request, apiBase string, eventDetailBase string, lumaBase string, mapBase string, siteURL string) {
+ 	items, err := lumaFetchItems(r, apiBase, "20")
+ 	if err != nil {
+@@ -285,90 +491,28 @@ 		panic(err)
+ 	}
+ 
+ 	for i, item := range items {
+-		link := lumaBase
+-		if item.URL != "" {
+-			link = lumaBase + "/" + item.URL
+-		}
++		data := buildEntryData(item, descriptions[i], lumaBase, mapBase)
+ 
+ 		published := now
+-		startTime := now
+ 		if t, err := time.Parse(time.RFC3339, item.StartAt); err == nil {
+ 			published = t
+-			startTime = t
+ 		}
+ 
+-		var endTime *time.Time
+-		if item.EndAt != "" {
+-			if t, err := time.Parse(time.RFC3339, item.EndAt); err == nil {
+-				endTime = &t
+-			}
+-		}
+-
+-		loc := time.UTC
+-		if item.Timezone != "" {
+-			if l, err := time.LoadLocation(item.Timezone); err == nil {
+-				loc = l
+-			}
+-		}
+-
+-		localStart := startTime.In(loc)
+-		dateLine := localStart.Format("Monday, January 2, 2006")
+-		timeLine := caTime(localStart.Format("3:04 PM"))
+-		if endTime != nil {
+-			localEnd := endTime.In(loc)
+-			if localStart.Day() == localEnd.Day() {
+-				timeLine += " – " + caTime(localEnd.Format("3:04 PM"))
+-			} else {
+-				timeLine += " – " + caTime(localEnd.Format("Monday, January 2, 3:04 PM"))
+-			}
+-		}
+-		if item.Timezone != "" {
+-			timeLine += " " + localStart.Format("MST")
+-		}
+-
+-		summary := dateLine + ", " + timeLine
++		summary := data.DateLine + ", " + data.TimeLine
+ 		if item.Location != "" {
+ 			summary = item.Location + " — " + summary
+ 		}
+ 
+-		var admission string
+-		if item.IsFree {
+-			admission = "Free"
+-			if item.IsSoldOut {
+-				admission += " (Sold out)"
+-			} else if item.SpotsRemaining > 0 {
+-				admission += fmt.Sprintf(" (%d spots remaining)", item.SpotsRemaining)
+-			}
+-		}
+-
+-		var mapURL string
+-		if item.Latitude != 0 && item.Longitude != 0 {
+-			mapURL = fmt.Sprintf("%s#16/%.6f/%.6f",
+-				mapBase, item.Latitude, item.Longitude)
+-		}
+-
+ 		var buf bytes.Buffer
+-		if err := feedEntryTmpl.Execute(&buf, feedEntryData{
+-			CoverURL:    item.CoverURL,
+-			Name:        item.Name,
+-			DateLine:    dateLine,
+-			TimeLine:    timeLine,
+-			Location:    item.Location,
+-			FullAddress: item.FullAddress,
+-			Hosts:       strings.Join(item.Hosts, ", "),
+-			Admission:   admission,
+-			Description: template.HTML(descriptions[i]),
+-			Link:        link,
+-			MapURL:      mapURL,
+-		}); err != nil {
++		if err := feedEntryTmpl.Execute(&buf, data); err != nil {
+ 			panic(err)
+ 		}
+ 
+ 		feedItem := &feeds.Item{
+ 			Title:       item.Name,
+-			Link:        &feeds.Link{Href: link},
++			Link:        &feeds.Link{Href: data.Link},
+ 			Description: summary,
+-			Id:          link,
++			Id:          data.Link,
+ 			Created:     published,
+ 			Updated:     published,
+ 			Content:     buf.String(),
+
