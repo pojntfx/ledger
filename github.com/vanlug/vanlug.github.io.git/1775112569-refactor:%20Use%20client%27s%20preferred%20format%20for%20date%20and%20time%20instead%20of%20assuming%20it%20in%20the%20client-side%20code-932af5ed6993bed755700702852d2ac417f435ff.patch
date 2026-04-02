@@ -1,0 +1,70 @@
+From 932af5ed6993bed755700702852d2ac417f435ff Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Wed, 01 Apr 2026 23:49:29 -0700
+Subject: [PATCH] refactor: Use client's preferred format for date and time instead of assuming it in the client-side code
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/assets/js/event-detail-modal.js b/assets/js/event-detail-modal.js
+index 4ac238c67fe856e9c5f9df1ab0a52a9cca8195c0..7d01e163372daa2a613065b8e1469b1e0b1ae9da 100644
+--- a/assets/js/event-detail-modal.js
++++ b/assets/js/event-detail-modal.js
+@@ -138,7 +138,7 @@           month: "long",
+           day: "numeric",
+           timeZone: data.timezone || undefined,
+         };
+-        $("date").textContent = start.toLocaleDateString("en-CA", dateOpts);
++        $("date").textContent = start.toLocaleDateString(undefined, dateOpts);
+ 
+         const timeOpts = {
+           hour: "numeric",
+@@ -146,10 +146,10 @@           minute: "2-digit",
+           timeZone: data.timezone || undefined,
+           timeZoneName: data.timezone ? "short" : undefined,
+         };
+-        let timeText = start.toLocaleTimeString("en-CA", timeOpts);
++        let timeText = start.toLocaleTimeString(undefined, timeOpts);
+         if (data.end_at) {
+           const end = new Date(data.end_at);
+-          timeText += " – " + end.toLocaleTimeString("en-CA", timeOpts);
++          timeText += " – " + end.toLocaleTimeString(undefined, timeOpts);
+         }
+         $("time").textContent = timeText;
+ 
+diff --git a/assets/js/events.js b/assets/js/events.js
+index 98b524f4bf91faf2b072ae587a11a2916a6f18e4..f0f176c79f742135c3a25a5d736f18f5ecdd1167 100644
+--- a/assets/js/events.js
++++ b/assets/js/events.js
+@@ -1,14 +1,15 @@
+-export const formatEvent = (evt) => {
++export const formatEvent = (evt, api) => {
+   const start = new Date(evt.start_at);
+   const days = Math.ceil((start - new Date()) / 86400000);
+   return {
++    apiId: evt.api_id,
+     name: evt.name || "VanLUG Meeting",
+-    date: start.toLocaleDateString("en-CA", {
++    date: start.toLocaleDateString(undefined, {
+       weekday: "short",
+       month: "short",
+       day: "numeric",
+     }),
+-    time: start.toLocaleTimeString("en-CA", {
++    time: start.toLocaleTimeString(undefined, {
+       hour: "numeric",
+       minute: "2-digit",
+     }),
+diff --git a/assets/js/mastodon-feed.js b/assets/js/mastodon-feed.js
+index 267f5a857d8c2a72c61d7a8fdff3d30c9ecddcab..e85c75e327f441357187554c9a45d8aaea32a6d3 100644
+--- a/assets/js/mastodon-feed.js
++++ b/assets/js/mastodon-feed.js
+@@ -53,7 +53,7 @@   avatar.src = data.userProfilePictureURL;
+   avatar.alt = data.userDisplayName;
+ 
+   $("timestamp").textContent = new Date(toot.timestamp).toLocaleDateString(
+-    "en-CA",
++    undefined,
+     { month: "short", day: "numeric" },
+   );
+ 
+
