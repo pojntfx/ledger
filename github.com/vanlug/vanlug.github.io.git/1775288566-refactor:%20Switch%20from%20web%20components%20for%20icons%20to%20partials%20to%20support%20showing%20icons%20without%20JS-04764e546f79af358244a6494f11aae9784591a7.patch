@@ -1,0 +1,564 @@
+From 04764e546f79af358244a6494f11aae9784591a7 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Sat, 04 Apr 2026 00:42:46 -0700
+Subject: [PATCH] refactor: Switch from web components for icons to partials to support showing icons without JS
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/assets/js/event-detail-modal.js b/assets/js/event-detail-modal.js
+index 2d1f3b0ca3f79e6047daa63869e3d4351bbd8684..e22f1274dc2ada0a913a7ef64f334c528c6c44db 100644
+--- a/assets/js/event-detail-modal.js
++++ b/assets/js/event-detail-modal.js
+@@ -151,7 +151,7 @@               rel: "noopener",
+               className: "pf-v6-c-button pf-m-link pf-m-inline pf-m-small",
+             });
+             mapLink.innerHTML =
+-              'View on map <span class="pf-v6-c-button__icon pf-m-end"><icon-external></icon-external></span>';
++              'View on map <span class="pf-v6-c-button__icon pf-m-end"><i class="fa-solid fa-arrow-up-right-from-square" aria-hidden="true"></i></span>';
+             $("map-link").append(mapLink);
+           } else {
+             $("map-br").remove();
+diff --git a/assets/js/icons.js b/assets/js/icons.js
+deleted file mode 100644
+index b647fe7efeb931b0c10d65022dd9d0aba77bc2ca..0000000000000000000000000000000000000000
+--- a/assets/js/icons.js
++++ /dev/null
+@@ -1,44 +0,0 @@
+-class FaIcon extends HTMLElement {
+-  static faClass = "";
+-
+-  connectedCallback() {
+-    const inButton = this.closest(".pf-v6-c-button__icon") !== null;
+-    const faClass = this.constructor.faClass || this.dataset.icon;
+-    const icon = document.createElement("i");
+-    icon.className = faClass;
+-    icon.setAttribute("aria-hidden", "true");
+-
+-    if (inButton) {
+-      this.replaceChildren(icon);
+-    } else {
+-      this.style.display = "inline";
+-      this.style.whiteSpace = "nowrap";
+-      icon.classList.add("pf-v6-u-ml-xs");
+-      this.replaceChildren("\u2060", icon);
+-    }
+-  }
+-}
+-
+-const icons = {
+-  "icon-discourse": "fa-brands fa-discourse",
+-  "icon-signal": "fa-brands fa-signal-messenger",
+-  "icon-mastodon": "fa-brands fa-mastodon",
+-  "icon-bluesky": "fa-brands fa-bluesky",
+-  "icon-linkedin": "fa-brands fa-linkedin",
+-  "icon-paypal": "fa-brands fa-paypal",
+-  "icon-github": "fa-brands fa-github",
+-  "icon-globe": "fa-solid fa-globe",
+-  "icon-external": "fa-solid fa-arrow-up-right-from-square",
+-  "icon-email": "fa-solid fa-envelope",
+-};
+-
+-for (const [tag, cls] of Object.entries(icons)) {
+-  customElements.define(
+-    tag,
+-    class extends FaIcon {
+-      static faClass = cls;
+-    },
+-  );
+-}
+-
+-customElements.define("icon-custom", FaIcon);
+diff --git a/assets/js/luma-next-event.js b/assets/js/luma-next-event.js
+index ddb8bea55b96e9399fa717360cd89a32c949c47b..6a68d0065fbdb935fa7acf31dffc07e2c17dc48d 100644
+--- a/assets/js/luma-next-event.js
++++ b/assets/js/luma-next-event.js
+@@ -33,7 +33,7 @@               <span class="pf-v6-u-text-color-subtle pf-v6-u-font-size-sm">or</span>
+               <a data-slot="rsvp" target="_blank" rel="noopener"
+                 class="pf-v6-c-button pf-m-link pf-m-inline">
+                 <span class="pf-v6-c-button__text">RSVP on Luma</span>
+-                <span class="pf-v6-c-button__icon pf-m-end"><icon-external></icon-external></span>
++                <span class="pf-v6-c-button__icon pf-m-end"><i class="fa-solid fa-arrow-up-right-from-square" aria-hidden="true"></i></span>
+               </a>
+             </div>
+           </div>
+diff --git a/assets/js/luma-upcoming-events.js b/assets/js/luma-upcoming-events.js
+index 4d735c337f761093b3626188a828c162f0c67e50..b079fc86242b633a361ba31dcbbece4a05fdef65 100644
+--- a/assets/js/luma-upcoming-events.js
++++ b/assets/js/luma-upcoming-events.js
+@@ -22,7 +22,7 @@         <button data-slot="details" type="button" class="pf-v6-c-button pf-m-control pf-m-small">
+           Details
+         </button>
+         <a data-slot="rsvp" target="_blank" rel="noopener" class="pf-v6-c-button pf-m-link pf-m-inline pf-m-small">
+-          RSVP<span class="pf-v6-c-button__icon pf-m-end"><icon-external></icon-external></span>
++          RSVP<span class="pf-v6-c-button__icon pf-m-end"><i class="fa-solid fa-arrow-up-right-from-square" aria-hidden="true"></i></span>
+         </a>
+       </div>
+     </td>
+@@ -81,7 +81,7 @@       const cal = this.getAttribute("calendar");
+       const api = this.getAttribute("api");
+       const lumaUrl = this.getAttribute("luma") ?? "https://luma.com/vanlug";
+       const rssUrl = `${api}/events/feed?calendar=${encodeURIComponent(cal)}`;
+-      const subscribeLinks = `<br>Stay updated via <a href="${lumaUrl}" target="_blank" rel="noopener">Luma<icon-external></icon-external></a> or <a href="${rssUrl}" target="_blank" rel="noopener">RSS<icon-custom data-icon="fa-solid fa-rss"></icon-custom></a>.`;
++      const subscribeLinks = `<br>Stay updated via <a href="${lumaUrl}" target="_blank" rel="noopener">Luma<span style="display: inline; white-space: nowrap;">&#8288;<i class="fa-solid fa-arrow-up-right-from-square pf-v6-u-ml-xs" aria-hidden="true"></i></span></a> or <a href="${rssUrl}" target="_blank" rel="noopener">RSS<span style="display: inline; white-space: nowrap;">&#8288;<i class="fa-solid fa-rss pf-v6-u-ml-xs" aria-hidden="true"></i></span></a>.`;
+ 
+       try {
+         const { entries } = await fetch(
+diff --git a/assets/js/main.js b/assets/js/main.js
+index 705e9d8a44ddc12a8ee9778f5fddf494afabbe00..de978aef574e064c1623745943af88c1f0340a70 100644
+--- a/assets/js/main.js
++++ b/assets/js/main.js
+@@ -1,6 +1,5 @@
+ import "./theme.js";
+ import "./sidebar.js";
+-import "./icons.js";
+ import "./event-detail-modal.js";
+ import "./luma-next-event.js";
+ import "./luma-upcoming-events.js";
+diff --git a/data/content.yaml b/data/content.yaml
+index 45c240331d7369dab2794bfca995c4905df12a46..faaf25680878b6b84446ff831090994f44fc2980 100644
+--- a/data/content.yaml
++++ b/data/content.yaml
+@@ -112,4 +112,4 @@     title: Support VanLUG
+     body: "VanLUG is 100% volunteer-run. All Board of Directors and Executives volunteer their time and effort for free. Donations go toward maintaining our website, Discourse platform, network infrastructure, and expenses related to our in-person meetings. Any amount helps. Thank you for sharing your resources."
+     cta: Donate via PayPal
+   land_acknowledgment: "VanLUG acknowledges that we meet, learn, and collaborate on the shared territories of many Indigenous Peoples, including the q̓ic̓əy̓ (Katzie), q̓ʷɑ:n̓ƛ̓ən̓ (Kwantlen), kʷikʷəƛ̓əm (Kwikwetlem), máthxwi (Matsqui), xʷməθkʷəy̓əm (Musqueam), qiqéyt (Qayqayt), Semiahmoo, Sḵwx̱wú7mesh Úxwumixw (Squamish), scəw̓aθən məsteyəxʷ (Tsawwassen), and səlilwətaɬ (Tsleil-Waututh). We respect the diverse and distinct histories, languages, and cultures of First Nations, Métis, and Inuit."
+-  nonprofit: 'VanLUG is a registered non-profit organization with the <a href="https://www2.gov.bc.ca/gov/content/employment-business/business/not-for-profit-organizations" target="_blank" rel="noreferrer noopener">BC Provincial Government<icon-external></icon-external></a>, incorporated on March 29, 1999. Run entirely by volunteers, we''ve been bringing Linux and open-source enthusiasts together in Vancouver for over 25 years.'
++  nonprofit: 'VanLUG is a registered non-profit organization with the <a href="https://www2.gov.bc.ca/gov/content/employment-business/business/not-for-profit-organizations" target="_blank" rel="noreferrer noopener">BC Provincial Government<span style="display: inline; white-space: nowrap;">&#8288;<i class="fa-solid fa-arrow-up-right-from-square pf-v6-u-ml-xs" aria-hidden="true"></i></span></a>, incorporated on March 29, 1999. Run entirely by volunteers, we''ve been bringing Linux and open-source enthusiasts together in Vancouver for over 25 years.'
+diff --git a/layouts/_partials/footer.html b/layouts/_partials/footer.html
+index 8374308bac5627ab759c2314d9ca9b613a29ee3e..680f852557215a45016f8a0aac78f7b2b7e41d6f 100644
+--- a/layouts/_partials/footer.html
++++ b/layouts/_partials/footer.html
+@@ -50,14 +50,13 @@               <a
+                 href="{{ .Site.Data.site.source }}"
+                 target="_blank"
+                 rel="noopener"
+-                >source code<icon-external></icon-external>
+-              </a>
++                >source code{{ partial "icon" "external" }}</a>
+               on GitHub, licensed under
+               <a
+                 href="{{ .Site.Data.site.source }}/blob/main/LICENSE"
+                 target="_blank"
+                 rel="noopener"
+-                >AGPL-3.0-or-later<icon-external></icon-external></a
++                >AGPL-3.0-or-later{{ partial "icon" "external" }}</a
+               >. See our <a href="{{ "/terms/" | relURL }}">terms</a> and
+               <a href="{{ "/privacy/" | relURL }}">privacy policy</a>.</small
+             >
+diff --git a/layouts/_partials/icon.html b/layouts/_partials/icon.html
+index 5b727273e2a8bcc8db286c93bcb23740c8010957..52d18eee7109026d98232523a9580d12115b79ed 100644
+--- a/layouts/_partials/icon.html
++++ b/layouts/_partials/icon.html
+@@ -1 +1,27 @@
+-{{- with . -}}{{ printf `<icon-custom data-icon="%s"></icon-custom>` . | safeHTML }}{{- end -}}
++{{- $map := dict
++  "discourse" "fa-brands fa-discourse"
++  "signal" "fa-brands fa-signal-messenger"
++  "mastodon" "fa-brands fa-mastodon"
++  "bluesky" "fa-brands fa-bluesky"
++  "linkedin" "fa-brands fa-linkedin"
++  "paypal" "fa-brands fa-paypal"
++  "github" "fa-brands fa-github"
++  "globe" "fa-solid fa-globe"
++  "external" "fa-solid fa-arrow-up-right-from-square"
++  "email" "fa-solid fa-envelope"
++  "rss" "fa-solid fa-rss"
++-}}
++{{- $name := "" -}}
++{{- $inButton := false -}}
++{{- if reflect.IsMap . -}}
++  {{- $name = .icon -}}
++  {{- $inButton = .inButton | default false -}}
++{{- else -}}
++  {{- $name = . -}}
++{{- end -}}
++{{- $fa := index $map $name | default $name -}}
++{{- if $inButton -}}
++  <i class="{{ $fa }}" aria-hidden="true"></i>
++{{- else -}}
++  <span style="display: inline; white-space: nowrap;">&#8288;<i class="{{ $fa }} pf-v6-u-ml-xs" aria-hidden="true"></i></span>
++{{- end -}}
+diff --git a/layouts/_partials/mastodon-feed.html b/layouts/_partials/mastodon-feed.html
+index 6405a94282c5979c06f12bc4e990ad2434670dad..10847c6fe0a454ed54be329e3c610b30d6776a00 100644
+--- a/layouts/_partials/mastodon-feed.html
++++ b/layouts/_partials/mastodon-feed.html
+@@ -48,13 +48,13 @@       <a
+         href="{{ .Site.Data.links.socials.mastodon.url }}"
+         target="_blank"
+         rel="noopener"
+-        >See all posts<icon-external></icon-external></a
++        >See all posts{{ partial "icon" "external" }}</a
+       >, or subscribe via
+       <a
+         href="{{ .Site.Data.links.feed.mastodon }}"
+         target="_blank"
+         rel="noopener"
+-        >RSS<icon-custom data-icon="fa-solid fa-rss"></icon-custom></a
++        >RSS{{ partial "icon" "rss" }}</a
+       >.
+     </p>
+   </div>
+diff --git a/layouts/_partials/section-about.html b/layouts/_partials/section-about.html
+index 4735be862e32be08dc691beb5d26a738323f6b34..f292f97a015a43c206c162ab5a54bf49aed356cc 100644
+--- a/layouts/_partials/section-about.html
++++ b/layouts/_partials/section-about.html
+@@ -45,18 +45,17 @@         <h3>{{ .Site.Data.board.year }} Board of Directors</h3>
+         <p>
+           {{ .Site.Data.content.about.board.preamble | default "As a registered non-profit society in British Columbia, VanLUG is governed by a volunteer Board of Directors. Elections are held annually at our AGM. New volunteers are always welcome." }}
+           <a href="{{ .Site.Data.links.socials.email.url }}"
+-            >Get in touch<icon-email></icon-email
+-          ></a>
++            >Get in touch{{ partial "icon" "email" }}</a>
+           if you'd like to help.
+         </p>
+       </div>
+ 
+-      {{ $prevRole := "" }}
++      {{ $directorSeen := false }}
+       {{ range $i, $member := .Site.Data.board.bios }}
+-        {{ if and (ne $i 0) (ne $member.role $prevRole) }}
++        {{ if and (not $directorSeen) (eq $member.role "Director-at-large") (ne $i 0) }}
+           <hr class="pf-v6-c-divider" />
+         {{ end }}
+-        {{ $prevRole = $member.role }}
++        {{ if eq $member.role "Director-at-large" }}{{ $directorSeen = true }}{{ end }}
+         <div class="pf-v6-c-card pf-m-compact">
+           <div class="pf-v6-c-card__title">
+             <div class="pf-v6-c-card__title-text">
+@@ -83,7 +82,7 @@                   <a
+                     href="{{ .url }}"
+                     target="_blank"
+                     rel="noreferrer noopener"
+-                  >{{ .label }}{{ with .icon }}{{ printf "<%s></%s>" . . | safeHTML }}{{ else }}<icon-external></icon-external>{{ end }}</a>
++                  >{{ .label }}{{ partial "icon" ((.icon | default "icon-external") | strings.TrimPrefix "icon-") }}</a>
+                 {{ end }}
+               </div>
+             {{ end }}
+diff --git a/layouts/_partials/section-events.html b/layouts/_partials/section-events.html
+index dfa1bd41caf4df968413091921aa3f9aeac448a7..537c9888ddf3314a570e104d50a84682b63f9584 100644
+--- a/layouts/_partials/section-events.html
++++ b/layouts/_partials/section-events.html
+@@ -28,13 +28,13 @@           <a
+             href="{{ .Site.Data.links.luma.url }}"
+             target="_blank"
+             rel="noopener"
+-            >calendar on Luma<icon-external></icon-external></a
++            >calendar on Luma{{ partial "icon" "external" }}</a
+           > and
+           <a
+             href="{{ .Site.Data.links.api }}/events/feed?calendar={{ .Site.Data.links.luma.calendar }}"
+             target="_blank"
+             rel="noopener"
+-            >RSS feed<icon-custom data-icon="fa-solid fa-rss"></icon-custom></a
++            >RSS feed{{ partial "icon" "rss" }}</a
+           >.
+         </p>
+       </div>
+@@ -145,19 +145,18 @@           <a
+             href="{{ .Site.Data.links.luma.url }}"
+             target="_blank"
+             rel="noopener"
+-            >Luma<icon-external></icon-external></a
++            >Luma{{ partial "icon" "external" }}</a
+           >,
+           <a
+             href="{{ .Site.Data.links.meetup.url }}"
+             target="_blank"
+             rel="noopener"
+-            >Meetup<icon-external></icon-external
+-          ></a>
++            >Meetup{{ partial "icon" "external" }}</a>
+           and the Web Archive ({{ range $i, $link := $c.past.archive_links }}{{ if $i }}, {{ end }}<a
+             href="{{ $link.url }}"
+             target="_blank"
+             rel="noopener"
+-            >{{ $link.title }}<icon-external></icon-external></a
++            >{{ $link.title }}{{ partial "icon" "external" }}</a
+           >{{ end }}). Slides and materials from past talks are on our
+           <a href="{{ "/resources/" | relURL }}">Resources</a> page.
+         </p>
+@@ -188,8 +187,7 @@                     href="{{ .url }}"
+                     target="_blank"
+                     rel="noopener"
+                     class="pf-v6-c-button pf-m-link pf-m-inline pf-m-small"
+-                    >{{ .title }}<icon-external></icon-external
+-                  ></a>
++                    >{{ .title }}{{ partial "icon" "external" }}</a>
+                 {{ end }}
+               </td>
+             </tr>
+diff --git a/layouts/_partials/section-home.html b/layouts/_partials/section-home.html
+index 2854fb67e37a2eac8893a93389370d1c51a3072b..f4d3f7e65ff1e9e90cfe191d92878f7fd01f5126 100644
+--- a/layouts/_partials/section-home.html
++++ b/layouts/_partials/section-home.html
+@@ -45,7 +45,7 @@           rel="noopener"
+           class="pf-v6-c-button pf-m-link"
+           ><span class="pf-v6-c-button__text">{{ $c.cta_link.title }}</span
+           ><span class="pf-v6-c-button__icon pf-m-end"
+-            >{{ partial "icon" $social.icon }}</span
++            >{{ partial "icon" (dict "icon" $social.icon "inButton" true) }}</span
+         ></a>
+       </div>
+     </div>
+@@ -121,7 +121,7 @@           <a
+             href="{{ .Site.Data.links.api }}/events/feed?calendar={{ .Site.Data.links.luma.calendar }}"
+             target="_blank"
+             rel="noopener"
+-            >RSS<icon-custom data-icon="fa-solid fa-rss"></icon-custom></a
++            >RSS{{ partial "icon" "rss" }}</a
+           >.
+         </p>
+       </div>
+@@ -158,15 +158,13 @@                     <a
+                       href="{{ $.Site.Data.links.socials.discourse.url }}"
+                       target="_blank"
+                       rel="noopener"
+-                      >Discourse<icon-discourse></icon-discourse
+-                    ></a>
++                      >Discourse{{ partial "icon" "discourse" }}</a>
+                     and
+                     <a
+                       href="{{ $.Site.Data.links.socials.signal.url }}"
+                       target="_blank"
+                       rel="noreferrer noopener"
+-                      >Signal<icon-signal></icon-signal
+-                    ></a>
++                      >Signal{{ partial "icon" "signal" }}</a>
+                     between meetings. Ask questions, share projects, find
+                     collaborators.
+                   {{ else }}
+@@ -185,24 +183,22 @@           <a
+             href="{{ .Site.Data.links.socials.mastodon.url }}"
+             target="_blank"
+             rel="noopener"
+-            >Mastodon<icon-mastodon></icon-mastodon></a
++            >Mastodon{{ partial "icon" "mastodon" }}</a
+           >,
+           <a
+             href="{{ .Site.Data.links.socials.bluesky.url }}"
+             target="_blank"
+             rel="noopener"
+-            >Bluesky<icon-bluesky></icon-bluesky></a
++            >Bluesky{{ partial "icon" "bluesky" }}</a
+           >, or
+           <a
+             href="{{ .Site.Data.links.socials.linkedin.url }}"
+             target="_blank"
+             rel="noopener"
+-            >LinkedIn<icon-linkedin></icon-linkedin
+-          ></a>
++            >LinkedIn{{ partial "icon" "linkedin" }}</a>
+           for announcements. Want to give a talk or have a question?
+           <a href="{{ .Site.Data.links.socials.email.url }}"
+-            >Email the board.<icon-email></icon-email
+-          ></a>
++            >Email the board.{{ partial "icon" "email" }}</a>
+         </p>
+       </div>
+     </div>
+@@ -241,7 +237,7 @@                     rel="noopener"
+                     class="pf-v6-c-button pf-m-link pf-m-inline"
+                     ><span class="pf-v6-c-button__text">Visit website</span
+                     ><span class="pf-v6-c-button__icon pf-m-end"
+-                      ><icon-external></icon-external></span
++                      >{{ partial "icon" (dict "icon" "external" "inButton" true) }}</span
+                   ></a>
+                 </div>
+               </div>
+diff --git a/layouts/_partials/section-membership.html b/layouts/_partials/section-membership.html
+index 976fcfd2e3383bda84603faf2ee1dea563c68c96..5b4db8b05992cfbbc797aa6fa8372e6b7bd71653 100644
+--- a/layouts/_partials/section-membership.html
++++ b/layouts/_partials/section-membership.html
+@@ -70,7 +70,7 @@         rel="noopener"
+         class="pf-v6-c-button pf-m-primary"
+         ><span class="pf-v6-c-button__text">Register on Luma</span
+         ><span class="pf-v6-c-button__icon pf-m-end"
+-          ><icon-external></icon-external></span
++          >{{ partial "icon" (dict "icon" "external" "inButton" true) }}</span
+       ></a>
+     </div>
+   </section>
+diff --git a/layouts/_partials/section-partners.html b/layouts/_partials/section-partners.html
+index ca48386930c93a91d95e014dfea16674b910192b..341cc1bdb211dc97a8449d5868c29d38a4ac4cc6 100644
+--- a/layouts/_partials/section-partners.html
++++ b/layouts/_partials/section-partners.html
+@@ -40,8 +40,7 @@                   ><a
+                     href="{{ .url }}"
+                     target="_blank"
+                     rel="noopener"
+-                    >{{ .name }}<icon-external
+-                    ></icon-external></a
++                    >{{ .name }}{{ partial "icon" "external" }}</a
+                 ></b>
+                 <br />
+                 {{ .description }}
+diff --git a/layouts/_partials/section-resources.html b/layouts/_partials/section-resources.html
+index ecd9b6c913f270fd93319361805e368fd78aedb2..79dd6ac48a7d98ac0d8024a9a44dc693289679e2 100644
+--- a/layouts/_partials/section-resources.html
++++ b/layouts/_partials/section-resources.html
+@@ -86,8 +86,7 @@                   href="{{ .url | relURL }}"
+                   target="_blank"
+                   rel="noopener"
+                   class="pf-v6-c-button pf-m-link pf-m-inline pf-m-small"
+-                  >{{ with .label }}{{ . }}{{ else }}Slides{{ end }}<icon-external></icon-external
+-                ></a>
++                  >{{ with .label }}{{ . }}{{ else }}Slides{{ end }}{{ partial "icon" "external" }}</a>
+               </td>
+             </tr>
+           {{ end }}
+@@ -112,9 +111,7 @@               <a
+                 href="{{ .url | relURL }}"
+                 target="_blank"
+                 rel="noopener"
+-                >{{ .title }}<icon-external
+-                ></icon-external
+-              ></a>
++                >{{ .title }}{{ partial "icon" "external" }}</a>
+             </li>
+           {{ end }}
+         </ul>
+@@ -156,9 +153,7 @@                     <a
+                       href="{{ .url }}"
+                       target="_blank"
+                       rel="noopener"
+-                      >{{ .title }}<icon-external
+-                      ></icon-external
+-                    ></a>
++                      >{{ .title }}{{ partial "icon" "external" }}</a>
+                     {{ with .note }}({{ . }}){{ end }}
+                   </li>
+                 {{ end }}
+@@ -184,9 +179,7 @@                     <a
+                       href="{{ .url }}"
+                       target="_blank"
+                       rel="noopener"
+-                      >{{ .title }}<icon-external
+-                      ></icon-external
+-                    ></a>
++                      >{{ .title }}{{ partial "icon" "external" }}</a>
+                     {{ with .note }}({{ . }}){{ end }}
+                   </li>
+                 {{ end }}
+@@ -212,15 +205,13 @@                     <a
+                       href="{{ .url }}"
+                       target="_blank"
+                       rel="noopener"
+-                      >{{ .title }}<icon-external
+-                      ></icon-external
+-                    ></a>
++                      >{{ .title }}{{ partial "icon" "external" }}</a>
+                     {{ with .extra }}
+                       (<a
+                         href="{{ .url }}"
+                         target="_blank"
+                         rel="noopener"
+-                        >{{ .title }}<icon-external></icon-external></a
++                        >{{ .title }}{{ partial "icon" "external" }}</a
+                       >)
+                     {{ end }}
+                   </li>
+@@ -248,8 +239,7 @@               <a
+                 href="{{ .url }}"
+                 target="_blank"
+                 rel="noopener"
+-                >{{ .title }}<icon-external
+-                ></icon-external></a
++                >{{ .title }}{{ partial "icon" "external" }}</a
+               >{{ with .note }}, {{ . }}{{ end }}
+             </li>
+           {{ end }}
+@@ -272,7 +262,7 @@           <a
+             href="https://www.patternfly.org/"
+             target="_blank"
+             rel="noopener"
+-            >PatternFly<icon-external></icon-external></a
++            >PatternFly{{ partial "icon" "external" }}</a
+           >, the open-source design system used for this website.
+         </p>
+       </div>
+@@ -285,36 +275,31 @@           <a
+             href="https://commons.wikimedia.org/wiki/File:TuxFlat.svg"
+             target="_blank"
+             rel="noopener"
+-            >Tux Flat SVG<icon-external></icon-external
+-          ></a>
++            >Tux Flat SVG{{ partial "icon" "external" }}</a>
+           by gg3po and Iwan Gabovitch, based on
+           <a
+             href="https://commons.wikimedia.org/wiki/File:NewTux.svg"
+             target="_blank"
+             rel="noopener"
+-            >NewTux.svg<icon-external></icon-external
+-          ></a>
++            >NewTux.svg{{ partial "icon" "external" }}</a>
+           by gg3po, itself based on the original
+           <a
+             href="https://commons.wikimedia.org/wiki/File:Tux.png"
+             target="_blank"
+             rel="noopener"
+-            >Tux.png<icon-external></icon-external
+-          ></a>
++            >Tux.png{{ partial "icon" "external" }}</a>
+           by Larry Ewing. The wavy stripes from the
+           <a
+             href="https://en.wikipedia.org/wiki/Flag_of_Vancouver"
+             target="_blank"
+             rel="noopener"
+-            >flag of Vancouver<icon-external></icon-external
+-          ></a>
++            >flag of Vancouver{{ partial "icon" "external" }}</a>
+           have been added to the belly. Licensed under the
+           <a
+             href="https://www.gnu.org/licenses/gpl-2.0.html"
+             target="_blank"
+             rel="noopener"
+-            >GNU GPL v2<icon-external></icon-external
+-          ></a>
++            >GNU GPL v2{{ partial "icon" "external" }}</a>
+           or later. The full logo combines the icon with the
+           &ldquo;VanLUG/Vancouver Linux User Group&rdquo; wordmark, as
+           seen on the banner and event cards.
+@@ -338,8 +323,7 @@                 <a
+                   href="{{ $val.url }}"
+                   target="_blank"
+                   rel="noopener"
+-                  >{{ $val.name }}<icon-external></icon-external
+-                ></a>
++                  >{{ $val.name }}{{ partial "icon" "external" }}</a>
+               </div>
+             </dd>
+           </div>
+@@ -402,19 +386,19 @@           <a
+             href="https://inkscape.org/"
+             target="_blank"
+             rel="noopener"
+-            >Inkscape<icon-external></icon-external></a
++            >Inkscape{{ partial "icon" "external" }}</a
+           >. All files are in
+           <a
+             href="{{ .Site.Data.site.source }}/tree/main/static/design"
+             target="_blank"
+             rel="noopener"
+-            >static/design/<icon-external></icon-external></a
++            >static/design/{{ partial "icon" "external" }}</a
+           >. Cards and headers use background photos from
+           <a
+             href="https://unsplash.com/"
+             target="_blank"
+             rel="noopener"
+-            >Unsplash<icon-external></icon-external></a
++            >Unsplash{{ partial "icon" "external" }}</a
+           >:
+         </p>
+       </div>
+@@ -463,8 +447,7 @@                   <a
+                     href="{{ .url }}"
+                     target="_blank"
+                     rel="noopener"
+-                    >{{ .credit }}<icon-external></icon-external
+-                  ></a>
++                    >{{ .credit }}{{ partial "icon" "external" }}</a>
+                   (<a
+                     href="{{ .source | relURL }}"
+                     target="_blank"
+
