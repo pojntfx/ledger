@@ -1,0 +1,186 @@
+From d231da51ca4041235b7833cbf8ff3f3084a895a4 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Sat, 04 Apr 2026 00:39:36 -0700
+Subject: [PATCH] feat: Add noscript support for expandable sections
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/assets/js/expandable-section.js b/assets/js/expandable-section.js
+index 73d106afadf5c3aa9ade3d2e500fb95540a2c367..04bb56b6722c254a97f4431c7c8425bdda8a743c 100644
+--- a/assets/js/expandable-section.js
++++ b/assets/js/expandable-section.js
+@@ -1,7 +1,20 @@
+-for (const section of document.querySelectorAll(".pf-v6-c-expandable-section")) {
+-  const toggle = section.querySelector(".pf-v6-c-expandable-section__toggle button");
++for (const section of document.querySelectorAll(
++  ".pf-v6-c-expandable-section",
++)) {
++  const toggle = section.querySelector(
++    ".pf-v6-c-expandable-section__toggle button",
++  );
+   const content = section.querySelector(".pf-v6-c-expandable-section__content");
+   const textEl = toggle.querySelector(".pf-v6-c-button__text");
++
++  // Invert the default visibility if JS is available and add corresponding ARIA tags
++  // If no JS is available, everything is visible and the ARIA attributes aren't necessary
++  toggle.setAttribute("aria-expanded", "false");
++  toggle.setAttribute("aria-controls", toggle.dataset.controls);
++  content.setAttribute("role", "region");
++  content.setAttribute("aria-labelledby", toggle.id);
++
++  content.hidden = true;
+ 
+   toggle.addEventListener("click", () => {
+     const expanded = toggle.getAttribute("aria-expanded") === "true";
+diff --git a/assets/scss/main.scss b/assets/scss/main.scss
+index 9b8b7df701a631bfa9e664e1f0d9c0d427f9ad10..e25c1b01c4511b565ae9abef9e71a549e426d4a4 100644
+--- a/assets/scss/main.scss
++++ b/assets/scss/main.scss
+@@ -12,9 +12,16 @@ @import "@fortawesome/fontawesome-free/scss/fontawesome";
+ @import "@fortawesome/fontawesome-free/scss/solid";
+ @import "@fortawesome/fontawesome-free/scss/brands";
+ 
++.noscript-only {
++  display: none;
++}
++
+ // Remove the bottom corner & padding from the Patternfly page to get more vertical space
+ .pf-v6-c-page {
+-  --pf-v6-c-page__main-container--BorderRadius: var(--pf-t--global--border--radius--medium) var(--pf-t--global--border--radius--medium) 0 0;
++  --pf-v6-c-page__main-container--BorderRadius: var(
++      --pf-t--global--border--radius--medium
++    )
++    var(--pf-t--global--border--radius--medium) 0 0;
+   --pf-v6-c-page__main-container--AlignSelf: stretch;
+   --pf-v6-c-page__main-container--MaxHeight: 100%;
+   --pf-v6-c-page__main-container--BorderBlockEndWidth: 0;
+diff --git a/assets/scss/noscript.scss b/assets/scss/noscript.scss
+new file mode 100644
+index 0000000000000000000000000000000000000000..5a6988e0dc05fc22b871b00975fe33027f1af5de
+--- /dev/null
++++ b/assets/scss/noscript.scss
+@@ -0,0 +1,30 @@
++.js-only {
++  display: none !important;
++}
++
++.noscript-only {
++  display: block !important;
++}
++
++// Show the expandable sections on the about page
++.pf-v6-c-expandable-section {
++  --pf-v6-c-expandable-section__content--Opacity: 1;
++  --pf-v6-c-expandable-section__content--MaxHeight: none;
++  --pf-v6-c-expandable-section__content--Visibility: visible;
++  --pf-v6-c-expandable-section__content--Overflow: visible;
++}
++
++.pf-v6-c-expandable-section__toggle {
++  display: none;
++}
++
++// Show the tab cards on the events pag
++[hidden].pf-v6-c-tab-content {
++  display: block !important;
++}
++
++// Hide non-functional toggles
++.pf-v6-c-tabs,
++.pf-v6-c-masthead__toggle {
++  display: none;
++}
+diff --git a/layouts/_partials/section-about.html b/layouts/_partials/section-about.html
+index 8ea1deac43bd4072cb6094624c0f0d55c6855b71..4735be862e32be08dc691beb5d26a738323f6b34 100644
+--- a/layouts/_partials/section-about.html
++++ b/layouts/_partials/section-about.html
+@@ -88,42 +88,39 @@                 {{ end }}
+               </div>
+             {{ end }}
+           </div>
+-          <div class="pf-v6-c-card__footer">
+-            <div class="pf-v6-c-expandable-section" id="bio-section-{{ $i }}">
+-              <div class="pf-v6-c-expandable-section__toggle">
+-                <button
+-                  class="pf-v6-c-button pf-m-link"
+-                  type="button"
+-                  id="bio-toggle-{{ $i }}"
+-                  aria-expanded="false"
+-                  aria-controls="bio-content-{{ $i }}"
+-                  data-text-collapsed="Show {{ $member.name }}'s goals and contributions"
+-                  data-text-expanded="Hide {{ $member.name }}'s goals and contributions"
+-                >
+-                  <span class="pf-v6-c-button__icon pf-m-start">
+-                    <span class="pf-v6-c-expandable-section__toggle-icon">
+-                      <i class="fas fa-angle-right" aria-hidden="true"></i>
++          {{ if $member.bio }}
++            <div class="pf-v6-c-card__footer">
++              <div class="pf-v6-c-expandable-section" id="bio-section-{{ $i }}">
++                <div class="pf-v6-c-expandable-section__toggle">
++                  <button
++                    class="pf-v6-c-button pf-m-link"
++                    type="button"
++                    id="bio-toggle-{{ $i }}"
++                    data-controls="bio-content-{{ $i }}"
++                    data-text-collapsed="Show {{ $member.name }}'s goals and contributions"
++                    data-text-expanded="Hide {{ $member.name }}'s goals and contributions"
++                  >
++                    <span class="pf-v6-c-button__icon pf-m-start">
++                      <span class="pf-v6-c-expandable-section__toggle-icon">
++                        <i class="fas fa-angle-right" aria-hidden="true"></i>
++                      </span>
+                     </span>
+-                  </span>
+-                  <span class="pf-v6-c-button__text">Show {{ $member.name }}'s goals and contributions</span>
+-                </button>
+-              </div>
+-              <div
+-                class="pf-v6-c-expandable-section__content"
+-                hidden
+-                id="bio-content-{{ $i }}"
+-                role="region"
+-                aria-labelledby="bio-toggle-{{ $i }}"
+-              >
+-                <dl class="pf-v6-c-description-list pf-m-compact">
+-                  <div class="pf-v6-c-description-list__group">
+-                    <dt class="pf-v6-c-description-list__term">
+-                      <span class="pf-v6-c-description-list__text">What VanLUG needs</span>
+-                    </dt>
+-                    <dd class="pf-v6-c-description-list__description">
+-                      <div class="pf-v6-c-description-list__text">{{ $member.needs }}</div>
+-                    </dd>
+-                  </div>
++                    <span class="pf-v6-c-button__text">Show {{ $member.name }}'s goals and contributions</span>
++                  </button>
++                </div>
++                <div
++                  class="pf-v6-c-expandable-section__content"
++                  id="bio-content-{{ $i }}"
++                >
++                  <dl class="pf-v6-c-description-list pf-m-compact">
++                    <div class="pf-v6-c-description-list__group">
++                      <dt class="pf-v6-c-description-list__term">
++                        <span class="pf-v6-c-description-list__text">What VanLUG needs</span>
++                      </dt>
++                      <dd class="pf-v6-c-description-list__description">
++                        <div class="pf-v6-c-description-list__text">{{ $member.needs }}</div>
++                      </dd>
++                    </div>
+                   <div class="pf-v6-c-description-list__group">
+                     <dt class="pf-v6-c-description-list__term">
+                       <span class="pf-v6-c-description-list__text">What I can contribute</span>
+@@ -132,10 +129,11 @@                     <dd class="pf-v6-c-description-list__description">
+                       <div class="pf-v6-c-description-list__text">{{ $member.contributions }}</div>
+                     </dd>
+                   </div>
+-                </dl>
++                  </dl>
++                </div>
+               </div>
+             </div>
+-          </div>
++          {{ end }}
+         </div>
+       {{ end }}
+ 
+
