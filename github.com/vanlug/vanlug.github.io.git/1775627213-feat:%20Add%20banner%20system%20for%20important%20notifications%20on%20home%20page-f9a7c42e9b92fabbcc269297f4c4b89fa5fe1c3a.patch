@@ -1,0 +1,64 @@
+From f9a7c42e9b92fabbcc269297f4c4b89fa5fe1c3a Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Tue, 07 Apr 2026 22:46:53 -0700
+Subject: [PATCH] feat: Add banner system for important notifications on home page
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/README.md b/README.md
+index 63e4c41116541c964ee1874c2db13af0aa12d6fd..71c41c67be59b9e7903593d41c832267b825892c 100644
+--- a/README.md
++++ b/README.md
+@@ -56,7 +56,7 @@
+ - [gohugoio/hugo](https://github.com/gohugoio/hugo) provides the static site generator.
+ - The open source [PatternFly design system](https://www.patternfly.org/) provides the UI components.
+ - [FortAwesome/Font-Awesome](https://github.com/FortAwesome/Font-Awesome) provides the icons.
+-- [lu.ma](https://lu.ma/) provides the event calendar and API.
++- [Luma](https://luma.com/home) provides the event calendar and API.
+ 
+ ## Contributing
+ 
+diff --git a/data/banner.yaml b/data/banner.yaml
+new file mode 100644
+index 0000000000000000000000000000000000000000..0aefdceab11a4f77e4306facf61a40cd0cac4bda
+--- /dev/null
++++ b/data/banner.yaml
+@@ -0,0 +1,7 @@
++enabled: true
++color: info # info, warning, danger, success, custom
++screen_reader_text: "Info:"
++icon: fa-info-circle # fa-info-circle (info), fa-exclamation-triangle (warning), fa-exclamation-circle (danger), fa-check-circle (success), fa-bell (custom)
++message: "Our next Burnaby talk, Linux Talks (May 23), has changed location from the Bob Prittie Metrotown Branch to the Tommy Douglas Library."
++link_text: "RSVP on Luma" # Optional
++link_url: "https://luma.com/ahm1hi2s" # Optional
+diff --git a/layouts/_partials/banner.html b/layouts/_partials/banner.html
+new file mode 100644
+index 0000000000000000000000000000000000000000..3db3fa79f5af851c76a2a07e43d077e0cfa1f8f7
+--- /dev/null
++++ b/layouts/_partials/banner.html
+@@ -0,0 +1,12 @@
++{{ with .Site.Data.banner }}
++  {{ if .enabled }}
++    <div class="pf-v6-c-banner pf-m-sticky{{ with .color }} pf-m-{{ . }}{{ end }} pf-v6-u-text-align-center" role="status" style="white-space: normal;">
++      <span class="pf-v6-screen-reader">{{ .screen_reader_text }}</span>
++      <i class="fas {{ with .icon }}{{ . }}{{ else }}fa-info-circle{{ end }} pf-v6-u-mr-sm" aria-hidden="true"></i>
++      {{- .message -}}
++      {{ if and .link_text .link_url }}
++        <a href="{{ .link_url }}">{{ .link_text }}{{ partial "icon" "external" }}</a>
++      {{ end }}
++    </div>
++  {{ end }}
++{{ end }}
+diff --git a/layouts/baseof.html b/layouts/baseof.html
+index fac7f795eb9fa6a978bd90c586d37cc13a12dd14..44cd988e74986a57cf7e5720bd24115875782ea3 100644
+--- a/layouts/baseof.html
++++ b/layouts/baseof.html
+@@ -94,6 +94,7 @@             <div class="pf-v6-c-drawer__main">
+               <div class="pf-v6-c-drawer__content pf-v6-c-page__main-container">
+                 <div class="pf-v6-c-drawer__body">
+                   <main class="pf-v6-c-page__main" id="main-content">
++                    {{ partial "banner" . }}
+                     {{ block "main" . }}{{ end }}
+                   </main>
+                 </div>
+
