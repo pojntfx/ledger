@@ -1,0 +1,262 @@
+From bd27700694e0224868f44b6b6b48e6f5548d0b6c Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Tue, 07 Apr 2026 23:04:34 -0700
+Subject: [PATCH] feat: Add support for scaling images up/down for function, embed different preview image sizes in RSS feed
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/assets/js/event-detail-modal.js b/assets/js/event-detail-modal.js
+index e22f1274dc2ada0a913a7ef64f334c528c6c44db..8b1288e5c11d256b227dd404c21bc5c7a8b52f92 100644
+--- a/assets/js/event-detail-modal.js
++++ b/assets/js/event-detail-modal.js
+@@ -109,7 +109,7 @@         const $ = (s) => detail.querySelector(`[data-slot="${s}"]`);
+ 
+         const cover = $("cover");
+         if (data.cover_url) {
+-          cover.src = proxyImageUrl(data.cover_url, api);
++          cover.src = proxyImageUrl(data.cover_url, api, "lg");
+           cover.alt = data.name;
+         } else {
+           cover.remove();
+diff --git a/assets/js/events.js b/assets/js/events.js
+index 9414d5fd6c23326e4787ef7bb6189271d0ca4d65..69b748db257b2f48503f53cfffaac201542768b9 100644
+--- a/assets/js/events.js
++++ b/assets/js/events.js
+@@ -1,6 +1,6 @@
+-export const proxyImageUrl = (url, api) => {
++export const proxyImageUrl = (url, api, size = "lg") => {
+   if (!url) return "";
+-  return `${api}/image?url=${encodeURIComponent(url)}`;
++  return `${api}/image?url=${encodeURIComponent(url)}&size=${size}`;
+ };
+ 
+ export const formatEvent = (evt, api) => {
+@@ -32,7 +32,7 @@     lumaUrl: evt.url
+       ? `https://luma.com/${encodeURI(evt.url)}`
+       : "https://luma.com/vanlug",
+     location: evt.location || "",
+-    coverUrl: proxyImageUrl(evt.cover_url, api),
++    coverUrl: proxyImageUrl(evt.cover_url, api, "sm"),
+   };
+ };
+ 
+diff --git a/assets/js/mastodon-feed.js b/assets/js/mastodon-feed.js
+index aac7b1c0496bfdf9dfd4e2f4c87e774a6f479464..7d73a8d1640f9168c47333735681a71369da8355 100644
+--- a/assets/js/mastodon-feed.js
++++ b/assets/js/mastodon-feed.js
+@@ -38,7 +38,7 @@
+   const mediaSlot = $("media");
+   for (const m of toot.media?.slice(0, 1) ?? []) {
+     const el = document.createElement(m.isVideo ? "video" : "img");
+-    el.src = proxyImageUrl(m.url, api);
++    el.src = proxyImageUrl(m.url, api, "md");
+     if (m.isVideo) el.controls = true;
+     else el.alt = m.altText || "";
+     el.className = "pf-v6-u-w-100";
+@@ -50,7 +50,7 @@   }
+   if (!mediaSlot.children.length) mediaSlot.remove();
+ 
+   const avatar = $("avatar");
+-  avatar.src = proxyImageUrl(data.userProfilePictureURL, api);
++  avatar.src = proxyImageUrl(data.userProfilePictureURL, api, "sm");
+   avatar.alt = data.userDisplayName;
+ 
+   $("timestamp").textContent = new Date(toot.timestamp).toLocaleDateString(
+diff --git a/go.mod b/go.mod
+index d9cea91f4f5c366997935ac228be75d98af136e9..e5938cd3a81d6e714e472538ea30fb0b1118c2e9 100644
+--- a/go.mod
++++ b/go.mod
+@@ -1,6 +1,6 @@
+ module github.com/vanlug/vanlug.github.io
+ 
+-go 1.25.0
++go 1.26
+ 
+ require (
+ 	github.com/mattn/go-mastodon v0.0.11 // indirect
+@@ -8,8 +8,10 @@ 	github.com/pojntfx/felicitas.pojtinger.com v0.4.1
+ )
+ 
+ require (
++	github.com/anthonynsimon/bild v0.15.0
+ 	github.com/gorilla/feeds v1.2.0
+ 	github.com/nicksrandall/prosemirror-go v0.0.0-20170601171447-b0778c4954c7
++	golang.org/x/image v0.38.0
+ 	golang.org/x/sync v0.20.0
+ )
+ 
+diff --git a/go.sum b/go.sum
+index 3e1e64d5c27a3804107d55009407388ee8a90204..47bc39f90d8b630d13308cf14db8d9c7adbdfb9b 100644
+--- a/go.sum
++++ b/go.sum
+@@ -1,3 +1,5 @@
++github.com/anthonynsimon/bild v0.15.0 h1:FzvaNLuNlAPKw1Xz7V2WYOcGIEBMj8Y6ZyAk7CI+HzA=
++github.com/anthonynsimon/bild v0.15.0/go.mod h1:qIgJ9FldkCn0iy5Ad24fzUkz5R+iJ0WfhiV+6FeCB5A=
+ github.com/davecgh/go-spew v1.1.1 h1:vj9j/u1bqnvCEfJOwUhtlOARqs3+rkHYY13jYWTU97c=
+ github.com/davecgh/go-spew v1.1.1/go.mod h1:J7Y8YcW2NihsgmVo/mv3lAwl/skON4iLHjSsI+c5H38=
+ github.com/gorilla/feeds v1.2.0 h1:O6pBiXJ5JHhPvqy53NsjKOThq+dNFm8+DFrxBEdzSCc=
+@@ -22,6 +24,8 @@ github.com/stretchr/testify v1.11.1 h1:7s2iGBzp5EwR7/aIZr8ao5+dra3wiQyKjjFuvgVKu7U=
+ github.com/stretchr/testify v1.11.1/go.mod h1:wZwfW3scLgRK+23gO65QZefKpKQRnfz6sD981Nm4B6U=
+ github.com/tomnomnom/linkheader v0.0.0-20250811210735-e5fe3b51442e h1:tD38/4xg4nuQCASJ/JxcvCHNb46w0cdAaJfkzQOO1bA=
+ github.com/tomnomnom/linkheader v0.0.0-20250811210735-e5fe3b51442e/go.mod h1:krvJ5AY/MjdPkTeRgMYbIDhbbbVvnPQPzsIsDJO8xrY=
++golang.org/x/image v0.38.0 h1:5l+q+Y9JDC7mBOMjo4/aPhMDcxEptsX+Tt3GgRQRPuE=
++golang.org/x/image v0.38.0/go.mod h1:/3f6vaXC+6CEanU4KJxbcUZyEePbyKbaLoDOe4ehFYY=
+ golang.org/x/sync v0.20.0 h1:e0PTpb7pjO8GAtTs2dQ6jYa5BWYlMuX047Dco/pItO4=
+ golang.org/x/sync v0.20.0/go.mod h1:9xrNwdLfx4jkKbNva9FpL6vEN7evnE43NNNJQ2LF3+0=
+ gopkg.in/yaml.v3 v3.0.1 h1:fxVm/GzAzEWqLHuvctI91KS9hhNmmWOoWu0XTYJS7CA=
+diff --git a/pkg/handlers/images.go b/pkg/handlers/images.go
+index 77fd6a44e9841eb60a145bf16870766e76ba51cc..aade98e5ebaced761bd3b9f13c87d66438a4559c 100644
+--- a/pkg/handlers/images.go
++++ b/pkg/handlers/images.go
+@@ -1,9 +1,16 @@
+ package handlers
+ 
+ import (
++	"image"
++	_ "image/jpeg"
++	_ "image/png"
+ 	"io"
+ 	"net/http"
+ 	"net/url"
++
++	"github.com/anthonynsimon/bild/imgio"
++	"github.com/anthonynsimon/bild/transform"
++	_ "golang.org/x/image/webp"
+ )
+ 
+ var allowedImageHosts = map[string]bool{
+@@ -11,6 +18,12 @@ 	"images.lumacdn.com":             true,
+ 	"s3.us-west-000.backblazeb2.com": true,
+ }
+ 
++var sizeWidths = map[string]int{
++	"sm": 192,
++	"md": 512,
++	"lg": 1024,
++}
++
+ func ImageProxyHandler(w http.ResponseWriter, r *http.Request) {
+ 	upstream := r.URL.Query().Get("url")
+ 	if upstream == "" {
+@@ -18,6 +31,16 @@ 		http.Error(w, "missing url query parameter", http.StatusBadRequest)
+ 		return
+ 	}
+ 
++	size := r.URL.Query().Get("size")
++	if size == "" {
++		size = "lg"
++	}
++	maxWidth, ok := sizeWidths[size]
++	if !ok {
++		http.Error(w, "invalid size parameter, must be sm, md, or lg", http.StatusBadRequest)
++		return
++	}
++
+ 	parsed, err := url.Parse(upstream)
+ 	if err != nil || parsed.Scheme != "https" {
+ 		http.Error(w, "invalid url", http.StatusBadRequest)
+@@ -41,13 +64,40 @@ 		http.Error(w, "upstream error", resp.StatusCode)
+ 		return
+ 	}
+ 
+-	if ct := resp.Header.Get("Content-Type"); ct != "" {
+-		w.Header().Set("Content-Type", ct)
+-	}
++	ct := resp.Header.Get("Content-Type")
+ 	w.Header().Set("Cache-Control", "public, max-age=86400")
+-	if cl := resp.Header.Get("Content-Length"); cl != "" {
+-		w.Header().Set("Content-Length", cl)
+-	}
+ 
+-	io.Copy(w, resp.Body)
++	switch ct {
++	case "image/jpeg", "image/png", "image/webp":
++		src, format, err := image.Decode(resp.Body)
++		if err != nil {
++			http.Error(w, "failed to decode image", http.StatusBadGateway)
++			return
++		}
++
++		srcW, srcH := src.Bounds().Dx(), src.Bounds().Dy()
++		dstW, dstH := srcW, srcH
++		if srcW > maxWidth {
++			dstW = maxWidth
++			dstH = srcH * maxWidth / srcW
++		}
++
++		dst := transform.Resize(src, dstW, dstH, transform.Lanczos)
++
++		encoder := imgio.JPEGEncoder(80)
++		outFormat := "jpeg"
++		if format == "png" {
++			encoder = imgio.PNGEncoder()
++			outFormat = "png"
++		}
++
++		w.Header().Set("Content-Type", "image/"+outFormat)
++		encoder(w, dst)
++
++	default:
++		if ct != "" {
++			w.Header().Set("Content-Type", ct)
++		}
++		io.Copy(w, resp.Body)
++	}
+ }
+diff --git a/pkg/handlers/luma.go b/pkg/handlers/luma.go
+index 423b707bfab9849be15724c8addb1951a152fa59..da1cf83ffd90e7d6f235fc046eb49c951dc5a90c 100644
+--- a/pkg/handlers/luma.go
++++ b/pkg/handlers/luma.go
+@@ -30,17 +30,18 @@ 		}).
+ 		Parse(feedEntryTmplStr))
+ 
+ type feedEntryData struct {
+-	CoverURL    string `json:"cover_url,omitempty"`
+-	Name        string `json:"name"`
+-	DateLine    string `json:"date_line"`
+-	TimeLine    string `json:"time_line"`
+-	Location    string `json:"location,omitempty"`
+-	FullAddress string `json:"full_address,omitempty"`
+-	Hosts       string `json:"hosts,omitempty"`
+-	Admission   string `json:"admission,omitempty"`
+-	Description string `json:"description,omitempty"`
+-	Link        string `json:"link"`
+-	MapURL      string `json:"map_url,omitempty"`
++	CoverURL        string `json:"cover_url,omitempty"`
++	CoverURLPreview string `json:"-"`
++	Name            string `json:"name"`
++	DateLine        string `json:"date_line"`
++	TimeLine        string `json:"time_line"`
++	Location        string `json:"location,omitempty"`
++	FullAddress     string `json:"full_address,omitempty"`
++	Hosts           string `json:"hosts,omitempty"`
++	Admission       string `json:"admission,omitempty"`
++	Description     string `json:"description,omitempty"`
++	Link            string `json:"link"`
++	MapURL          string `json:"map_url,omitempty"`
+ }
+ 
+ func caTime(s string) string {
+@@ -494,7 +495,8 @@ 	for i, item := range items {
+ 		data := buildEntryData(item, descriptions[i], lumaBase, mapBase)
+ 
+ 		if data.CoverURL != "" {
+-			data.CoverURL = apiURL + "/image?" + url.Values{"url": {data.CoverURL}}.Encode()
++			data.CoverURLPreview = apiURL + "/image?" + url.Values{"url": {data.CoverURL}, "size": {"md"}}.Encode()
++			data.CoverURL = apiURL + "/image?" + url.Values{"url": {data.CoverURL}, "size": {"lg"}}.Encode()
+ 		}
+ 
+ 		published := now
+@@ -522,9 +524,9 @@ 			Updated:     published,
+ 			Content:     buf.String(),
+ 		}
+ 
+-		if data.CoverURL != "" {
++		if data.CoverURLPreview != "" {
+ 			feedItem.Enclosure = &feeds.Enclosure{
+-				Url: data.CoverURL,
++				Url: data.CoverURLPreview,
+ 			}
+ 		}
+ 
+
