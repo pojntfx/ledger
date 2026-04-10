@@ -1,0 +1,2617 @@
+From e65431489b04ed2bfe959eebc9dc79bb7548a03c Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Fri, 10 Apr 2026 00:58:41 -0700
+Subject: [PATCH] GIR: Re-implement based on abstract description
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/changes.md b/changes.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..14f69a114c466f3d79344641ea1acd39f5ab55d8
+--- /dev/null
++++ b/changes.md
+@@ -0,0 +1,181 @@
++# Change-by-change breakdown
++
++Covers every change outside of `v4/`, `templates/go`, and generated files.
++
++---
++
++## New file: `internal/gir/types/imports.go`
++
++**Why:** Previously, imports were not computed during generation. The template had a hardcoded import block and `goimports` was run afterwards to fix them. This file replaces that approach by tracking imports as types are resolved.
++
++- **`ImportConfig` struct** — Holds module paths and a `PackageImports` map (namespace name -> Go import path). This replaces the old hardcoded `V4Packages` allowlist and `ModuleBase` constant, making the generator work with any module layout.
++- **`ImportConfig.AddPackages()`** — Helper to bulk-register namespaces from an external dependency under a given module+prefix. Used by the example to register puregotk's namespaces.
++- **`ImportSet` struct** — Per-file import accumulator. Created via `NewImportSet(pkgName, config)` and threaded through all type-resolution functions.
++- **`AddPkg(pkg)`** — Looks up the package in `PackageImports` and adds the import. Replaces the old pattern of hardcoding `ModuleBase + "/v4/" + pkg`.
++- **`AddCore()`** — Uses `CoreModule` (falling back to `ModuleBase`) so `pkg/core` always resolves to puregotk's module even when generating a third-party library.
++- **`AddPurego()`, `AddUnsafe()`, `AddStructs()`** — Straightforward single-import helpers.
++- **`AddTypes()`** — Looks up `gobject` in `PackageImports` and appends `/types`. Needed for files that reference `types.GType`.
++- **`TrackGoType(goType)`** — Scans a Go type string for `pkg.` prefixes and calls `AddPkg` for each match. This is the main mechanism for automatically adding imports from type references like `glib.Error` or `gtk.Widget`.
++- **`Sorted()`** — Returns imports grouped: stdlib first, blank line separator, then third-party. This replaces the old plain alphabetical sort that mixed stdlib and third-party imports.
++
++---
++
++## `internal/gir/types/template.go`
++
++### `AddAPI`: added `imps *ImportSet` parameter
++
++**Why:** This function generates API-level call expressions like `glib.NewCallback(x)` or `gobject.ConvertPtr(x)`. Previously those cross-package references were left for `goimports` to resolve. Now the import is recorded at the exact point where the reference is created.
++
++- **Callback case** — When `glibNs != ""`, calls `imps.AddPkg("glib")` because the generated code references `glib.NewCallback`.
++- **Classes/Interfaces `stars > 1` case** — When `gobjectNs != ""`, calls `imps.AddPkg("gobject")` because the generated code references `gobject.ConvertPtr`.
++- **End of function** — Calls `imps.TrackGoType(t)` on the final API type to catch any remaining cross-package type references.
++
++### `AddPure`: comment placement fix
++
++**Why:** The comments "Out parameters are always pointers in C" and "For primitive Go types we need to manually add the *" were inside the `if stars == 0` block but describe the outer `if isOut` block. Moved them to the correct scope. No code change.
++
++### `Add`: added `imps *ImportSet` parameter
++
++**Why:** Passes the import set through to `AddAPI` so imports are tracked for every parameter.
++
++### `AddThrows`: added `imps *ImportSet` parameter
++
++**Why:** When a function has `throws="1"`, the generated code references `**glib.Error`. The import for `glib` must be recorded. Previously left for `goimports`.
++
++### `Fmt`: removed trailing `\n` from `cerr` write
++
++**Why:** The template uses `{{- with .Ret.Fmt ...}}` to conditionally emit the return formatting. If `Fmt` returns a string ending in `\n`, the template produces a blank line before the closing `}` of the function. Removing the `\n` lets the template control the whitespace.
++
++---
++
++## `internal/gir/types/interface.go`
++
++### `ConvertInterface`: added `imps *ImportSet` parameter
++
++**Why:** Interface methods and properties need import tracking just like class methods.
++
++- **TypeGetter** — If the interface has a `GLibGetType`, records the `types` import.
++- **Method parameters/returns** — Passes `imps` through to `Parameters.Template` and `ReturnValue.Template`.
++- **Cross-namespace interfaces** — When an interface from another namespace (e.g., `Gio.ActionMap` used by `Gtk.Application`) has methods that survive the `implemented` filter, records the interface's namespace import via `imps.AddPkg(ins)`.
++- **Properties** — Passes `imps` through to `prop.Template`.
++
++### `GetInterfaceFuncs`: added `imps *ImportSet` parameter
++
++**Why:** Passes through to `ConvertInterface`.
++
++---
++
++## `internal/gir/types/types.go`
++
++### `Parameters.Template`: added `imps *ImportSet` parameter + throws fix
++
++**Why (imps):** Passes the import set through to `Add` and `AddThrows`.
++
++**Why (throws fix):** The function had two early returns (when `p == nil` and when `len(params) == 0`) that returned an empty `funcArgsTemplate{}` without checking `throws`. This meant `throws="1"` functions with no regular parameters (e.g., `g_async_result_legacy_propagate_error`) never got the `&cerr` argument added. The fix checks `throws` before each early return and calls `AddThrows` if needed.
++
++### `Property.Template`: added `imps *ImportSet` parameter + import tracking
++
++**Why:** Properties generate code that references `gobject.Value`, `glib.StrvGetType()`, `core.UnsafeSlice()`, and `unsafe.Pointer`. Previously these were left for `goimports`. Now the exact imports needed are recorded based on the property's GValue type, whether it's readable/writable, and whether it's a boxed type.
++
++### `ReturnValue.Template`: added `imps *ImportSet` parameter + import tracking
++
++**Why:** Return values that are classes from other namespaces (e.g., `*gtk.Widget`) need their namespace imported. Also, classes with `transfer-ownership="none"` generate `gobject.IncreaseRef(cret)`, which needs the `gobject` import. Both are now tracked at the point where the return type is resolved.
++
++---
++
++## `internal/gir/pass/pass.go`
++
++### New imports: `bytes`, `context`, `go/format`, `log`, `sync`, `errgroup`
++
++**Why:** `Second()` now formats files in-process with `go/format.Source` instead of shelling out to `goimports`/`gofumpt`, and parallelizes both template execution and formatting with `errgroup`.
++
++### `Pass` struct: added `ImpConfig *types.ImportConfig`
++
++**Why:** Holds the import configuration passed in by the caller.
++
++### `New()`: added `config *types.ImportConfig` parameter
++
++**Why:** The caller provides the module base, path prefix, purego module, and optionally pre-populated package imports.
++
++### `First()`: builds `PackageImports` from parsed repositories
++
++**Why:** After collecting type information, iterates all parsed namespaces and registers their import paths (using `ModuleBase`/`PathPrefix`). Pre-populated entries (from external dependencies) are preserved.
++
++### New type: `perFile` struct
++
++**Why:** Replaces the old pattern of separate `map[string][]T` for each type category (aliases, enums, records, etc.) plus no import tracking. Each `perFile` bundles all generated elements for a single output file together with its `ImportSet`, making it clear what belongs to what.
++
++### `writeGo()`: added `rawFiles *[]string` parameter, refactored to use `perFile`
++
++**Why (rawFiles):** Collects output file paths so `Second()` can format them afterwards.
++
++**Why (perFile):** The old code used separate maps (`aliases[fn]`, `records[fn]`, etc.) and a `files []string` slice to track which files existed. The new code uses a single `files map[string]*perFile` with a `getFile()` helper that lazily creates entries. Each processing loop gets the file's `ImportSet` and records imports as types are resolved.
++
++### Specific import tracking additions in `writeGo()`:
++
++- **Bitfields/Enums with TypeGetter** — `imps.AddTypes()` because the generated code references `types.GType`.
++- **Constants** — `imps.TrackGoType(ct.Type)` because constant types may reference other packages.
++- **Records with TypeGetter** — `imps.AddTypes()`.
++- **Record callback fields** — `imps.AddPurego()` + `imps.AddUnsafe()` because callback accessor wrappers use `purego.NewCallback` and `unsafe.Pointer`.
++- **Record non-callback fields** — `imps.TrackGoType(_type)` because field types may reference other packages.
++- **Callbacks** — Uses a throwaway `ImportSet` because the callback type definition only renders `Pure.Types` and `Ret.Raw`; the API-level return type (which may reference a cross-package class) must not leak into the file's imports. Only the actually-rendered types are tracked via the file's real `ImportSet`.
++- **Classes with TypeGetter** — `imps.AddTypes()`.
++- **Signals** — `imps.AddPurego()`, `imps.AddUnsafe()`, `imps.AddPkg("glib")`, `imps.AddPkg("gobject")` because signal connection code uses all four.
++- **Class parent** — `imps.TrackGoType(parent)` because the parent struct may be from another package.
++- **needsInit** — `pf.imps.AddPurego()` + `pf.imps.AddCore()` because the `init()` function uses `purego.Dlopen` and `core.PuregoSafeRegister`.
++- **Records present** — `pf.imps.AddStructs()` + `pf.imps.AddUnsafe()` because record structs use `structs.HostLayout` and `unsafe.Pointer` in `GoPointer()`.
++
++### `writeGo()`: template output to buffer + file
++
++**Why:** Old code used `os.Create` + `gotemp.Execute(f, args)` writing directly to a file. New code writes to a `bytes.Buffer` first, then `os.WriteFile`. This is needed because `go/format.Source` needs the complete source as a byte slice.
++
++### `writeGo()`: `TemplateArg` now includes `Imports` field
++
++**Why:** The template's import block is now populated from `pf.imps.Sorted()` instead of being hardcoded.
++
++### `Second()`: parallel execution + in-process formatting
++
++**Why:** Old code was `for _, r := range p.Parsed { p.writeGo(r, gotemp, dir) }` — sequential, no formatting. New code:
++1. Runs `writeGo` for each repository concurrently via `errgroup`, collecting output file paths under a mutex.
++2. Runs `go/format.Source` on each output file concurrently via a second `errgroup`.
++
++This replaces the old `gen.sh` pipeline of `goimports` + `gofumpt` + `goimports` + `go vet`.
++
++---
++
++## `pkg/gir/pass/pass.go`
++
++### Added `ImportConfig` type alias
++
++**Why:** Re-exports `types.ImportConfig` so that callers using the public API (`pkg/gir/pass`) can construct an `ImportConfig` without importing the internal `types` package directly.
++
++---
++
++## `gen.go`
++
++### `pass.New()` now receives `ImportConfig`
++
++**Why:** Configures the generator with `ModuleBase: "codeberg.org/puregotk/puregotk"`, `PathPrefix: "v4"`, `PuregoModule: "codeberg.org/puregotk/purego"`. Namespaces are auto-discovered from the GIR files.
++
++### Added `"nl"` template function
++
++**Why:** The template needs to emit newlines that survive Go template whitespace trimming (`{{-` / `-}}`). `{{nl}}` calls a Go function returning `"\n"`, which is output text (not template whitespace) and therefore immune to trimming. Used in the `init()` block of `templates/go` to separate registration groups.
++
++---
++
++## `examples/mylib-gtk-meson-go/gen.go`
++
++### Extract puregotk namespace names from GIR filenames
++
++**Why:** The example generates a custom library that imports puregotk's v4 packages. Those packages live under a different module path than the example itself. The namespace names are extracted from filenames (e.g., `Gtk-4.0.gir` -> `Gtk`) so they can be pre-registered.
++
++### `ImportConfig` with `ModuleBase`, `CoreModule`, and `AddPackages`
++
++**Why:**
++- `ModuleBase` is set to the example's own module so its local namespace (`mylibgtkmeson`) gets the correct import path.
++- `CoreModule` is set to puregotk's module so `pkg/core` resolves correctly.
++- `config.AddPackages("codeberg.org/puregotk/puregotk", "v4", puregotkNamespaces)` pre-registers all puregotk namespaces with their correct import paths before `First()` runs.
++
++### Added `"nl"` template function
++
++**Why:** Same as `gen.go` — the template requires this function.
+diff --git a/examples/mylib-gtk-meson-go/gen.go b/examples/mylib-gtk-meson-go/gen.go
+index f4b34a099122e03e62f5b6a9d4083f2cde455a1b..73850fce8d82beed169caf69b34a1b844d1c0435 100644
+--- a/examples/mylib-gtk-meson-go/gen.go
++++ b/examples/mylib-gtk-meson-go/gen.go
+@@ -40,14 +40,27 @@ 		panic("puregotk dependency not found: " + err.Error())
+ 	}
+ 	puregotk := strings.TrimSpace(string(output))
+ 
++	// Extract puregotk namespace names from GIR filenames
++	var puregotkNamespaces []string
+ 	filepath.Walk(filepath.Join(puregotk, "internal/gir/spec"), func(path string, f os.FileInfo, err error) error {
+ 		if strings.HasSuffix(path, ".gir") {
+ 			girs = append(girs, path)
++			base := filepath.Base(path)
++			if idx := strings.Index(base, "-"); idx != -1 {
++				puregotkNamespaces = append(puregotkNamespaces, base[:idx])
++			}
+ 		}
+ 		return nil
+ 	})
+ 
+-	p, err := pass.New(girs)
++	config := &pass.ImportConfig{
++		ModuleBase:   "codeberg.org/puregotk/puregotk/examples/mylib-gtk-meson-go",
++		CoreModule:   "codeberg.org/puregotk/puregotk",
++		PuregoModule: "codeberg.org/puregotk/purego",
++	}
++	config.AddPackages("codeberg.org/puregotk/puregotk", "v4", puregotkNamespaces)
++
++	p, err := pass.New(girs, config)
+ 	if err != nil {
+ 		panic(err)
+ 	}
+@@ -66,6 +79,7 @@ 		"propsset": util.PropertyScalarSet,
+ 		"propsget": util.PropertyScalarGet,
+ 		"propvset": util.PropertyVectorSet,
+ 		"propvget": util.PropertyVectorGet,
++		"nl":       func() string { return "\n" },
+ 	}).ParseFiles(filepath.Join(puregotk, "templates/go"))
+ 	if err != nil {
+ 		panic(err)
+diff --git a/examples/mylib-gtk-meson-go/gen.sh b/examples/mylib-gtk-meson-go/gen.sh
+index 827d394cac92a3e529c2ff62a9d5726c6c6eb360..d6abaafc690290afd285d712d97270fd1e004cb3 100755
+--- a/examples/mylib-gtk-meson-go/gen.sh
++++ b/examples/mylib-gtk-meson-go/gen.sh
+@@ -5,17 +5,5 @@
+ echo "generating go files..."
+ go generate
+ 
+-tmp=$(mktemp -d)
+-
+-echo "making sure imports are correct..."
+-GOPATH="$tmp" goimports --srcdir . -w . || { rm -r "$tmp"; exit 1; }
+-rm -r "$tmp"
+-
+-echo "formatting files..."
+-go fmt "./..."
+-
+-echo "running a second pass for goimports..."
+-goimports -w .
+-
+ echo "running go vet..."
+ go vet ./...
+diff --git a/examples/mylib-gtk-meson-go/go.mod b/examples/mylib-gtk-meson-go/go.mod
+index 2921e861767a41ddf03a0f0d8adfbff52b00c0aa..17df555d7d175244c9a71dd661baeb457fb8a4b5 100644
+--- a/examples/mylib-gtk-meson-go/go.mod
++++ b/examples/mylib-gtk-meson-go/go.mod
+@@ -8,3 +8,5 @@ require (
+ 	codeberg.org/puregotk/purego v0.0.0-20260224095105-2513c838cb80
+ 	codeberg.org/puregotk/puregotk v0.0.0-00010101000000-000000000000
+ )
++
++require golang.org/x/sync v0.20.0 // indirect
+diff --git a/examples/mylib-gtk-meson-go/go.sum b/examples/mylib-gtk-meson-go/go.sum
+index e3ada5c4a2e6bc5286773a5b52593c49375130aa..87f602eaf83a0296ea85c74e589ef32160817090 100644
+--- a/examples/mylib-gtk-meson-go/go.sum
++++ b/examples/mylib-gtk-meson-go/go.sum
+@@ -1,2 +1,4 @@
+ codeberg.org/puregotk/purego v0.0.0-20260224095105-2513c838cb80 h1:y5ZxMLLOjl4xc2tBl02olxZQ06xbbKiR+2ipBfDrVcs=
+ codeberg.org/puregotk/purego v0.0.0-20260224095105-2513c838cb80/go.mod h1:hVVM4ddvYRlc3IcK3CXJPlMwd/vaLj7gdDBZ6oPgT8w=
++golang.org/x/sync v0.20.0 h1:e0PTpb7pjO8GAtTs2dQ6jYa5BWYlMuX047Dco/pItO4=
++golang.org/x/sync v0.20.0/go.mod h1:9xrNwdLfx4jkKbNva9FpL6vEN7evnE43NNNJQ2LF3+0=
+diff --git a/examples/mylib-gtk-meson-go/mylibgtkmeson/window.go b/examples/mylib-gtk-meson-go/mylibgtkmeson/window.go
+index 5d18b76e1000a9b3f20a29e6de0e300e6f2e2e5a..fe3609bf7bba313e7aa4abfd511ee4b60f0caaaa 100644
+--- a/examples/mylib-gtk-meson-go/mylibgtkmeson/window.go
++++ b/examples/mylib-gtk-meson-go/mylibgtkmeson/window.go
+@@ -37,9 +37,7 @@ var xMainApplicationWindowShowToast func(uintptr, string)
+ 
+ // Shows a toast notification with the given message inside the window.
+ func (x *MainApplicationWindow) ShowToast(MessageVar string) {
+-
+ 	xMainApplicationWindowShowToast(x.GoPointer(), MessageVar)
+-
+ }
+ 
+ func (c *MainApplicationWindow) GoPointer() uintptr {
+@@ -80,7 +78,6 @@ 		fa.Ptr = clsPtr
+ 		cbFn := *cb
+ 
+ 		cbFn(fa)
+-
+ 	}
+ 	cbRefPtr := purego.NewCallback(fcb)
+ 	glib.SaveCallback(cbPtr, cbRefPtr)
+@@ -91,36 +88,28 @@ // Emits the [signal@Gio.ActionGroup::action-added] signal on @action_group.
+ //
+ // This function should only be called by [type@Gio.ActionGroup] implementations.
+ func (x *MainApplicationWindow) ActionAdded(ActionNameVar string) {
+-
+ 	gio.XGActionGroupActionAdded(x.GoPointer(), ActionNameVar)
+-
+ }
+ 
+ // Emits the [signal@Gio.ActionGroup::action-enabled-changed] signal on @action_group.
+ //
+ // This function should only be called by [type@Gio.ActionGroup] implementations.
+ func (x *MainApplicationWindow) ActionEnabledChanged(ActionNameVar string, EnabledVar bool) {
+-
+ 	gio.XGActionGroupActionEnabledChanged(x.GoPointer(), ActionNameVar, EnabledVar)
+-
+ }
+ 
+ // Emits the [signal@Gio.ActionGroup::action-removed] signal on @action_group.
+ //
+ // This function should only be called by [type@Gio.ActionGroup] implementations.
+ func (x *MainApplicationWindow) ActionRemoved(ActionNameVar string) {
+-
+ 	gio.XGActionGroupActionRemoved(x.GoPointer(), ActionNameVar)
+-
+ }
+ 
+ // Emits the [signal@Gio.ActionGroup::action-state-changed] signal on @action_group.
+ //
+ // This function should only be called by [type@Gio.ActionGroup] implementations.
+ func (x *MainApplicationWindow) ActionStateChanged(ActionNameVar string, StateVar *glib.Variant) {
+-
+ 	gio.XGActionGroupActionStateChanged(x.GoPointer(), ActionNameVar, StateVar)
+-
+ }
+ 
+ // Activate the named action within @action_group.
+@@ -157,9 +146,7 @@ //
+ // exit (0);
+ // ```
+ func (x *MainApplicationWindow) ActivateAction(ActionNameVar string, ParameterVar *glib.Variant) {
+-
+ 	gio.XGActionGroupActivateAction(x.GoPointer(), ActionNameVar, ParameterVar)
+-
+ }
+ 
+ // Request for the state of the named action within @action_group to be
+@@ -174,9 +161,7 @@ // See [method@Gio.ActionGroup.get_action_state_hint].
+ //
+ // If the @value GVariant is floating, it is consumed.
+ func (x *MainApplicationWindow) ChangeActionState(ActionNameVar string, ValueVar *glib.Variant) {
+-
+ 	gio.XGActionGroupChangeActionState(x.GoPointer(), ActionNameVar, ValueVar)
+-
+ }
+ 
+ // Checks if the named action within @action_group is currently enabled.
+@@ -184,7 +169,6 @@ //
+ // An action must be enabled in order to be activated or in order to
+ // have its state changed from outside callers.
+ func (x *MainApplicationWindow) GetActionEnabled(ActionNameVar string) bool {
+-
+ 	cret := gio.XGActionGroupGetActionEnabled(x.GoPointer(), ActionNameVar)
+ 	return cret
+ }
+@@ -203,7 +187,6 @@ // The parameter type of a particular action will never change but it is
+ // possible for an action to be removed and for a new action to be added
+ // with the same name but a different parameter type.
+ func (x *MainApplicationWindow) GetActionParameterType(ActionNameVar string) *glib.VariantType {
+-
+ 	cret := gio.XGActionGroupGetActionParameterType(x.GoPointer(), ActionNameVar)
+ 	return cret
+ }
+@@ -217,7 +200,6 @@ //
+ // The return value (if non-`NULL`) should be freed with
+ // [method@GLib.Variant.unref] when it is no longer required.
+ func (x *MainApplicationWindow) GetActionState(ActionNameVar string) *glib.Variant {
+-
+ 	cret := gio.XGActionGroupGetActionState(x.GoPointer(), ActionNameVar)
+ 	return cret
+ }
+@@ -241,7 +223,6 @@ //
+ // The return value (if non-`NULL`) should be freed with
+ // [method@GLib.Variant.unref] when it is no longer required.
+ func (x *MainApplicationWindow) GetActionStateHint(ActionNameVar string) *glib.Variant {
+-
+ 	cret := gio.XGActionGroupGetActionStateHint(x.GoPointer(), ActionNameVar)
+ 	return cret
+ }
+@@ -263,14 +244,12 @@ // The state type of a particular action will never change but it is
+ // possible for an action to be removed and for a new action to be added
+ // with the same name but a different state type.
+ func (x *MainApplicationWindow) GetActionStateType(ActionNameVar string) *glib.VariantType {
+-
+ 	cret := gio.XGActionGroupGetActionStateType(x.GoPointer(), ActionNameVar)
+ 	return cret
+ }
+ 
+ // Checks if the named action exists within @action_group.
+ func (x *MainApplicationWindow) HasAction(ActionNameVar string) bool {
+-
+ 	cret := gio.XGActionGroupHasAction(x.GoPointer(), ActionNameVar)
+ 	return cret
+ }
+@@ -280,7 +259,6 @@ //
+ // The caller is responsible for freeing the list with [func@GLib.strfreev] when
+ // it is no longer required.
+ func (x *MainApplicationWindow) ListActions() []string {
+-
+ 	cret := gio.XGActionGroupListActions(x.GoPointer())
+ 	return cret
+ }
+@@ -313,7 +291,6 @@ // fields (as indicated by having a non-`NULL` reference passed in) are
+ // filled.  If the action doesn’t exist, `FALSE` is returned and the
+ // fields may or may not have been modified.
+ func (x *MainApplicationWindow) QueryAction(ActionNameVar string, EnabledVar *bool, ParameterTypeVar **glib.VariantType, StateTypeVar **glib.VariantType, StateHintVar **glib.Variant, StateVar **glib.Variant) bool {
+-
+ 	cret := gio.XGActionGroupQueryAction(x.GoPointer(), ActionNameVar, EnabledVar, ParameterTypeVar, StateTypeVar, StateHintVar, StateVar)
+ 	return cret
+ }
+@@ -325,9 +302,7 @@ // as @action then the old action is dropped from the action map.
+ //
+ // The action map takes its own reference on @action.
+ func (x *MainApplicationWindow) AddAction(ActionVar gio.Action) {
+-
+ 	gio.XGActionMapAddAction(x.GoPointer(), ActionVar.GoPointer())
+-
+ }
+ 
+ // A convenience function for creating multiple [class@Gio.SimpleAction]
+@@ -374,9 +349,7 @@ //	}
+ //
+ // ```
+ func (x *MainApplicationWindow) AddActionEntries(EntriesVar []gio.ActionEntry, NEntriesVar int32, UserDataVar uintptr) {
+-
+ 	gio.XGActionMapAddActionEntries(x.GoPointer(), EntriesVar, NEntriesVar, UserDataVar)
+-
+ }
+ 
+ // Looks up the action with the name @action_name in @action_map.
+@@ -400,9 +373,7 @@ // Removes the named action from the action map.
+ //
+ // If no action of this name is in the map then nothing happens.
+ func (x *MainApplicationWindow) RemoveAction(ActionNameVar string) {
+-
+ 	gio.XGActionMapRemoveAction(x.GoPointer(), ActionNameVar)
+-
+ }
+ 
+ // Remove actions from a [iface@Gio.ActionMap]. This is meant as the reverse of
+@@ -431,9 +402,7 @@ //	}
+ //
+ // ```
+ func (x *MainApplicationWindow) RemoveActionEntries(EntriesVar []gio.ActionEntry, NEntriesVar int32) {
+-
+ 	gio.XGActionMapRemoveActionEntries(x.GoPointer(), EntriesVar, NEntriesVar)
+-
+ }
+ 
+ // Requests the user's screen reader to announce the given message.
+@@ -446,9 +415,7 @@ //
+ // Also, by using this API, you can ensure that the message
+ // does not interrupts the user's current screen reader output.
+ func (x *MainApplicationWindow) Announce(MessageVar string, PriorityVar gtk.AccessibleAnnouncementPriority) {
+-
+ 	gtk.XGtkAccessibleAnnounce(x.GoPointer(), MessageVar, PriorityVar)
+-
+ }
+ 
+ // Retrieves the accessible identifier for the accessible object.
+@@ -459,7 +426,6 @@ //
+ // It is left to the accessible implementation to define the scope
+ // and uniqueness of the identifier.
+ func (x *MainApplicationWindow) GetAccessibleId() string {
+-
+ 	cret := gtk.XGtkAccessibleGetAccessibleId(x.GoPointer())
+ 	return cret
+ }
+@@ -482,7 +448,6 @@ }
+ 
+ // Retrieves the accessible role of an accessible object.
+ func (x *MainApplicationWindow) GetAccessibleRole() gtk.AccessibleRole {
+-
+ 	cret := gtk.XGtkAccessibleGetAccessibleRole(x.GoPointer())
+ 	return cret
+ }
+@@ -507,7 +472,6 @@ // This functionality can be overridden by `GtkAccessible`
+ // implementations, e.g. to get the bounds from an ignored
+ // child widget.
+ func (x *MainApplicationWindow) GetBounds(XVar *int32, YVar *int32, WidthVar *int32, HeightVar *int32) bool {
+-
+ 	cret := gtk.XGtkAccessibleGetBounds(x.GoPointer(), XVar, YVar, WidthVar, HeightVar)
+ 	return cret
+ }
+@@ -546,30 +510,23 @@ // This functionality can be overridden by `GtkAccessible`
+ // implementations, e.g. to get platform state from an ignored
+ // child widget, as is the case for `GtkText` wrappers.
+ func (x *MainApplicationWindow) GetPlatformState(StateVar gtk.AccessiblePlatformState) bool {
+-
+ 	cret := gtk.XGtkAccessibleGetPlatformState(x.GoPointer(), StateVar)
+ 	return cret
+ }
+ 
+ // Resets the accessible property to its default value.
+ func (x *MainApplicationWindow) ResetProperty(PropertyVar gtk.AccessibleProperty) {
+-
+ 	gtk.XGtkAccessibleResetProperty(x.GoPointer(), PropertyVar)
+-
+ }
+ 
+ // Resets the accessible relation to its default value.
+ func (x *MainApplicationWindow) ResetRelation(RelationVar gtk.AccessibleRelation) {
+-
+ 	gtk.XGtkAccessibleResetRelation(x.GoPointer(), RelationVar)
+-
+ }
+ 
+ // Resets the accessible state to its default value.
+ func (x *MainApplicationWindow) ResetState(StateVar gtk.AccessibleState) {
+-
+ 	gtk.XGtkAccessibleResetState(x.GoPointer(), StateVar)
+-
+ }
+ 
+ // Sets the parent and sibling of an accessible object.
+@@ -582,9 +539,7 @@ // interface, you will use this function to ensure that the parent of each
+ // child widget is the metadata object, and the parent of each metadata
+ // object is the container widget.
+ func (x *MainApplicationWindow) SetAccessibleParent(ParentVar gtk.Accessible, NextSiblingVar gtk.Accessible) {
+-
+ 	gtk.XGtkAccessibleSetAccessibleParent(x.GoPointer(), ParentVar.GoPointer(), NextSiblingVar.GoPointer())
+-
+ }
+ 
+ // Updates the next accessible sibling.
+@@ -592,9 +547,7 @@ //
+ // That might be useful when a new child of a custom accessible
+ // is created, and it needs to be linked to a previous child.
+ func (x *MainApplicationWindow) UpdateNextAccessibleSibling(NewSiblingVar gtk.Accessible) {
+-
+ 	gtk.XGtkAccessibleUpdateNextAccessibleSibling(x.GoPointer(), NewSiblingVar.GoPointer())
+-
+ }
+ 
+ // Informs ATs that the platform state has changed.
+@@ -603,9 +556,7 @@ // This function should be used by `GtkAccessible` implementations that
+ // have a platform state but are not widgets. Widgets handle platform
+ // states automatically.
+ func (x *MainApplicationWindow) UpdatePlatformState(StateVar gtk.AccessiblePlatformState) {
+-
+ 	gtk.XGtkAccessibleUpdatePlatformState(x.GoPointer(), StateVar)
+-
+ }
+ 
+ // Updates a list of accessible properties.
+@@ -627,9 +578,7 @@ //	-1);
+ //
+ // ```
+ func (x *MainApplicationWindow) UpdateProperty(FirstPropertyVar gtk.AccessibleProperty, varArgs ...interface{}) {
+-
+ 	gtk.XGtkAccessibleUpdateProperty(x.GoPointer(), FirstPropertyVar, varArgs...)
+-
+ }
+ 
+ // Updates an array of accessible properties.
+@@ -639,9 +588,7 @@ // property change must be communicated to assistive technologies.
+ //
+ // This function is meant to be used by language bindings.
+ func (x *MainApplicationWindow) UpdatePropertyValue(NPropertiesVar int32, PropertiesVar []gtk.AccessibleProperty, ValuesVar []gobject.Value) {
+-
+ 	gtk.XGtkAccessibleUpdatePropertyValue(x.GoPointer(), NPropertiesVar, PropertiesVar, ValuesVar)
+-
+ }
+ 
+ // Updates a list of accessible relations.
+@@ -663,9 +610,7 @@ //	-1);
+ //
+ // ```
+ func (x *MainApplicationWindow) UpdateRelation(FirstRelationVar gtk.AccessibleRelation, varArgs ...interface{}) {
+-
+ 	gtk.XGtkAccessibleUpdateRelation(x.GoPointer(), FirstRelationVar, varArgs...)
+-
+ }
+ 
+ // Updates an array of accessible relations.
+@@ -675,9 +620,7 @@ // relation change must be communicated to assistive technologies.
+ //
+ // This function is meant to be used by language bindings.
+ func (x *MainApplicationWindow) UpdateRelationValue(NRelationsVar int32, RelationsVar []gtk.AccessibleRelation, ValuesVar []gobject.Value) {
+-
+ 	gtk.XGtkAccessibleUpdateRelationValue(x.GoPointer(), NRelationsVar, RelationsVar, ValuesVar)
+-
+ }
+ 
+ // Updates a list of accessible states.
+@@ -700,9 +643,7 @@ //	-1);
+ //
+ // ```
+ func (x *MainApplicationWindow) UpdateState(FirstStateVar gtk.AccessibleState, varArgs ...interface{}) {
+-
+ 	gtk.XGtkAccessibleUpdateState(x.GoPointer(), FirstStateVar, varArgs...)
+-
+ }
+ 
+ // Updates an array of accessible states.
+@@ -712,9 +653,7 @@ // state change must be communicated to assistive technologies.
+ //
+ // This function is meant to be used by language bindings.
+ func (x *MainApplicationWindow) UpdateStateValue(NStatesVar int32, StatesVar []gtk.AccessibleState, ValuesVar []gobject.Value) {
+-
+ 	gtk.XGtkAccessibleUpdateStateValue(x.GoPointer(), NStatesVar, StatesVar, ValuesVar)
+-
+ }
+ 
+ // Gets the ID of the @buildable object.
+@@ -722,7 +661,6 @@ //
+ // `GtkBuilder` sets the name based on the ID attribute
+ // of the `&lt;object&gt;` tag used to construct the @buildable.
+ func (x *MainApplicationWindow) GetBuildableId() string {
+-
+ 	cret := gtk.XGtkBuildableGetBuildableId(x.GoPointer())
+ 	return cret
+ }
+@@ -762,27 +700,21 @@ //
+ // This is the translation from @self's surface coordinates into
+ // @self's widget coordinates.
+ func (x *MainApplicationWindow) GetSurfaceTransform(XVar *float64, YVar *float64) {
+-
+ 	gtk.XGtkNativeGetSurfaceTransform(x.GoPointer(), XVar, YVar)
+-
+ }
+ 
+ // Realizes a `GtkNative`.
+ //
+ // This should only be used by subclasses.
+ func (x *MainApplicationWindow) Realize() {
+-
+ 	gtk.XGtkNativeRealize(x.GoPointer())
+-
+ }
+ 
+ // Unrealizes a `GtkNative`.
+ //
+ // This should only be used by subclasses.
+ func (x *MainApplicationWindow) Unrealize() {
+-
+ 	gtk.XGtkNativeUnrealize(x.GoPointer())
+-
+ }
+ 
+ // Returns the display that this `GtkRoot` is on.
+@@ -829,9 +761,7 @@ // To set the focus to a particular widget in the root, it is usually
+ // more convenient to use [method@Gtk.Widget.grab_focus] instead of
+ // this function.
+ func (x *MainApplicationWindow) SetFocus(FocusVar *gtk.Widget) {
+-
+ 	gtk.XGtkRootSetFocus(x.GoPointer(), FocusVar.GoPointer())
+-
+ }
+ 
+ func init() {
+@@ -849,5 +779,4 @@
+ 	core.PuregoSafeRegister(&xMainApplicationWindowGLibType, libs, "mylib_gtk_meson_main_application_window_get_type")
+ 
+ 	core.PuregoSafeRegister(&xMainApplicationWindowShowToast, libs, "mylib_gtk_meson_main_application_window_show_toast")
+-
+ }
+diff --git a/gen.go b/gen.go
+index 4b6f0a0c0c881711f719ae4f0f7a17159b553367..00002370d68206a3f1f257fc4bb188a8bb01ee34 100644
+--- a/gen.go
++++ b/gen.go
+@@ -23,7 +23,12 @@ 		}
+ 		girs = append(girs, path)
+ 		return nil
+ 	})
+-	p, err := pass.New(girs)
++	config := &pass.ImportConfig{
++		ModuleBase:   "codeberg.org/puregotk/puregotk",
++		PathPrefix:   "v4",
++		PuregoModule: "codeberg.org/puregotk/purego",
++	}
++	p, err := pass.New(girs, config)
+ 	if err != nil {
+ 		panic(err)
+ 	}
+@@ -42,6 +47,7 @@ 		"propsset": util.PropertyScalarSet,
+ 		"propsget": util.PropertyScalarGet,
+ 		"propvset": util.PropertyVectorSet,
+ 		"propvget": util.PropertyVectorGet,
++		"nl":       func() string { return "\n" },
+ 	}).ParseFiles("templates/go")
+ 	if err != nil {
+ 		panic(err)
+diff --git a/gen.sh b/gen.sh
+index ea455cfb47f7f1930dfa32b6837cd3597ca42270..cdab30688394319a1b904bb847e2b22b5d7e8fce 100755
+--- a/gen.sh
++++ b/gen.sh
+@@ -5,17 +5,5 @@
+ echo "generating go files..."
+ go generate
+ 
+-tmp=$(mktemp -d)
+-
+-echo "making sure imports are correct..."
+-GOPATH="$tmp" goimports --srcdir . -w v4 || { rm -r "$tmp"; exit 1; }
+-rm -r "$tmp"
+-
+-echo "formatting files..."
+-gofumpt -w v4 || go fmt "codeberg.org/puregotk/puregotk/v4/..."
+-
+-echo "running a second pass for goimports..."
+-goimports -w v4
+-
+ echo "running go vet..."
+ go vet ./v4/...
+diff --git a/go.mod b/go.mod
+index 6998951bae5f054fa86157134f376ae544b06cff..c00bb773d484a847c2e897d351fddf8bd245a58e 100644
+--- a/go.mod
++++ b/go.mod
+@@ -1,7 +1,7 @@
+ module codeberg.org/puregotk/puregotk
+ 
+-go 1.23.0
+-
+-toolchain go1.24.5
++go 1.25.0
+ 
+ require codeberg.org/puregotk/purego v0.0.0-20260224095105-2513c838cb80
++
++require golang.org/x/sync v0.20.0
+diff --git a/go.sum b/go.sum
+index e3ada5c4a2e6bc5286773a5b52593c49375130aa..87f602eaf83a0296ea85c74e589ef32160817090 100644
+--- a/go.sum
++++ b/go.sum
+@@ -1,2 +1,4 @@
+ codeberg.org/puregotk/purego v0.0.0-20260224095105-2513c838cb80 h1:y5ZxMLLOjl4xc2tBl02olxZQ06xbbKiR+2ipBfDrVcs=
+ codeberg.org/puregotk/purego v0.0.0-20260224095105-2513c838cb80/go.mod h1:hVVM4ddvYRlc3IcK3CXJPlMwd/vaLj7gdDBZ6oPgT8w=
++golang.org/x/sync v0.20.0 h1:e0PTpb7pjO8GAtTs2dQ6jYa5BWYlMuX047Dco/pItO4=
++golang.org/x/sync v0.20.0/go.mod h1:9xrNwdLfx4jkKbNva9FpL6vEN7evnE43NNNJQ2LF3+0=
+diff --git a/internal/gir/pass/pass.go b/internal/gir/pass/pass.go
+index 7a1e959736f934df1922481171108c0d0674a515..9176f71c3ef309d90a2ad5a12b3b43e3dbb2f7f2 100644
+--- a/internal/gir/pass/pass.go
++++ b/internal/gir/pass/pass.go
+@@ -4,27 +4,38 @@ // the second pass uses the basic type information to go over the gir files again and convert it to go files
+ package pass
+ 
+ import (
++	"bytes"
++	"context"
+ 	"encoding/xml"
+ 	"fmt"
++	"go/format"
++	"log"
+ 	"os"
+ 	"strings"
++	"sync"
+ 	"text/template"
+ 
+ 	"codeberg.org/puregotk/puregotk/internal/gir/types"
+ 	"codeberg.org/puregotk/puregotk/internal/gir/util"
++	"golang.org/x/sync/errgroup"
+ )
+ 
+ type Pass struct {
+-	Parsed []types.Repository
+-	Types  types.KindMap
++	Parsed    []types.Repository
++	Types     types.KindMap
++	ImpConfig *types.ImportConfig
+ }
+ 
+ // New creates a new pass struct by parsing gir files in the string slice
+ // This pass object will then be used to go over these files multiple times up until we have the full info to convert it to go files
+-func New(files []string) (*Pass, error) {
++func New(files []string, config *types.ImportConfig) (*Pass, error) {
++	if config.PackageImports == nil {
++		config.PackageImports = make(map[string]string)
++	}
+ 	p := Pass{
+-		Parsed: make([]types.Repository, len(files)),
+-		Types:  make(types.KindMap),
++		Parsed:    make([]types.Repository, len(files)),
++		Types:     make(types.KindMap),
++		ImpConfig: config,
+ 	}
+ 	for i, f := range files {
+ 		b, err := os.ReadFile(f)
+@@ -85,33 +96,76 @@ func (p *Pass) First() {
+ 	for _, r := range p.Parsed {
+ 		p.collectTypes(r)
+ 	}
++
++	// Build PackageImports from parsed repositories, preserving pre-populated entries
++	for _, r := range p.Parsed {
++		ns := r.Namespaces[0]
++		pkg := strings.ToLower(ns.Name)
++		if _, exists := p.ImpConfig.PackageImports[pkg]; !exists {
++			if p.ImpConfig.PathPrefix != "" && p.ImpConfig.PathPrefix != "." {
++				p.ImpConfig.PackageImports[pkg] = p.ImpConfig.ModuleBase + "/" + p.ImpConfig.PathPrefix + "/" + pkg
++			} else {
++				p.ImpConfig.PackageImports[pkg] = p.ImpConfig.ModuleBase + "/" + pkg
++			}
++		}
++	}
+ }
+ 
+-func (p *Pass) writeGo(r types.Repository, gotemp *template.Template, dir string) {
++// perFile bundles all generated elements for a single output file together with its ImportSet.
++type perFile struct {
++	imps              *types.ImportSet
++	aliases           []types.AliasTemplate
++	enums             []types.EnumTemplate
++	constants         []types.ConstantTemplate
++	records           []types.RecordTemplate
++	callbacks         []types.CallbackTemplate
++	interfaces        []types.InterfaceTemplate
++	functions         []types.FuncTemplate
++	classes           []types.ClassTemplate
++}
++
++func (p *Pass) writeGo(r types.Repository, gotemp *template.Template, dir string, rawFiles *[]string, mu *sync.Mutex) {
+ 	ns := r.Namespaces[0]
++	pkgName := strings.ToLower(ns.Name)
+ 
+-	aliases := make(map[string][]types.AliasTemplate)
+-	enums := make(map[string][]types.EnumTemplate)
+-	var files []string
++	files := make(map[string]*perFile)
++	getFile := func(fn string) *perFile {
++		pf, ok := files[fn]
++		if !ok {
++			pf = &perFile{
++				imps: types.NewImportSet(pkgName, p.ImpConfig),
++			}
++			files[fn] = pf
++		}
++		return pf
++	}
++
+ 	for _, el := range ns.Bitfields {
+ 		temp := el.Template(ns.Name)
+ 		fn := el.FilenameSafe()
+-		files = append(files, fn)
+-		enums[fn] = append(enums[fn], temp)
++		pf := getFile(fn)
++		pf.enums = append(pf.enums, temp)
++		if temp.TypeGetter != "" {
++			pf.imps.AddTypes()
++		}
+ 	}
+ 
+ 	for _, el := range ns.Enums {
+ 		temp := el.Template(ns.Name)
+ 		fn := el.FilenameSafe()
+-		files = append(files, fn)
+-		enums[fn] = append(enums[fn], temp)
++		pf := getFile(fn)
++		pf.enums = append(pf.enums, temp)
++		if temp.TypeGetter != "" {
++			pf.imps.AddTypes()
++		}
+ 	}
+ 
+-	constants := make(map[string][]types.ConstantTemplate)
+ 	for _, con := range ns.Constants {
+ 		fn := con.FilenameSafe()
+-		files = append(files, fn)
+-		constants[fn] = append(constants[fn], con.Template(ns.Name, p.Types))
++		pf := getFile(fn)
++		ct := con.Template(ns.Name, p.Types)
++		pf.constants = append(pf.constants, ct)
++		pf.imps.TrackGoType(ct.Type)
+ 	}
+ 
+ 	callbackDocs := make(map[string]string)
+@@ -119,23 +173,29 @@ 	for _, cb := range ns.Callbacks {
+ 		callbackDocs[cb.Name] = cb.Doc.StringSafe()
+ 	}
+ 
+-	records := make(map[string][]types.RecordTemplate)
+ 	recordLookup := make(map[string]bool)
+ 	for _, rec := range ns.Records {
+ 		name := util.SnakeToCamel(rec.Name)
++		fn := rec.FilenameSafe()
++		pf := getFile(fn)
++		imps := pf.imps
++
+ 		constructors := make([]types.FuncTemplate, len(rec.Constructors))
+ 		receivers := make([]types.FuncTemplate, 0, len(rec.Methods))
+ 		fields := make([]types.RecordField, 0, len(rec.Fields))
+ 		callbackAccessors := make([]types.CallbackAccessor, 0)
+-		fn := rec.FilenameSafe()
+-		files = append(files, fn)
++
++		if rec.GLibGetType != "" {
++			imps.AddTypes()
++		}
++
+ 		for i, c := range rec.Constructors {
+ 			constructors[i] = types.FuncTemplate{
+ 				Name:  util.ConstructorName(c.Name, rec.Name),
+ 				CName: c.CIdentifier,
+ 				Doc:   c.Doc.StringSafe(),
+-				Args:  c.Parameters.Template(ns.Name, "", p.Types, c.Throws),
+-				Ret:   c.ReturnValue.Template(ns.Name, "", p.Types, c.Throws),
++				Args:  c.Parameters.Template(ns.Name, "", p.Types, c.Throws, imps),
++				Ret:   c.ReturnValue.Template(ns.Name, "", p.Types, c.Throws, imps),
+ 			}
+ 		}
+ 		for _, f := range rec.Fields {
+@@ -148,8 +208,8 @@ 				_type = "uintptr"
+ 				fieldName = "x" + util.SnakeToCamel(f.Name) // Prefix callback pointer fields with `x` to make them private
+ 
+ 				callbackName := util.SnakeToCamel(f.Name)
+-				args := f.Callback.Parameters.Template(ns.Name, "", p.Types, f.Callback.Throws)
+-				ret := f.Callback.ReturnValue.Template(ns.Name, "", p.Types, f.Callback.Throws)
++				args := f.Callback.Parameters.Template(ns.Name, "", p.Types, f.Callback.Throws, imps)
++				ret := f.Callback.ReturnValue.Template(ns.Name, "", p.Types, f.Callback.Throws, imps)
+ 
+ 				apiTypes := args.API.Types
+ 
+@@ -166,6 +226,9 @@ 					} else {
+ 						doc = f.Doc.StringSafe()
+ 					}
+ 				}
++
++				imps.AddPurego()
++				imps.AddUnsafe()
+ 
+ 				callbackAccessors = append(callbackAccessors, types.CallbackAccessor{
+ 					Name:         callbackName,
+@@ -205,6 +268,7 @@ 						_type = typeName
+ 					}
+ 				}
+ 
++				imps.TrackGoType(_type)
+ 				fieldName = util.SnakeToCamel(f.Name)
+ 			}
+ 
+@@ -228,11 +292,11 @@ 			receivers = append(receivers, types.FuncTemplate{
+ 				Doc:   f.Doc.StringSafe(),
+ 				Name:  name,
+ 				CName: f.CIdentifier,
+-				Args:  f.Parameters.Template(ns.Name, "", p.Types, f.Throws),
+-				Ret:   f.ReturnValue.Template(ns.Name, "", p.Types, f.Throws),
++				Args:  f.Parameters.Template(ns.Name, "", p.Types, f.Throws, imps),
++				Ret:   f.ReturnValue.Template(ns.Name, "", p.Types, f.Throws, imps),
+ 			})
+ 		}
+-		records[fn] = append(records[fn], types.RecordTemplate{
++		pf.records = append(pf.records, types.RecordTemplate{
+ 			Name:              name,
+ 			Doc:               rec.Doc.StringSafe(),
+ 			Constructors:      constructors,
+@@ -244,30 +308,37 @@ 		})
+ 		recordLookup[name] = true
+ 	}
+ 
+-	callbacks := make(map[string][]types.CallbackTemplate)
+ 	// set every callback equal to uintptr as well
+ 	for _, cb := range ns.Callbacks {
+ 		fn := cb.FilenameSafe()
+-		files = append(files, fn)
++		pf := getFile(fn)
++		// Use a throwaway ImportSet for callbacks — the callback type definition only
++		// renders Pure.Types and Ret.Raw; the API-level return type (which may reference
++		// a cross-package class) must not leak into the file's imports.
++		cbImps := types.NewImportSet(pkgName, p.ImpConfig)
+ 		cbT := types.CallbackTemplate{
+ 			Doc:  cb.Doc.StringSafe(),
+ 			Name: cb.Name,
+-			Args: cb.Parameters.Template(ns.Name, "", p.Types, cb.Throws),
+-			Ret:  cb.ReturnValue.Template(ns.Name, "", p.Types, cb.Throws),
++			Args: cb.Parameters.Template(ns.Name, "", p.Types, cb.Throws, cbImps),
++			Ret:  cb.ReturnValue.Template(ns.Name, "", p.Types, cb.Throws, cbImps),
+ 		}
+-		callbacks[fn] = append(callbacks[fn], cbT)
++		// Track imports for the types that actually render in the callback definition
++		for _, t := range cbT.Args.Pure.Types {
++			pf.imps.TrackGoType(t)
++		}
++		pf.imps.TrackGoType(cbT.Ret.Raw)
++		pf.callbacks = append(pf.callbacks, cbT)
+ 	}
+ 
+-	interfaces := make(map[string][]types.InterfaceTemplate)
+ 	for _, inter := range ns.Interfaces {
+ 		fn := inter.FilenameSafe()
+-		files = append(files, fn)
+-		interfaces[fn] = append(interfaces[fn], types.ConvertInterface(ns.Name, "", inter, nil, p.Types))
++		pf := getFile(fn)
++		pf.interfaces = append(pf.interfaces, types.ConvertInterface(ns.Name, "", inter, nil, p.Types, pf.imps))
+ 	}
+ 
+ 	for _, union := range ns.Unions {
+ 		fn := union.FilenameSafe()
+-		files = append(files, fn)
++		pf := getFile(fn)
+ 		name := util.SnakeToCamel(union.Name)
+ 		interT := types.AliasTemplate{
+ 			Doc:  union.Doc.StringSafe(),
+@@ -275,12 +346,12 @@ 			Name: name,
+ 			// structs are not yet supported in CGO
+ 			Value: "uintptr",
+ 		}
+-		aliases[fn] = append(aliases[fn], interT)
++		pf.aliases = append(pf.aliases, interT)
+ 	}
+ 
+ 	for _, alias := range ns.Aliases {
+ 		fn := alias.FilenameSafe()
+-		files = append(files, fn)
++		pf := getFile(fn)
+ 		typeName := alias.Template(ns.Name, p.Types)
+ 		if typeName == "" {
+ 			typeName = "uintptr"
+@@ -292,33 +363,36 @@ 			Name: name,
+ 			// structs are not yet supported in CGO
+ 			Value: typeName,
+ 		}
+-		aliases[fn] = append(aliases[fn], aliasT)
++		pf.aliases = append(pf.aliases, aliasT)
+ 	}
+ 
+-	functions := make(map[string][]types.FuncTemplate)
+ 	for _, f := range ns.Functions {
+ 		name := util.SnakeToCamel(f.Name)
+ 		if p.Types.Kind(ns.Name, name) != types.UnknownType {
+ 			name = "New" + name
+ 		}
+ 		fn := f.FilenameSafe()
+-		files = append(files, fn)
+-		functions[fn] = append(functions[fn], types.FuncTemplate{
++		pf := getFile(fn)
++		pf.functions = append(pf.functions, types.FuncTemplate{
+ 			Name:  name,
+ 			CName: f.CIdentifier,
+ 			Doc:   f.Doc.StringSafe(),
+-			Args:  f.Parameters.Template(ns.Name, "", p.Types, f.Throws),
+-			Ret:   f.ReturnValue.Template(ns.Name, "", p.Types, f.Throws),
++			Args:  f.Parameters.Template(ns.Name, "", p.Types, f.Throws, pf.imps),
++			Ret:   f.ReturnValue.Template(ns.Name, "", p.Types, f.Throws, pf.imps),
+ 		})
+ 	}
+ 
+-	classes := make(map[string][]types.ClassTemplate)
+ 	for _, cls := range ns.Classes {
+ 		implemented := make(map[string]bool)
+ 		constructors := make([]types.FuncTemplate, len(cls.Constructors))
+ 		functions := make([]types.FuncTemplate, len(cls.Functions))
+ 		fn := cls.FilenameSafe()
+-		files = append(files, fn)
++		pf := getFile(fn)
++		imps := pf.imps
++
++		if cls.GLibGetType != "" {
++			imps.AddTypes()
++		}
+ 
+ 		for i, c := range cls.Constructors {
+ 			c.ReturnValue.AnyType.Type.Name = cls.Name
+@@ -326,18 +400,22 @@ 			constructors[i] = types.FuncTemplate{
+ 				Name:  util.ConstructorName(c.Name, cls.Name),
+ 				CName: c.CIdentifier,
+ 				Doc:   c.Doc.StringSafe(),
+-				Args:  c.Parameters.Template(ns.Name, "", p.Types, c.Throws),
+-				Ret:   c.ReturnValue.Template(ns.Name, "", p.Types, c.Throws),
++				Args:  c.Parameters.Template(ns.Name, "", p.Types, c.Throws, imps),
++				Ret:   c.ReturnValue.Template(ns.Name, "", p.Types, c.Throws, imps),
+ 			}
+ 		}
+ 		signals := make([]types.SignalsTemplate, len(cls.Signals))
+ 		for i, s := range cls.Signals {
++			imps.AddPurego()
++			imps.AddUnsafe()
++			imps.AddPkg("glib")
++			imps.AddPkg("gobject")
+ 			signals[i] = types.SignalsTemplate{
+ 				Doc:   s.Doc.StringSafe(),
+ 				Name:  util.DashToCamel(s.Name),
+ 				CName: s.Name,
+-				Args:  s.Parameters.Template(ns.Name, "", p.Types, false),
+-				Ret:   s.ReturnValue.Template(ns.Name, "", p.Types, false),
++				Args:  s.Parameters.Template(ns.Name, "", p.Types, false, imps),
++				Ret:   s.ReturnValue.Template(ns.Name, "", p.Types, false, imps),
+ 			}
+ 		}
+ 		receivers := make([]types.FuncTemplate, len(cls.Methods))
+@@ -348,8 +426,8 @@ 			receivers[i] = types.FuncTemplate{
+ 				Doc:   f.Doc.StringSafe(),
+ 				Name:  name,
+ 				CName: f.CIdentifier,
+-				Args:  f.Parameters.Template(ns.Name, "", p.Types, f.Throws),
+-				Ret:   f.ReturnValue.Template(ns.Name, "", p.Types, f.Throws),
++				Args:  f.Parameters.Template(ns.Name, "", p.Types, f.Throws, imps),
++				Ret:   f.ReturnValue.Template(ns.Name, "", p.Types, f.Throws, imps),
+ 			}
+ 		}
+ 		var interfaces []types.InterfaceTemplate
+@@ -359,26 +437,30 @@ 			functions[i] = types.FuncTemplate{
+ 				Name:  name,
+ 				CName: f.CIdentifier,
+ 				Doc:   f.Doc.StringSafe(),
+-				Args:  f.Parameters.Template(ns.Name, "", p.Types, f.Throws),
+-				Ret:   f.ReturnValue.Template(ns.Name, "", p.Types, f.Throws),
++				Args:  f.Parameters.Template(ns.Name, "", p.Types, f.Throws, imps),
++				Ret:   f.ReturnValue.Template(ns.Name, "", p.Types, f.Throws, imps),
+ 			}
+ 		}
+ 		for _, impl := range cls.Implements {
+-			interfaces = append(interfaces, types.GetInterfaceFuncs(ns.Name, impl.Name, implemented, p.Types))
++			interfaces = append(interfaces, types.GetInterfaceFuncs(ns.Name, impl.Name, implemented, p.Types, imps))
+ 		}
+ 		properties := make([]types.PropertyTemplate, 0, len(cls.Properties))
+ 		for _, prop := range cls.Properties {
+-			propTemp := prop.Template(ns.Name, p.Types)
++			propTemp := prop.Template(ns.Name, p.Types, imps)
+ 
+ 			// TODO: Implement non-primitive types, then remove this
+ 			if propTemp.GValueType != "" {
+ 				properties = append(properties, propTemp)
+ 			}
+ 		}
+-		classes[fn] = append(classes[fn], types.ClassTemplate{
++
++		parent := util.NormalizeNamespace(ns.Name, cls.Parent, true)
++		imps.TrackGoType(parent)
++
++		pf.classes = append(pf.classes, types.ClassTemplate{
+ 			Doc:          cls.Doc.StringSafe(),
+ 			Name:         cls.Name,
+-			Parent:       util.NormalizeNamespace(ns.Name, cls.Parent, true),
++			Parent:       parent,
+ 			Constructors: constructors,
+ 			Receivers:    receivers,
+ 			Interfaces:   interfaces,
+@@ -388,8 +470,6 @@ 			Signals:      signals,
+ 			TypeGetter:   cls.GLibGetType,
+ 		})
+ 	}
+-
+-	pkgName := strings.ToLower(ns.Name)
+ 
+ 	var pkgConfigName string
+ 	if len(r.Packages) > 0 {
+@@ -414,23 +494,69 @@ 		}
+ 	}
+ 	sharedLibraries = append(sharedLibraries, dylibNames...)
+ 
+-	for _, fn := range files {
++	var localRawFiles []string
++
++	for fn, pf := range files {
+ 		methods := 0
+-		for _, i := range interfaces[fn] {
++		for _, i := range pf.interfaces {
+ 			methods += len(i.Methods)
+ 		}
+-		for _, i := range records[fn] {
++		for _, i := range pf.records {
+ 			methods += len(i.Constructors)
+ 			methods += len(i.Receivers)
+ 		}
+-		for _, i := range classes[fn] {
++		for _, i := range pf.classes {
+ 			methods += len(i.Constructors)
+ 			methods += len(i.Receivers)
+ 			methods += len(i.Functions)
+ 		}
+ 		// we do not need to add the length of interfaces in here
+ 		// as they should only be loaded when there are classes
+-		needsInit := (len(functions[fn]) + methods) > 0
++		needsInit := (len(pf.functions) + methods) > 0
++
++		if needsInit {
++			pf.imps.AddPurego()
++			pf.imps.AddCore()
++		}
++		if len(pf.records) > 0 {
++			pf.imps.AddStructs()
++			pf.imps.AddUnsafe()
++		}
++
++		// Track imports from Pure.Types and Ret.Raw that render in function var declarations
++		trackFunc := func(f types.FuncTemplate) {
++			for _, t := range f.Args.Pure.Types {
++				pf.imps.TrackGoType(t)
++			}
++			pf.imps.TrackGoType(f.Ret.Raw)
++		}
++		for _, f := range pf.functions {
++			trackFunc(f)
++		}
++		for _, r := range pf.records {
++			for _, f := range r.Constructors {
++				trackFunc(f)
++			}
++			for _, f := range r.Receivers {
++				trackFunc(f)
++			}
++		}
++		for _, c := range pf.classes {
++			for _, f := range c.Constructors {
++				trackFunc(f)
++			}
++			for _, f := range c.Receivers {
++				trackFunc(f)
++			}
++			for _, f := range c.Functions {
++				trackFunc(f)
++			}
++		}
++		for _, i := range pf.interfaces {
++			for _, m := range i.Methods {
++				trackFunc(m.FuncTemplate)
++			}
++		}
+ 
+ 		// Packages that need to have their types manually registered
+ 		// See https://bugs.webkit.org/show_bug.cgi?id=175937
+@@ -443,32 +569,99 @@ 			PkgConfigName:   pkgConfigName,
+ 			SharedLibraries: sharedLibraries,
+ 			NeedsInit:       needsInit,
+ 			RegisterTypes:   registerTypes,
+-			Aliases:         aliases[fn],
+-			Callbacks:       callbacks[fn],
+-			Records:         records[fn],
+-			Enums:           enums[fn],
+-			Constants:       constants[fn],
+-			Functions:       functions[fn],
+-			Interfaces:      interfaces[fn],
+-			Classes:         classes[fn],
++			Imports:         pf.imps.Sorted(),
++			Aliases:         pf.aliases,
++			Callbacks:       pf.callbacks,
++			Records:         pf.records,
++			Enums:           pf.enums,
++			Constants:       pf.constants,
++			Functions:       pf.functions,
++			Interfaces:      pf.interfaces,
++			Classes:         pf.classes,
+ 		}
+ 
+ 		os.MkdirAll(fmt.Sprintf(dir+"/%s", pkgName), 0o755)
+ 
+-		f, err := os.Create(fmt.Sprintf(dir+"/%s/%s", pkgName, fn))
++		var buf bytes.Buffer
++		err := gotemp.Execute(&buf, args)
+ 		if err != nil {
+ 			panic(err)
+ 		}
+-		err = gotemp.Execute(f, args)
++
++		filePath := fmt.Sprintf(dir+"/%s/%s", pkgName, fn)
++		err = os.WriteFile(filePath, buf.Bytes(), 0o644)
+ 		if err != nil {
+ 			panic(err)
+ 		}
++		localRawFiles = append(localRawFiles, filePath)
++	}
+ 
+-	}
++	mu.Lock()
++	*rawFiles = append(*rawFiles, localRawFiles...)
++	mu.Unlock()
+ }
+ 
+ func (p *Pass) Second(dir string, gotemp *template.Template) {
++	var rawFiles []string
++	var mu sync.Mutex
++
++	g, _ := errgroup.WithContext(context.Background())
+ 	for _, r := range p.Parsed {
+-		p.writeGo(r, gotemp, dir)
++		r := r
++		g.Go(func() error {
++			p.writeGo(r, gotemp, dir, &rawFiles, &mu)
++			return nil
++		})
++	}
++	if err := g.Wait(); err != nil {
++		panic(err)
+ 	}
++
++	// Format all output files in parallel
++	g2, _ := errgroup.WithContext(context.Background())
++	for _, f := range rawFiles {
++		f := f
++		g2.Go(func() error {
++			src, err := os.ReadFile(f)
++			if err != nil {
++				return err
++			}
++			formatted, err := format.Source(src)
++			if err != nil {
++				log.Printf("warning: could not format %s: %v", f, err)
++				return nil
++			}
++			formatted = removeRedundantBlanks(formatted)
++			return os.WriteFile(f, formatted, 0o644)
++		})
++	}
++	if err := g2.Wait(); err != nil {
++		panic(err)
++	}
++}
++
++// removeRedundantBlanks removes blank lines after opening braces and before
++// closing braces, matching gofumpt's behavior for function bodies.
++func removeRedundantBlanks(src []byte) []byte {
++	lines := bytes.Split(src, []byte("\n"))
++	var out [][]byte
++	for i, line := range lines {
++		trimmed := bytes.TrimSpace(line)
++		// Skip blank lines that follow a line ending with "{"
++		if len(trimmed) == 0 && i > 0 {
++			prevTrimmed := bytes.TrimSpace(lines[i-1])
++			if bytes.HasSuffix(prevTrimmed, []byte("{")) {
++				continue
++			}
++		}
++		// Skip blank lines that precede a line starting with "}"
++		if len(trimmed) == 0 && i+1 < len(lines) {
++			nextTrimmed := bytes.TrimSpace(lines[i+1])
++			if bytes.HasPrefix(nextTrimmed, []byte("}")) {
++				continue
++			}
++		}
++		out = append(out, line)
++	}
++	return bytes.Join(out, []byte("\n"))
+ }
+diff --git a/internal/gir/types/imports.go b/internal/gir/types/imports.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..66c356a2b93983683506d42a3a5e48a9e75b89eb
+--- /dev/null
++++ b/internal/gir/types/imports.go
+@@ -0,0 +1,144 @@
++package types
++
++import (
++	"sort"
++	"strings"
++)
++
++// ImportConfig holds module paths and a PackageImports map (namespace name -> Go import path).
++type ImportConfig struct {
++	// ModuleBase is the Go module path (e.g. "codeberg.org/puregotk/puregotk")
++	ModuleBase string
++
++	// PathPrefix is the sub-directory within ModuleBase where packages live (e.g. "v4")
++	PathPrefix string
++
++	// PuregoModule is the module path for purego (e.g. "codeberg.org/puregotk/purego")
++	PuregoModule string
++
++	// CoreModule overrides ModuleBase when resolving pkg/core.
++	// When generating a third-party library that depends on puregotk,
++	// CoreModule should point to puregotk's module so pkg/core resolves correctly.
++	CoreModule string
++
++	// PackageImports maps lowercased namespace names to their Go import paths.
++	PackageImports map[string]string
++}
++
++// AddPackages bulk-registers namespaces from an external dependency.
++// For each namespace name, it registers module/prefix/lowercased-name as the import path.
++func (c *ImportConfig) AddPackages(module string, prefix string, namespaces []string) {
++	if c.PackageImports == nil {
++		c.PackageImports = make(map[string]string)
++	}
++	for _, ns := range namespaces {
++		pkg := strings.ToLower(ns)
++		c.PackageImports[pkg] = module + "/" + prefix + "/" + pkg
++	}
++}
++
++// ImportSet is a per-file import accumulator.
++type ImportSet struct {
++	pkgName string
++	config  *ImportConfig
++	imports map[string]bool
++}
++
++// NewImportSet creates a new import accumulator for the given package.
++func NewImportSet(pkgName string, config *ImportConfig) *ImportSet {
++	return &ImportSet{
++		pkgName: pkgName,
++		config:  config,
++		imports: make(map[string]bool),
++	}
++}
++
++// AddPkg looks up the package in PackageImports and adds the import.
++func (s *ImportSet) AddPkg(pkg string) {
++	pkg = strings.ToLower(pkg)
++	if pkg == s.pkgName {
++		return
++	}
++	if imp, ok := s.config.PackageImports[pkg]; ok {
++		s.imports[imp] = true
++	}
++}
++
++// AddCore adds the import for pkg/core.
++func (s *ImportSet) AddCore() {
++	module := s.config.CoreModule
++	if module == "" {
++		module = s.config.ModuleBase
++	}
++	s.imports[module+"/pkg/core"] = true
++}
++
++// AddPurego adds the purego import.
++func (s *ImportSet) AddPurego() {
++	s.imports[s.config.PuregoModule] = true
++}
++
++// AddUnsafe adds the "unsafe" import.
++func (s *ImportSet) AddUnsafe() {
++	s.imports["unsafe"] = true
++}
++
++// AddStructs adds the "structs" import.
++func (s *ImportSet) AddStructs() {
++	s.imports["structs"] = true
++}
++
++// AddTypes looks up gobject in PackageImports and appends /types.
++func (s *ImportSet) AddTypes() {
++	if imp, ok := s.config.PackageImports["gobject"]; ok {
++		s.imports[imp+"/types"] = true
++	}
++}
++
++// TrackGoType scans a Go type string for pkg. prefixes and calls AddPkg for each match.
++func (s *ImportSet) TrackGoType(goType string) {
++	// Look for patterns like "pkg.Something" in the type string
++	parts := strings.Split(goType, ".")
++	if len(parts) < 2 {
++		return
++	}
++	// The package name is everything before the first dot, stripped of pointer/slice/array prefixes
++	pkg := strings.TrimLeftFunc(parts[0], func(r rune) bool {
++		return r == '*' || r == '[' || r == ']' || (r >= '0' && r <= '9')
++	})
++	if pkg == "" {
++		return
++	}
++	// Special case: types.GType comes from gobject/types, not a namespace
++	if pkg == "types" {
++		s.AddTypes()
++		return
++	}
++	s.AddPkg(pkg)
++}
++
++// Sorted returns imports grouped: stdlib first, blank line separator, then third-party.
++func (s *ImportSet) Sorted() []string {
++	if len(s.imports) == 0 {
++		return nil
++	}
++
++	var stdlib, thirdparty []string
++	for imp := range s.imports {
++		if !strings.Contains(imp, ".") {
++			stdlib = append(stdlib, imp)
++		} else {
++			thirdparty = append(thirdparty, imp)
++		}
++	}
++	sort.Strings(stdlib)
++	sort.Strings(thirdparty)
++
++	var result []string
++	result = append(result, stdlib...)
++	if len(stdlib) > 0 && len(thirdparty) > 0 {
++		result = append(result, "") // blank line separator
++	}
++	result = append(result, thirdparty...)
++	return result
++}
+diff --git a/internal/gir/types/interface.go b/internal/gir/types/interface.go
+index 5d6c95f8ae07f54e31b4fcf76fc766f3f18ad3b1..64fa6aa579ef79493433307660ee842f8d541d84 100644
+--- a/internal/gir/types/interface.go
++++ b/internal/gir/types/interface.go
+@@ -6,9 +6,13 @@
+ 	"codeberg.org/puregotk/puregotk/internal/gir/util"
+ )
+ 
+-func ConvertInterface(currns string, ins string, inter Interface, implemented map[string]bool, kinds KindMap) InterfaceTemplate {
++func ConvertInterface(currns string, ins string, inter Interface, implemented map[string]bool, kinds KindMap, imps *ImportSet) InterfaceTemplate {
+ 	var methods []InterfaceFuncTemplate
+ 
++	if imps != nil && inter.GLibGetType != "" {
++		imps.AddTypes()
++	}
++
+ 	for _, m := range inter.Methods {
+ 		name := util.SnakeToCamel(m.Name)
+ 		if implemented != nil {
+@@ -20,6 +24,9 @@ 		}
+ 		var newns string
+ 		if ins != "" {
+ 			newns = ins + "."
++			if imps != nil {
++				imps.AddPkg(ins)
++			}
+ 		}
+ 		methods = append(methods, InterfaceFuncTemplate{
+ 			Namespace: newns,
+@@ -28,15 +35,15 @@ 			FuncTemplate: FuncTemplate{
+ 				Doc:   m.Doc.StringSafe(),
+ 				CName: m.CIdentifier,
+ 				Name:  name,
+-				Args:  m.Parameters.Template(currns, ins, kinds, m.Throws),
+-				Ret:   m.ReturnValue.Template(currns, ins, kinds, m.Throws),
++				Args:  m.Parameters.Template(currns, ins, kinds, m.Throws, imps),
++				Ret:   m.ReturnValue.Template(currns, ins, kinds, m.Throws, imps),
+ 			},
+ 		})
+ 	}
+ 
+ 	properties := make([]PropertyTemplate, 0, len(inter.Properties))
+ 	for _, prop := range inter.Properties {
+-		propTemp := prop.Template(currns, kinds)
++		propTemp := prop.Template(currns, kinds, imps)
+ 
+ 		// TODO: Implement non-primitive types, then remove this
+ 		if propTemp.GValueType != "" {
+@@ -54,12 +61,12 @@ 		TypeGetter: inter.GLibGetType,
+ 	}
+ }
+ 
+-func GetInterfaceFuncs(ns string, name string, implemented map[string]bool, kinds KindMap) InterfaceTemplate {
++func GetInterfaceFuncs(ns string, name string, implemented map[string]bool, kinds KindMap, imps *ImportSet) InterfaceTemplate {
+ 	inter := kinds.MustInterface(ns, name)
+ 	parts := strings.Split(name, ".")
+ 	var ins string
+ 	if len(parts) > 1 {
+ 		ins = strings.ToLower(parts[0])
+ 	}
+-	return ConvertInterface(ns, ins, inter, implemented, kinds)
++	return ConvertInterface(ns, ins, inter, implemented, kinds, imps)
+ }
+diff --git a/internal/gir/types/template.go b/internal/gir/types/template.go
+index 320ce618f96774e62f13de37b9fa85094c1bd787..7e0dc9992ecad7bcd713581ca45d669627f8cc78 100644
+--- a/internal/gir/types/template.go
++++ b/internal/gir/types/template.go
+@@ -29,7 +29,7 @@ 	// API are the arguments as suitable for a Go API
+ 	API argsTemplate
+ }
+ 
+-func (f *funcArgsTemplate) AddAPI(t string, n string, k Kind, ns string, nullable bool, isOut bool) {
++func (f *funcArgsTemplate) AddAPI(t string, n string, k Kind, ns string, nullable bool, isOut bool, imps *ImportSet) {
+ 	c := n
+ 	stars := strings.Count(t, "*")
+ 	gobjectNs := "gobject."
+@@ -56,6 +56,9 @@ 				c = fmt.Sprintf("%sNewCallbackNullable(%s)", glibNs, n)
+ 			} else {
+ 				c = fmt.Sprintf("%sNewCallback(%s)", glibNs, n)
+ 			}
++			if imps != nil && glibNs != "" {
++				imps.AddPkg("glib")
++			}
+ 			t = "*" + t
+ 		case ClassesType:
+ 			if stars == 0 {
+@@ -63,6 +66,9 @@ 				c = n
+ 				t = "uintptr"
+ 			} else if stars > 1 {
+ 				c = fmt.Sprintf("%sConvertPtr(%s)", gobjectNs, n)
++				if imps != nil && gobjectNs != "" {
++					imps.AddPkg("gobject")
++				}
+ 			} else if stars == 1 {
+ 				c = n + ".GoPointer()"
+ 			}
+@@ -73,6 +79,9 @@ 				c = n
+ 				t = "uintptr"
+ 			} else if stars > 1 {
+ 				c = fmt.Sprintf("%sConvertPtr(%s)", gobjectNs, n)
++				if imps != nil && gobjectNs != "" {
++					imps.AddPkg("gobject")
++				}
+ 			} else if stars == 1 {
+ 				c = n + ".GoPointer()"
+ 			}
+@@ -88,6 +97,10 @@ 	f.API.Names = append(f.API.Names, n)
+ 	f.API.Types = append(f.API.Types, t)
+ 	f.API.Call = append(f.API.Call, c)
+ 	f.API.Full = append(f.API.Full, n+" "+t)
++
++	if imps != nil {
++		imps.TrackGoType(t)
++	}
+ }
+ 
+ func (f *funcArgsTemplate) AddPure(t string, n string, k Kind, isOut bool) {
+@@ -160,7 +173,7 @@
+ 	return false
+ }
+ 
+-func (f *funcArgsTemplate) Add(p Parameter, ins string, ns string, kinds KindMap) {
++func (f *funcArgsTemplate) Add(p Parameter, ins string, ns string, kinds KindMap, imps *ImportSet) {
+ 	// get the lookup namespace
+ 	// as if the interface namespace is non-empty
+ 	// means we can also lookup in the namespace of the interface
+@@ -186,14 +199,17 @@ 	varName := p.VarName()
+ 
+ 	isOut := p.Direction == "out"
+ 
+-	f.AddAPI(goType, varName, kind, ns, p.Nullable, isOut)
++	f.AddAPI(goType, varName, kind, ns, p.Nullable, isOut, imps)
+ 	f.AddPure(goType, varName, kind, isOut)
+ }
+ 
+-func (f *funcArgsTemplate) AddThrows(ns string) {
++func (f *funcArgsTemplate) AddThrows(ns string, imps *ImportSet) {
+ 	f.API.Call = append(f.API.Call, "&cerr")
+ 	if strings.ToLower(ns) != "glib" {
+ 		f.Pure.Types = append(f.Pure.Types, "**glib.Error")
++		if imps != nil {
++			imps.AddPkg("glib")
++		}
+ 	} else {
+ 		f.Pure.Types = append(f.Pure.Types, "**Error")
+ 	}
+@@ -400,7 +416,7 @@ 		if fr.Value != "" {
+ 			after.WriteString(val)
+ 			after.WriteString(",")
+ 		}
+-		after.WriteString("cerr\n")
++		after.WriteString("cerr")
+ 		return after.String()
+ 	}
+ 	after.WriteString("return ")
+diff --git a/internal/gir/types/types.go b/internal/gir/types/types.go
+index d348c4dc8a1beaf2d0fc8f0508553cb179edd70e..b2fe4b6be059832ef2af816d3d86dc70323b47aa 100644
+--- a/internal/gir/types/types.go
++++ b/internal/gir/types/types.go
+@@ -674,20 +674,30 @@ 	// could also do first letter to lower?
+ 	return snaked + "Var"
+ }
+ 
+-func (p *Parameters) Template(ns string, ifacens string, kinds KindMap, throws bool) funcArgsTemplate {
++func (p *Parameters) Template(ns string, ifacens string, kinds KindMap, throws bool, imps *ImportSet) funcArgsTemplate {
+ 	if p == nil {
++		if throws {
++			args := funcArgsTemplate{}
++			args.AddThrows(ns, imps)
++			return args
++		}
+ 		return funcArgsTemplate{}
+ 	}
+ 	params := p.Parameters
+ 	if len(params) == 0 {
++		if throws {
++			args := funcArgsTemplate{}
++			args.AddThrows(ns, imps)
++			return args
++		}
+ 		return funcArgsTemplate{}
+ 	}
+ 	args := funcArgsTemplate{}
+ 	for _, par := range params {
+-		args.Add(par, ifacens, ns, kinds)
++		args.Add(par, ifacens, ns, kinds, imps)
+ 	}
+ 	if throws {
+-		args.AddThrows(ns)
++		args.AddThrows(ns, imps)
+ 	}
+ 	return args
+ }
+@@ -739,13 +749,31 @@ func (p Property) IsReadable() bool {
+ 	return p.Readable == nil || *p.Readable
+ }
+ 
+-func (p *Property) Template(ns string, kinds KindMap) PropertyTemplate {
++func (p *Property) Template(ns string, kinds KindMap, imps *ImportSet) PropertyTemplate {
+ 	var (
+ 		goType                           = p.AnyType.Translate(ns, kinds)
+ 		cName                            = p.Name
+ 		gvalueType, setMethod, getMethod = mapGoTypeToGValue(goType)
+ 	)
+ 
++	if imps != nil && gvalueType != "" {
++		imps.AddPkg("gobject")
++		switch gvalueType {
++		case "BoxedStrv":
++			if p.Writable {
++				imps.AddPkg("glib")
++			}
++			imps.AddCore()
++			imps.AddUnsafe()
++		case "BoxedByteArray", "BoxedPtrArray":
++			if p.Writable {
++				imps.AddPkg("glib")
++			}
++			imps.AddCore()
++			imps.AddUnsafe()
++		}
++	}
++
+ 	return PropertyTemplate{
+ 		Doc:        p.Doc.StringSafe(),
+ 		Name:       util.DashToCamel(cName),
+@@ -834,7 +862,7 @@ 	DocElements
+ 	AnyType
+ }
+ 
+-func (r *ReturnValue) Template(ns string, ins string, kinds KindMap, throws bool) funcRetTemplate {
++func (r *ReturnValue) Template(ns string, ins string, kinds KindMap, throws bool, imps *ImportSet) funcRetTemplate {
+ 	val := r.AnyType.Translate(ns, kinds)
+ 	raw := val
+ 	class := false
+@@ -859,11 +887,20 @@ 		// TODO: why does this happen?
+ 		if strings.HasPrefix(val, "[]") {
+ 			class = false
+ 			val = "uintptr"
++		}
++		if imps != nil && ins != "" {
++			imps.AddPkg(ins)
++		}
++		if imps != nil && r.TransferOwnership.TransferOwnership == "none" {
++			imps.AddPkg("gobject")
+ 		}
+ 	case InterfacesType:
+ 		raw = "uintptr"
+ 		val += "Base"
+ 		class = true
++		if imps != nil && r.TransferOwnership.TransferOwnership == "none" {
++			imps.AddPkg("gobject")
++		}
+ 	// callback returns should always be uintptr
+ 	// I needed this for glib.LogSetDefaultHandler
+ 	// Otherwise I got 'panic: reflect.MakeFunc: value of type *glib.LogFunc is not assignable to type glib.LogFunc'
+@@ -876,6 +913,10 @@ 		if val != "[]string" {
+ 			raw = "uintptr"
+ 			val = "uintptr"
+ 		}
++	}
++	if imps != nil {
++		imps.TrackGoType(val)
++		imps.TrackGoType(raw)
+ 	}
+ 	return funcRetTemplate{
+ 		Raw:     raw,
+diff --git a/pkg/gir/pass/pass.go b/pkg/gir/pass/pass.go
+index 6e3ce2fa442cf3a689470852be6e9025ecb08cf8..27c6980524518335c4eb21a379d6d1982ea366d2 100644
+--- a/pkg/gir/pass/pass.go
++++ b/pkg/gir/pass/pass.go
+@@ -1,9 +1,13 @@
+ package pass
+ 
+-import "codeberg.org/puregotk/puregotk/internal/gir/pass"
++import (
++	"codeberg.org/puregotk/puregotk/internal/gir/pass"
++	"codeberg.org/puregotk/puregotk/internal/gir/types"
++)
+ 
+ type (
+-	Pass = pass.Pass
++	Pass         = pass.Pass
++	ImportConfig = types.ImportConfig
+ )
+ 
+ var (
+diff --git a/templates/go b/templates/go
+index b4583f4cbc1579f4fb1bbe54c05964c711f566ba..63f13de67d3865128e16915244c24385e93802cb 100644
+--- a/templates/go
++++ b/templates/go
+@@ -3,31 +3,20 @@ package {{.PkgName}}
+ 
+ {{ $NotGObject := ne .PkgName "gobject" }}
+ {{ $NotGLib := ne .PkgName "glib" }}
+-{{ $HasSignals := false }}
+-{{range .Classes -}}
+-  {{if .Signals}}
+-    {{ $HasSignals = true }}
+-  {{end}}
+-{{end}}
+-{{ $NeedsUnsafe := or .Records $HasSignals }}
+-{{ $NeedsPurego := or .NeedsInit $HasSignals }}
+-{{ $AnyImports := or .NeedsInit .Records $HasSignals }}
+ 
+-{{if $AnyImports}}
++{{if .Imports}}
++{{- if eq (len .Imports) 1}}
++import "{{index .Imports 0}}"
++{{- else}}
+ import (
+-{{- if $NeedsUnsafe}}
+-	"unsafe"
++{{- range .Imports}}
++{{- if .}}
++	"{{.}}"
++{{- else}}
++{{end}}
+ {{- end}}
+-{{- if .Records}}
+-	"structs"
++)
+ {{- end}}
+-{{- if $NeedsPurego}}
+-	"codeberg.org/puregotk/purego"
+-{{- end}}
+-{{- if .NeedsInit}}
+-	"codeberg.org/puregotk/puregotk/pkg/core"
+-{{- end}}
+-)
+ {{end}}
+ 
+ {{$outer := .}}
+@@ -190,8 +179,16 @@ }
+ {{end}}
+ {{end}}
+ 
+-{{range .Methods -}}
++{{if .Methods}}
++{{if eq (len .Methods) 1}}{{range .Methods}}
+ var {{.Namespace}}X{{.FullName}} func(uintptr {{convc .Args.Pure.Types}}) {{.Ret.Raw}}
++{{end}}{{else}}
++var (
++{{range .Methods -}}
++	{{.Namespace}}X{{.FullName}} func(uintptr {{convc .Args.Pure.Types}}) {{.Ret.Raw}}
++{{end}}
++)
++{{end}}
+ {{end}}
+ {{end}}
+ 
+diff --git a/v4/gdk/gdkcicpparams.go b/v4/gdk/gdkcicpparams.go
+index fce7a710a9e6a323870f784ce16f3c0340464877..0f43faf0391b2e0b81c428bd9dd78f09b4d288f3 100644
+--- a/v4/gdk/gdkcicpparams.go
++++ b/v4/gdk/gdkcicpparams.go
+@@ -96,7 +96,7 @@ 	cls.Ptr = cret
+ 	return cls
+ }
+ 
+-var xCicpParamsBuildColorState func(uintptr) *ColorState
++var xCicpParamsBuildColorState func(uintptr, **glib.Error) *ColorState
+ 
+ // Creates a new `GdkColorState` object for the cicp parameters in @self.
+ //
+@@ -106,7 +106,7 @@ // with an error message that can be presented to the user.
+ func (x *CicpParams) BuildColorState() (*ColorState, error) {
+ 	var cerr *glib.Error
+ 
+-	cret := xCicpParamsBuildColorState(x.GoPointer())
++	cret := xCicpParamsBuildColorState(x.GoPointer(), &cerr)
+ 	if cerr == nil {
+ 		return cret, nil
+ 	}
+diff --git a/v4/gdk/gdkcontentdeserializer.go b/v4/gdk/gdkcontentdeserializer.go
+index 4725552ffa1e4094d553243c131eef04802e2129..1ad2615667b5b504a4e6210605425c31d0887f72 100644
+--- a/v4/gdk/gdkcontentdeserializer.go
++++ b/v4/gdk/gdkcontentdeserializer.go
+@@ -235,7 +235,7 @@ // to enable subclasses to chain up correctly.
+ func (x *ContentDeserializer) LegacyPropagateError() (bool, error) {
+ 	var cerr *glib.Error
+ 
+-	cret := gio.XGAsyncResultLegacyPropagateError(x.GoPointer())
++	cret := gio.XGAsyncResultLegacyPropagateError(x.GoPointer(), &cerr)
+ 	if cerr == nil {
+ 		return cret, nil
+ 	}
+diff --git a/v4/gdk/gdkcontentserializer.go b/v4/gdk/gdkcontentserializer.go
+index 59ef8f077a4b2a29b56afdae7b00377228992875..7eec0f778a54999e947bdebd00492e6b3ebc1f58 100644
+--- a/v4/gdk/gdkcontentserializer.go
++++ b/v4/gdk/gdkcontentserializer.go
+@@ -236,7 +236,7 @@ // to enable subclasses to chain up correctly.
+ func (x *ContentSerializer) LegacyPropagateError() (bool, error) {
+ 	var cerr *glib.Error
+ 
+-	cret := gio.XGAsyncResultLegacyPropagateError(x.GoPointer())
++	cret := gio.XGAsyncResultLegacyPropagateError(x.GoPointer(), &cerr)
+ 	if cerr == nil {
+ 		return cret, nil
+ 	}
+diff --git a/v4/gdk/gdkdisplay.go b/v4/gdk/gdkdisplay.go
+index 62b7e2c05d0f2ae5856aebeecc8c0ce16d0abf6c..cbff4ad62bb795f55492930c371778cc1e05b7d6 100644
+--- a/v4/gdk/gdkdisplay.go
++++ b/v4/gdk/gdkdisplay.go
+@@ -58,7 +58,7 @@ func (x *Display) Close() {
+ 	xDisplayClose(x.GoPointer())
+ }
+ 
+-var xDisplayCreateGlContext func(uintptr) uintptr
++var xDisplayCreateGlContext func(uintptr, **glib.Error) uintptr
+ 
+ // Creates a new `GdkGLContext` for the `GdkDisplay`.
+ //
+@@ -73,7 +73,7 @@ func (x *Display) CreateGlContext() (*GLContext, error) {
+ 	var cls *GLContext
+ 	var cerr *glib.Error
+ 
+-	cret := xDisplayCreateGlContext(x.GoPointer())
++	cret := xDisplayCreateGlContext(x.GoPointer(), &cerr)
+ 
+ 	if cret == 0 {
+ 		return nil, cerr
+@@ -371,7 +371,7 @@ func (x *Display) NotifyStartupComplete(StartupIdVar string) {
+ 	xDisplayNotifyStartupComplete(x.GoPointer(), StartupIdVar)
+ }
+ 
+-var xDisplayPrepareGl func(uintptr) bool
++var xDisplayPrepareGl func(uintptr, **glib.Error) bool
+ 
+ // Checks that OpenGL is available for @self and ensures that it is
+ // properly initialized.
+@@ -390,7 +390,7 @@ // might make use of OpenGL.
+ func (x *Display) PrepareGl() (bool, error) {
+ 	var cerr *glib.Error
+ 
+-	cret := xDisplayPrepareGl(x.GoPointer())
++	cret := xDisplayPrepareGl(x.GoPointer(), &cerr)
+ 	if cerr == nil {
+ 		return cret, nil
+ 	}
+diff --git a/v4/gdk/gdkglcontext.go b/v4/gdk/gdkglcontext.go
+index 56df9e05cae3218372c4be20917d67bc6e1b12b3..6cf2470c9ff48d837ece157d8e36fcd5146c5935 100644
+--- a/v4/gdk/gdkglcontext.go
++++ b/v4/gdk/gdkglcontext.go
+@@ -251,7 +251,7 @@ func (x *GLContext) MakeCurrent() {
+ 	xGLContextMakeCurrent(x.GoPointer())
+ }
+ 
+-var xGLContextRealize func(uintptr) bool
++var xGLContextRealize func(uintptr, **glib.Error) bool
+ 
+ // Realizes the given `GdkGLContext`.
+ //
+@@ -259,7 +259,7 @@ // It is safe to call this function on a realized `GdkGLContext`.
+ func (x *GLContext) Realize() (bool, error) {
+ 	var cerr *glib.Error
+ 
+-	cret := xGLContextRealize(x.GoPointer())
++	cret := xGLContextRealize(x.GoPointer(), &cerr)
+ 	if cerr == nil {
+ 		return cret, nil
+ 	}
+diff --git a/v4/gdk/gdksurface.go b/v4/gdk/gdksurface.go
+index 89b6be7ff7d422cabc7f4802dd6e8da908da036b..61dfe7f764cdfe661c0f4a50b08bc180e94091e0 100644
+--- a/v4/gdk/gdksurface.go
++++ b/v4/gdk/gdksurface.go
+@@ -107,7 +107,7 @@ 	cls.Ptr = cret
+ 	return cls
+ }
+ 
+-var xSurfaceCreateGlContext func(uintptr) uintptr
++var xSurfaceCreateGlContext func(uintptr, **glib.Error) uintptr
+ 
+ // Creates a new `GdkGLContext` for the `GdkSurface`.
+ //
+@@ -119,7 +119,7 @@ func (x *Surface) CreateGlContext() (*GLContext, error) {
+ 	var cls *GLContext
+ 	var cerr *glib.Error
+ 
+-	cret := xSurfaceCreateGlContext(x.GoPointer())
++	cret := xSurfaceCreateGlContext(x.GoPointer(), &cerr)
+ 
+ 	if cret == 0 {
+ 		return nil, cerr
+@@ -154,14 +154,14 @@ 	cret := xSurfaceCreateSimilarSurface(x.GoPointer(), ContentVar, WidthVar, HeightVar)
+ 	return cret
+ }
+ 
+-var xSurfaceCreateVulkanContext func(uintptr) uintptr
++var xSurfaceCreateVulkanContext func(uintptr, **glib.Error) uintptr
+ 
+ // Sets an error and returns %NULL.
+ func (x *Surface) CreateVulkanContext() (*VulkanContext, error) {
+ 	var cls *VulkanContext
+ 	var cerr *glib.Error
+ 
+-	cret := xSurfaceCreateVulkanContext(x.GoPointer())
++	cret := xSurfaceCreateVulkanContext(x.GoPointer(), &cerr)
+ 
+ 	if cret == 0 {
+ 		return nil, cerr
+diff --git a/v4/gdkpixbuf/gdk-pixbuf-loader.go b/v4/gdkpixbuf/gdk-pixbuf-loader.go
+index 4adaff9ac963b15fbad2b3404c3f75b8c90f68e6..8af4f668c7f8544041e6077abfa3a9bd3cf3266f 100644
+--- a/v4/gdkpixbuf/gdk-pixbuf-loader.go
++++ b/v4/gdkpixbuf/gdk-pixbuf-loader.go
+@@ -266,7 +266,7 @@ 	}
+ 	return cls, cerr
+ }
+ 
+-var xPixbufLoaderClose func(uintptr) bool
++var xPixbufLoaderClose func(uintptr, **glib.Error) bool
+ 
+ // Informs a pixbuf loader that no further writes with
+ // gdk_pixbuf_loader_write() will occur, so that it can free its
+@@ -286,7 +286,7 @@ // you will need to explicitly release any reference you hold.
+ func (x *PixbufLoader) Close() (bool, error) {
+ 	var cerr *glib.Error
+ 
+-	cret := xPixbufLoaderClose(x.GoPointer())
++	cret := xPixbufLoaderClose(x.GoPointer(), &cerr)
+ 	if cerr == nil {
+ 		return cret, nil
+ 	}
+diff --git a/v4/gio/gasyncresult.go b/v4/gio/gasyncresult.go
+index 2df0a8501660b50c1c72d9e87bc7de60678e32bc..d9bff9ccc6da0e38dc2ff747551558c29e765d86 100644
+--- a/v4/gio/gasyncresult.go
++++ b/v4/gio/gasyncresult.go
+@@ -275,7 +275,7 @@ // to enable subclasses to chain up correctly.
+ func (x *AsyncResultBase) LegacyPropagateError() (bool, error) {
+ 	var cerr *glib.Error
+ 
+-	cret := XGAsyncResultLegacyPropagateError(x.GoPointer())
++	cret := XGAsyncResultLegacyPropagateError(x.GoPointer(), &cerr)
+ 	if cerr == nil {
+ 		return cret, nil
+ 	}
+@@ -286,7 +286,7 @@ var (
+ 	XGAsyncResultGetSourceObject      func(uintptr) uintptr
+ 	XGAsyncResultGetUserData          func(uintptr) uintptr
+ 	XGAsyncResultIsTagged             func(uintptr, uintptr) bool
+-	XGAsyncResultLegacyPropagateError func(uintptr) bool
++	XGAsyncResultLegacyPropagateError func(uintptr, **glib.Error) bool
+ )
+ 
+ func init() {
+diff --git a/v4/gio/gcancellable.go b/v4/gio/gcancellable.go
+index e27775595c74496169f15e6535cb20e5ef1b5ce0..2d109758cc4d237ebb9c1ac68f35a1702ab18865 100644
+--- a/v4/gio/gcancellable.go
++++ b/v4/gio/gcancellable.go
+@@ -433,14 +433,14 @@ func (x *Cancellable) Reset() {
+ 	xCancellableReset(x.GoPointer())
+ }
+ 
+-var xCancellableSetErrorIfCancelled func(uintptr) bool
++var xCancellableSetErrorIfCancelled func(uintptr, **glib.Error) bool
+ 
+ // If the @cancellable is cancelled, sets the error to notify
+ // that the operation was cancelled.
+ func (x *Cancellable) SetErrorIfCancelled() (bool, error) {
+ 	var cerr *glib.Error
+ 
+-	cret := xCancellableSetErrorIfCancelled(x.GoPointer())
++	cret := xCancellableSetErrorIfCancelled(x.GoPointer(), &cerr)
+ 	if cerr == nil {
+ 		return cret, nil
+ 	}
+diff --git a/v4/gio/gcredentials.go b/v4/gio/gcredentials.go
+index 341084451a9ddbf444aa8c80f67826af14df6b3e..a3e07ae752fd28a2b962ae2ef5fddddd95106b9a 100644
+--- a/v4/gio/gcredentials.go
++++ b/v4/gio/gcredentials.go
+@@ -102,7 +102,7 @@ 	cret := xCredentialsGetNative(x.GoPointer(), NativeTypeVar)
+ 	return cret
+ }
+ 
+-var xCredentialsGetUnixPid func(uintptr) int
++var xCredentialsGetUnixPid func(uintptr, **glib.Error) int
+ 
+ // Tries to get the UNIX process identifier from @credentials. This
+ // method is only available on UNIX platforms.
+@@ -113,14 +113,14 @@ // about the UNIX process ID.
+ func (x *Credentials) GetUnixPid() (int, error) {
+ 	var cerr *glib.Error
+ 
+-	cret := xCredentialsGetUnixPid(x.GoPointer())
++	cret := xCredentialsGetUnixPid(x.GoPointer(), &cerr)
+ 	if cerr == nil {
+ 		return cret, nil
+ 	}
+ 	return cret, cerr
+ }
+ 
+-var xCredentialsGetUnixUser func(uintptr) uint
++var xCredentialsGetUnixUser func(uintptr, **glib.Error) uint
+ 
+ // Tries to get the UNIX user identifier from @credentials. This
+ // method is only available on UNIX platforms.
+@@ -135,7 +135,7 @@ // particularly in language bindings.
+ func (x *Credentials) GetUnixUser() (uint, error) {
+ 	var cerr *glib.Error
+ 
+-	cret := xCredentialsGetUnixUser(x.GoPointer())
++	cret := xCredentialsGetUnixUser(x.GoPointer(), &cerr)
+ 	if cerr == nil {
+ 		return cret, nil
+ 	}
+diff --git a/v4/gio/gdbusmessage.go b/v4/gio/gdbusmessage.go
+index 04590607d51fa271eb5373e45189af35745b7fb8..bf3ff05e4c94ba774c561f8038393de6f4549037 100644
+--- a/v4/gio/gdbusmessage.go
++++ b/v4/gio/gdbusmessage.go
+@@ -100,7 +100,7 @@ 	cls.Ptr = cret
+ 	return cls
+ }
+ 
+-var xDBusMessageCopy func(uintptr) uintptr
++var xDBusMessageCopy func(uintptr, **glib.Error) uintptr
+ 
+ // Copies @message. The copy is a deep copy and the returned
+ // #GDBusMessage is completely identical except that it is guaranteed
+@@ -112,7 +112,7 @@ func (x *DBusMessage) Copy() (*DBusMessage, error) {
+ 	var cls *DBusMessage
+ 	var cerr *glib.Error
+ 
+-	cret := xDBusMessageCopy(x.GoPointer())
++	cret := xDBusMessageCopy(x.GoPointer(), &cerr)
+ 
+ 	if cret == 0 {
+ 		return nil, cerr
+@@ -577,7 +577,7 @@ 	}
+ 	return cret, cerr
+ }
+ 
+-var xDBusMessageToGerror func(uintptr) bool
++var xDBusMessageToGerror func(uintptr, **glib.Error) bool
+ 
+ // If @message is not of type %G_DBUS_MESSAGE_TYPE_ERROR does
+ // nothing and returns %FALSE.
+@@ -589,7 +589,7 @@ // well as the first string item in @message's body.
+ func (x *DBusMessage) ToGerror() (bool, error) {
+ 	var cerr *glib.Error
+ 
+-	cret := xDBusMessageToGerror(x.GoPointer())
++	cret := xDBusMessageToGerror(x.GoPointer(), &cerr)
+ 	if cerr == nil {
+ 		return cret, nil
+ 	}
+diff --git a/v4/gio/gdbusproxy.go b/v4/gio/gdbusproxy.go
+index 963cae787b921d807acd08d106600025e2d09a5c..15ee28f9187c5d374374ef956c550daa53e7d6c2 100644
+--- a/v4/gio/gdbusproxy.go
++++ b/v4/gio/gdbusproxy.go
+@@ -618,7 +618,6 @@ // from the other peer is ignored. The given #GDBusInterfaceInfo is
+ // said to be the "expected interface".
+ //
+ // The checks performed are:
+-//
+ //   - When completing a method call, if the type signature of
+ //     the reply message isn't what's expected, the reply is
+ //     discarded and the #GError is set to %G_IO_ERROR_INVALID_ARGUMENT.
+@@ -651,7 +650,6 @@ // from the other peer is ignored. The given #GDBusInterfaceInfo is
+ // said to be the "expected interface".
+ //
+ // The checks performed are:
+-//
+ //   - When completing a method call, if the type signature of
+ //     the reply message isn't what's expected, the reply is
+ //     discarded and the #GError is set to %G_IO_ERROR_INVALID_ARGUMENT.
+diff --git a/v4/gio/ginputstream.go b/v4/gio/ginputstream.go
+index 8181f23e7af960468c7974b4c7822ad8218eb4c1..3113112dc5c2df67475a18805a684fe33d9db738 100644
+--- a/v4/gio/ginputstream.go
++++ b/v4/gio/ginputstream.go
+@@ -713,7 +713,7 @@ 	}
+ 	return cret, cerr
+ }
+ 
+-var xInputStreamSetPending func(uintptr) bool
++var xInputStreamSetPending func(uintptr, **glib.Error) bool
+ 
+ // Sets @stream to have actions pending. If the pending flag is
+ // already set or @stream is closed, it will return %FALSE and set
+@@ -721,7 +721,7 @@ // @error.
+ func (x *InputStream) SetPending() (bool, error) {
+ 	var cerr *glib.Error
+ 
+-	cret := xInputStreamSetPending(x.GoPointer())
++	cret := xInputStreamSetPending(x.GoPointer(), &cerr)
+ 	if cerr == nil {
+ 		return cret, nil
+ 	}
+diff --git a/v4/gio/giostream.go b/v4/gio/giostream.go
+index ec4b6b531040da98fa079b8848d545f5e22c7843..868b9069c2152f93856ae2e55fe6818ff5c9165e 100644
+--- a/v4/gio/giostream.go
++++ b/v4/gio/giostream.go
+@@ -622,7 +622,7 @@ 	cret := xIOStreamIsClosed(x.GoPointer())
+ 	return cret
+ }
+ 
+-var xIOStreamSetPending func(uintptr) bool
++var xIOStreamSetPending func(uintptr, **glib.Error) bool
+ 
+ // Sets @stream to have actions pending. If the pending flag is
+ // already set or @stream is closed, it will return %FALSE and set
+@@ -630,7 +630,7 @@ // @error.
+ func (x *IOStream) SetPending() (bool, error) {
+ 	var cerr *glib.Error
+ 
+-	cret := xIOStreamSetPending(x.GoPointer())
++	cret := xIOStreamSetPending(x.GoPointer(), &cerr)
+ 	if cerr == nil {
+ 		return cret, nil
+ 	}
+diff --git a/v4/gio/goutputstream.go b/v4/gio/goutputstream.go
+index 57a8d40f36e37c89e53ea81f0f5d9068f085d92a..22fbc2495e23aa141fecc23d7f4efc56d42594cb 100644
+--- a/v4/gio/goutputstream.go
++++ b/v4/gio/goutputstream.go
+@@ -733,7 +733,7 @@ 	cret := xOutputStreamPrintf(x.GoPointer(), BytesWrittenVar, CancellableVar.GoPointer(), ErrorVar, FormatVar, varArgs...)
+ 	return cret
+ }
+ 
+-var xOutputStreamSetPending func(uintptr) bool
++var xOutputStreamSetPending func(uintptr, **glib.Error) bool
+ 
+ // Sets @stream to have actions pending. If the pending flag is
+ // already set or @stream is closed, it will return %FALSE and set
+@@ -741,7 +741,7 @@ // @error.
+ func (x *OutputStream) SetPending() (bool, error) {
+ 	var cerr *glib.Error
+ 
+-	cret := xOutputStreamSetPending(x.GoPointer())
++	cret := xOutputStreamSetPending(x.GoPointer(), &cerr)
+ 	if cerr == nil {
+ 		return cret, nil
+ 	}
+diff --git a/v4/gio/gsimpleasyncresult.go b/v4/gio/gsimpleasyncresult.go
+index c402818e67b15304a01b13e08e935073517fc1eb..900fa27f013f94d917f70f370dd323948d3ec2a1 100644
+--- a/v4/gio/gsimpleasyncresult.go
++++ b/v4/gio/gsimpleasyncresult.go
+@@ -368,7 +368,7 @@ 	cret := xSimpleAsyncResultGetSourceTag(x.GoPointer())
+ 	return cret
+ }
+ 
+-var xSimpleAsyncResultPropagateError func(uintptr) bool
++var xSimpleAsyncResultPropagateError func(uintptr, **glib.Error) bool
+ 
+ // Propagates an error from within the simple asynchronous result to
+ // a given destination.
+@@ -379,7 +379,7 @@ // function will return %TRUE with @dest set appropriately.
+ func (x *SimpleAsyncResult) PropagateError() (bool, error) {
+ 	var cerr *glib.Error
+ 
+-	cret := xSimpleAsyncResultPropagateError(x.GoPointer())
++	cret := xSimpleAsyncResultPropagateError(x.GoPointer(), &cerr)
+ 	if cerr == nil {
+ 		return cret, nil
+ 	}
+@@ -533,7 +533,7 @@ // to enable subclasses to chain up correctly.
+ func (x *SimpleAsyncResult) LegacyPropagateError() (bool, error) {
+ 	var cerr *glib.Error
+ 
+-	cret := XGAsyncResultLegacyPropagateError(x.GoPointer())
++	cret := XGAsyncResultLegacyPropagateError(x.GoPointer(), &cerr)
+ 	if cerr == nil {
+ 		return cret, nil
+ 	}
+diff --git a/v4/gio/gsocket.go b/v4/gio/gsocket.go
+index 6147847ce4e24de33cff5de483a8d9b4a2ab2713..93aa32f3485879023ca7f5167c3ee52aa3bb8291 100644
+--- a/v4/gio/gsocket.go
++++ b/v4/gio/gsocket.go
+@@ -496,7 +496,7 @@ 	}
+ 	return cret, cerr
+ }
+ 
+-var xSocketCheckConnectResult func(uintptr) bool
++var xSocketCheckConnectResult func(uintptr, **glib.Error) bool
+ 
+ // Checks and resets the pending connect error for the socket.
+ // This is used to check for errors when g_socket_connect() is
+@@ -504,14 +504,14 @@ // used in non-blocking mode.
+ func (x *Socket) CheckConnectResult() (bool, error) {
+ 	var cerr *glib.Error
+ 
+-	cret := xSocketCheckConnectResult(x.GoPointer())
++	cret := xSocketCheckConnectResult(x.GoPointer(), &cerr)
+ 	if cerr == nil {
+ 		return cret, nil
+ 	}
+ 	return cret, cerr
+ }
+ 
+-var xSocketClose func(uintptr) bool
++var xSocketClose func(uintptr, **glib.Error) bool
+ 
+ // Closes the socket, shutting down any active connection.
+ //
+@@ -545,7 +545,7 @@ // does.)
+ func (x *Socket) Close() (bool, error) {
+ 	var cerr *glib.Error
+ 
+-	cret := xSocketClose(x.GoPointer())
++	cret := xSocketClose(x.GoPointer(), &cerr)
+ 	if cerr == nil {
+ 		return cret, nil
+ 	}
+@@ -736,7 +736,7 @@ 	cret := xSocketGetBroadcast(x.GoPointer())
+ 	return cret
+ }
+ 
+-var xSocketGetCredentials func(uintptr) uintptr
++var xSocketGetCredentials func(uintptr, **glib.Error) uintptr
+ 
+ // Returns the credentials of the foreign process connected to this
+ // socket, if any (e.g. it is only supported for %G_SOCKET_FAMILY_UNIX
+@@ -762,7 +762,7 @@ func (x *Socket) GetCredentials() (*Credentials, error) {
+ 	var cls *Credentials
+ 	var cerr *glib.Error
+ 
+-	cret := xSocketGetCredentials(x.GoPointer())
++	cret := xSocketGetCredentials(x.GoPointer(), &cerr)
+ 
+ 	if cret == 0 {
+ 		return nil, cerr
+@@ -813,7 +813,7 @@ 	cret := xSocketGetListenBacklog(x.GoPointer())
+ 	return cret
+ }
+ 
+-var xSocketGetLocalAddress func(uintptr) uintptr
++var xSocketGetLocalAddress func(uintptr, **glib.Error) uintptr
+ 
+ // Try to get the local address of a bound socket. This is only
+ // useful if the socket has been bound to a local address,
+@@ -822,7 +822,7 @@ func (x *Socket) GetLocalAddress() (*SocketAddress, error) {
+ 	var cls *SocketAddress
+ 	var cerr *glib.Error
+ 
+-	cret := xSocketGetLocalAddress(x.GoPointer())
++	cret := xSocketGetLocalAddress(x.GoPointer(), &cerr)
+ 
+ 	if cret == 0 {
+ 		return nil, cerr
+@@ -888,7 +888,7 @@ 	cret := xSocketGetProtocol(x.GoPointer())
+ 	return cret
+ }
+ 
+-var xSocketGetRemoteAddress func(uintptr) uintptr
++var xSocketGetRemoteAddress func(uintptr, **glib.Error) uintptr
+ 
+ // Try to get the remote address of a connected socket. This is only
+ // useful for connection oriented sockets that have been connected.
+@@ -896,7 +896,7 @@ func (x *Socket) GetRemoteAddress() (*SocketAddress, error) {
+ 	var cls *SocketAddress
+ 	var cerr *glib.Error
+ 
+-	cret := xSocketGetRemoteAddress(x.GoPointer())
++	cret := xSocketGetRemoteAddress(x.GoPointer(), &cerr)
+ 
+ 	if cret == 0 {
+ 		return nil, cerr
+@@ -1049,7 +1049,7 @@ 	}
+ 	return cret, cerr
+ }
+ 
+-var xSocketListen func(uintptr) bool
++var xSocketListen func(uintptr, **glib.Error) bool
+ 
+ // Marks the socket as a server socket, i.e. a socket that is used
+ // to accept incoming requests using g_socket_accept().
+@@ -1062,7 +1062,7 @@ // g_socket_set_listen_backlog().
+ func (x *Socket) Listen() (bool, error) {
+ 	var cerr *glib.Error
+ 
+-	cret := xSocketListen(x.GoPointer())
++	cret := xSocketListen(x.GoPointer(), &cerr)
+ 	if cerr == nil {
+ 		return cret, nil
+ 	}
+diff --git a/v4/gio/gsocketconnection.go b/v4/gio/gsocketconnection.go
+index 501d052f728d1281709393621d80af77744a71d4..e1fd7b4e61c756550a977c1538d97a3ba9f51bf4 100644
+--- a/v4/gio/gsocketconnection.go
++++ b/v4/gio/gsocketconnection.go
+@@ -254,14 +254,14 @@ 	}
+ 	return cret, cerr
+ }
+ 
+-var xSocketConnectionGetLocalAddress func(uintptr) uintptr
++var xSocketConnectionGetLocalAddress func(uintptr, **glib.Error) uintptr
+ 
+ // Try to get the local address of a socket connection.
+ func (x *SocketConnection) GetLocalAddress() (*SocketAddress, error) {
+ 	var cls *SocketAddress
+ 	var cerr *glib.Error
+ 
+-	cret := xSocketConnectionGetLocalAddress(x.GoPointer())
++	cret := xSocketConnectionGetLocalAddress(x.GoPointer(), &cerr)
+ 
+ 	if cret == 0 {
+ 		return nil, cerr
+@@ -274,7 +274,7 @@ 	}
+ 	return cls, cerr
+ }
+ 
+-var xSocketConnectionGetRemoteAddress func(uintptr) uintptr
++var xSocketConnectionGetRemoteAddress func(uintptr, **glib.Error) uintptr
+ 
+ // Try to get the remote address of a socket connection.
+ //
+@@ -288,7 +288,7 @@ func (x *SocketConnection) GetRemoteAddress() (*SocketAddress, error) {
+ 	var cls *SocketAddress
+ 	var cerr *glib.Error
+ 
+-	cret := xSocketConnectionGetRemoteAddress(x.GoPointer())
++	cret := xSocketConnectionGetRemoteAddress(x.GoPointer(), &cerr)
+ 
+ 	if cret == 0 {
+ 		return nil, cerr
+diff --git a/v4/gio/gtask.go b/v4/gio/gtask.go
+index f7101dc7d3aca22abb5743d2e8a6bb3785f455e1..16a89ea5a9329bee169817a651717563dacd9243 100644
+--- a/v4/gio/gtask.go
++++ b/v4/gio/gtask.go
+@@ -777,7 +777,7 @@ 	cret := xTaskHadError(x.GoPointer())
+ 	return cret
+ }
+ 
+-var xTaskPropagateBoolean func(uintptr) bool
++var xTaskPropagateBoolean func(uintptr, **glib.Error) bool
+ 
+ // Gets the result of @task as a #gboolean.
+ //
+@@ -789,14 +789,14 @@ // error) to the caller, you may only call it once.
+ func (x *Task) PropagateBoolean() (bool, error) {
+ 	var cerr *glib.Error
+ 
+-	cret := xTaskPropagateBoolean(x.GoPointer())
++	cret := xTaskPropagateBoolean(x.GoPointer(), &cerr)
+ 	if cerr == nil {
+ 		return cret, nil
+ 	}
+ 	return cret, cerr
+ }
+ 
+-var xTaskPropagateInt func(uintptr) int
++var xTaskPropagateInt func(uintptr, **glib.Error) int
+ 
+ // Gets the result of @task as an integer (#gssize).
+ //
+@@ -808,14 +808,14 @@ // error) to the caller, you may only call it once.
+ func (x *Task) PropagateInt() (int, error) {
+ 	var cerr *glib.Error
+ 
+-	cret := xTaskPropagateInt(x.GoPointer())
++	cret := xTaskPropagateInt(x.GoPointer(), &cerr)
+ 	if cerr == nil {
+ 		return cret, nil
+ 	}
+ 	return cret, cerr
+ }
+ 
+-var xTaskPropagatePointer func(uintptr) uintptr
++var xTaskPropagatePointer func(uintptr, **glib.Error) uintptr
+ 
+ // Gets the result of @task as a pointer, and transfers ownership
+ // of that value to the caller.
+@@ -828,7 +828,7 @@ // error) to the caller, you may only call it once.
+ func (x *Task) PropagatePointer() (uintptr, error) {
+ 	var cerr *glib.Error
+ 
+-	cret := xTaskPropagatePointer(x.GoPointer())
++	cret := xTaskPropagatePointer(x.GoPointer(), &cerr)
+ 	if cerr == nil {
+ 		return cret, nil
+ 	}
+@@ -1214,7 +1214,7 @@ // to enable subclasses to chain up correctly.
+ func (x *Task) LegacyPropagateError() (bool, error) {
+ 	var cerr *glib.Error
+ 
+-	cret := XGAsyncResultLegacyPropagateError(x.GoPointer())
++	cret := XGAsyncResultLegacyPropagateError(x.GoPointer(), &cerr)
+ 	if cerr == nil {
+ 		return cret, nil
+ 	}
+diff --git a/v4/glib/gerror.go b/v4/glib/gerror.go
+index f17c785d8c887f043508fbf3b7fd0b894233b10b..f389a3613bb836ca4526906f2c82211aec7ebc7c 100644
+--- a/v4/glib/gerror.go
++++ b/v4/glib/gerror.go
+@@ -120,14 +120,14 @@ 	cret := xErrorMatches(x.GoPointer(), DomainVar, CodeVar)
+ 	return cret
+ }
+ 
+-var xClearError func()
++var xClearError func(**Error)
+ 
+ // If @err or `*err` is %NULL, does nothing. Otherwise,
+ // calls g_error_free() on `*err` and sets `*err` to %NULL.
+ func ClearError() error {
+ 	var cerr *Error
+ 
+-	xClearError()
++	xClearError(&cerr)
+ 	if cerr == nil {
+ 		return nil
+ 	}
+diff --git a/v4/glib/giochannel.go b/v4/glib/giochannel.go
+index 5635b4ce456ec376033129244a64d73c5fce0b61..14ee6a70895d687c3e9f4bfed6058ae6c020c8ad 100644
+--- a/v4/glib/giochannel.go
++++ b/v4/glib/giochannel.go
+@@ -160,13 +160,13 @@ func (x *IOChannel) Close() {
+ 	xIOChannelClose(x.GoPointer())
+ }
+ 
+-var xIOChannelFlush func(uintptr) IOStatus
++var xIOChannelFlush func(uintptr, **Error) IOStatus
+ 
+ // Flushes the write buffer for the GIOChannel.
+ func (x *IOChannel) Flush() (IOStatus, error) {
+ 	var cerr *Error
+ 
+-	cret := xIOChannelFlush(x.GoPointer())
++	cret := xIOChannelFlush(x.GoPointer(), &cerr)
+ 	if cerr == nil {
+ 		return cret, nil
+ 	}
+diff --git a/v4/glib/gmarkup.go b/v4/glib/gmarkup.go
+index 06235d319f0b4fd5a92cde6dd77ddf59ca474f85..193ea12b8f3793f51ba2df1adc5fe9a63e38a853 100644
+--- a/v4/glib/gmarkup.go
++++ b/v4/glib/gmarkup.go
+@@ -41,7 +41,7 @@ 	cret := xNewMarkupParseContext(ParserVar, FlagsVar, UserDataVar, NewCallback(UserDataDnotifyVar))
+ 	return cret
+ }
+ 
+-var xMarkupParseContextEndParse func(uintptr) bool
++var xMarkupParseContextEndParse func(uintptr, **Error) bool
+ 
+ // Signals to the #GMarkupParseContext that all data has been
+ // fed into the parse context with g_markup_parse_context_parse().
+@@ -51,7 +51,7 @@ // for example if elements are still open.
+ func (x *MarkupParseContext) EndParse() (bool, error) {
+ 	var cerr *Error
+ 
+-	cret := xMarkupParseContextEndParse(x.GoPointer())
++	cret := xMarkupParseContextEndParse(x.GoPointer(), &cerr)
+ 	if cerr == nil {
+ 		return cret, nil
+ 	}
+diff --git a/v4/glib/gregex.go b/v4/glib/gregex.go
+index 6f93b7c5ef32595c67ee18cbfa1dd42874926762..5f1c031b3e86d91fe0d0c406bf687179ce314e88 100644
+--- a/v4/glib/gregex.go
++++ b/v4/glib/gregex.go
+@@ -442,7 +442,7 @@ 	cret := xMatchInfoMatches(x.GoPointer())
+ 	return cret
+ }
+ 
+-var xMatchInfoNext func(uintptr) bool
++var xMatchInfoNext func(uintptr, **Error) bool
+ 
+ // Scans for the next match using the same parameters of the previous
+ // call to g_regex_match_full() or g_regex_match() that returned
+@@ -453,7 +453,7 @@ // cannot free it before calling this function.
+ func (x *MatchInfo) Next() (bool, error) {
+ 	var cerr *Error
+ 
+-	cret := xMatchInfoNext(x.GoPointer())
++	cret := xMatchInfoNext(x.GoPointer(), &cerr)
+ 	if cerr == nil {
+ 		return cret, nil
+ 	}
+diff --git a/v4/glib/gvarianttype.go b/v4/glib/gvarianttype.go
+index 103bee12393a8780928c6f0443aee30c420748e0..73b741c6cf2d26750913ca3565c061c43079eee3 100644
+--- a/v4/glib/gvarianttype.go
++++ b/v4/glib/gvarianttype.go
+@@ -175,7 +175,6 @@ //
+ //     The first type (the basic type) is the key type and the second type is
+ //     the value type. The reason that the first type is restricted to being a
+ //     basic type is so that it can easily be hashed.
+-//
+ //   - `*`: the type string of `G_VARIANT_TYPE_ANY`; the indefinite type that is
+ //     a supertype of all types.  Note that, as with all type strings, this
+ //     character represents exactly one type. It cannot be used inside of tuples
+diff --git a/v4/gtk/gtkprintjob.go b/v4/gtk/gtkprintjob.go
+index ee3ce66a84a43a6399bb813c2e0dc0acf3045115..bff97bca7a4df17825bbb1a7306a6c1104cf546f 100644
+--- a/v4/gtk/gtkprintjob.go
++++ b/v4/gtk/gtkprintjob.go
+@@ -181,14 +181,14 @@ 	cret := xPrintJobGetStatus(x.GoPointer())
+ 	return cret
+ }
+ 
+-var xPrintJobGetSurface func(uintptr) *cairo.Surface
++var xPrintJobGetSurface func(uintptr, **glib.Error) *cairo.Surface
+ 
+ // Gets a cairo surface onto which the pages of
+ // the print job should be rendered.
+ func (x *PrintJob) GetSurface() (*cairo.Surface, error) {
+ 	var cerr *glib.Error
+ 
+-	cret := xPrintJobGetSurface(x.GoPointer())
++	cret := xPrintJobGetSurface(x.GoPointer(), &cerr)
+ 	if cerr == nil {
+ 		return cret, nil
+ 	}
+diff --git a/v4/gtk/gtkprintoperation.go b/v4/gtk/gtkprintoperation.go
+index ff4bda21fca0a85c7d938743062d5a94717fb8bc..c6442336a140cd7a1da5b94dff928d78d59d52d4 100644
+--- a/v4/gtk/gtkprintoperation.go
++++ b/v4/gtk/gtkprintoperation.go
+@@ -673,7 +673,7 @@ 	cret := xPrintOperationGetEmbedPageSetup(x.GoPointer())
+ 	return cret
+ }
+ 
+-var xPrintOperationGetError func(uintptr)
++var xPrintOperationGetError func(uintptr, **glib.Error)
+ 
+ // Call this when the result of a print operation is
+ // %GTK_PRINT_OPERATION_RESULT_ERROR.
+@@ -686,7 +686,7 @@ // The returned `GError` will contain more details on what went wrong.
+ func (x *PrintOperation) GetError() error {
+ 	var cerr *glib.Error
+ 
+-	xPrintOperationGetError(x.GoPointer())
++	xPrintOperationGetError(x.GoPointer(), &cerr)
+ 	if cerr == nil {
+ 		return nil
+ 	}
+diff --git a/v4/gtk/gtkrecentmanager.go b/v4/gtk/gtkrecentmanager.go
+index 50469624ea5ff7c8e0bcba1704aa055d65a91776..a319a01b991042c4ccfde52933200f54a398f962 100644
+--- a/v4/gtk/gtkrecentmanager.go
++++ b/v4/gtk/gtkrecentmanager.go
+@@ -676,13 +676,13 @@ 	}
+ 	return cret, cerr
+ }
+ 
+-var xRecentManagerPurgeItems func(uintptr) int32
++var xRecentManagerPurgeItems func(uintptr, **glib.Error) int32
+ 
+ // Purges every item from the recently used resources list.
+ func (x *RecentManager) PurgeItems() (int32, error) {
+ 	var cerr *glib.Error
+ 
+-	cret := xRecentManagerPurgeItems(x.GoPointer())
++	cret := xRecentManagerPurgeItems(x.GoPointer(), &cerr)
+ 	if cerr == nil {
+ 		return cret, nil
+ 	}
+
