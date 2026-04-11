@@ -1,0 +1,2976 @@
+From df53889206359f6016a40beacc11e320dc44ef15 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Fri, 10 Apr 2026 23:48:53 -0700
+Subject: [PATCH] GIR: Initial implementation of moving go fmt into the process
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/examples/mylib-gtk-meson-go/gen.sh b/examples/mylib-gtk-meson-go/gen.sh
+index 827d394cac92a3e529c2ff62a9d5726c6c6eb360..d9d8960a9807d14b4d1c2aae693a13d2702c82fc 100755
+--- a/examples/mylib-gtk-meson-go/gen.sh
++++ b/examples/mylib-gtk-meson-go/gen.sh
+@@ -11,9 +11,6 @@ echo "making sure imports are correct..."
+ GOPATH="$tmp" goimports --srcdir . -w . || { rm -r "$tmp"; exit 1; }
+ rm -r "$tmp"
+ 
+-echo "formatting files..."
+-go fmt "./..."
+-
+ echo "running a second pass for goimports..."
+ goimports -w .
+ 
+diff --git a/gen.sh b/gen.sh
+index ea455cfb47f7f1930dfa32b6837cd3597ca42270..a2c0617626c09d33994351364cde493f36c53ab6 100755
+--- a/gen.sh
++++ b/gen.sh
+@@ -11,9 +11,6 @@ echo "making sure imports are correct..."
+ GOPATH="$tmp" goimports --srcdir . -w v4 || { rm -r "$tmp"; exit 1; }
+ rm -r "$tmp"
+ 
+-echo "formatting files..."
+-gofumpt -w v4 || go fmt "codeberg.org/puregotk/puregotk/v4/..."
+-
+ echo "running a second pass for goimports..."
+ goimports -w v4
+ 
+diff --git a/go.mod b/go.mod
+index 6998951bae5f054fa86157134f376ae544b06cff..728696bfc209003c845acdea870b8fb599fcdad0 100644
+--- a/go.mod
++++ b/go.mod
+@@ -1,7 +1,15 @@
+ module codeberg.org/puregotk/puregotk
+ 
+-go 1.23.0
++go 1.24.0
+ 
+ toolchain go1.24.5
+ 
+-require codeberg.org/puregotk/purego v0.0.0-20260224095105-2513c838cb80
++require (
++	codeberg.org/puregotk/purego v0.0.0-20260224095105-2513c838cb80
++	mvdan.cc/gofumpt v0.9.2
++)
++
++require (
++	github.com/google/go-cmp v0.7.0 // indirect
++	golang.org/x/tools v0.38.0 // indirect
++)
+diff --git a/go.sum b/go.sum
+index e3ada5c4a2e6bc5286773a5b52593c49375130aa..c5e7944ba77223e72649ed2e46b15761baf1decc 100644
+--- a/go.sum
++++ b/go.sum
+@@ -1,2 +1,16 @@
+ codeberg.org/puregotk/purego v0.0.0-20260224095105-2513c838cb80 h1:y5ZxMLLOjl4xc2tBl02olxZQ06xbbKiR+2ipBfDrVcs=
+ codeberg.org/puregotk/purego v0.0.0-20260224095105-2513c838cb80/go.mod h1:hVVM4ddvYRlc3IcK3CXJPlMwd/vaLj7gdDBZ6oPgT8w=
++github.com/go-quicktest/qt v1.101.0 h1:O1K29Txy5P2OK0dGo59b7b0LR6wKfIhttaAhHUyn7eI=
++github.com/go-quicktest/qt v1.101.0/go.mod h1:14Bz/f7NwaXPtdYEgzsx46kqSxVwTbzVZsDC26tQJow=
++github.com/google/go-cmp v0.7.0 h1:wk8382ETsv4JYUZwIsn6YpYiWiBsYLSJiTsyBybVuN8=
++github.com/google/go-cmp v0.7.0/go.mod h1:pXiqmnSA92OHEEa9HXL2W4E7lf9JzCmGVUdgjX3N/iU=
++github.com/kr/pretty v0.3.1 h1:flRD4NNwYAUpkphVc1HcthR4KEIFJ65n8Mw5qdRn3LE=
++github.com/kr/pretty v0.3.1/go.mod h1:hoEshYVHaxMs3cyo3Yncou5ZscifuDolrwPKZanG3xk=
++github.com/kr/text v0.2.0 h1:5Nx0Ya0ZqY2ygV366QzturHI13Jq95ApcVaJBhpS+AY=
++github.com/kr/text v0.2.0/go.mod h1:eLer722TekiGuMkidMxC/pM04lWEeraHUUmBw8l2grE=
++github.com/rogpeppe/go-internal v1.14.1 h1:UQB4HGPB6osV0SQTLymcB4TgvyWu6ZyliaW0tI/otEQ=
++github.com/rogpeppe/go-internal v1.14.1/go.mod h1:MaRKkUm5W0goXpeCfT7UZI6fk/L7L7so1lCWt35ZSgc=
++golang.org/x/tools v0.38.0 h1:Hx2Xv8hISq8Lm16jvBZ2VQf+RLmbd7wVUsALibYI/IQ=
++golang.org/x/tools v0.38.0/go.mod h1:yEsQ/d/YK8cjh0L6rZlY8tgtlKiBNTL14pGDJPJpYQs=
++mvdan.cc/gofumpt v0.9.2 h1:zsEMWL8SVKGHNztrx6uZrXdp7AX8r421Vvp23sz7ik4=
++mvdan.cc/gofumpt v0.9.2/go.mod h1:iB7Hn+ai8lPvofHd9ZFGVg2GOr8sBUw1QUWjNbmIL/s=
+diff --git a/internal/gir/pass/pass.go b/internal/gir/pass/pass.go
+index 7a1e959736f934df1922481171108c0d0674a515..b88304db9ca1797abfb28abd1419880a056507b8 100644
+--- a/internal/gir/pass/pass.go
++++ b/internal/gir/pass/pass.go
+@@ -4,14 +4,18 @@ // the second pass uses the basic type information to go over the gir files again and convert it to go files
+ package pass
+ 
+ import (
++	"bytes"
+ 	"encoding/xml"
+ 	"fmt"
++	"log"
+ 	"os"
++	"path/filepath"
+ 	"strings"
+ 	"text/template"
+ 
+ 	"codeberg.org/puregotk/puregotk/internal/gir/types"
+ 	"codeberg.org/puregotk/puregotk/internal/gir/util"
++	gofumpt "mvdan.cc/gofumpt/format"
+ )
+ 
+ type Pass struct {
+@@ -455,15 +459,17 @@ 		}
+ 
+ 		os.MkdirAll(fmt.Sprintf(dir+"/%s", pkgName), 0o755)
+ 
+-		f, err := os.Create(fmt.Sprintf(dir+"/%s/%s", pkgName, fn))
++		var buf bytes.Buffer
++		err := gotemp.Execute(&buf, args)
+ 		if err != nil {
+ 			panic(err)
+ 		}
+-		err = gotemp.Execute(f, args)
++
++		filePath := fmt.Sprintf(dir+"/%s/%s", pkgName, fn)
++		err = os.WriteFile(filePath, buf.Bytes(), 0o644)
+ 		if err != nil {
+ 			panic(err)
+ 		}
+-
+ 	}
+ }
+ 
+@@ -471,4 +477,22 @@ func (p *Pass) Second(dir string, gotemp *template.Template) {
+ 	for _, r := range p.Parsed {
+ 		p.writeGo(r, gotemp, dir)
+ 	}
++
++	// Format all output files in-process with gofumpt
++	filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
++		if err != nil || info.IsDir() || !strings.HasSuffix(path, ".go") {
++			return nil
++		}
++		src, err := os.ReadFile(path)
++		if err != nil {
++			return nil
++		}
++		src, err = gofumpt.Source(src, gofumpt.Options{})
++		if err != nil {
++			log.Printf("warning: gofumpt %s: %v", path, err)
++			return nil
++		}
++		os.WriteFile(path, src, 0o644)
++		return nil
++	})
+ }
+diff --git a/v4/gdkpixbuf/gdk-pixbuf-core.go b/v4/gdkpixbuf/gdk-pixbuf-core.go
+index 453d879858f781610c31d429b083ee75d4a847b4..609315531856c2ed8514c02e87e5b3c4bc73b936 100644
+--- a/v4/gdkpixbuf/gdk-pixbuf-core.go
++++ b/v4/gdkpixbuf/gdk-pixbuf-core.go
+@@ -13,17 +13,18 @@ // The gdk_pixbuf_new_from_data() function lets you pass in a pre-allocated
+ // pixel array so that a pixbuf can be created from it; in this case you
+ // will need to pass in a function of type `GdkPixbufDestroyNotify` so that
+ // the pixel data can be freed when the pixbuf is finalized.
+-type PixbufDestroyNotify func([]byte, uintptr)
+-
+-// Save functions used by [method@GdkPixbuf.Pixbuf.save_to_callback].
+-//
+-// This function is called once for each block of bytes that is "written"
+-// by `gdk_pixbuf_save_to_callback()`.
+-//
+-// If successful it should return `TRUE`; if an error occurs it should set
+-// `error` and return `FALSE`, in which case `gdk_pixbuf_save_to_callback()`
+-// will fail with the same error.
+-type PixbufSaveFunc func([]byte, uint, **glib.Error, uintptr) bool
++type (
++	PixbufDestroyNotify func([]byte, uintptr)
++	// Save functions used by [method@GdkPixbuf.Pixbuf.save_to_callback].
++	//
++	// This function is called once for each block of bytes that is "written"
++	// by `gdk_pixbuf_save_to_callback()`.
++	//
++	// If successful it should return `TRUE`; if an error occurs it should set
++	// `error` and return `FALSE`, in which case `gdk_pixbuf_save_to_callback()`
++	// will fail with the same error.
++	PixbufSaveFunc func([]byte, uint, **glib.Error, uintptr) bool
++)
+ 
+ // This enumeration defines the color spaces that are supported by
+ // the gdk-pixbuf library.
+diff --git a/v4/gdkpixbuf/gdk-pixbuf-io.go b/v4/gdkpixbuf/gdk-pixbuf-io.go
+index e357a250b23c48cf96cc18fde122fc462eea082e..f7c0404820ebf8d909332e15c01ca68baec823c5 100644
+--- a/v4/gdkpixbuf/gdk-pixbuf-io.go
++++ b/v4/gdkpixbuf/gdk-pixbuf-io.go
+@@ -21,84 +21,73 @@ // The image loader should set up an internal state object, and return it
+ // from this function; the state object will then be updated from the
+ // [callback@GdkPixbuf.PixbufModuleIncrementLoadFunc] callback, and will be freed
+ // by [callback@GdkPixbuf.PixbufModuleStopLoadFunc] callback.
+-type PixbufModuleBeginLoadFunc func(uintptr, uintptr, uintptr, uintptr, **glib.Error) uintptr
+-
+-// Defines the type of the function used to fill a
+-// #GdkPixbufFormat structure with information about a module.
+-type PixbufModuleFillInfoFunc func(*PixbufFormat)
+-
+-// Defines the type of the function used to set the vtable of a
+-// #GdkPixbufModule when it is loaded.
+-type PixbufModuleFillVtableFunc func(*PixbufModule)
+-
+-// Incrementally loads a buffer into the image data.
+-type PixbufModuleIncrementLoadFunc func(uintptr, []byte, uint32, **glib.Error) bool
+-
+-// Loads a file from a standard C file stream into a new `GdkPixbufAnimation`.
+-//
+-// In case of error, this function should return `NULL` and set the `error` argument.
+-type PixbufModuleLoadAnimationFunc func(uintptr, **glib.Error) uintptr
+-
+-// Loads a file from a standard C file stream into a new `GdkPixbuf`.
+-//
+-// In case of error, this function should return `NULL` and set the `error` argument.
+-type PixbufModuleLoadFunc func(uintptr, **glib.Error) uintptr
+-
+-// Loads XPM data into a new `GdkPixbuf`.
+-type PixbufModuleLoadXpmDataFunc func([]string) uintptr
+-
+-// Defines the type of the function that gets called once the initial
+-// setup of @pixbuf is done.
+-//
+-// #GdkPixbufLoader uses a function of this type to emit the
+-// "&lt;link linkend="GdkPixbufLoader-area-prepared"&gt;area_prepared&lt;/link&gt;"
+-// signal.
+-type PixbufModulePreparedFunc func(uintptr, uintptr, uintptr)
+-
+-// Saves a `GdkPixbuf` by calling the provided function.
+-//
+-// The optional `option_keys` and `option_values` arrays contain the keys and
+-// values (in the same order) for attributes to be saved alongside the image
+-// data.
+-type PixbufModuleSaveCallbackFunc func(uintptr, uintptr, uintptr, []string, []string, **glib.Error) bool
+-
+-// Saves a `GdkPixbuf` into a standard C file stream.
+-//
+-// The optional `param_keys` and `param_values` arrays contain the keys and
+-// values (in the same order) for attributes to be saved alongside the image
+-// data.
+-type PixbufModuleSaveFunc func(uintptr, uintptr, []string, []string, **glib.Error) bool
+-
+-// Checks whether the given `option_key` is supported when saving.
+-type PixbufModuleSaveOptionSupportedFunc func(string) bool
+-
+-// Defines the type of the function that gets called once the size
+-// of the loaded image is known.
+-//
+-// The function is expected to set @width and @height to the desired
+-// size to which the image should be scaled. If a module has no efficient
+-// way to achieve the desired scaling during the loading of the image, it may
+-// either ignore the size request, or only approximate it - gdk-pixbuf will
+-// then perform the required scaling on the completely loaded image.
+-//
+-// If the function sets @width or @height to zero, the module should interpret
+-// this as a hint that it will be closed soon and shouldn't allocate further
+-// resources. This convention is used to implement gdk_pixbuf_get_file_info()
+-// efficiently.
+-type PixbufModuleSizeFunc func(int32, int32, uintptr)
+-
+-// Finalizes the image loading state.
+-//
+-// This function is called on success and error states.
+-type PixbufModuleStopLoadFunc func(uintptr, **glib.Error) bool
+-
+-// Defines the type of the function that gets called every time a region
+-// of @pixbuf is updated.
+-//
+-// #GdkPixbufLoader uses a function of this type to emit the
+-// "&lt;link linkend="GdkPixbufLoader-area-updated"&gt;area_updated&lt;/link&gt;"
+-// signal.
+-type PixbufModuleUpdatedFunc func(uintptr, int32, int32, int32, int32, uintptr)
++type (
++	PixbufModuleBeginLoadFunc func(uintptr, uintptr, uintptr, uintptr, **glib.Error) uintptr
++	// Defines the type of the function used to fill a
++	// #GdkPixbufFormat structure with information about a module.
++	PixbufModuleFillInfoFunc func(*PixbufFormat)
++	// Defines the type of the function used to set the vtable of a
++	// #GdkPixbufModule when it is loaded.
++	PixbufModuleFillVtableFunc func(*PixbufModule)
++	// Incrementally loads a buffer into the image data.
++	PixbufModuleIncrementLoadFunc func(uintptr, []byte, uint32, **glib.Error) bool
++	// Loads a file from a standard C file stream into a new `GdkPixbufAnimation`.
++	//
++	// In case of error, this function should return `NULL` and set the `error` argument.
++	PixbufModuleLoadAnimationFunc func(uintptr, **glib.Error) uintptr
++	// Loads a file from a standard C file stream into a new `GdkPixbuf`.
++	//
++	// In case of error, this function should return `NULL` and set the `error` argument.
++	PixbufModuleLoadFunc func(uintptr, **glib.Error) uintptr
++	// Loads XPM data into a new `GdkPixbuf`.
++	PixbufModuleLoadXpmDataFunc func([]string) uintptr
++	// Defines the type of the function that gets called once the initial
++	// setup of @pixbuf is done.
++	//
++	// #GdkPixbufLoader uses a function of this type to emit the
++	// "&lt;link linkend="GdkPixbufLoader-area-prepared"&gt;area_prepared&lt;/link&gt;"
++	// signal.
++	PixbufModulePreparedFunc func(uintptr, uintptr, uintptr)
++	// Saves a `GdkPixbuf` by calling the provided function.
++	//
++	// The optional `option_keys` and `option_values` arrays contain the keys and
++	// values (in the same order) for attributes to be saved alongside the image
++	// data.
++	PixbufModuleSaveCallbackFunc func(uintptr, uintptr, uintptr, []string, []string, **glib.Error) bool
++	// Saves a `GdkPixbuf` into a standard C file stream.
++	//
++	// The optional `param_keys` and `param_values` arrays contain the keys and
++	// values (in the same order) for attributes to be saved alongside the image
++	// data.
++	PixbufModuleSaveFunc func(uintptr, uintptr, []string, []string, **glib.Error) bool
++	// Checks whether the given `option_key` is supported when saving.
++	PixbufModuleSaveOptionSupportedFunc func(string) bool
++	// Defines the type of the function that gets called once the size
++	// of the loaded image is known.
++	//
++	// The function is expected to set @width and @height to the desired
++	// size to which the image should be scaled. If a module has no efficient
++	// way to achieve the desired scaling during the loading of the image, it may
++	// either ignore the size request, or only approximate it - gdk-pixbuf will
++	// then perform the required scaling on the completely loaded image.
++	//
++	// If the function sets @width or @height to zero, the module should interpret
++	// this as a hint that it will be closed soon and shouldn't allocate further
++	// resources. This convention is used to implement gdk_pixbuf_get_file_info()
++	// efficiently.
++	PixbufModuleSizeFunc func(int32, int32, uintptr)
++	// Finalizes the image loading state.
++	//
++	// This function is called on success and error states.
++	PixbufModuleStopLoadFunc func(uintptr, **glib.Error) bool
++	// Defines the type of the function that gets called every time a region
++	// of @pixbuf is updated.
++	//
++	// #GdkPixbufLoader uses a function of this type to emit the
++	// "&lt;link linkend="GdkPixbufLoader-area-updated"&gt;area_updated&lt;/link&gt;"
++	// signal.
++	PixbufModuleUpdatedFunc func(uintptr, int32, int32, int32, int32, uintptr)
++)
+ 
+ // A `GdkPixbufFormat` contains information about the image format accepted
+ // by a module.
+diff --git a/v4/gio/gdbusconnection.go b/v4/gio/gdbusconnection.go
+index cba4349fdf871d33cd5cc260f73cb4644248ea09..46b54f30eeee55d44b2ef9a4d8ded97e6eafe7b9 100644
+--- a/v4/gio/gdbusconnection.go
++++ b/v4/gio/gdbusconnection.go
+@@ -13,132 +13,118 @@ 	"codeberg.org/puregotk/puregotk/v4/gobject/types"
+ )
+ 
+ // The type of the @get_property function in #GDBusInterfaceVTable.
+-type DBusInterfaceGetPropertyFunc func(uintptr, string, string, string, string, **glib.Error, uintptr) *glib.Variant
+-
+-// The type of the @method_call function in #GDBusInterfaceVTable.
+-//
+-// @interface_name may be `NULL` if not specified by the sender, although it’s
+-// encouraged for the sender to set it. If unset, and the object has only one
+-// method (across all interfaces) matching @method_name, that method is invoked.
+-// Otherwise, behaviour is implementation defined. See the
+-// [D-Bus specification](https://dbus.freedesktop.org/doc/dbus-specification.html#message-protocol-types-method).
+-// It is recommended to return [error@Gio.DBusError.UNKNOWN_METHOD].
+-type DBusInterfaceMethodCallFunc func(uintptr, string, string, string, string, *glib.Variant, uintptr, uintptr)
+-
+-// The type of the @set_property function in #GDBusInterfaceVTable.
+-type DBusInterfaceSetPropertyFunc func(uintptr, string, string, string, string, *glib.Variant, **glib.Error, uintptr) bool
+-
+-// Signature for function used in g_dbus_connection_add_filter().
+-//
+-// A filter function is passed a #GDBusMessage and expected to return
+-// a #GDBusMessage too. Passive filter functions that don't modify the
+-// message can simply return the @message object:
+-// |[
+-// static GDBusMessage *
+-// passive_filter (GDBusConnection *connection
+-//
+-//	GDBusMessage    *message,
+-//	gboolean         incoming,
+-//	gpointer         user_data)
+-//
+-//	{
+-//	  // inspect @message
+-//	  return message;
+-//	}
+-//
+-// ]|
+-// Filter functions that wants to drop a message can simply return %NULL:
+-// |[
+-// static GDBusMessage *
+-// drop_filter (GDBusConnection *connection
+-//
+-//	GDBusMessage    *message,
+-//	gboolean         incoming,
+-//	gpointer         user_data)
+-//
+-//	{
+-//	  if (should_drop_message)
+-//	    {
+-//	      g_object_unref (message);
+-//	      message = NULL;
+-//	    }
+-//	  return message;
+-//	}
+-//
+-// ]|
+-// Finally, a filter function may modify a message by copying it:
+-// |[
+-// static GDBusMessage *
+-// modifying_filter (GDBusConnection *connection
+-//
+-//	GDBusMessage    *message,
+-//	gboolean         incoming,
+-//	gpointer         user_data)
+-//
+-//	{
+-//	  GDBusMessage *copy;
+-//	  GError *error;
+-//
+-//	  error = NULL;
+-//	  copy = g_dbus_message_copy (message, &amp;error);
+-//	  // handle @error being set
+-//	  g_object_unref (message);
+-//
+-//	  // modify @copy
+-//
+-//	  return copy;
+-//	}
+-//
+-// ]|
+-// If the returned #GDBusMessage is different from @message and cannot
+-// be sent on @connection (it could use features, such as file
+-// descriptors, not compatible with @connection), then a warning is
+-// logged to standard error. Applications can
+-// check this ahead of time using g_dbus_message_to_blob() passing a
+-// #GDBusCapabilityFlags value obtained from @connection.
+-type DBusMessageFilterFunction func(uintptr, uintptr, bool, uintptr) uintptr
+-
+-// Signature for callback function used in g_dbus_connection_signal_subscribe().
+-type DBusSignalCallback func(uintptr, string, string, string, string, *glib.Variant, uintptr)
+-
+-// The type of the @dispatch function in #GDBusSubtreeVTable.
+-//
+-// Subtrees are flat.  @node, if non-%NULL, is always exactly one
+-// segment of the object path (ie: it never contains a slash).
+-type DBusSubtreeDispatchFunc func(uintptr, string, string, string, string, uintptr, uintptr) *DBusInterfaceVTable
+-
+-// The type of the @enumerate function in #GDBusSubtreeVTable.
+-//
+-// This function is called when generating introspection data and also
+-// when preparing to dispatch incoming messages in the event that the
+-// %G_DBUS_SUBTREE_FLAGS_DISPATCH_TO_UNENUMERATED_NODES flag is not
+-// specified (ie: to verify that the object path is valid).
+-//
+-// Hierarchies are not supported; the items that you return should not
+-// contain the `/` character.
+-//
+-// The return value will be freed with g_strfreev().
+-type DBusSubtreeEnumerateFunc func(uintptr, string, string, uintptr) []string
+-
+-// The type of the @introspect function in #GDBusSubtreeVTable.
+-//
+-// Subtrees are flat.  @node, if non-%NULL, is always exactly one
+-// segment of the object path (ie: it never contains a slash).
+-//
+-// This function should return %NULL to indicate that there is no object
+-// at this node.
+-//
+-// If this function returns non-%NULL, the return value is expected to
+-// be a %NULL-terminated array of pointers to #GDBusInterfaceInfo
+-// structures describing the interfaces implemented by @node.  This
+-// array will have g_dbus_interface_info_unref() called on each item
+-// before being freed with g_free().
+-//
+-// The difference between returning %NULL and an array containing zero
+-// items is that the standard DBus interfaces will returned to the
+-// remote introspector in the empty array case, but not in the %NULL
+-// case.
+-type DBusSubtreeIntrospectFunc func(uintptr, string, string, string, uintptr) uintptr
++type (
++	DBusInterfaceGetPropertyFunc func(uintptr, string, string, string, string, **glib.Error, uintptr) *glib.Variant
++	// The type of the @method_call function in #GDBusInterfaceVTable.
++	//
++	// @interface_name may be `NULL` if not specified by the sender, although it’s
++	// encouraged for the sender to set it. If unset, and the object has only one
++	// method (across all interfaces) matching @method_name, that method is invoked.
++	// Otherwise, behaviour is implementation defined. See the
++	// [D-Bus specification](https://dbus.freedesktop.org/doc/dbus-specification.html#message-protocol-types-method).
++	// It is recommended to return [error@Gio.DBusError.UNKNOWN_METHOD].
++	DBusInterfaceMethodCallFunc func(uintptr, string, string, string, string, *glib.Variant, uintptr, uintptr)
++	// The type of the @set_property function in #GDBusInterfaceVTable.
++	DBusInterfaceSetPropertyFunc func(uintptr, string, string, string, string, *glib.Variant, **glib.Error, uintptr) bool
++	// Signature for function used in g_dbus_connection_add_filter().
++	//
++	// A filter function is passed a #GDBusMessage and expected to return
++	// a #GDBusMessage too. Passive filter functions that don't modify the
++	// message can simply return the @message object:
++	// |[
++	// static GDBusMessage *
++	// passive_filter (GDBusConnection *connection
++	//                 GDBusMessage    *message,
++	//                 gboolean         incoming,
++	//                 gpointer         user_data)
++	// {
++	//   // inspect @message
++	//   return message;
++	// }
++	// ]|
++	// Filter functions that wants to drop a message can simply return %NULL:
++	// |[
++	// static GDBusMessage *
++	// drop_filter (GDBusConnection *connection
++	//              GDBusMessage    *message,
++	//              gboolean         incoming,
++	//              gpointer         user_data)
++	// {
++	//   if (should_drop_message)
++	//     {
++	//       g_object_unref (message);
++	//       message = NULL;
++	//     }
++	//   return message;
++	// }
++	// ]|
++	// Finally, a filter function may modify a message by copying it:
++	// |[
++	// static GDBusMessage *
++	// modifying_filter (GDBusConnection *connection
++	//                   GDBusMessage    *message,
++	//                   gboolean         incoming,
++	//                   gpointer         user_data)
++	// {
++	//   GDBusMessage *copy;
++	//   GError *error;
++	//
++	//   error = NULL;
++	//   copy = g_dbus_message_copy (message, &amp;error);
++	//   // handle @error being set
++	//   g_object_unref (message);
++	//
++	//   // modify @copy
++	//
++	//   return copy;
++	// }
++	// ]|
++	// If the returned #GDBusMessage is different from @message and cannot
++	// be sent on @connection (it could use features, such as file
++	// descriptors, not compatible with @connection), then a warning is
++	// logged to standard error. Applications can
++	// check this ahead of time using g_dbus_message_to_blob() passing a
++	// #GDBusCapabilityFlags value obtained from @connection.
++	DBusMessageFilterFunction func(uintptr, uintptr, bool, uintptr) uintptr
++	// Signature for callback function used in g_dbus_connection_signal_subscribe().
++	DBusSignalCallback func(uintptr, string, string, string, string, *glib.Variant, uintptr)
++	// The type of the @dispatch function in #GDBusSubtreeVTable.
++	//
++	// Subtrees are flat.  @node, if non-%NULL, is always exactly one
++	// segment of the object path (ie: it never contains a slash).
++	DBusSubtreeDispatchFunc func(uintptr, string, string, string, string, uintptr, uintptr) *DBusInterfaceVTable
++	// The type of the @enumerate function in #GDBusSubtreeVTable.
++	//
++	// This function is called when generating introspection data and also
++	// when preparing to dispatch incoming messages in the event that the
++	// %G_DBUS_SUBTREE_FLAGS_DISPATCH_TO_UNENUMERATED_NODES flag is not
++	// specified (ie: to verify that the object path is valid).
++	//
++	// Hierarchies are not supported; the items that you return should not
++	// contain the `/` character.
++	//
++	// The return value will be freed with g_strfreev().
++	DBusSubtreeEnumerateFunc func(uintptr, string, string, uintptr) []string
++	// The type of the @introspect function in #GDBusSubtreeVTable.
++	//
++	// Subtrees are flat.  @node, if non-%NULL, is always exactly one
++	// segment of the object path (ie: it never contains a slash).
++	//
++	// This function should return %NULL to indicate that there is no object
++	// at this node.
++	//
++	// If this function returns non-%NULL, the return value is expected to
++	// be a %NULL-terminated array of pointers to #GDBusInterfaceInfo
++	// structures describing the interfaces implemented by @node.  This
++	// array will have g_dbus_interface_info_unref() called on each item
++	// before being freed with g_free().
++	//
++	// The difference between returning %NULL and an array containing zero
++	// items is that the standard DBus interfaces will returned to the
++	// remote introspector in the empty array case, but not in the %NULL
++	// case.
++	DBusSubtreeIntrospectFunc func(uintptr, string, string, string, uintptr) uintptr
++)
+ 
+ // Virtual table for handling properties and method calls for a D-Bus
+ // interface.
+diff --git a/v4/gio/gdbusnameowning.go b/v4/gio/gdbusnameowning.go
+index e1b926d409d3f403c7ffb6a34a863e909e7a81d4..5c38133e5c44f85702dd08ae4e7abf3cc353587b 100644
+--- a/v4/gio/gdbusnameowning.go
++++ b/v4/gio/gdbusnameowning.go
+@@ -9,13 +9,13 @@ 	"codeberg.org/puregotk/puregotk/v4/gobject"
+ )
+ 
+ // Invoked when a connection to a message bus has been obtained.
+-type BusAcquiredCallback func(uintptr, string, uintptr)
+-
+-// Invoked when the name is acquired.
+-type BusNameAcquiredCallback func(uintptr, string, uintptr)
+-
+-// Invoked when the name is lost or @connection has been closed.
+-type BusNameLostCallback func(uintptr, string, uintptr)
++type (
++	BusAcquiredCallback func(uintptr, string, uintptr)
++	// Invoked when the name is acquired.
++	BusNameAcquiredCallback func(uintptr, string, uintptr)
++	// Invoked when the name is lost or @connection has been closed.
++	BusNameLostCallback func(uintptr, string, uintptr)
++)
+ 
+ var xBusOwnName func(BusType, string, BusNameOwnerFlags, uintptr, uintptr, uintptr, uintptr, uintptr) uint32
+ 
+diff --git a/v4/gio/gdbusnamewatching.go b/v4/gio/gdbusnamewatching.go
+index f7f8f581046b2c1e6640b74f3069e012d50030e3..8cd707a70c851ec9aaf2218ef109c5b6b5ad4a9c 100644
+--- a/v4/gio/gdbusnamewatching.go
++++ b/v4/gio/gdbusnamewatching.go
+@@ -9,14 +9,15 @@ 	"codeberg.org/puregotk/puregotk/v4/gobject"
+ )
+ 
+ // Invoked when the name being watched is known to have to have an owner.
+-type BusNameAppearedCallback func(uintptr, string, string, uintptr)
+-
+-// Invoked when the name being watched is known not to have to have an owner.
+-//
+-// This is also invoked when the #GDBusConnection on which the watch was
+-// established has been closed.  In that case, @connection will be
+-// %NULL.
+-type BusNameVanishedCallback func(uintptr, string, uintptr)
++type (
++	BusNameAppearedCallback func(uintptr, string, string, uintptr)
++	// Invoked when the name being watched is known not to have to have an owner.
++	//
++	// This is also invoked when the #GDBusConnection on which the watch was
++	// established has been closed.  In that case, @connection will be
++	// %NULL.
++	BusNameVanishedCallback func(uintptr, string, uintptr)
++)
+ 
+ var xBusUnwatchName func(uint32)
+ 
+diff --git a/v4/gio/giotypes.go b/v4/gio/giotypes.go
+index 4a99779377668885f0dab1ba921e0e50116fe5d4..fbac6c84b3f7bed8b781d9a067813a6b0cda4905 100644
+--- a/v4/gio/giotypes.go
++++ b/v4/gio/giotypes.go
+@@ -24,83 +24,75 @@ //
+ // The asynchronous operation is guaranteed to have held a reference to
+ // @source_object from the time when the `*_async()` function was called, until
+ // after this callback returns.
+-type AsyncReadyCallback func(uintptr, uintptr, uintptr)
+-
+-// This is the function type of the callback used for the #GSource
+-// returned by g_cancellable_source_new().
+-type CancellableSourceFunc func(uintptr, uintptr) bool
+-
+-// Function signature for a function used to determine the #GType to
+-// use for an interface proxy (if @interface_name is not %NULL) or
+-// object proxy (if @interface_name is %NULL).
+-//
+-// This function is called in the thread-default main context
+-// (see [method@GLib.MainContext.push_thread_default])
+-// that @manager was constructed in.
+-type DBusProxyTypeFunc func(uintptr, string, string, uintptr) types.GType
+-
+-// This is the function type of the callback used for the #GSource
+-// returned by g_datagram_based_create_source().
+-type DatagramBasedSourceFunc func(uintptr, glib.IOCondition, uintptr) bool
+-
+-// This callback type is used by g_file_measure_disk_usage() to make
+-// periodic progress reports when measuring the amount of disk spaced
+-// used by a directory.
+-//
+-// These calls are made on a best-effort basis and not all types of
+-// #GFile will support them.  At the minimum, however, one call will
+-// always be made immediately.
+-//
+-// In the case that there is no support, @reporting will be set to
+-// %FALSE (and the other values undefined) and no further calls will be
+-// made.  Otherwise, the @reporting will be %TRUE and the other values
+-// all-zeros during the first (immediate) call.  In this way, you can
+-// know which type of progress UI to show without a delay.
+-//
+-// For g_file_measure_disk_usage() the callback is made directly.  For
+-// g_file_measure_disk_usage_async() the callback is made via the
+-// default main context of the calling thread (ie: the same way that the
+-// final async result would be reported).
+-//
+-// @current_size is in the same units as requested by the operation (see
+-// %G_FILE_MEASURE_APPARENT_SIZE).
+-//
+-// The frequency of the updates is implementation defined, but is
+-// ideally about once every 200ms.
+-//
+-// The last progress callback may or may not be equal to the final
+-// result.  Always check the async result to get the final value.
+-type FileMeasureProgressCallback func(bool, uint64, uint64, uint64, uintptr)
+-
+-// When doing file operations that may take a while, such as moving
+-// a file or copying a file, a progress callback is used to pass how
+-// far along that operation is to the application.
+-type FileProgressCallback func(int64, int64, uintptr)
+-
+-// When loading the partial contents of a file with g_file_load_partial_contents_async(),
+-// it may become necessary to determine if any more data from the file should be loaded.
+-// A #GFileReadMoreCallback function facilitates this by returning %TRUE if more data
+-// should be read, or %FALSE otherwise.
+-type FileReadMoreCallback func(string, int64, uintptr) bool
+-
+-// I/O Job function.
+-//
+-// Long-running jobs should periodically check the @cancellable
+-// to see if they have been cancelled.
+-type IOSchedulerJobFunc func(*IOSchedulerJob, uintptr, uintptr) bool
+-
+-// This is the function type of the callback used for the #GSource
+-// returned by g_pollable_input_stream_create_source() and
+-// g_pollable_output_stream_create_source().
+-type PollableSourceFunc func(uintptr, uintptr) bool
+-
+-// Simple thread function that runs an asynchronous operation and
+-// checks for cancellation.
+-type SimpleAsyncThreadFunc func(uintptr, uintptr, uintptr)
+-
+-// This is the function type of the callback used for the #GSource
+-// returned by g_socket_create_source().
+-type SocketSourceFunc func(uintptr, glib.IOCondition, uintptr) bool
++type (
++	AsyncReadyCallback func(uintptr, uintptr, uintptr)
++	// This is the function type of the callback used for the #GSource
++	// returned by g_cancellable_source_new().
++	CancellableSourceFunc func(uintptr, uintptr) bool
++	// Function signature for a function used to determine the #GType to
++	// use for an interface proxy (if @interface_name is not %NULL) or
++	// object proxy (if @interface_name is %NULL).
++	//
++	// This function is called in the thread-default main context
++	// (see [method@GLib.MainContext.push_thread_default])
++	// that @manager was constructed in.
++	DBusProxyTypeFunc func(uintptr, string, string, uintptr) types.GType
++	// This is the function type of the callback used for the #GSource
++	// returned by g_datagram_based_create_source().
++	DatagramBasedSourceFunc func(uintptr, glib.IOCondition, uintptr) bool
++	// This callback type is used by g_file_measure_disk_usage() to make
++	// periodic progress reports when measuring the amount of disk spaced
++	// used by a directory.
++	//
++	// These calls are made on a best-effort basis and not all types of
++	// #GFile will support them.  At the minimum, however, one call will
++	// always be made immediately.
++	//
++	// In the case that there is no support, @reporting will be set to
++	// %FALSE (and the other values undefined) and no further calls will be
++	// made.  Otherwise, the @reporting will be %TRUE and the other values
++	// all-zeros during the first (immediate) call.  In this way, you can
++	// know which type of progress UI to show without a delay.
++	//
++	// For g_file_measure_disk_usage() the callback is made directly.  For
++	// g_file_measure_disk_usage_async() the callback is made via the
++	// default main context of the calling thread (ie: the same way that the
++	// final async result would be reported).
++	//
++	// @current_size is in the same units as requested by the operation (see
++	// %G_FILE_MEASURE_APPARENT_SIZE).
++	//
++	// The frequency of the updates is implementation defined, but is
++	// ideally about once every 200ms.
++	//
++	// The last progress callback may or may not be equal to the final
++	// result.  Always check the async result to get the final value.
++	FileMeasureProgressCallback func(bool, uint64, uint64, uint64, uintptr)
++	// When doing file operations that may take a while, such as moving
++	// a file or copying a file, a progress callback is used to pass how
++	// far along that operation is to the application.
++	FileProgressCallback func(int64, int64, uintptr)
++	// When loading the partial contents of a file with g_file_load_partial_contents_async(),
++	// it may become necessary to determine if any more data from the file should be loaded.
++	// A #GFileReadMoreCallback function facilitates this by returning %TRUE if more data
++	// should be read, or %FALSE otherwise.
++	FileReadMoreCallback func(string, int64, uintptr) bool
++	// I/O Job function.
++	//
++	// Long-running jobs should periodically check the @cancellable
++	// to see if they have been cancelled.
++	IOSchedulerJobFunc func(*IOSchedulerJob, uintptr, uintptr) bool
++	// This is the function type of the callback used for the #GSource
++	// returned by g_pollable_input_stream_create_source() and
++	// g_pollable_output_stream_create_source().
++	PollableSourceFunc func(uintptr, uintptr) bool
++	// Simple thread function that runs an asynchronous operation and
++	// checks for cancellation.
++	SimpleAsyncThreadFunc func(uintptr, uintptr, uintptr)
++	// This is the function type of the callback used for the #GSource
++	// returned by g_socket_create_source().
++	SocketSourceFunc func(uintptr, glib.IOCondition, uintptr) bool
++)
+ 
+ // Determines if a string matches a file attribute.
+ type FileAttributeMatcher struct {
+diff --git a/v4/gio/gsettings.go b/v4/gio/gsettings.go
+index cf9f14389a776322626bf1c3d8c743ec79d2d086..8cc09384d8bc95b2dfa5f6edcb23f789b0fc69ec 100644
+--- a/v4/gio/gsettings.go
++++ b/v4/gio/gsettings.go
+@@ -16,23 +16,23 @@ // The type for the function that is used to convert from [class@Gio.Settings]
+ // to an object property.
+ //
+ // The @value is already initialized to hold values of the appropriate type.
+-type SettingsBindGetMapping func(*gobject.Value, *glib.Variant, uintptr) bool
+-
+-// The type for the function that is used to convert an object property
+-// value to a [struct@GLib.Variant] for storing it in [class@Gio.Settings].
+-type SettingsBindSetMapping func(*gobject.Value, *glib.VariantType, uintptr) *glib.Variant
+-
+-// The type of the function that is used to convert from a value stored
+-// in a [class@Gio.Settings] to a value that is useful to the application.
+-//
+-// If the value is successfully mapped, the result should be stored at
+-// @result and true returned.  If mapping fails (for example, if @value
+-// is not in the right format) then false should be returned.
+-//
+-// If @value is `NULL` then it means that the mapping function is being
+-// given a ‘last chance’ to successfully return a valid value.  True
+-// must be returned in this case.
+-type SettingsGetMapping func(*glib.Variant, *uintptr, uintptr) bool
++type (
++	SettingsBindGetMapping func(*gobject.Value, *glib.Variant, uintptr) bool
++	// The type for the function that is used to convert an object property
++	// value to a [struct@GLib.Variant] for storing it in [class@Gio.Settings].
++	SettingsBindSetMapping func(*gobject.Value, *glib.VariantType, uintptr) *glib.Variant
++	// The type of the function that is used to convert from a value stored
++	// in a [class@Gio.Settings] to a value that is useful to the application.
++	//
++	// If the value is successfully mapped, the result should be stored at
++	// @result and true returned.  If mapping fails (for example, if @value
++	// is not in the right format) then false should be returned.
++	//
++	// If @value is `NULL` then it means that the mapping function is being
++	// given a ‘last chance’ to successfully return a valid value.  True
++	// must be returned in this case.
++	SettingsGetMapping func(*glib.Variant, *uintptr, uintptr) bool
++)
+ 
+ type SettingsClass struct {
+ 	_ structs.HostLayout
+diff --git a/v4/glib/gcache.go b/v4/glib/gcache.go
+index 46218a0f8daf7a73d387e1403c137cec77a8c112..d9dfc51142679dff50bb69bf532377e870116630 100644
+--- a/v4/glib/gcache.go
++++ b/v4/glib/gcache.go
+@@ -13,18 +13,18 @@ // Specifies the type of the @value_destroy_func and @key_destroy_func
+ // functions passed to g_cache_new(). The functions are passed a
+ // pointer to the #GCache key or #GCache value and should free any
+ // memory and other resources associated with it.
+-type CacheDestroyFunc func(uintptr)
+-
+-// Specifies the type of the @key_dup_func function passed to
+-// g_cache_new(). The function is passed a key
+-// (__not__ a value as the prototype implies) and
+-// should return a duplicate of the key.
+-type CacheDupFunc func(uintptr) uintptr
+-
+-// Specifies the type of the @value_new_func function passed to
+-// g_cache_new(). It is passed a #GCache key and should create the
+-// value corresponding to the key.
+-type CacheNewFunc func(uintptr) uintptr
++type (
++	CacheDestroyFunc func(uintptr)
++	// Specifies the type of the @key_dup_func function passed to
++	// g_cache_new(). The function is passed a key
++	// (__not__ a value as the prototype implies) and
++	// should return a duplicate of the key.
++	CacheDupFunc func(uintptr) uintptr
++	// Specifies the type of the @value_new_func function passed to
++	// g_cache_new(). It is passed a #GCache key and should create the
++	// value corresponding to the key.
++	CacheNewFunc func(uintptr) uintptr
++)
+ 
+ // A `GCache` allows sharing of complex data structures, in order to
+ // save system resources.
+diff --git a/v4/glib/gcompletion.go b/v4/glib/gcompletion.go
+index 52ba17ac31c3d24af6ccae94ffd1ce04e71506cd..cd769d23f0ed19084319e7722c1fca8e3e930f5d 100644
+--- a/v4/glib/gcompletion.go
++++ b/v4/glib/gcompletion.go
+@@ -12,12 +12,13 @@
+ // Specifies the type of the function passed to g_completion_new(). It
+ // should return the string corresponding to the given target item.
+ // This is used when you use data structures as #GCompletion items.
+-type CompletionFunc func(uintptr) string
+-
+-// Specifies the type of the function passed to
+-// g_completion_set_compare(). This is used when you use strings as
+-// #GCompletion items.
+-type CompletionStrncmpFunc func(string, string, uint) int32
++type (
++	CompletionFunc func(uintptr) string
++	// Specifies the type of the function passed to
++	// g_completion_set_compare(). This is used when you use strings as
++	// #GCompletion items.
++	CompletionStrncmpFunc func(string, string, uint) int32
++)
+ 
+ // `GCompletion` provides support for automatic completion of a string
+ // using any group of target strings. It is typically used for file
+diff --git a/v4/glib/gdataset.go b/v4/glib/gdataset.go
+index 9796febc36b24317c2e6ae08061862e6e3898045..f3f012bfd5147f6e914d52b73b684df36c58e478 100644
+--- a/v4/glib/gdataset.go
++++ b/v4/glib/gdataset.go
+@@ -12,13 +12,14 @@
+ // Specifies the type of function passed to g_dataset_foreach(). It is
+ // called with each #GQuark id and associated data element, together
+ // with the @user_data parameter supplied to g_dataset_foreach().
+-type DataForeachFunc func(Quark, uintptr, uintptr)
+-
+-// The type of functions that are used to 'duplicate' an object.
+-// What this means depends on the context, it could just be
+-// incrementing the reference count, if @data is a ref-counted
+-// object.
+-type DuplicateFunc func(uintptr, uintptr) uintptr
++type (
++	DataForeachFunc func(Quark, uintptr, uintptr)
++	// The type of functions that are used to 'duplicate' an object.
++	// What this means depends on the context, it could just be
++	// incrementing the reference count, if @data is a ref-counted
++	// object.
++	DuplicateFunc func(uintptr, uintptr) uintptr
++)
+ 
+ // An opaque data structure that represents a keyed data list.
+ //
+diff --git a/v4/glib/gerror.go b/v4/glib/gerror.go
+index f17c785d8c887f043508fbf3b7fd0b894233b10b..285ffbf569af10f82ed6e0095839869a7ab6345e 100644
+--- a/v4/glib/gerror.go
++++ b/v4/glib/gerror.go
+@@ -16,26 +16,26 @@ // freed, and should free the error's private data fields.
+ //
+ // Normally, it is better to use G_DEFINE_EXTENDED_ERROR(), as it
+ // already takes care of getting the private data from @error.
+-type ErrorClearFunc func(*Error)
+-
+-// Specifies the type of function which is called when an extended
+-// error instance is copied. It is passed the pointer to the
+-// destination error and source error, and should copy only the fields
+-// of the private data from @src_error to @dest_error.
+-//
+-// Normally, it is better to use G_DEFINE_EXTENDED_ERROR(), as it
+-// already takes care of getting the private data from @src_error and
+-// @dest_error.
+-type ErrorCopyFunc func(*Error, *Error)
+-
+-// Specifies the type of function which is called just after an
+-// extended error instance is created and its fields filled. It should
+-// only initialize the fields in the private data, which can be
+-// received with the generated `*_get_private()` function.
+-//
+-// Normally, it is better to use G_DEFINE_EXTENDED_ERROR(), as it
+-// already takes care of getting the private data from @error.
+-type ErrorInitFunc func(*Error)
++type (
++	ErrorClearFunc func(*Error)
++	// Specifies the type of function which is called when an extended
++	// error instance is copied. It is passed the pointer to the
++	// destination error and source error, and should copy only the fields
++	// of the private data from @src_error to @dest_error.
++	//
++	// Normally, it is better to use G_DEFINE_EXTENDED_ERROR(), as it
++	// already takes care of getting the private data from @src_error and
++	// @dest_error.
++	ErrorCopyFunc func(*Error, *Error)
++	// Specifies the type of function which is called just after an
++	// extended error instance is created and its fields filled. It should
++	// only initialize the fields in the private data, which can be
++	// received with the generated `*_get_private()` function.
++	//
++	// Normally, it is better to use G_DEFINE_EXTENDED_ERROR(), as it
++	// already takes care of getting the private data from @error.
++	ErrorInitFunc func(*Error)
++)
+ 
+ // The `GError` structure contains information about
+ // an error that has occurred.
+diff --git a/v4/glib/ghook.go b/v4/glib/ghook.go
+index 10be54791cc695a102e6cc64643dff0767760b38..24e6ac72c11d8aa9699667ffd70fdbfb8b406850 100644
+--- a/v4/glib/ghook.go
++++ b/v4/glib/ghook.go
+@@ -11,28 +11,24 @@ )
+ 
+ // Defines the type of a hook function that can be invoked
+ // by g_hook_list_invoke_check().
+-type HookCheckFunc func(uintptr) bool
+-
+-// Defines the type of function used by g_hook_list_marshal_check().
+-type HookCheckMarshaller func(*Hook, uintptr) bool
+-
+-// Defines the type of function used to compare #GHook elements in
+-// g_hook_insert_sorted().
+-type HookCompareFunc func(*Hook, *Hook) int32
+-
+-// Defines the type of function to be called when a hook in a
+-// list of hooks gets finalized.
+-type HookFinalizeFunc func(*HookList, *Hook)
+-
+-// Defines the type of the function passed to g_hook_find().
+-type HookFindFunc func(*Hook, uintptr) bool
+-
+-// Defines the type of a hook function that can be invoked
+-// by g_hook_list_invoke().
+-type HookFunc func(uintptr)
+-
+-// Defines the type of function used by g_hook_list_marshal().
+-type HookMarshaller func(*Hook, uintptr)
++type (
++	HookCheckFunc func(uintptr) bool
++	// Defines the type of function used by g_hook_list_marshal_check().
++	HookCheckMarshaller func(*Hook, uintptr) bool
++	// Defines the type of function used to compare #GHook elements in
++	// g_hook_insert_sorted().
++	HookCompareFunc func(*Hook, *Hook) int32
++	// Defines the type of function to be called when a hook in a
++	// list of hooks gets finalized.
++	HookFinalizeFunc func(*HookList, *Hook)
++	// Defines the type of the function passed to g_hook_find().
++	HookFindFunc func(*Hook, uintptr) bool
++	// Defines the type of a hook function that can be invoked
++	// by g_hook_list_invoke().
++	HookFunc func(uintptr)
++	// Defines the type of function used by g_hook_list_marshal().
++	HookMarshaller func(*Hook, uintptr)
++)
+ 
+ // The #GHook struct represents a single hook function in a #GHookList.
+ type Hook struct {
+diff --git a/v4/glib/gmain.go b/v4/glib/gmain.go
+index d147b8ff289af1283524abba65ef1c1b7aeedaf3..0e0d6cbae35577922bb72f83a0ce6f30249580f0 100644
+--- a/v4/glib/gmain.go
++++ b/v4/glib/gmain.go
+@@ -17,84 +17,77 @@ // To interpret @wait_status, see the documentation for
+ // [func@GLib.spawn_check_wait_status]. In particular,
+ // on Unix platforms, note that it is usually not equal
+ // to the integer passed to `exit()` or returned from `main()`.
+-type ChildWatchFunc func(Pid, int32, uintptr)
+-
+-// Specifies the type of function passed to [func@GLib.clear_handle_id] The
+-// implementation is expected to free the resource identified by @handle_id;
+-// for instance, if @handle_id is a [struct@GLib.Source] ID,
+-// [func@GLib.Source.remove] can be used.
+-type ClearHandleFunc func(uint32)
+-
+-// Dispose function for @source. See [method@GLib.Source.set_dispose_function]
+-// for details.
+-type SourceDisposeFunc func(*Source)
+-
+-// This is just a placeholder for #GClosureMarshal,
+-// which cannot be used here for dependency reasons.
+-type SourceDummyMarshal func()
+-
+-// Specifies the type of function passed to [func@GLib.timeout_add],
+-// [func@GLib.timeout_add_full], [func@GLib.idle_add], and
+-// [func@GLib.idle_add_full].
+-//
+-// When calling [method@GLib.Source.set_callback], you may need to cast a
+-// function of a different type to this type. Use [func@GLib.SOURCE_FUNC] to
+-// avoid warnings about incompatible function types.
+-type SourceFunc func(uintptr) bool
+-
+-// Checks if the source is ready to be dispatched.
+-//
+-// Called after all the file descriptors are polled. The source
+-// should return %TRUE if it is ready to be dispatched. Note that some
+-// time may have passed since the previous prepare function was called,
+-// so the source should be checked again here.
+-//
+-// Since 2.36 this may be `NULL`, in which case the effect is
+-// as if the function always returns `FALSE`.
+-type SourceFuncsCheckFunc func(*Source) bool
+-
+-// Dispatches the source callback.
+-//
+-// Called to dispatch the event source, after it has returned
+-// `TRUE` in either its prepare or its check function, or if a ready time
+-// has been reached. The dispatch function receives a callback function and
+-// user data. The callback function may be `NULL` if the source was never
+-// connected to a callback using [method@GLib.Source.set_callback]. The dispatch
+-// function should call the callback function with @user_data and whatever
+-// additional parameters are needed for this type of event source. The
+-// return value of the dispatch function should be [const@GLib.SOURCE_REMOVE]
+-// if the source should be removed or [const@GLib.SOURCE_CONTINUE] to keep it.
+-type SourceFuncsDispatchFunc func(*Source, uintptr, uintptr) bool
+-
+-// Finalizes the source.
+-//
+-// Called when the source is finalized. At this point, the source
+-// will have been destroyed, had its callback cleared, and have been removed
+-// from its [type@GLib.MainContext], but it will still have its final reference
+-// count, so methods can be called on it from within this function.
+-type SourceFuncsFinalizeFunc func(*Source)
+-
+-// Checks the source for readiness.
+-//
+-// Called before all the file descriptors are polled. If the
+-// source can determine that it is ready here (without waiting for the
+-// results of the poll call) it should return %TRUE. It can also return
+-// a @timeout_ value which should be the maximum timeout (in milliseconds)
+-// which should be passed to the poll call. The actual timeout used will
+-// be `-1` if all sources returned `-1`, or it will be the minimum of all
+-// the @timeout_ values returned which were greater than or equal to `0`.
+-// If the prepare function returns a timeout and the source also has a
+-// ready time set, then the lower of the two will be used.
+-//
+-// Since 2.36 this may be `NULL`, in which case the effect is as if the
+-// function always returns `FALSE` with a timeout of `-1`.
+-type SourceFuncsPrepareFunc func(*Source, *int32) bool
+-
+-// A source function that is only called once before being removed from the main
+-// context automatically.
+-//
+-// See: [func@GLib.idle_add_once], [func@GLib.timeout_add_once]
+-type SourceOnceFunc func(uintptr)
++type (
++	ChildWatchFunc func(Pid, int32, uintptr)
++	// Specifies the type of function passed to [func@GLib.clear_handle_id] The
++	// implementation is expected to free the resource identified by @handle_id;
++	// for instance, if @handle_id is a [struct@GLib.Source] ID,
++	// [func@GLib.Source.remove] can be used.
++	ClearHandleFunc func(uint32)
++	// Dispose function for @source. See [method@GLib.Source.set_dispose_function]
++	// for details.
++	SourceDisposeFunc func(*Source)
++	// This is just a placeholder for #GClosureMarshal,
++	// which cannot be used here for dependency reasons.
++	SourceDummyMarshal func()
++	// Specifies the type of function passed to [func@GLib.timeout_add],
++	// [func@GLib.timeout_add_full], [func@GLib.idle_add], and
++	// [func@GLib.idle_add_full].
++	//
++	// When calling [method@GLib.Source.set_callback], you may need to cast a
++	// function of a different type to this type. Use [func@GLib.SOURCE_FUNC] to
++	// avoid warnings about incompatible function types.
++	SourceFunc func(uintptr) bool
++	// Checks if the source is ready to be dispatched.
++	//
++	// Called after all the file descriptors are polled. The source
++	// should return %TRUE if it is ready to be dispatched. Note that some
++	// time may have passed since the previous prepare function was called,
++	// so the source should be checked again here.
++	//
++	// Since 2.36 this may be `NULL`, in which case the effect is
++	// as if the function always returns `FALSE`.
++	SourceFuncsCheckFunc func(*Source) bool
++	// Dispatches the source callback.
++	//
++	// Called to dispatch the event source, after it has returned
++	// `TRUE` in either its prepare or its check function, or if a ready time
++	// has been reached. The dispatch function receives a callback function and
++	// user data. The callback function may be `NULL` if the source was never
++	// connected to a callback using [method@GLib.Source.set_callback]. The dispatch
++	// function should call the callback function with @user_data and whatever
++	// additional parameters are needed for this type of event source. The
++	// return value of the dispatch function should be [const@GLib.SOURCE_REMOVE]
++	// if the source should be removed or [const@GLib.SOURCE_CONTINUE] to keep it.
++	SourceFuncsDispatchFunc func(*Source, uintptr, uintptr) bool
++	// Finalizes the source.
++	//
++	// Called when the source is finalized. At this point, the source
++	// will have been destroyed, had its callback cleared, and have been removed
++	// from its [type@GLib.MainContext], but it will still have its final reference
++	// count, so methods can be called on it from within this function.
++	SourceFuncsFinalizeFunc func(*Source)
++	// Checks the source for readiness.
++	//
++	// Called before all the file descriptors are polled. If the
++	// source can determine that it is ready here (without waiting for the
++	// results of the poll call) it should return %TRUE. It can also return
++	// a @timeout_ value which should be the maximum timeout (in milliseconds)
++	// which should be passed to the poll call. The actual timeout used will
++	// be `-1` if all sources returned `-1`, or it will be the minimum of all
++	// the @timeout_ values returned which were greater than or equal to `0`.
++	// If the prepare function returns a timeout and the source also has a
++	// ready time set, then the lower of the two will be used.
++	//
++	// Since 2.36 this may be `NULL`, in which case the effect is as if the
++	// function always returns `FALSE` with a timeout of `-1`.
++	SourceFuncsPrepareFunc func(*Source, *int32) bool
++	// A source function that is only called once before being removed from the main
++	// context automatically.
++	//
++	// See: [func@GLib.idle_add_once], [func@GLib.timeout_add_once]
++	SourceOnceFunc func(uintptr)
++)
+ 
+ // The `GMainContext` struct is an opaque data
+ // type representing a set of sources to be handled in a main loop.
+diff --git a/v4/glib/gmessages.go b/v4/glib/gmessages.go
+index e2eb9210c37b63eb4ca88331e55c102d662bb03c..f55bdc68475138ccd34970c503da6dab0b3f9a95 100644
+--- a/v4/glib/gmessages.go
++++ b/v4/glib/gmessages.go
+@@ -22,31 +22,31 @@ // application domain.
+ //
+ // This is not used if structured logging is enabled; see
+ // [Using Structured Logging](logging.html#using-structured-logging).
+-type LogFunc func(string, LogLevelFlags, string, uintptr)
+-
+-// Writer function for log entries. A log entry is a collection of one or more
+-// #GLogFields, using the standard [field names from journal
+-// specification](https://www.freedesktop.org/software/systemd/man/systemd.journal-fields.html).
+-// See g_log_structured() for more information.
+-//
+-// Writer functions must ignore fields which they do not recognise, unless they
+-// can write arbitrary binary output, as field values may be arbitrary binary.
+-//
+-// @log_level is guaranteed to be included in @fields as the `PRIORITY` field,
+-// but is provided separately for convenience of deciding whether or where to
+-// output the log entry.
+-//
+-// Writer functions should return %G_LOG_WRITER_HANDLED if they handled the log
+-// message successfully or if they deliberately ignored it. If there was an
+-// error handling the message (for example, if the writer function is meant to
+-// send messages to a remote logging server and there is a network error), it
+-// should return %G_LOG_WRITER_UNHANDLED. This allows writer functions to be
+-// chained and fall back to simpler handlers in case of failure.
+-type LogWriterFunc func(LogLevelFlags, []LogField, uint, uintptr) LogWriterOutput
+-
+-// Specifies the type of the print handler functions.
+-// These are called with the complete formatted string to output.
+-type PrintFunc func(string)
++type (
++	LogFunc func(string, LogLevelFlags, string, uintptr)
++	// Writer function for log entries. A log entry is a collection of one or more
++	// #GLogFields, using the standard [field names from journal
++	// specification](https://www.freedesktop.org/software/systemd/man/systemd.journal-fields.html).
++	// See g_log_structured() for more information.
++	//
++	// Writer functions must ignore fields which they do not recognise, unless they
++	// can write arbitrary binary output, as field values may be arbitrary binary.
++	//
++	// @log_level is guaranteed to be included in @fields as the `PRIORITY` field,
++	// but is provided separately for convenience of deciding whether or where to
++	// output the log entry.
++	//
++	// Writer functions should return %G_LOG_WRITER_HANDLED if they handled the log
++	// message successfully or if they deliberately ignored it. If there was an
++	// error handling the message (for example, if the writer function is meant to
++	// send messages to a remote logging server and there is a network error), it
++	// should return %G_LOG_WRITER_UNHANDLED. This allows writer functions to be
++	// chained and fall back to simpler handlers in case of failure.
++	LogWriterFunc func(LogLevelFlags, []LogField, uint, uintptr) LogWriterOutput
++	// Specifies the type of the print handler functions.
++	// These are called with the complete formatted string to output.
++	PrintFunc func(string)
++)
+ 
+ // Structure representing a single field in a structured log entry. See
+ // g_log_structured() for details.
+diff --git a/v4/glib/gnode.go b/v4/glib/gnode.go
+index f94dce8b24a2234724e0f9583cb20023346dc755..7fb2ff0f4eedd053dad82894d6cb614d4b5f53ea 100644
+--- a/v4/glib/gnode.go
++++ b/v4/glib/gnode.go
+@@ -12,13 +12,14 @@
+ // Specifies the type of function passed to g_node_children_foreach().
+ // The function is called with each child node, together with the user
+ // data passed to g_node_children_foreach().
+-type NodeForeachFunc func(*Node, uintptr)
+-
+-// Specifies the type of function passed to g_node_traverse(). The
+-// function is called with each of the nodes visited, together with the
+-// user data passed to g_node_traverse(). If the function returns
+-// %TRUE, then the traversal is stopped.
+-type NodeTraverseFunc func(*Node, uintptr) bool
++type (
++	NodeForeachFunc func(*Node, uintptr)
++	// Specifies the type of function passed to g_node_traverse(). The
++	// function is called with each of the nodes visited, together with the
++	// user data passed to g_node_traverse(). If the function returns
++	// %TRUE, then the traversal is stopped.
++	NodeTraverseFunc func(*Node, uintptr) bool
++)
+ 
+ // The #GNode struct represents one node in a [n-ary tree](data-structures.html#n-ary-trees).
+ type Node struct {
+diff --git a/v4/glib/goption.go b/v4/glib/goption.go
+index 1b5c3081f90ccb43b464ef5bd408eaae5efb7f1d..0ef1506d7e5fbac149d5215fa35386705aa6092e 100644
+--- a/v4/glib/goption.go
++++ b/v4/glib/goption.go
+@@ -12,13 +12,13 @@ )
+ 
+ // The type of function to be passed as callback for %G_OPTION_ARG_CALLBACK
+ // options.
+-type OptionArgFunc func(string, string, uintptr, **Error) bool
+-
+-// The type of function to be used as callback when a parse error occurs.
+-type OptionErrorFunc func(*OptionContext, *OptionGroup, uintptr, **Error)
+-
+-// The type of function that can be called before and after parsing.
+-type OptionParseFunc func(*OptionContext, *OptionGroup, uintptr, **Error) bool
++type (
++	OptionArgFunc func(string, string, uintptr, **Error) bool
++	// The type of function to be used as callback when a parse error occurs.
++	OptionErrorFunc func(*OptionContext, *OptionGroup, uintptr, **Error)
++	// The type of function that can be called before and after parsing.
++	OptionParseFunc func(*OptionContext, *OptionGroup, uintptr, **Error) bool
++)
+ 
+ // A `GOptionContext` struct defines which options
+ // are accepted by the commandline option parser. The struct has only private
+diff --git a/v4/glib/gtestutils.go b/v4/glib/gtestutils.go
+index 3663ea47db862472c079185cf6743f5f31dcf688..60209d59037f041a0e5fee457fb26e5203a06ece 100644
+--- a/v4/glib/gtestutils.go
++++ b/v4/glib/gtestutils.go
+@@ -11,26 +11,25 @@ )
+ 
+ // The type used for test case functions that take an extra pointer
+ // argument.
+-type TestDataFunc func(uintptr)
+-
+-// The type used for functions that operate on test fixtures.
+-//
+-// This is used for the fixture setup and teardown functions
+-// as well as for the testcases themselves.
+-//
+-// @user_data is a pointer to the data that was given when
+-// registering the test case.
+-//
+-// @fixture will be a pointer to the area of memory allocated by the
+-// test framework, of the size requested.  If the requested size was
+-// zero then @fixture will be equal to @user_data.
+-type TestFixtureFunc func(uintptr, uintptr)
+-
+-// The type used for test case functions.
+-type TestFunc func()
+-
+-// Specifies the prototype of fatal log handler functions.
+-type TestLogFatalFunc func(string, LogLevelFlags, string, uintptr) bool
++type (
++	TestDataFunc func(uintptr)
++	// The type used for functions that operate on test fixtures.
++	//
++	// This is used for the fixture setup and teardown functions
++	// as well as for the testcases themselves.
++	//
++	// @user_data is a pointer to the data that was given when
++	// registering the test case.
++	//
++	// @fixture will be a pointer to the area of memory allocated by the
++	// test framework, of the size requested.  If the requested size was
++	// zero then @fixture will be equal to @user_data.
++	TestFixtureFunc func(uintptr, uintptr)
++	// The type used for test case functions.
++	TestFunc func()
++	// Specifies the prototype of fatal log handler functions.
++	TestLogFatalFunc func(string, LogLevelFlags, string, uintptr) bool
++)
+ 
+ // An opaque structure representing a test case.
+ type TestCase struct {
+diff --git a/v4/glib/gtree.go b/v4/glib/gtree.go
+index be7fc7c847d022c5366c1d92b2583f2829baf741..9fa56c1c2139ef655bf846710ee3283a062779bd 100644
+--- a/v4/glib/gtree.go
++++ b/v4/glib/gtree.go
+@@ -14,13 +14,14 @@ // Specifies the type of function passed to g_tree_traverse(). It is
+ // passed the key and value of each node, together with the @user_data
+ // parameter passed to g_tree_traverse(). If the function returns
+ // %TRUE, the traversal is stopped.
+-type TraverseFunc func(uintptr, uintptr, uintptr) bool
+-
+-// Specifies the type of function passed to g_tree_foreach_node(). It is
+-// passed each node, together with the @user_data parameter passed to
+-// g_tree_foreach_node(). If the function returns %TRUE, the traversal is
+-// stopped.
+-type TraverseNodeFunc func(*TreeNode, uintptr) bool
++type (
++	TraverseFunc func(uintptr, uintptr, uintptr) bool
++	// Specifies the type of function passed to g_tree_foreach_node(). It is
++	// passed each node, together with the @user_data parameter passed to
++	// g_tree_foreach_node(). If the function returns %TRUE, the traversal is
++	// stopped.
++	TraverseNodeFunc func(*TreeNode, uintptr) bool
++)
+ 
+ // The GTree struct is an opaque data structure representing a
+ // [balanced binary tree](data-structures.html#binary-trees). It should be
+diff --git a/v4/glib/gtypes.go b/v4/glib/gtypes.go
+index 5939c41ed1ec02e5eed98c900f3bdd802e3b44f7..12c59f8e1d99ad20956acb19968278db85c14e67 100644
+--- a/v4/glib/gtypes.go
++++ b/v4/glib/gtypes.go
+@@ -13,86 +13,78 @@ // Specifies the type of a comparison function used to compare two
+ // values.  The function should return a negative integer if the first
+ // value comes before the second, 0 if they are equal, or a positive
+ // integer if the first value comes after the second.
+-type CompareDataFunc func(uintptr, uintptr, uintptr) int32
+-
+-// Specifies the type of a comparison function used to compare two
+-// values.  The function should return a negative integer if the first
+-// value comes before the second, 0 if they are equal, or a positive
+-// integer if the first value comes after the second.
+-type CompareFunc func(uintptr, uintptr) int32
+-
+-// A function of this signature is used to copy the node data
+-// when doing a deep-copy of a tree.
+-type CopyFunc func(uintptr, uintptr) uintptr
+-
+-// Specifies the type of function which is called when a data element
+-// is destroyed. It is passed the pointer to the data element and
+-// should free any memory and resources allocated for it.
+-type DestroyNotify func(uintptr)
+-
+-// Specifies the type of a function used to test two values for
+-// equality. The function should return %TRUE if both values are equal
+-// and %FALSE otherwise.
+-type EqualFunc func(uintptr, uintptr) bool
+-
+-// Specifies the type of a function used to test two values for
+-// equality. The function should return %TRUE if both values are equal
+-// and %FALSE otherwise.
+-//
+-// This is a version of #GEqualFunc which provides a @user_data closure from
+-// the caller.
+-type EqualFuncFull func(uintptr, uintptr, uintptr) bool
+-
+-// Declares a type of function which takes an arbitrary
+-// data pointer argument and has no return value. It is
+-// not currently used in GLib or GTK.
+-type FreeFunc func(uintptr)
+-
+-// Specifies the type of functions passed to g_list_foreach() and
+-// g_slist_foreach().
+-type Func func(uintptr, uintptr)
+-
+-// Specifies the type of the function passed to g_hash_table_foreach().
+-// It is called with each key/value pair, together with the @user_data
+-// parameter which is passed to g_hash_table_foreach().
+-type HFunc func(uintptr, uintptr, uintptr)
+-
+-// Specifies the type of the hash function which is passed to
+-// [func@HashTable.new] when a [struct@HashTable] is created.
+-//
+-// The function is passed a key and should return an `unsigned int` hash value.
+-// The functions [func@direct_hash], [func@int_hash] and [func@str_hash] provide
+-// hash functions which can be used when the key is a `void*`, `int*`,
+-// and `char*` respectively.
+-//
+-// [func@direct_hash] is also the appropriate hash function for keys
+-// of the form [`GINT_TO_POINTER (n)`](conversion-macros.html#gint-to-pointer)
+-// (or similar macros).
+-//
+-// A good hash functions should produce
+-// hash values that are evenly distributed over a fairly large range.
+-// The modulus is taken with the hash table size (a prime number) to
+-// find the 'bucket' to place each key into. The function should also
+-// be very fast, since it is called for each key lookup.
+-//
+-// Note that the hash functions provided by GLib have these qualities,
+-// but are not particularly robust against manufactured keys that
+-// cause hash collisions. Therefore, you should consider choosing
+-// a more secure hash function when using a [struct@HashTable] with keys
+-// that originate in untrusted data (such as HTTP requests).
+-// Using [func@str_hash] in that situation might make your application
+-// vulnerable to
+-// [Algorithmic Complexity Attacks](https://lwn.net/Articles/474912/).
+-//
+-// The key to choosing a good hash is unpredictability.  Even
+-// cryptographic hashes are very easy to find collisions for when the
+-// remainder is taken modulo a somewhat predictable prime number.  There
+-// must be an element of randomness that an attacker is unable to guess.
+-type HashFunc func(uintptr) uint32
+-
+-// The type of functions which are used to translate user-visible
+-// strings, for &lt;option&gt;--help&lt;/option&gt; output.
+-type TranslateFunc func(string, uintptr) string
++type (
++	CompareDataFunc func(uintptr, uintptr, uintptr) int32
++	// Specifies the type of a comparison function used to compare two
++	// values.  The function should return a negative integer if the first
++	// value comes before the second, 0 if they are equal, or a positive
++	// integer if the first value comes after the second.
++	CompareFunc func(uintptr, uintptr) int32
++	// A function of this signature is used to copy the node data
++	// when doing a deep-copy of a tree.
++	CopyFunc func(uintptr, uintptr) uintptr
++	// Specifies the type of function which is called when a data element
++	// is destroyed. It is passed the pointer to the data element and
++	// should free any memory and resources allocated for it.
++	DestroyNotify func(uintptr)
++	// Specifies the type of a function used to test two values for
++	// equality. The function should return %TRUE if both values are equal
++	// and %FALSE otherwise.
++	EqualFunc func(uintptr, uintptr) bool
++	// Specifies the type of a function used to test two values for
++	// equality. The function should return %TRUE if both values are equal
++	// and %FALSE otherwise.
++	//
++	// This is a version of #GEqualFunc which provides a @user_data closure from
++	// the caller.
++	EqualFuncFull func(uintptr, uintptr, uintptr) bool
++	// Declares a type of function which takes an arbitrary
++	// data pointer argument and has no return value. It is
++	// not currently used in GLib or GTK.
++	FreeFunc func(uintptr)
++	// Specifies the type of functions passed to g_list_foreach() and
++	// g_slist_foreach().
++	Func func(uintptr, uintptr)
++	// Specifies the type of the function passed to g_hash_table_foreach().
++	// It is called with each key/value pair, together with the @user_data
++	// parameter which is passed to g_hash_table_foreach().
++	HFunc func(uintptr, uintptr, uintptr)
++	// Specifies the type of the hash function which is passed to
++	// [func@HashTable.new] when a [struct@HashTable] is created.
++	//
++	// The function is passed a key and should return an `unsigned int` hash value.
++	// The functions [func@direct_hash], [func@int_hash] and [func@str_hash] provide
++	// hash functions which can be used when the key is a `void*`, `int*`,
++	// and `char*` respectively.
++	//
++	// [func@direct_hash] is also the appropriate hash function for keys
++	// of the form [`GINT_TO_POINTER (n)`](conversion-macros.html#gint-to-pointer)
++	// (or similar macros).
++	//
++	// A good hash functions should produce
++	// hash values that are evenly distributed over a fairly large range.
++	// The modulus is taken with the hash table size (a prime number) to
++	// find the 'bucket' to place each key into. The function should also
++	// be very fast, since it is called for each key lookup.
++	//
++	// Note that the hash functions provided by GLib have these qualities,
++	// but are not particularly robust against manufactured keys that
++	// cause hash collisions. Therefore, you should consider choosing
++	// a more secure hash function when using a [struct@HashTable] with keys
++	// that originate in untrusted data (such as HTTP requests).
++	// Using [func@str_hash] in that situation might make your application
++	// vulnerable to
++	// [Algorithmic Complexity Attacks](https://lwn.net/Articles/474912/).
++	//
++	// The key to choosing a good hash is unpredictability.  Even
++	// cryptographic hashes are very easy to find collisions for when the
++	// remainder is taken modulo a somewhat predictable prime number.  There
++	// must be an element of randomness that an attacker is unable to guess.
++	HashFunc func(uintptr) uint32
++	// The type of functions which are used to translate user-visible
++	// strings, for &lt;option&gt;--help&lt;/option&gt; output.
++	TranslateFunc func(string, uintptr) string
++)
+ 
+ // Represents a precise time, with seconds and microseconds.
+ //
+diff --git a/v4/gmodule/gmodule.go b/v4/gmodule/gmodule.go
+index 452fd4edf17aa970c840912d8ea68c2b622ab739..bc260d97817c9a18fe8cfa5e54132a1edd38f2f1 100644
+--- a/v4/gmodule/gmodule.go
++++ b/v4/gmodule/gmodule.go
+@@ -14,13 +14,14 @@ // If a module contains a function named g_module_check_init() it is called
+ // automatically when the module is loaded. It is passed the #GModule structure
+ // and should return %NULL on success or a string describing the initialization
+ // error.
+-type ModuleCheckInit func(*Module) string
+-
+-// Specifies the type of the module function called when it is unloaded.
+-// If a module contains a function named g_module_unload() it is called
+-// automatically when the module is unloaded.
+-// It is passed the #GModule structure.
+-type ModuleUnload func(*Module)
++type (
++	ModuleCheckInit func(*Module) string
++	// Specifies the type of the module function called when it is unloaded.
++	// If a module contains a function named g_module_unload() it is called
++	// automatically when the module is unloaded.
++	// It is passed the #GModule structure.
++	ModuleUnload func(*Module)
++)
+ 
+ // The #GModule struct is an opaque data structure to represent a
+ // [dynamically-loaded module](modules.html#dynamic-loading-of-modules).
+diff --git a/v4/gobject/gboxed.go b/v4/gobject/gboxed.go
+index 047ffbfe022f077c74cbecfc83808be5cf002d6a..665896762217bc04c5c0f9ccaca9d5c5e3ab8f7b 100644
+--- a/v4/gobject/gboxed.go
++++ b/v4/gobject/gboxed.go
+@@ -10,11 +10,12 @@ )
+ 
+ // This function is provided by the user and should produce a copy
+ // of the passed in boxed structure.
+-type BoxedCopyFunc func(uintptr) uintptr
+-
+-// This function is provided by the user and should free the boxed
+-// structure passed.
+-type BoxedFreeFunc func(uintptr)
++type (
++	BoxedCopyFunc func(uintptr) uintptr
++	// This function is provided by the user and should free the boxed
++	// structure passed.
++	BoxedFreeFunc func(uintptr)
++)
+ 
+ var xBoxedCopy func(types.GType, uintptr) uintptr
+ 
+diff --git a/v4/gobject/gclosure.go b/v4/gobject/gclosure.go
+index ba60931b7f079d9c1d9b66a94cdd93702ec4929b..f6b541401b63eece4a5aad3ab2a43174a02c9e27 100644
+--- a/v4/gobject/gclosure.go
++++ b/v4/gobject/gclosure.go
+@@ -19,19 +19,18 @@ // return void. The required signature of a callback function is determined by
+ // the context in which is used (e.g. the signal to which it is connected).
+ //
+ // Use G_CALLBACK() to cast the callback function to a #GCallback.
+-type Callback func()
+-
+-// The type used for marshaller functions.
+-type ClosureMarshal func(*Closure, *Value, uint32, []Value, uintptr, uintptr)
+-
+-// The type used for the various notification callbacks which can be registered
+-// on closures.
+-type ClosureNotify func(uintptr, *Closure)
+-
+-// This is the signature of va_list marshaller functions, an optional
+-// marshaller that can be used in some situations to avoid
+-// marshalling the signal argument into GValues.
+-type VaClosureMarshal func(*Closure, *Value, *TypeInstance, []interface{}, uintptr, int32, []types.GType)
++type (
++	Callback func()
++	// The type used for marshaller functions.
++	ClosureMarshal func(*Closure, *Value, uint32, []Value, uintptr, uintptr)
++	// The type used for the various notification callbacks which can be registered
++	// on closures.
++	ClosureNotify func(uintptr, *Closure)
++	// This is the signature of va_list marshaller functions, an optional
++	// marshaller that can be used in some situations to avoid
++	// marshalling the signal argument into GValues.
++	VaClosureMarshal func(*Closure, *Value, *TypeInstance, []interface{}, uintptr, int32, []types.GType)
++)
+ 
+ // A #GCClosure is a specialization of #GClosure for C function callbacks.
+ type CClosure struct {
+diff --git a/v4/gobject/gobject.go b/v4/gobject/gobject.go
+index 4f52a62b8175f4ff59c7e54b67da735228cc522f..6dcaa41c7625cc56a2c0390aec308bd43d9dab9f 100644
+--- a/v4/gobject/gobject.go
++++ b/v4/gobject/gobject.go
+@@ -12,32 +12,30 @@ 	"codeberg.org/puregotk/puregotk/v4/gobject/types"
+ )
+ 
+ // The type of the @finalize function of #GObjectClass.
+-type ObjectFinalizeFunc func(uintptr)
+-
+-// The type of the @get_property function of #GObjectClass.
+-type ObjectGetPropertyFunc func(uintptr, uint32, *Value, uintptr)
+-
+-// The type of the @set_property function of #GObjectClass.
+-type ObjectSetPropertyFunc func(uintptr, uint32, *Value, uintptr)
+-
+-// A callback function used for notification when the state
+-// of a toggle reference changes.
+-//
+-// See also: g_object_add_toggle_ref()
+-type ToggleNotify func(uintptr, uintptr, bool)
+-
+-// A #GWeakNotify function can be added to an object as a callback that gets
+-// triggered when the object is finalized.
+-//
+-// Since the object is already being disposed when the #GWeakNotify is called,
+-// there's not much you could do with the object, apart from e.g. using its
+-// address as hash-index or the like.
+-//
+-// In particular, this means it’s invalid to call g_object_ref(),
+-// g_weak_ref_init(), g_weak_ref_set(), g_object_add_toggle_ref(),
+-// g_object_weak_ref(), g_object_add_weak_pointer() or any function which calls
+-// them on the object from this callback.
+-type WeakNotify func(uintptr, uintptr)
++type (
++	ObjectFinalizeFunc func(uintptr)
++	// The type of the @get_property function of #GObjectClass.
++	ObjectGetPropertyFunc func(uintptr, uint32, *Value, uintptr)
++	// The type of the @set_property function of #GObjectClass.
++	ObjectSetPropertyFunc func(uintptr, uint32, *Value, uintptr)
++	// A callback function used for notification when the state
++	// of a toggle reference changes.
++	//
++	// See also: g_object_add_toggle_ref()
++	ToggleNotify func(uintptr, uintptr, bool)
++	// A #GWeakNotify function can be added to an object as a callback that gets
++	// triggered when the object is finalized.
++	//
++	// Since the object is already being disposed when the #GWeakNotify is called,
++	// there's not much you could do with the object, apart from e.g. using its
++	// address as hash-index or the like.
++	//
++	// In particular, this means it’s invalid to call g_object_ref(),
++	// g_weak_ref_init(), g_weak_ref_set(), g_object_add_toggle_ref(),
++	// g_object_weak_ref(), g_object_add_weak_pointer() or any function which calls
++	// them on the object from this callback.
++	WeakNotify func(uintptr, uintptr)
++)
+ 
+ // The class structure for the GInitiallyUnowned type.
+ type InitiallyUnownedClass struct {
+diff --git a/v4/gobject/gsignal.go b/v4/gobject/gsignal.go
+index 06288b071e64d0b8ba332c6290099ef662c4200e..dabb0f9ba4e5afa3f405526d5387518552f7b9ac 100644
+--- a/v4/gobject/gsignal.go
++++ b/v4/gobject/gsignal.go
+@@ -19,15 +19,16 @@ // The signal accumulator is specified at signal creation time, if it is
+ // left %NULL, no accumulation of callback return values is performed.
+ // The return value of signal emissions is then the value returned by the
+ // last callback.
+-type SignalAccumulator func(*SignalInvocationHint, *Value, *Value, uintptr) bool
+-
+-// A simple function pointer to get invoked when the signal is emitted.
+-//
+-// Emission hooks allow you to tie a hook to the signal type, so that it will
+-// trap all emissions of that signal, from any object.
+-//
+-// You may not attach these to signals created with the %G_SIGNAL_NO_HOOKS flag.
+-type SignalEmissionHook func(*SignalInvocationHint, uint32, []Value, uintptr) bool
++type (
++	SignalAccumulator func(*SignalInvocationHint, *Value, *Value, uintptr) bool
++	// A simple function pointer to get invoked when the signal is emitted.
++	//
++	// Emission hooks allow you to tie a hook to the signal type, so that it will
++	// trap all emissions of that signal, from any object.
++	//
++	// You may not attach these to signals created with the %G_SIGNAL_NO_HOOKS flag.
++	SignalEmissionHook func(*SignalInvocationHint, uint32, []Value, uintptr) bool
++)
+ 
+ // The #GSignalInvocationHint structure is used to pass on additional information
+ // to callbacks during a signal emission.
+diff --git a/v4/gobject/gtype.go b/v4/gobject/gtype.go
+index 163fdfe01285f0f7e202c8948513bc399f10b7f9..e916f8f6cdcd33806ec5fb2b5fda409597d0cb0f 100644
+--- a/v4/gobject/gtype.go
++++ b/v4/gobject/gtype.go
+@@ -19,380 +19,333 @@ // Class finalization basically works the inverse way in which class
+ // initialization is performed.
+ //
+ // See GClassInitFunc() for a discussion of the class initialization process.
+-type BaseFinalizeFunc func(*TypeClass)
+-
+-// A callback function used by the type system to do base initialization
+-// of the class structures of derived types.
+-//
+-// This function is called as part of the initialization process of all derived
+-// classes and should reallocate or reset all dynamic class members copied over
+-// from the parent class.
+-//
+-// For example, class members (such as strings) that are not sufficiently
+-// handled by a plain memory copy of the parent class into the derived class
+-// have to be altered. See GClassInitFunc() for a discussion of the class
+-// initialization process.
+-type BaseInitFunc func(*TypeClass)
+-
+-// A callback function used by the type system to finalize a class.
+-//
+-// This function is rarely needed, as dynamically allocated class resources
+-// should be handled by GBaseInitFunc() and GBaseFinalizeFunc().
+-//
+-// Also, specification of a GClassFinalizeFunc() in the #GTypeInfo
+-// structure of a static type is invalid, because classes of static types
+-// will never be finalized (they are artificially kept alive when their
+-// reference count drops to zero).
+-type ClassFinalizeFunc func(*TypeClass, uintptr)
+-
+-// A callback function used by the type system to initialize the class
+-// of a specific type.
+-//
+-// This function should initialize all static class members.
+-//
+-// The initialization process of a class involves:
+-//
+-//   - Copying common members from the parent class over to the
+-//     derived class structure.
+-//   - Zero initialization of the remaining members not copied
+-//     over from the parent class.
+-//   - Invocation of the GBaseInitFunc() initializers of all parent
+-//     types and the class' type.
+-//   - Invocation of the class' GClassInitFunc() initializer.
+-//
+-// Since derived classes are partially initialized through a memory copy
+-// of the parent class, the general rule is that GBaseInitFunc() and
+-// GBaseFinalizeFunc() should take care of necessary reinitialization
+-// and release of those class members that were introduced by the type
+-// that specified these GBaseInitFunc()/GBaseFinalizeFunc().
+-// GClassInitFunc() should only care about initializing static
+-// class members, while dynamic class members (such as allocated strings
+-// or reference counted resources) are better handled by a GBaseInitFunc()
+-// for this type, so proper initialization of the dynamic class members
+-// is performed for class initialization of derived types as well.
+-//
+-// An example may help to correspond the intend of the different class
+-// initializers:
+-//
+-// |[&lt;!-- language="C" --&gt;
+-//
+-//	typedef struct {
+-//	  GObjectClass parent_class;
+-//	  gint         static_integer;
+-//	  gchar       *dynamic_string;
+-//	} TypeAClass;
+-//
+-// static void
+-// type_a_base_class_init (TypeAClass *class)
+-//
+-//	{
+-//	  class-&gt;dynamic_string = g_strdup ("some string");
+-//	}
+-//
+-// static void
+-// type_a_base_class_finalize (TypeAClass *class)
+-//
+-//	{
+-//	  g_free (class-&gt;dynamic_string);
+-//	}
+-//
+-// static void
+-// type_a_class_init (TypeAClass *class)
+-//
+-//	{
+-//	  class-&gt;static_integer = 42;
+-//	}
+-//
+-//	typedef struct {
+-//	  TypeAClass   parent_class;
+-//	  gfloat       static_float;
+-//	  GString     *dynamic_gstring;
+-//	} TypeBClass;
+-//
+-// static void
+-// type_b_base_class_init (TypeBClass *class)
+-//
+-//	{
+-//	  class-&gt;dynamic_gstring = g_string_new ("some other string");
+-//	}
+-//
+-// static void
+-// type_b_base_class_finalize (TypeBClass *class)
+-//
+-//	{
+-//	  g_string_free (class-&gt;dynamic_gstring);
+-//	}
+-//
+-// static void
+-// type_b_class_init (TypeBClass *class)
+-//
+-//	{
+-//	  class-&gt;static_float = 3.14159265358979323846;
+-//	}
+-//
+-// ]|
+-//
+-// Initialization of TypeBClass will first cause initialization of
+-// TypeAClass (derived classes reference their parent classes, see
+-// g_type_class_ref() on this).
+-//
+-// Initialization of TypeAClass roughly involves zero-initializing its fields,
+-// then calling its GBaseInitFunc() type_a_base_class_init() to allocate
+-// its dynamic members (dynamic_string), and finally calling its GClassInitFunc()
+-// type_a_class_init() to initialize its static members (static_integer).
+-// The first step in the initialization process of TypeBClass is then
+-// a plain memory copy of the contents of TypeAClass into TypeBClass and
+-// zero-initialization of the remaining fields in TypeBClass.
+-// The dynamic members of TypeAClass within TypeBClass now need
+-// reinitialization which is performed by calling type_a_base_class_init()
+-// with an argument of TypeBClass.
+-//
+-// After that, the GBaseInitFunc() of TypeBClass, type_b_base_class_init()
+-// is called to allocate the dynamic members of TypeBClass (dynamic_gstring),
+-// and finally the GClassInitFunc() of TypeBClass, type_b_class_init(),
+-// is called to complete the initialization process with the static members
+-// (static_float).
+-//
+-// Corresponding finalization counter parts to the GBaseInitFunc() functions
+-// have to be provided to release allocated resources at class finalization
+-// time.
+-type ClassInitFunc func(*TypeClass, uintptr)
+-
+-// A callback function used by the type system to initialize a new
+-// instance of a type.
+-//
+-// This function initializes all instance members and allocates any resources
+-// required by it.
+-//
+-// Initialization of a derived instance involves calling all its parent
+-// types instance initializers, so the class member of the instance
+-// is altered during its initialization to always point to the class that
+-// belongs to the type the current initializer was introduced for.
+-//
+-// The extended members of @instance are guaranteed to have been filled with
+-// zeros before this function is called.
+-type InstanceInitFunc func(*TypeInstance, *TypeClass)
+-
+-// A callback function used by the type system to finalize an interface.
+-//
+-// This function should destroy any internal data and release any resources
+-// allocated by the corresponding GInterfaceInitFunc() function.
+-type InterfaceFinalizeFunc func(*TypeInterface, uintptr)
+-
+-// A callback function used by the type system to initialize a new
+-// interface.
+-//
+-// This function should initialize all internal data and* allocate any
+-// resources required by the interface.
+-//
+-// The members of @iface_data are guaranteed to have been filled with
+-// zeros before this function is called.
+-type InterfaceInitFunc func(*TypeInterface, uintptr)
+-
+-// A callback function which is called when the reference count of a class
+-// drops to zero.
+-//
+-// It may use g_type_class_ref() to prevent the class from being freed. You
+-// should not call g_type_class_unref() from a #GTypeClassCacheFunc function
+-// to prevent infinite recursion, use g_type_class_unref_uncached() instead.
+-//
+-// The functions have to check the class id passed in to figure
+-// whether they actually want to cache the class of this type, since all
+-// classes are routed through the same #GTypeClassCacheFunc chain.
+-type TypeClassCacheFunc func(uintptr, *TypeClass) bool
+-
+-// A callback called after an interface vtable is initialized.
+-//
+-// See g_type_add_interface_check().
+-type TypeInterfaceCheckFunc func(uintptr, *TypeInterface)
+-
+-// This function is responsible for converting the values collected from
+-// a variadic argument list into contents suitable for storage in a #GValue.
+-//
+-// This function should setup @value similar to #GTypeValueInitFunc; e.g.
+-// for a string value that does not allow `NULL` pointers, it needs to either
+-// emit an error, or do an implicit conversion by storing an empty string.
+-//
+-// The @value passed in to this function has a zero-filled data array, so
+-// just like for #GTypeValueInitFunc it is guaranteed to not contain any old
+-// contents that might need freeing.
+-//
+-// The @n_collect_values argument is the string length of the `collect_format`
+-// field of #GTypeValueTable, and `collect_values` is an array of #GTypeCValue
+-// with length of @n_collect_values, containing the collected values according
+-// to `collect_format`.
+-//
+-// The @collect_flags argument provided as a hint by the caller. It may
+-// contain the flag %G_VALUE_NOCOPY_CONTENTS indicating that the collected
+-// value contents may be considered ‘static’ for the duration of the @value
+-// lifetime. Thus an extra copy of the contents stored in @collect_values is
+-// not required for assignment to @value.
+-//
+-// For our above string example, we continue with:
+-//
+-// |[&lt;!-- language="C" --&gt;
+-// if (!collect_values[0].v_pointer)
+-//
+-//	value-&gt;data[0].v_pointer = g_strdup ("");
+-//
+-// else if (collect_flags &amp; G_VALUE_NOCOPY_CONTENTS)
+-//
+-//	{
+-//	  value-&gt;data[0].v_pointer = collect_values[0].v_pointer;
+-//	  // keep a flag for the value_free() implementation to not free this string
+-//	  value-&gt;data[1].v_uint = G_VALUE_NOCOPY_CONTENTS;
+-//	}
+-//
+-// else
+-//
+-//	value-&gt;data[0].v_pointer = g_strdup (collect_values[0].v_pointer);
+-//
+-// return NULL;
+-// ]|
+-//
+-// It should be noted, that it is generally a bad idea to follow the
+-// %G_VALUE_NOCOPY_CONTENTS hint for reference counted types. Due to
+-// reentrancy requirements and reference count assertions performed
+-// by the signal emission code, reference counts should always be
+-// incremented for reference counted contents stored in the `value-&gt;data`
+-// array. To deviate from our string example for a moment, and taking
+-// a look at an exemplary implementation for `GTypeValueTable.collect_value()`
+-// of `GObject`:
+-//
+-// |[&lt;!-- language="C" --&gt;
+-// GObject *object = G_OBJECT (collect_values[0].v_pointer);
+-// g_return_val_if_fail (object != NULL,
+-//
+-//	g_strdup_printf ("Object %p passed as invalid NULL pointer", object));
+-//
+-// // never honour G_VALUE_NOCOPY_CONTENTS for ref-counted types
+-// value-&gt;data[0].v_pointer = g_object_ref (object);
+-// return NULL;
+-// ]|
+-//
+-// The reference count for valid objects is always incremented, regardless
+-// of `collect_flags`. For invalid objects, the example returns a newly
+-// allocated string without altering `value`.
+-//
+-// Upon success, `collect_value()` needs to return `NULL`. If, however,
+-// an error condition occurred, `collect_value()` should return a newly
+-// allocated string containing an error diagnostic.
+-//
+-// The calling code makes no assumptions about the `value` contents being
+-// valid upon error returns, `value` is simply thrown away without further
+-// freeing. As such, it is a good idea to not allocate `GValue` contents
+-// prior to returning an error; however, `collect_values()` is not obliged
+-// to return a correctly setup @value for error returns, simply because
+-// any non-`NULL` return is considered a fatal programming error, and
+-// further program behaviour is undefined.
+-type TypeValueCollectFunc func(*Value, uint32, []TypeCValue, uint32) string
+-
+-// Copies the content of a #GValue into another.
+-//
+-// The @dest_value is a #GValue with zero-filled data section and @src_value
+-// is a properly initialized #GValue of same type, or derived type.
+-//
+-// The purpose of this function is to copy the contents of @src_value
+-// into @dest_value in a way, that even after @src_value has been freed, the
+-// contents of @dest_value remain valid. String type example:
+-//
+-// |[&lt;!-- language="C" --&gt;
+-// dest_value-&gt;data[0].v_pointer = g_strdup (src_value-&gt;data[0].v_pointer);
+-// ]|
+-type TypeValueCopyFunc func(*Value, *Value)
+-
+-// Frees any old contents that might be left in the `value-&gt;data` array of
+-// the given value.
+-//
+-// No resources may remain allocated through the #GValue contents after this
+-// function returns. E.g. for our above string type:
+-//
+-// |[&lt;!-- language="C" --&gt;
+-// // only free strings without a specific flag for static storage
+-// if (!(value-&gt;data[1].v_uint &amp; G_VALUE_NOCOPY_CONTENTS))
+-//
+-//	g_free (value-&gt;data[0].v_pointer);
+-//
+-// ]|
+-type TypeValueFreeFunc func(*Value)
+-
+-// Initializes the value contents by setting the fields of the `value-&gt;data`
+-// array.
+-//
+-// The data array of the #GValue passed into this function was zero-filled
+-// with `memset()`, so no care has to be taken to free any old contents.
+-// For example, in the case of a string value that may never be %NULL, the
+-// implementation might look like:
+-//
+-// |[&lt;!-- language="C" --&gt;
+-// value-&gt;data[0].v_pointer = g_strdup ("");
+-// ]|
+-type TypeValueInitFunc func(*Value)
+-
+-// This function is responsible for storing the `value`
+-// contents into arguments passed through a variadic argument list which
+-// got collected into `collect_values` according to `lcopy_format`.
+-//
+-// The `n_collect_values` argument equals the string length of
+-// `lcopy_format`, and `collect_flags` may contain %G_VALUE_NOCOPY_CONTENTS.
+-//
+-// In contrast to #GTypeValueCollectFunc, this function is obliged to always
+-// properly support %G_VALUE_NOCOPY_CONTENTS.
+-//
+-// Similar to #GTypeValueCollectFunc the function may prematurely abort by
+-// returning a newly allocated string describing an error condition. To
+-// complete the string example:
+-//
+-// |[&lt;!-- language="C" --&gt;
+-// gchar **string_p = collect_values[0].v_pointer;
+-// g_return_val_if_fail (string_p != NULL,
+-//
+-//	g_strdup ("string location passed as NULL"));
+-//
+-// if (collect_flags &amp; G_VALUE_NOCOPY_CONTENTS)
+-//
+-//	*string_p = value-&gt;data[0].v_pointer;
+-//
+-// else
+-//
+-//	*string_p = g_strdup (value-&gt;data[0].v_pointer);
+-//
+-// ]|
+-//
+-// And an illustrative version of this function for reference-counted
+-// types:
+-//
+-// |[&lt;!-- language="C" --&gt;
+-// GObject **object_p = collect_values[0].v_pointer;
+-// g_return_val_if_fail (object_p != NULL,
+-//
+-//	g_strdup ("object location passed as NULL"));
+-//
+-// if (value-&gt;data[0].v_pointer == NULL)
+-//
+-//	*object_p = NULL;
+-//
+-// else if (collect_flags &amp; G_VALUE_NOCOPY_CONTENTS) // always honour
+-//
+-//	*object_p = value-&gt;data[0].v_pointer;
+-//
+-// else
+-//
+-//	*object_p = g_object_ref (value-&gt;data[0].v_pointer);
+-//
+-// return NULL;
+-// ]|
+-type TypeValueLCopyFunc func(*Value, uint32, []TypeCValue, uint32) string
+-
+-// If the value contents fit into a pointer, such as objects or strings,
+-// return this pointer, so the caller can peek at the current contents.
+-//
+-// To extend on our above string example:
+-//
+-// |[&lt;!-- language="C" --&gt;
+-// return value-&gt;data[0].v_pointer;
+-// ]|
+-type TypeValuePeekPointerFunc func(*Value) uintptr
++type (
++	BaseFinalizeFunc func(*TypeClass)
++	// A callback function used by the type system to do base initialization
++	// of the class structures of derived types.
++	//
++	// This function is called as part of the initialization process of all derived
++	// classes and should reallocate or reset all dynamic class members copied over
++	// from the parent class.
++	//
++	// For example, class members (such as strings) that are not sufficiently
++	// handled by a plain memory copy of the parent class into the derived class
++	// have to be altered. See GClassInitFunc() for a discussion of the class
++	// initialization process.
++	BaseInitFunc func(*TypeClass)
++	// A callback function used by the type system to finalize a class.
++	//
++	// This function is rarely needed, as dynamically allocated class resources
++	// should be handled by GBaseInitFunc() and GBaseFinalizeFunc().
++	//
++	// Also, specification of a GClassFinalizeFunc() in the #GTypeInfo
++	// structure of a static type is invalid, because classes of static types
++	// will never be finalized (they are artificially kept alive when their
++	// reference count drops to zero).
++	ClassFinalizeFunc func(*TypeClass, uintptr)
++	// A callback function used by the type system to initialize the class
++	// of a specific type.
++	//
++	// This function should initialize all static class members.
++	//
++	// The initialization process of a class involves:
++	//
++	// - Copying common members from the parent class over to the
++	//   derived class structure.
++	// - Zero initialization of the remaining members not copied
++	//   over from the parent class.
++	// - Invocation of the GBaseInitFunc() initializers of all parent
++	//   types and the class' type.
++	// - Invocation of the class' GClassInitFunc() initializer.
++	//
++	// Since derived classes are partially initialized through a memory copy
++	// of the parent class, the general rule is that GBaseInitFunc() and
++	// GBaseFinalizeFunc() should take care of necessary reinitialization
++	// and release of those class members that were introduced by the type
++	// that specified these GBaseInitFunc()/GBaseFinalizeFunc().
++	// GClassInitFunc() should only care about initializing static
++	// class members, while dynamic class members (such as allocated strings
++	// or reference counted resources) are better handled by a GBaseInitFunc()
++	// for this type, so proper initialization of the dynamic class members
++	// is performed for class initialization of derived types as well.
++	//
++	// An example may help to correspond the intend of the different class
++	// initializers:
++	//
++	// |[&lt;!-- language="C" --&gt;
++	// typedef struct {
++	//   GObjectClass parent_class;
++	//   gint         static_integer;
++	//   gchar       *dynamic_string;
++	// } TypeAClass;
++	// static void
++	// type_a_base_class_init (TypeAClass *class)
++	// {
++	//   class-&gt;dynamic_string = g_strdup ("some string");
++	// }
++	// static void
++	// type_a_base_class_finalize (TypeAClass *class)
++	// {
++	//   g_free (class-&gt;dynamic_string);
++	// }
++	// static void
++	// type_a_class_init (TypeAClass *class)
++	// {
++	//   class-&gt;static_integer = 42;
++	// }
++	//
++	// typedef struct {
++	//   TypeAClass   parent_class;
++	//   gfloat       static_float;
++	//   GString     *dynamic_gstring;
++	// } TypeBClass;
++	// static void
++	// type_b_base_class_init (TypeBClass *class)
++	// {
++	//   class-&gt;dynamic_gstring = g_string_new ("some other string");
++	// }
++	// static void
++	// type_b_base_class_finalize (TypeBClass *class)
++	// {
++	//   g_string_free (class-&gt;dynamic_gstring);
++	// }
++	// static void
++	// type_b_class_init (TypeBClass *class)
++	// {
++	//   class-&gt;static_float = 3.14159265358979323846;
++	// }
++	// ]|
++	//
++	// Initialization of TypeBClass will first cause initialization of
++	// TypeAClass (derived classes reference their parent classes, see
++	// g_type_class_ref() on this).
++	//
++	// Initialization of TypeAClass roughly involves zero-initializing its fields,
++	// then calling its GBaseInitFunc() type_a_base_class_init() to allocate
++	// its dynamic members (dynamic_string), and finally calling its GClassInitFunc()
++	// type_a_class_init() to initialize its static members (static_integer).
++	// The first step in the initialization process of TypeBClass is then
++	// a plain memory copy of the contents of TypeAClass into TypeBClass and
++	// zero-initialization of the remaining fields in TypeBClass.
++	// The dynamic members of TypeAClass within TypeBClass now need
++	// reinitialization which is performed by calling type_a_base_class_init()
++	// with an argument of TypeBClass.
++	//
++	// After that, the GBaseInitFunc() of TypeBClass, type_b_base_class_init()
++	// is called to allocate the dynamic members of TypeBClass (dynamic_gstring),
++	// and finally the GClassInitFunc() of TypeBClass, type_b_class_init(),
++	// is called to complete the initialization process with the static members
++	// (static_float).
++	//
++	// Corresponding finalization counter parts to the GBaseInitFunc() functions
++	// have to be provided to release allocated resources at class finalization
++	// time.
++	ClassInitFunc func(*TypeClass, uintptr)
++	// A callback function used by the type system to initialize a new
++	// instance of a type.
++	//
++	// This function initializes all instance members and allocates any resources
++	// required by it.
++	//
++	// Initialization of a derived instance involves calling all its parent
++	// types instance initializers, so the class member of the instance
++	// is altered during its initialization to always point to the class that
++	// belongs to the type the current initializer was introduced for.
++	//
++	// The extended members of @instance are guaranteed to have been filled with
++	// zeros before this function is called.
++	InstanceInitFunc func(*TypeInstance, *TypeClass)
++	// A callback function used by the type system to finalize an interface.
++	//
++	// This function should destroy any internal data and release any resources
++	// allocated by the corresponding GInterfaceInitFunc() function.
++	InterfaceFinalizeFunc func(*TypeInterface, uintptr)
++	// A callback function used by the type system to initialize a new
++	// interface.
++	//
++	// This function should initialize all internal data and* allocate any
++	// resources required by the interface.
++	//
++	// The members of @iface_data are guaranteed to have been filled with
++	// zeros before this function is called.
++	InterfaceInitFunc func(*TypeInterface, uintptr)
++	// A callback function which is called when the reference count of a class
++	// drops to zero.
++	//
++	// It may use g_type_class_ref() to prevent the class from being freed. You
++	// should not call g_type_class_unref() from a #GTypeClassCacheFunc function
++	// to prevent infinite recursion, use g_type_class_unref_uncached() instead.
++	//
++	// The functions have to check the class id passed in to figure
++	// whether they actually want to cache the class of this type, since all
++	// classes are routed through the same #GTypeClassCacheFunc chain.
++	TypeClassCacheFunc func(uintptr, *TypeClass) bool
++	// A callback called after an interface vtable is initialized.
++	//
++	// See g_type_add_interface_check().
++	TypeInterfaceCheckFunc func(uintptr, *TypeInterface)
++	// This function is responsible for converting the values collected from
++	// a variadic argument list into contents suitable for storage in a #GValue.
++	//
++	// This function should setup @value similar to #GTypeValueInitFunc; e.g.
++	// for a string value that does not allow `NULL` pointers, it needs to either
++	// emit an error, or do an implicit conversion by storing an empty string.
++	//
++	// The @value passed in to this function has a zero-filled data array, so
++	// just like for #GTypeValueInitFunc it is guaranteed to not contain any old
++	// contents that might need freeing.
++	//
++	// The @n_collect_values argument is the string length of the `collect_format`
++	// field of #GTypeValueTable, and `collect_values` is an array of #GTypeCValue
++	// with length of @n_collect_values, containing the collected values according
++	// to `collect_format`.
++	//
++	// The @collect_flags argument provided as a hint by the caller. It may
++	// contain the flag %G_VALUE_NOCOPY_CONTENTS indicating that the collected
++	// value contents may be considered ‘static’ for the duration of the @value
++	// lifetime. Thus an extra copy of the contents stored in @collect_values is
++	// not required for assignment to @value.
++	//
++	// For our above string example, we continue with:
++	//
++	// |[&lt;!-- language="C" --&gt;
++	// if (!collect_values[0].v_pointer)
++	//   value-&gt;data[0].v_pointer = g_strdup ("");
++	// else if (collect_flags &amp; G_VALUE_NOCOPY_CONTENTS)
++	//   {
++	//     value-&gt;data[0].v_pointer = collect_values[0].v_pointer;
++	//     // keep a flag for the value_free() implementation to not free this string
++	//     value-&gt;data[1].v_uint = G_VALUE_NOCOPY_CONTENTS;
++	//   }
++	// else
++	//   value-&gt;data[0].v_pointer = g_strdup (collect_values[0].v_pointer);
++	// return NULL;
++	// ]|
++	//
++	// It should be noted, that it is generally a bad idea to follow the
++	// %G_VALUE_NOCOPY_CONTENTS hint for reference counted types. Due to
++	// reentrancy requirements and reference count assertions performed
++	// by the signal emission code, reference counts should always be
++	// incremented for reference counted contents stored in the `value-&gt;data`
++	// array. To deviate from our string example for a moment, and taking
++	// a look at an exemplary implementation for `GTypeValueTable.collect_value()`
++	// of `GObject`:
++	//
++	// |[&lt;!-- language="C" --&gt;
++	// GObject *object = G_OBJECT (collect_values[0].v_pointer);
++	// g_return_val_if_fail (object != NULL,
++	//    g_strdup_printf ("Object %p passed as invalid NULL pointer", object));
++	// // never honour G_VALUE_NOCOPY_CONTENTS for ref-counted types
++	// value-&gt;data[0].v_pointer = g_object_ref (object);
++	// return NULL;
++	// ]|
++	//
++	// The reference count for valid objects is always incremented, regardless
++	// of `collect_flags`. For invalid objects, the example returns a newly
++	// allocated string without altering `value`.
++	//
++	// Upon success, `collect_value()` needs to return `NULL`. If, however,
++	// an error condition occurred, `collect_value()` should return a newly
++	// allocated string containing an error diagnostic.
++	//
++	// The calling code makes no assumptions about the `value` contents being
++	// valid upon error returns, `value` is simply thrown away without further
++	// freeing. As such, it is a good idea to not allocate `GValue` contents
++	// prior to returning an error; however, `collect_values()` is not obliged
++	// to return a correctly setup @value for error returns, simply because
++	// any non-`NULL` return is considered a fatal programming error, and
++	// further program behaviour is undefined.
++	TypeValueCollectFunc func(*Value, uint32, []TypeCValue, uint32) string
++	// Copies the content of a #GValue into another.
++	//
++	// The @dest_value is a #GValue with zero-filled data section and @src_value
++	// is a properly initialized #GValue of same type, or derived type.
++	//
++	// The purpose of this function is to copy the contents of @src_value
++	// into @dest_value in a way, that even after @src_value has been freed, the
++	// contents of @dest_value remain valid. String type example:
++	//
++	// |[&lt;!-- language="C" --&gt;
++	// dest_value-&gt;data[0].v_pointer = g_strdup (src_value-&gt;data[0].v_pointer);
++	// ]|
++	TypeValueCopyFunc func(*Value, *Value)
++	// Frees any old contents that might be left in the `value-&gt;data` array of
++	// the given value.
++	//
++	// No resources may remain allocated through the #GValue contents after this
++	// function returns. E.g. for our above string type:
++	//
++	// |[&lt;!-- language="C" --&gt;
++	// // only free strings without a specific flag for static storage
++	// if (!(value-&gt;data[1].v_uint &amp; G_VALUE_NOCOPY_CONTENTS))
++	//   g_free (value-&gt;data[0].v_pointer);
++	// ]|
++	TypeValueFreeFunc func(*Value)
++	// Initializes the value contents by setting the fields of the `value-&gt;data`
++	// array.
++	//
++	// The data array of the #GValue passed into this function was zero-filled
++	// with `memset()`, so no care has to be taken to free any old contents.
++	// For example, in the case of a string value that may never be %NULL, the
++	// implementation might look like:
++	//
++	// |[&lt;!-- language="C" --&gt;
++	// value-&gt;data[0].v_pointer = g_strdup ("");
++	// ]|
++	TypeValueInitFunc func(*Value)
++	// This function is responsible for storing the `value`
++	// contents into arguments passed through a variadic argument list which
++	// got collected into `collect_values` according to `lcopy_format`.
++	//
++	// The `n_collect_values` argument equals the string length of
++	// `lcopy_format`, and `collect_flags` may contain %G_VALUE_NOCOPY_CONTENTS.
++	//
++	// In contrast to #GTypeValueCollectFunc, this function is obliged to always
++	// properly support %G_VALUE_NOCOPY_CONTENTS.
++	//
++	// Similar to #GTypeValueCollectFunc the function may prematurely abort by
++	// returning a newly allocated string describing an error condition. To
++	// complete the string example:
++	//
++	// |[&lt;!-- language="C" --&gt;
++	// gchar **string_p = collect_values[0].v_pointer;
++	// g_return_val_if_fail (string_p != NULL,
++	//   g_strdup ("string location passed as NULL"));
++	//
++	// if (collect_flags &amp; G_VALUE_NOCOPY_CONTENTS)
++	//   *string_p = value-&gt;data[0].v_pointer;
++	// else
++	//   *string_p = g_strdup (value-&gt;data[0].v_pointer);
++	// ]|
++	//
++	// And an illustrative version of this function for reference-counted
++	// types:
++	//
++	// |[&lt;!-- language="C" --&gt;
++	// GObject **object_p = collect_values[0].v_pointer;
++	// g_return_val_if_fail (object_p != NULL,
++	//   g_strdup ("object location passed as NULL"));
++	//
++	// if (value-&gt;data[0].v_pointer == NULL)
++	//   *object_p = NULL;
++	// else if (collect_flags &amp; G_VALUE_NOCOPY_CONTENTS) // always honour
++	//   *object_p = value-&gt;data[0].v_pointer;
++	// else
++	//   *object_p = g_object_ref (value-&gt;data[0].v_pointer);
++	//
++	// return NULL;
++	// ]|
++	TypeValueLCopyFunc func(*Value, uint32, []TypeCValue, uint32) string
++	// If the value contents fit into a pointer, such as objects or strings,
++	// return this pointer, so the caller can peek at the current contents.
++	//
++	// To extend on our above string example:
++	//
++	// |[&lt;!-- language="C" --&gt;
++	// return value-&gt;data[0].v_pointer;
++	// ]|
++	TypeValuePeekPointerFunc func(*Value) uintptr
++)
+ 
+ // A structure that provides information to the type system which is
+ // used specifically for managing interface types.
+diff --git a/v4/gobject/gtypeplugin.go b/v4/gobject/gtypeplugin.go
+index 5b3027a002ba112af7e23a7bd373a528c6d57f48..dce10db451a6fabc92a094ae990e3aa1ce580fe7 100644
+--- a/v4/gobject/gtypeplugin.go
++++ b/v4/gobject/gtypeplugin.go
+@@ -11,17 +11,16 @@ 	"codeberg.org/puregotk/puregotk/v4/gobject/types"
+ )
+ 
+ // The type of the @complete_interface_info function of #GTypePluginClass.
+-type TypePluginCompleteInterfaceInfo func(uintptr, types.GType, types.GType, *InterfaceInfo)
+-
+-// The type of the @complete_type_info function of #GTypePluginClass.
+-type TypePluginCompleteTypeInfo func(uintptr, types.GType, *TypeInfo, *TypeValueTable)
+-
+-// The type of the @unuse_plugin function of #GTypePluginClass.
+-type TypePluginUnuse func(uintptr)
+-
+-// The type of the @use_plugin function of #GTypePluginClass, which gets called
+-// to increase the use count of @plugin.
+-type TypePluginUse func(uintptr)
++type (
++	TypePluginCompleteInterfaceInfo func(uintptr, types.GType, types.GType, *InterfaceInfo)
++	// The type of the @complete_type_info function of #GTypePluginClass.
++	TypePluginCompleteTypeInfo func(uintptr, types.GType, *TypeInfo, *TypeValueTable)
++	// The type of the @unuse_plugin function of #GTypePluginClass.
++	TypePluginUnuse func(uintptr)
++	// The type of the @use_plugin function of #GTypePluginClass, which gets called
++	// to increase the use count of @plugin.
++	TypePluginUse func(uintptr)
++)
+ 
+ // The #GTypePlugin interface is used by the type system in order to handle
+ // the lifecycle of dynamically loaded types.
+diff --git a/v4/gsk/gskpath.go b/v4/gsk/gskpath.go
+index a74128cc6a726026687b6089183e6bc025e75d79..50acde43bd5755fda0bfdec3614a42c1f22e04b6 100644
+--- a/v4/gsk/gskpath.go
++++ b/v4/gsk/gskpath.go
+@@ -17,11 +17,12 @@ // of points can be inferred from the operation.
+ //
+ // Each contour of the path starts with a @GSK_PATH_MOVE operation.
+ // Closed contours end with a @GSK_PATH_CLOSE operation.
+-type PathForeachFunc func(PathOperation, []graphene.Point, uint, float32, uintptr) bool
+-
+-// Prototype of the callback to iterate through the
+-// intersections of two paths.
+-type PathIntersectionFunc func(*Path, *PathPoint, *Path, *PathPoint, PathIntersection, uintptr) bool
++type (
++	PathForeachFunc func(PathOperation, []graphene.Point, uint, float32, uintptr) bool
++	// Prototype of the callback to iterate through the
++	// intersections of two paths.
++	PathIntersectionFunc func(*Path, *PathPoint, *Path, *PathPoint, PathIntersection, uintptr) bool
++)
+ 
+ // Flags that can be passed to gsk_path_foreach() to influence what
+ // kinds of operations the path is decomposed into.
+diff --git a/v4/gsk/gskrenderreplay.go b/v4/gsk/gskrenderreplay.go
+index 6baf83c74d8a49a9e42dce83553431c618651d54..6f54df4fc9bcdf47a76dd8d443ae4a5abcd33fe2 100644
+--- a/v4/gsk/gskrenderreplay.go
++++ b/v4/gsk/gskrenderreplay.go
+@@ -9,25 +9,25 @@ // returned font.
+ //
+ // It is valid for the function to return the passed in font if
+ // the font shuld not be modified.
+-type RenderReplayFontFilter func(*RenderReplay, uintptr, uintptr) uintptr
+-
+-// A function to replay a node.
+-//
+-// The node may be returned unmodified.
+-//
+-// The node may be discarded by returning %NULL.
+-//
+-// If you do not want to do any handling yourself, call
+-// [method@Gsk.RenderReplay.default] to use the default handler
+-// that calls your function on the children of the node.
+-type RenderReplayNodeFilter func(*RenderReplay, uintptr, uintptr) uintptr
+-
+-// A function that filters textures.
+-//
+-// The function will be called by the default replay function for
+-// all nodes with textures. They will then generate a node using the
+-// returned texture.
+-//
+-// It is valid for the function to return the passed in texture if
+-// the texture shuld not be modified.
+-type RenderReplayTextureFilter func(*RenderReplay, uintptr, uintptr) uintptr
++type (
++	RenderReplayFontFilter func(*RenderReplay, uintptr, uintptr) uintptr
++	// A function to replay a node.
++	//
++	// The node may be returned unmodified.
++	//
++	// The node may be discarded by returning %NULL.
++	//
++	// If you do not want to do any handling yourself, call
++	// [method@Gsk.RenderReplay.default] to use the default handler
++	// that calls your function on the children of the node.
++	RenderReplayNodeFilter func(*RenderReplay, uintptr, uintptr) uintptr
++	// A function that filters textures.
++	//
++	// The function will be called by the default replay function for
++	// all nodes with textures. They will then generate a node using the
++	// returned texture.
++	//
++	// It is valid for the function to return the passed in texture if
++	// the texture shuld not be modified.
++	RenderReplayTextureFilter func(*RenderReplay, uintptr, uintptr) uintptr
++)
+diff --git a/v4/gtk/gtkcellarea.go b/v4/gtk/gtkcellarea.go
+index f7706049efb15b938909cb4c735f1debe35a888d..1e53451b16a953947bdbb81ca764a6998a055369 100644
+--- a/v4/gtk/gtkcellarea.go
++++ b/v4/gtk/gtkcellarea.go
+@@ -16,11 +16,12 @@
+ // The type of the callback functions used for iterating over the
+ // cell renderers and their allocated areas inside a `GtkCellArea`,
+ // see gtk_cell_area_foreach_alloc().
+-type CellAllocCallback func(uintptr, *gdk.Rectangle, *gdk.Rectangle, uintptr) bool
+-
+-// The type of the callback functions used for iterating over
+-// the cell renderers of a `GtkCellArea`, see gtk_cell_area_foreach().
+-type CellCallback func(uintptr, uintptr) bool
++type (
++	CellAllocCallback func(uintptr, *gdk.Rectangle, *gdk.Rectangle, uintptr) bool
++	// The type of the callback functions used for iterating over
++	// the cell renderers of a `GtkCellArea`, see gtk_cell_area_foreach().
++	CellCallback func(uintptr, uintptr) bool
++)
+ 
+ type CellAreaClass struct {
+ 	_ structs.HostLayout
+diff --git a/v4/gtk/gtkcustomlayout.go b/v4/gtk/gtkcustomlayout.go
+index 12549b9f280650cb10c034e9efcf4b948f4296aa..c93b906d2a3edc9d4b5f3522f4dee4d763df6839 100644
+--- a/v4/gtk/gtkcustomlayout.go
++++ b/v4/gtk/gtkcustomlayout.go
+@@ -12,13 +12,13 @@ 	"codeberg.org/puregotk/puregotk/v4/gobject/types"
+ )
+ 
+ // A function to be used by `GtkCustomLayout` to allocate a widget.
+-type CustomAllocateFunc func(uintptr, int32, int32, int32)
+-
+-// A function to be used by `GtkCustomLayout` to measure a widget.
+-type CustomMeasureFunc func(uintptr, Orientation, int32, *int32, *int32, *int32, *int32)
+-
+-// Queries a widget for its preferred size request mode.
+-type CustomRequestModeFunc func(uintptr) SizeRequestMode
++type (
++	CustomAllocateFunc func(uintptr, int32, int32, int32)
++	// A function to be used by `GtkCustomLayout` to measure a widget.
++	CustomMeasureFunc func(uintptr, Orientation, int32, *int32, *int32, *int32, *int32)
++	// Queries a widget for its preferred size request mode.
++	CustomRequestModeFunc func(uintptr) SizeRequestMode
++)
+ 
+ type CustomLayoutClass struct {
+ 	_ structs.HostLayout
+diff --git a/v4/gtk/gtkflowbox.go b/v4/gtk/gtkflowbox.go
+index 851edd8f2dbe7ce84eba6dcd63457d5219e512fc..d354a77abc7fd3260e7601051f1cc6a859393584 100644
+--- a/v4/gtk/gtkflowbox.go
++++ b/v4/gtk/gtkflowbox.go
+@@ -16,22 +16,21 @@
+ // Called for flow boxes that are bound to a `GListModel`.
+ //
+ // This function is called for each item that gets added to the model.
+-type FlowBoxCreateWidgetFunc func(uintptr, uintptr) uintptr
+-
+-// A function that will be called whenever a child changes
+-// or is added.
+-//
+-// It lets you control if the child should be visible or not.
+-type FlowBoxFilterFunc func(uintptr, uintptr) bool
+-
+-// A function used by gtk_flow_box_selected_foreach().
+-//
+-// It will be called on every selected child of the @box.
+-type FlowBoxForeachFunc func(uintptr, uintptr, uintptr)
+-
+-// A function to compare two children to determine which
+-// should come first.
+-type FlowBoxSortFunc func(uintptr, uintptr, uintptr) int32
++type (
++	FlowBoxCreateWidgetFunc func(uintptr, uintptr) uintptr
++	// A function that will be called whenever a child changes
++	// or is added.
++	//
++	// It lets you control if the child should be visible or not.
++	FlowBoxFilterFunc func(uintptr, uintptr) bool
++	// A function used by gtk_flow_box_selected_foreach().
++	//
++	// It will be called on every selected child of the @box.
++	FlowBoxForeachFunc func(uintptr, uintptr, uintptr)
++	// A function to compare two children to determine which
++	// should come first.
++	FlowBoxSortFunc func(uintptr, uintptr, uintptr) int32
++)
+ 
+ type FlowBoxChildClass struct {
+ 	_ structs.HostLayout
+diff --git a/v4/gtk/gtklistbox.go b/v4/gtk/gtklistbox.go
+index 5708b8c5e0ee53f2455f27cbf08020fcdc068f48..4205afccce9f3bb090fbe3f3b61813fad75ceec2 100644
+--- a/v4/gtk/gtklistbox.go
++++ b/v4/gtk/gtklistbox.go
+@@ -18,26 +18,24 @@ // gtk_list_box_bind_model() for each item that gets added to the model.
+ //
+ // If the widget returned is not a #GtkListBoxRow widget, then the widget
+ // will be inserted as the child of an intermediate #GtkListBoxRow.
+-type ListBoxCreateWidgetFunc func(uintptr, uintptr) uintptr
+-
+-// Will be called whenever the row changes or is added and lets you control
+-// if the row should be visible or not.
+-type ListBoxFilterFunc func(uintptr, uintptr) bool
+-
+-// A function used by gtk_list_box_selected_foreach().
+-//
+-// It will be called on every selected child of the @box.
+-type ListBoxForeachFunc func(uintptr, uintptr, uintptr)
+-
+-// Compare two rows to determine which should be first.
+-type ListBoxSortFunc func(uintptr, uintptr, uintptr) int32
+-
+-// Whenever @row changes or which row is before @row changes this
+-// is called, which lets you update the header on @row.
+-//
+-// You may remove or set a new one via [method@Gtk.ListBoxRow.set_header]
+-// or just change the state of the current header widget.
+-type ListBoxUpdateHeaderFunc func(uintptr, uintptr, uintptr)
++type (
++	ListBoxCreateWidgetFunc func(uintptr, uintptr) uintptr
++	// Will be called whenever the row changes or is added and lets you control
++	// if the row should be visible or not.
++	ListBoxFilterFunc func(uintptr, uintptr) bool
++	// A function used by gtk_list_box_selected_foreach().
++	//
++	// It will be called on every selected child of the @box.
++	ListBoxForeachFunc func(uintptr, uintptr, uintptr)
++	// Compare two rows to determine which should be first.
++	ListBoxSortFunc func(uintptr, uintptr, uintptr) int32
++	// Whenever @row changes or which row is before @row changes this
++	// is called, which lets you update the header on @row.
++	//
++	// You may remove or set a new one via [method@Gtk.ListBoxRow.set_header]
++	// or just change the state of the current header widget.
++	ListBoxUpdateHeaderFunc func(uintptr, uintptr, uintptr)
++)
+ 
+ type ListBoxRowClass struct {
+ 	_ structs.HostLayout
+diff --git a/v4/gtk/gtktreemodelfilter.go b/v4/gtk/gtktreemodelfilter.go
+index eb505e8959f91480b66ad4d5e8663957c21f9a1d..969654f150cb228a9549425fe486284380c7f462 100644
+--- a/v4/gtk/gtktreemodelfilter.go
++++ b/v4/gtk/gtktreemodelfilter.go
+@@ -19,10 +19,11 @@ // row indicated by @iter.
+ //
+ // Since this function is called for each data access, it’s not a
+ // particularly efficient operation.
+-type TreeModelFilterModifyFunc func(uintptr, *TreeIter, *gobject.Value, int32, uintptr)
+-
+-// A function which decides whether the row indicated by @iter is visible.
+-type TreeModelFilterVisibleFunc func(uintptr, *TreeIter, uintptr) bool
++type (
++	TreeModelFilterModifyFunc func(uintptr, *TreeIter, *gobject.Value, int32, uintptr)
++	// A function which decides whether the row indicated by @iter is visible.
++	TreeModelFilterVisibleFunc func(uintptr, *TreeIter, uintptr) bool
++)
+ 
+ type TreeModelFilterClass struct {
+ 	_ structs.HostLayout
+diff --git a/v4/gtk/gtktreeselection.go b/v4/gtk/gtktreeselection.go
+index f93fac2b8d9cb176ab11cad3929ef397a9e701e9..1afd7ca1275c8fb311546788a020a325b9ebfb82 100644
+--- a/v4/gtk/gtktreeselection.go
++++ b/v4/gtk/gtktreeselection.go
+@@ -13,15 +13,16 @@ )
+ 
+ // A function used by gtk_tree_selection_selected_foreach() to map all
+ // selected rows.  It will be called on every selected row in the view.
+-type TreeSelectionForeachFunc func(uintptr, *TreePath, *TreeIter, uintptr)
+-
+-// A function used by gtk_tree_selection_set_select_function() to filter
+-// whether or not a row may be selected. It is called whenever a row's
+-// state might change.
+-//
+-// A return value of %TRUE indicates to @selection that it is okay to
+-// change the selection.
+-type TreeSelectionFunc func(uintptr, uintptr, *TreePath, bool, uintptr) bool
++type (
++	TreeSelectionForeachFunc func(uintptr, *TreePath, *TreeIter, uintptr)
++	// A function used by gtk_tree_selection_set_select_function() to filter
++	// whether or not a row may be selected. It is called whenever a row's
++	// state might change.
++	//
++	// A return value of %TRUE indicates to @selection that it is okay to
++	// change the selection.
++	TreeSelectionFunc func(uintptr, uintptr, *TreePath, bool, uintptr) bool
++)
+ 
+ // The selection object for GtkTreeView
+ //
+diff --git a/v4/gtk/gtktreeview.go b/v4/gtk/gtktreeview.go
+index 3da8e1cb503f989aab30fc2a89e5008d3a47d4d5..f5068faa998bff13930a9971a8708e82980af5f6 100644
+--- a/v4/gtk/gtktreeview.go
++++ b/v4/gtk/gtktreeview.go
+@@ -21,22 +21,21 @@ // reversed.  This function should return %TRUE if the spot is a valid drop
+ // spot.  Please note that returning %TRUE does not actually indicate that
+ // the column drop was made, but is meant only to indicate a possible drop
+ // spot to the user.
+-type TreeViewColumnDropFunc func(uintptr, uintptr, uintptr, uintptr, uintptr) bool
+-
+-// Function used for gtk_tree_view_map_expanded_rows().
+-type TreeViewMappingFunc func(uintptr, *TreePath, uintptr)
+-
+-// Function type for determining whether the row pointed to by @iter should
+-// be rendered as a separator. A common way to implement this is to have a
+-// boolean column in the model, whose values the `GtkTreeViewRowSeparatorFunc`
+-// returns.
+-type TreeViewRowSeparatorFunc func(uintptr, *TreeIter, uintptr) bool
+-
+-// A function used for checking whether a row in @model matches
+-// a search key string entered by the user. Note the return value
+-// is reversed from what you would normally expect, though it
+-// has some similarity to strcmp() returning 0 for equal strings.
+-type TreeViewSearchEqualFunc func(uintptr, int32, string, *TreeIter, uintptr) bool
++type (
++	TreeViewColumnDropFunc func(uintptr, uintptr, uintptr, uintptr, uintptr) bool
++	// Function used for gtk_tree_view_map_expanded_rows().
++	TreeViewMappingFunc func(uintptr, *TreePath, uintptr)
++	// Function type for determining whether the row pointed to by @iter should
++	// be rendered as a separator. A common way to implement this is to have a
++	// boolean column in the model, whose values the `GtkTreeViewRowSeparatorFunc`
++	// returns.
++	TreeViewRowSeparatorFunc func(uintptr, *TreeIter, uintptr) bool
++	// A function used for checking whether a row in @model matches
++	// a search key string entered by the user. Note the return value
++	// is reversed from what you would normally expect, though it
++	// has some similarity to strcmp() returning 0 for equal strings.
++	TreeViewSearchEqualFunc func(uintptr, int32, string, *TreeIter, uintptr) bool
++)
+ 
+ type TreeViewClass struct {
+ 	_ structs.HostLayout
+diff --git a/v4/gtk/gtkwidget.go b/v4/gtk/gtkwidget.go
+index b6354311e5b0f449e60e870906ed3f3b6e019140..703282eb988799be238677989ac8fd16b20f0cd6 100644
+--- a/v4/gtk/gtkwidget.go
++++ b/v4/gtk/gtkwidget.go
+@@ -21,13 +21,14 @@
+ // Callback type for adding a function to update animations.
+ //
+ // See [method@Gtk.Widget.add_tick_callback].
+-type TickCallback func(uintptr, uintptr, uintptr) bool
+-
+-// The type of the callback functions used for activating
+-// actions installed with [method@Gtk.WidgetClass.install_action].
+-//
+-// The @parameter must match the @parameter_type of the action.
+-type WidgetActionActivateFunc func(uintptr, string, *glib.Variant)
++type (
++	TickCallback func(uintptr, uintptr, uintptr) bool
++	// The type of the callback functions used for activating
++	// actions installed with [method@Gtk.WidgetClass.install_action].
++	//
++	// The @parameter must match the @parameter_type of the action.
++	WidgetActionActivateFunc func(uintptr, string, *glib.Variant)
++)
+ 
+ // Represents the desired size of a widget.
+ //
+diff --git a/v4/javascriptcore/JSCClass.go b/v4/javascriptcore/JSCClass.go
+index 374f1303736b7415ccb50012683fd8c0eb9de015..f413fd7e8353254fc20be9e18c562a882d9aabff 100644
+--- a/v4/javascriptcore/JSCClass.go
++++ b/v4/javascriptcore/JSCClass.go
+@@ -14,23 +14,21 @@ )
+ 
+ // The type of delete_property in #JSCClassVTable. This is only required when you need to handle
+ // external properties not added to the prototype.
+-type ClassDeletePropertyFunction func(uintptr, uintptr, uintptr, string) bool
+-
+-// The type of enumerate_properties in #JSCClassVTable. This is only required when you need to handle
+-// external properties not added to the prototype.
+-type ClassEnumeratePropertiesFunction func(uintptr, uintptr, uintptr) []string
+-
+-// The type of get_property in #JSCClassVTable. This is only required when you need to handle
+-// external properties not added to the prototype.
+-type ClassGetPropertyFunction func(uintptr, uintptr, uintptr, string) uintptr
+-
+-// The type of has_property in #JSCClassVTable. This is only required when you need to handle
+-// external properties not added to the prototype.
+-type ClassHasPropertyFunction func(uintptr, uintptr, uintptr, string) bool
+-
+-// The type of set_property in #JSCClassVTable. This is only required when you need to handle
+-// external properties not added to the prototype.
+-type ClassSetPropertyFunction func(uintptr, uintptr, uintptr, string, uintptr) bool
++type (
++	ClassDeletePropertyFunction func(uintptr, uintptr, uintptr, string) bool
++	// The type of enumerate_properties in #JSCClassVTable. This is only required when you need to handle
++	// external properties not added to the prototype.
++	ClassEnumeratePropertiesFunction func(uintptr, uintptr, uintptr) []string
++	// The type of get_property in #JSCClassVTable. This is only required when you need to handle
++	// external properties not added to the prototype.
++	ClassGetPropertyFunction func(uintptr, uintptr, uintptr, string) uintptr
++	// The type of has_property in #JSCClassVTable. This is only required when you need to handle
++	// external properties not added to the prototype.
++	ClassHasPropertyFunction func(uintptr, uintptr, uintptr, string) bool
++	// The type of set_property in #JSCClassVTable. This is only required when you need to handle
++	// external properties not added to the prototype.
++	ClassSetPropertyFunction func(uintptr, uintptr, uintptr, string, uintptr) bool
++)
+ 
+ type ClassClass struct {
+ 	_ structs.HostLayout
+diff --git a/v4/pango/pango-attributes.go b/v4/pango/pango-attributes.go
+index bd8790f4ea0181986de8b84beec7e42b29340160..cc64deb53eb8b22fb8f99b452f47d91ec4cfd64c 100644
+--- a/v4/pango/pango-attributes.go
++++ b/v4/pango/pango-attributes.go
+@@ -12,10 +12,11 @@ 	"codeberg.org/puregotk/puregotk/v4/gobject/types"
+ )
+ 
+ // Type of a function that can duplicate user data for an attribute.
+-type AttrDataCopyFunc func(uintptr) uintptr
+-
+-// Type of a function filtering a list of attributes.
+-type AttrFilterFunc func(*Attribute, uintptr) bool
++type (
++	AttrDataCopyFunc func(uintptr) uintptr
++	// Type of a function filtering a list of attributes.
++	AttrFilterFunc func(*Attribute, uintptr) bool
++)
+ 
+ // The `PangoAttrClass` structure stores the type and operations for
+ // a particular type of attribute.
+diff --git a/v4/soup/soup-auth-domain.go b/v4/soup/soup-auth-domain.go
+index 29ce57def8e43eee8341c9ce8e5f45ae71c891a3..0613492ee9bf7a79c3dee1bba7c69cbc21fb3e84 100644
+--- a/v4/soup/soup-auth-domain.go
++++ b/v4/soup/soup-auth-domain.go
+@@ -15,25 +15,26 @@
+ // The prototype for a [class@AuthDomain] filter.
+ //
+ // See [method@AuthDomain.set_filter] for details.
+-type AuthDomainFilter func(uintptr, uintptr, uintptr) bool
+-
+-// The prototype for a [class@AuthDomain] generic authentication callback.
+-//
+-// The callback should look up the user's password, call
+-// [method@AuthDomain.check_password], and use the return value from that method
+-// as its own return value.
+-//
+-// In general, for security reasons, it is preferable to use the
+-// auth-domain-specific auth callbacks (eg,
+-// [callback@AuthDomainBasicAuthCallback] and
+-// [callback@AuthDomainDigestAuthCallback]), because they don't require
+-// keeping a cleartext password database. Most users will use the same
+-// password for many different sites, meaning if any site with a
+-// cleartext password database is compromised, accounts on other
+-// servers might be compromised as well. For many of the cases where
+-// [class@Server] is used, this is not really relevant, but it may still
+-// be worth considering.
+-type AuthDomainGenericAuthCallback func(uintptr, uintptr, string, uintptr) bool
++type (
++	AuthDomainFilter func(uintptr, uintptr, uintptr) bool
++	// The prototype for a [class@AuthDomain] generic authentication callback.
++	//
++	// The callback should look up the user's password, call
++	// [method@AuthDomain.check_password], and use the return value from that method
++	// as its own return value.
++	//
++	// In general, for security reasons, it is preferable to use the
++	// auth-domain-specific auth callbacks (eg,
++	// [callback@AuthDomainBasicAuthCallback] and
++	// [callback@AuthDomainDigestAuthCallback]), because they don't require
++	// keeping a cleartext password database. Most users will use the same
++	// password for many different sites, meaning if any site with a
++	// cleartext password database is compromised, accounts on other
++	// servers might be compromised as well. For many of the cases where
++	// [class@Server] is used, this is not really relevant, but it may still
++	// be worth considering.
++	AuthDomainGenericAuthCallback func(uintptr, uintptr, string, uintptr) bool
++)
+ 
+ type AuthDomainClass struct {
+ 	_ structs.HostLayout
+diff --git a/v4/soup/soup-logger.go b/v4/soup/soup-logger.go
+index 6c55387304a7d56a118c6d3f6f5b6d94a582c395..dcc768ce740303aa7cc953b9b9e214f522fd4199 100644
+--- a/v4/soup/soup-logger.go
++++ b/v4/soup/soup-logger.go
+@@ -17,22 +17,23 @@ //
+ // The filter callback will be invoked for each request or response, and should
+ // analyze it and return a [enum@LoggerLogLevel] value indicating how much of
+ // the message to log.
+-type LoggerFilter func(uintptr, uintptr, uintptr) LoggerLogLevel
+-
+-// The prototype for a custom printing callback.
+-//
+-// @level indicates what kind of information is being printed. Eg, it
+-// will be %SOUP_LOGGER_LOG_HEADERS if @data is header data.
+-//
+-// @direction is either '&lt;', '&gt;', or ' ', and @data is the single line
+-// to print; the printer is expected to add a terminating newline.
+-//
+-// To get the effect of the default printer, you would do:
+-//
+-// ```c
+-// printf ("%c %s\n", direction, data);
+-// ```
+-type LoggerPrinter func(uintptr, LoggerLogLevel, byte, string, uintptr)
++type (
++	LoggerFilter func(uintptr, uintptr, uintptr) LoggerLogLevel
++	// The prototype for a custom printing callback.
++	//
++	// @level indicates what kind of information is being printed. Eg, it
++	// will be %SOUP_LOGGER_LOG_HEADERS if @data is header data.
++	//
++	// @direction is either '&lt;', '&gt;', or ' ', and @data is the single line
++	// to print; the printer is expected to add a terminating newline.
++	//
++	// To get the effect of the default printer, you would do:
++	//
++	// ```c
++	// printf ("%c %s\n", direction, data);
++	// ```
++	LoggerPrinter func(uintptr, LoggerLogLevel, byte, string, uintptr)
++)
+ 
+ type LoggerClass struct {
+ 	_ structs.HostLayout
+diff --git a/v4/soup/soup-server.go b/v4/soup/soup-server.go
+index c1462e57e5c820f5abdea65684b04fbbeeec82ad..dc7fd8ca6f66529460ac4284f6e0e87b4981b2b0 100644
+--- a/v4/soup/soup-server.go
++++ b/v4/soup/soup-server.go
+@@ -33,16 +33,17 @@ // query field yourself.
+ //
+ // See [method@Server.add_handler] and [method@Server.add_early_handler]
+ // for details of what handlers can/should do.
+-type ServerCallback func(uintptr, uintptr, string, *glib.HashTable, uintptr)
+-
+-// A callback used to handle WebSocket requests to a [class@Server].
+-//
+-// The callback will be invoked after sending the handshake response back to the
+-// client (and is only invoked if the handshake was successful).
+-//
+-// @path contains the path of the Request-URI, subject to the same
+-// rules as [callback@ServerCallback] `(qv)`.
+-type ServerWebsocketCallback func(uintptr, uintptr, string, uintptr, uintptr)
++type (
++	ServerCallback func(uintptr, uintptr, string, *glib.HashTable, uintptr)
++	// A callback used to handle WebSocket requests to a [class@Server].
++	//
++	// The callback will be invoked after sending the handshake response back to the
++	// client (and is only invoked if the handshake was successful).
++	//
++	// @path contains the path of the Request-URI, subject to the same
++	// rules as [callback@ServerCallback] `(qv)`.
++	ServerWebsocketCallback func(uintptr, uintptr, string, uintptr, uintptr)
++)
+ 
+ type ServerClass struct {
+ 	_ structs.HostLayout
+
