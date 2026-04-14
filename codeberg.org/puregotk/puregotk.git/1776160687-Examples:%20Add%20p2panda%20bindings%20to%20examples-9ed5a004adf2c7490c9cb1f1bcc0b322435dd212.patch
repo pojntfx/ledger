@@ -1,0 +1,2143 @@
+From 9ed5a004adf2c7490c9cb1f1bcc0b322435dd212 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Tue, 14 Apr 2026 02:58:07 -0700
+Subject: [PATCH] Examples: Add p2panda bindings to examples
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/examples/p2panda-gobject-go/README.md b/examples/p2panda-gobject-go/README.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..b6f8f789e3c03e239c0de17fb63c1066c34fef00
+--- /dev/null
++++ b/examples/p2panda-gobject-go/README.md
+@@ -0,0 +1,13 @@
++# p2panda-gobject-go
++
++Experimental Go bindings for [p2panda-gobject](https://github.com/p2panda/p2panda-gobject) using puregotk, specifically this fork: [pojntfx/p2panda-gobject@fix-bindings](https://github.com/pojntfx/p2panda-gobject/tree/fix-bindings). It uses puregotk's code generation pipeline to create type-safe Go bindings from the library's GIR (GObject Introspection Repository) file.
++
++First, make sure the `libp2panda` library is built (see [github.com/pojntfx/p2panda-gobject#getting-started](https://github.com/pojntfx/p2panda-gobject/tree/fix-bindings?tab=readme-ov-file#getting-started) for instructions). Then copy the resulting GIR file from `/usr/share/gir-1.0/P2panda-0.gir` to [internal/gir/spec/P2panda-0.gir](./internal/gir/spec/P2panda-0.gir); this GIR file is what the bindings are generated from.
++
++To generate the Go bindings from this GIR file, run:
++
++```shell
++./gen.sh
++```
++
++The generated Go bindings can then be imported from [p2panda](./p2panda/) and used from other Go applications, as demonstrated in [../p2pandaapp-cli-gomod](../p2pandaapp-cli-gomod/).
+diff --git a/examples/p2panda-gobject-go/gen.go b/examples/p2panda-gobject-go/gen.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..6420a1b9e2d21197aa1f2907b0303664ad255bee
+--- /dev/null
++++ b/examples/p2panda-gobject-go/gen.go
+@@ -0,0 +1,78 @@
++package main
++
++import (
++	"os"
++	"os/exec"
++	"path/filepath"
++	"strings"
++	"text/template"
++
++	"codeberg.org/puregotk/puregotk/pkg/gir/pass"
++	"codeberg.org/puregotk/puregotk/pkg/gir/util"
++)
++
++//go:generate go run gen.go
++
++func main() {
++	dir := "."
++	os.RemoveAll(dir)
++	var girs []string
++	filepath.Walk("internal/gir/spec", func(path string, f os.FileInfo, err error) error {
++		if !strings.HasSuffix(path, ".gir") {
++			return nil
++		}
++		girs = append(girs, path)
++		return nil
++	})
++
++	// Locate puregotk dependency and collect its GIR files
++	cmd := exec.Command("go", "list", "-m", "-f", "{{.Dir}}", "codeberg.org/puregotk/puregotk")
++	output, err := cmd.Output()
++	if err != nil {
++		panic("puregotk dependency not found: " + err.Error())
++	}
++	puregotk := strings.TrimSpace(string(output))
++
++	var puregotkGirs []string
++	filepath.Walk(filepath.Join(puregotk, "internal/gir/spec"), func(path string, f os.FileInfo, err error) error {
++		if strings.HasSuffix(path, ".gir") {
++			puregotkGirs = append(puregotkGirs, path)
++		}
++		return nil
++	})
++
++	p, err := pass.New(girs, "codeberg.org/puregotk/puregotk/examples/p2panda-gobject-go",
++		pass.Dependency{
++			Module: "codeberg.org/puregotk/puregotk/v4",
++			Files:  puregotkGirs,
++		},
++	)
++	if err != nil {
++		panic(err)
++	}
++	// collect basic type info
++	p.First()
++
++	// Create the template
++	gotemp, err := template.New("go").Funcs(template.FuncMap{
++		"conv":     util.ConvertArgs,
++		"convc":    util.ConvertArgsComma,
++		"convcb":   util.ConvertCallbackArgs,
++		"convcd":   util.ConvertArgsCommaDeref,
++		"convd":    util.ConvertArgsDeref,
++		"convcbne": util.ConvertCallbackArgsNoErr,
++		"propsset": util.PropertyScalarSet,
++		"propsget": util.PropertyScalarGet,
++		"propvset": util.PropertyVectorSet,
++		"propvget": util.PropertyVectorGet,
++	}).ParseFiles(filepath.Join(puregotk, "templates/go"))
++	if err != nil {
++		panic(err)
++	}
++
++	// Only generate code for local namespaces
++	p.Parsed = p.Parsed[:len(girs)]
++
++	// Write go files by making the second pass
++	p.Second(dir, gotemp)
++}
+diff --git a/examples/p2panda-gobject-go/gen.sh b/examples/p2panda-gobject-go/gen.sh
+new file mode 100755
+index 0000000000000000000000000000000000000000..d6abaafc690290afd285d712d97270fd1e004cb3
+--- /dev/null
++++ b/examples/p2panda-gobject-go/gen.sh
+@@ -0,0 +1,9 @@
++#!/usr/bin/env bash
++
++set -e
++
++echo "generating go files..."
++go generate
++
++echo "running go vet..."
++go vet ./...
+diff --git a/examples/p2panda-gobject-go/go.mod b/examples/p2panda-gobject-go/go.mod
+new file mode 100644
+index 0000000000000000000000000000000000000000..aa477da700e3644458638ab10674c44501cb69c4
+--- /dev/null
++++ b/examples/p2panda-gobject-go/go.mod
+@@ -0,0 +1,16 @@
++module codeberg.org/puregotk/puregotk/examples/p2panda-gobject-go
++
++go 1.25.0
++
++replace codeberg.org/puregotk/puregotk v0.0.0-00010101000000-000000000000 => ../..
++
++require (
++	codeberg.org/puregotk/purego v0.0.0-20260224095105-2513c838cb80
++	codeberg.org/puregotk/puregotk v0.0.0-00010101000000-000000000000
++)
++
++require (
++	github.com/google/go-cmp v0.7.0 // indirect
++	golang.org/x/tools v0.38.0 // indirect
++	mvdan.cc/gofumpt v0.9.2 // indirect
++)
+diff --git a/examples/p2panda-gobject-go/go.sum b/examples/p2panda-gobject-go/go.sum
+new file mode 100644
+index 0000000000000000000000000000000000000000..c5e7944ba77223e72649ed2e46b15761baf1decc
+--- /dev/null
++++ b/examples/p2panda-gobject-go/go.sum
+@@ -0,0 +1,16 @@
++codeberg.org/puregotk/purego v0.0.0-20260224095105-2513c838cb80 h1:y5ZxMLLOjl4xc2tBl02olxZQ06xbbKiR+2ipBfDrVcs=
++codeberg.org/puregotk/purego v0.0.0-20260224095105-2513c838cb80/go.mod h1:hVVM4ddvYRlc3IcK3CXJPlMwd/vaLj7gdDBZ6oPgT8w=
++github.com/go-quicktest/qt v1.101.0 h1:O1K29Txy5P2OK0dGo59b7b0LR6wKfIhttaAhHUyn7eI=
++github.com/go-quicktest/qt v1.101.0/go.mod h1:14Bz/f7NwaXPtdYEgzsx46kqSxVwTbzVZsDC26tQJow=
++github.com/google/go-cmp v0.7.0 h1:wk8382ETsv4JYUZwIsn6YpYiWiBsYLSJiTsyBybVuN8=
++github.com/google/go-cmp v0.7.0/go.mod h1:pXiqmnSA92OHEEa9HXL2W4E7lf9JzCmGVUdgjX3N/iU=
++github.com/kr/pretty v0.3.1 h1:flRD4NNwYAUpkphVc1HcthR4KEIFJ65n8Mw5qdRn3LE=
++github.com/kr/pretty v0.3.1/go.mod h1:hoEshYVHaxMs3cyo3Yncou5ZscifuDolrwPKZanG3xk=
++github.com/kr/text v0.2.0 h1:5Nx0Ya0ZqY2ygV366QzturHI13Jq95ApcVaJBhpS+AY=
++github.com/kr/text v0.2.0/go.mod h1:eLer722TekiGuMkidMxC/pM04lWEeraHUUmBw8l2grE=
++github.com/rogpeppe/go-internal v1.14.1 h1:UQB4HGPB6osV0SQTLymcB4TgvyWu6ZyliaW0tI/otEQ=
++github.com/rogpeppe/go-internal v1.14.1/go.mod h1:MaRKkUm5W0goXpeCfT7UZI6fk/L7L7so1lCWt35ZSgc=
++golang.org/x/tools v0.38.0 h1:Hx2Xv8hISq8Lm16jvBZ2VQf+RLmbd7wVUsALibYI/IQ=
++golang.org/x/tools v0.38.0/go.mod h1:yEsQ/d/YK8cjh0L6rZlY8tgtlKiBNTL14pGDJPJpYQs=
++mvdan.cc/gofumpt v0.9.2 h1:zsEMWL8SVKGHNztrx6uZrXdp7AX8r421Vvp23sz7ik4=
++mvdan.cc/gofumpt v0.9.2/go.mod h1:iB7Hn+ai8lPvofHd9ZFGVg2GOr8sBUw1QUWjNbmIL/s=
+diff --git a/examples/p2panda-gobject-go/internal/gir/spec/P2panda-0.gir b/examples/p2panda-gobject-go/internal/gir/spec/P2panda-0.gir
+new file mode 100644
+index 0000000000000000000000000000000000000000..6fc0ae44bc99b6bc1f44c19ec619822632e3410c
+--- /dev/null
++++ b/examples/p2panda-gobject-go/internal/gir/spec/P2panda-0.gir
+@@ -0,0 +1,1142 @@
++<?xml version="1.0"?>
++<!-- This file was automatically generated from C sources - DO NOT EDIT!
++To affect the contents of this file, edit the original C definitions,
++and/or use gtk-doc annotations.  -->
++<repository version="1.2"
++            xmlns="http://www.gtk.org/introspection/core/1.0"
++            xmlns:c="http://www.gtk.org/introspection/c/1.0"
++            xmlns:doc="http://www.gtk.org/introspection/doc/1.0"
++            xmlns:glib="http://www.gtk.org/introspection/glib/1.0">
++  <include name="GLib" version="2.0"/>
++  <include name="GObject" version="2.0"/>
++  <include name="Gio" version="2.0"/>
++  <package name="p2panda-0"/>
++  <c:include name="p2panda.h"/>
++  <doc:format name="unknown"/>
++  <namespace name="P2panda"
++             version="0"
++             shared-library="libp2panda-0.so.0"
++             c:identifier-prefixes="P2panda"
++             c:symbol-prefixes="p2panda">
++    <enumeration name="Error"
++                 glib:type-name="P2pandaError"
++                 glib:get-type="p2panda_error_get_type"
++                 c:type="P2pandaError"
++                 glib:error-domain="p2panda-error">
++      <doc xml:space="preserve"
++           filename="libp2panda/include/p2panda.h"
++           line="506">Errors that may happen while interacting with a node and topic</doc>
++      <member name="failed"
++              value="0"
++              c:identifier="P2PANDA_ERROR_FAILED"
++              glib:nick="failed"
++              glib:name="Failed">
++        <doc xml:space="preserve"
++             filename="libp2panda/include/p2panda.h"
++             line="522">Generic type for all other errors.</doc>
++      </member>
++      <member name="spawn_node"
++              value="1"
++              c:identifier="P2PANDA_ERROR_SPAWN_NODE"
++              glib:nick="spawn-node"
++              glib:name="SpawnNode">
++        <doc xml:space="preserve"
++             filename="libp2panda/include/p2panda.h"
++             line="528">Failed to spawn node.</doc>
++      </member>
++      <member name="spawn_topic"
++              value="2"
++              c:identifier="P2PANDA_ERROR_SPAWN_TOPIC"
++              glib:nick="spawn-topic"
++              glib:name="SpawnTopic">
++        <doc xml:space="preserve"
++             filename="libp2panda/include/p2panda.h"
++             line="534">Failed to spawn topic.</doc>
++      </member>
++      <member name="not_spawned"
++              value="3"
++              c:identifier="P2PANDA_ERROR_NOT_SPAWNED"
++              glib:nick="not-spawned"
++              glib:name="NotSpawned">
++        <doc xml:space="preserve"
++             filename="libp2panda/include/p2panda.h"
++             line="540">Topic or Node wasn't spawned.</doc>
++      </member>
++      <member name="decoding"
++              value="4"
++              c:identifier="P2PANDA_ERROR_DECODING"
++              glib:nick="decoding"
++              glib:name="Decoding">
++        <doc xml:space="preserve"
++             filename="libp2panda/include/p2panda.h"
++             line="547">Unable to decode a message.</doc>
++      </member>
++      <member name="replay"
++              value="5"
++              c:identifier="P2PANDA_ERROR_REPLAY"
++              glib:nick="replay"
++              glib:name="Replay">
++        <doc xml:space="preserve"
++             filename="libp2panda/include/p2panda.h"
++             line="554">Unable to replay a message.</doc>
++      </member>
++      <member name="has_no_persistent"
++              value="6"
++              c:identifier="P2PANDA_ERROR_HAS_NO_PERSISTENT"
++              glib:nick="has-no-persistent"
++              glib:name="HasNoPersistent">
++        <doc xml:space="preserve"
++             filename="libp2panda/include/p2panda.h"
++             line="561">Message was send to a topic without the PERSISTENT flag.</doc>
++      </member>
++      <member name="has_no_ephemeral"
++              value="7"
++              c:identifier="P2PANDA_ERROR_HAS_NO_EPHEMERAL"
++              glib:nick="has-no-ephemeral"
++              glib:name="HasNoEphemeral">
++        <doc xml:space="preserve"
++             filename="libp2panda/include/p2panda.h"
++             line="568">Message was send to a topic without the EPHEMERAL flag.</doc>
++      </member>
++      <member name="publish"
++              value="8"
++              c:identifier="P2PANDA_ERROR_PUBLISH"
++              glib:nick="publish"
++              glib:name="Publish">
++        <doc xml:space="preserve"
++             filename="libp2panda/include/p2panda.h"
++             line="575">Failed to publish a message.</doc>
++      </member>
++      <member name="signature"
++              value="9"
++              c:identifier="P2PANDA_ERROR_SIGNATURE"
++              glib:nick="signature"
++              glib:name="Signature">
++        <doc xml:space="preserve"
++             filename="libp2panda/include/p2panda.h"
++             line="582">Invalid sigature, when parsing [struct@NodeId] or [struct@PrivateKey].</doc>
++      </member>
++      <function name="quark" c:identifier="p2panda_error_quark">
++        <doc xml:space="preserve"
++             filename="libp2panda/include/p2panda.h"
++             line="591">Error quark for [error@Error]</doc>
++        <return-value transfer-ownership="none">
++          <doc xml:space="preserve"
++               filename="libp2panda/include/p2panda.h"
++               line="596">The error domain</doc>
++          <type name="GLib.Quark" c:type="GQuark"/>
++        </return-value>
++      </function>
++    </enumeration>
++    <record name="Hash"
++            c:type="P2pandaHash"
++            opaque="1"
++            glib:type-name="P2pandaHash"
++            glib:get-type="p2panda_hash_get_type"
++            c:symbol-prefix="hash">
++      <source-position filename="libp2panda/include/p2panda.h" line="349"/>
++      <method name="copy" c:identifier="p2panda_hash_copy">
++        <source-position filename="libp2panda/include/p2panda.h" line="353"/>
++        <return-value transfer-ownership="full">
++          <type name="Hash" c:type="P2pandaHash*"/>
++        </return-value>
++        <parameters>
++          <instance-parameter name="hash" transfer-ownership="none">
++            <type name="Hash" c:type="P2pandaHash*"/>
++          </instance-parameter>
++        </parameters>
++      </method>
++      <method name="free" c:identifier="p2panda_hash_free">
++        <source-position filename="libp2panda/include/p2panda.h" line="354"/>
++        <return-value transfer-ownership="none">
++          <type name="none" c:type="void"/>
++        </return-value>
++        <parameters>
++          <instance-parameter name="hash" transfer-ownership="none">
++            <type name="Hash" c:type="P2pandaHash*"/>
++          </instance-parameter>
++        </parameters>
++      </method>
++    </record>
++    <enumeration name="MdnsDiscoveryMode"
++                 glib:type-name="P2pandaMdnsDiscoveryMode"
++                 glib:get-type="p2panda_mdns_discovery_mode_get_type"
++                 c:type="P2pandaMdnsDiscoveryMode">
++      <member name="active"
++              value="0"
++              c:identifier="P2PANDA_MDNS_DISCOVERY_MODE_ACTIVE"
++              glib:nick="active"
++              glib:name="Active">
++        <doc xml:space="preserve"
++             filename="libp2panda/include/p2panda.h"
++             line="147">Broadcast this node and look for other nodes via MDNS</doc>
++      </member>
++      <member name="passive"
++              value="1"
++              c:identifier="P2PANDA_MDNS_DISCOVERY_MODE_PASSIVE"
++              glib:nick="passive"
++              glib:name="Passive">
++        <doc xml:space="preserve"
++             filename="libp2panda/include/p2panda.h"
++             line="148">Look for other nodes vie MDNS but do not broadcast this node</doc>
++      </member>
++    </enumeration>
++    <record name="NetworkId"
++            c:type="P2pandaNetworkId"
++            opaque="1"
++            glib:type-name="P2pandaNetworkId"
++            glib:get-type="p2panda_network_id_get_type"
++            c:symbol-prefix="network_id">
++      <source-position filename="libp2panda/include/p2panda.h" line="159"/>
++      <constructor name="new" c:identifier="p2panda_network_id_new">
++        <source-position filename="libp2panda/include/p2panda.h" line="168"/>
++        <return-value transfer-ownership="full">
++          <type name="NetworkId" c:type="P2pandaNetworkId*"/>
++        </return-value>
++      </constructor>
++      <constructor name="new_from_data"
++                   c:identifier="p2panda_network_id_new_from_data">
++        <source-position filename="libp2panda/include/p2panda.h" line="181"/>
++        <return-value transfer-ownership="full">
++          <doc xml:space="preserve"
++               filename="libp2panda/include/p2panda.h"
++               line="179">a new [struct@NetworkId]</doc>
++          <type name="NetworkId" c:type="P2pandaNetworkId*"/>
++        </return-value>
++        <parameters>
++          <parameter name="data" transfer-ownership="none">
++            <array zero-terminated="0" c:type="const uint8_t*" fixed-size="32">
++              <type name="guint8" c:type="uint8_t"/>
++            </array>
++          </parameter>
++        </parameters>
++      </constructor>
++      <method name="copy" c:identifier="p2panda_network_id_copy">
++        <source-position filename="libp2panda/include/p2panda.h" line="170"/>
++        <return-value transfer-ownership="full">
++          <type name="NetworkId" c:type="P2pandaNetworkId*"/>
++        </return-value>
++        <parameters>
++          <instance-parameter name="network_id" transfer-ownership="none">
++            <type name="NetworkId" c:type="P2pandaNetworkId*"/>
++          </instance-parameter>
++        </parameters>
++      </method>
++      <method name="free" c:identifier="p2panda_network_id_free">
++        <source-position filename="libp2panda/include/p2panda.h" line="171"/>
++        <return-value transfer-ownership="none">
++          <type name="none" c:type="void"/>
++        </return-value>
++        <parameters>
++          <instance-parameter name="network_id" transfer-ownership="none">
++            <type name="NetworkId" c:type="P2pandaNetworkId*"/>
++          </instance-parameter>
++        </parameters>
++      </method>
++      <method name="get_data" c:identifier="p2panda_network_id_get_data">
++        <doc xml:space="preserve"
++             filename="libp2panda/include/p2panda.h"
++             line="183">Retrieves the raw bytes of the [struct@NetworkId]</doc>
++        <source-position filename="libp2panda/include/p2panda.h" line="191"/>
++        <return-value transfer-ownership="none">
++          <array zero-terminated="0" c:type="const uint8_t*" fixed-size="32">
++            <type name="guint8" c:type="uint8_t"/>
++          </array>
++        </return-value>
++        <parameters>
++          <instance-parameter name="network_id" transfer-ownership="none">
++            <type name="NetworkId" c:type="P2pandaNetworkId*"/>
++          </instance-parameter>
++        </parameters>
++      </method>
++    </record>
++    <class name="Node"
++           c:symbol-prefix="node"
++           c:type="P2pandaNode"
++           parent="GObject.Object"
++           glib:type-name="P2pandaNode"
++           glib:get-type="p2panda_node_get_type"
++           glib:type-struct="NodeClass">
++      <doc xml:space="preserve"
++           filename="libp2panda/include/p2panda.h"
++           line="128">[class@Node] main entry point.</doc>
++      <source-position filename="libp2panda/include/p2panda.h" line="135"/>
++      <constructor name="new" c:identifier="p2panda_node_new">
++        <doc xml:space="preserve"
++             filename="libp2panda/include/p2panda.h"
++             line="371">Creates a new node with the given options.</doc>
++        <source-position filename="libp2panda/include/p2panda.h" line="384"/>
++        <return-value transfer-ownership="full">
++          <doc xml:space="preserve"
++               filename="libp2panda/include/p2panda.h"
++               line="382">a new [class@Node]</doc>
++          <type name="Node" c:type="P2pandaNode*"/>
++        </return-value>
++        <parameters>
++          <parameter name="private_key"
++                     transfer-ownership="none"
++                     nullable="1"
++                     allow-none="1">
++            <doc xml:space="preserve"
++                 filename="libp2panda/include/p2panda.h"
++                 line="373">The private key to be used for this node</doc>
++            <type name="PrivateKey" c:type="P2pandaPrivateKey*"/>
++          </parameter>
++          <parameter name="database_url"
++                     transfer-ownership="none"
++                     nullable="1"
++                     allow-none="1">
++            <doc xml:space="preserve"
++                 filename="libp2panda/include/p2panda.h"
++                 line="374">A sqlite address</doc>
++            <type name="utf8" c:type="const char*"/>
++          </parameter>
++          <parameter name="network_id"
++                     transfer-ownership="none"
++                     nullable="1"
++                     allow-none="1">
++            <doc xml:space="preserve"
++                 filename="libp2panda/include/p2panda.h"
++                 line="375">The network id of the network to join</doc>
++            <type name="NetworkId" c:type="P2pandaNetworkId*"/>
++          </parameter>
++          <parameter name="relay_url"
++                     transfer-ownership="none"
++                     nullable="1"
++                     allow-none="1">
++            <doc xml:space="preserve"
++                 filename="libp2panda/include/p2panda.h"
++                 line="376">The url of a iroh Relay Server</doc>
++            <type name="GLib.Uri" c:type="GUri*"/>
++          </parameter>
++          <parameter name="bootstrap_node_id"
++                     transfer-ownership="none"
++                     nullable="1"
++                     allow-none="1">
++            <doc xml:space="preserve"
++                 filename="libp2panda/include/p2panda.h"
++                 line="377">The address of the bootstrap node</doc>
++            <type name="NodeId" c:type="P2pandaNodeId*"/>
++          </parameter>
++          <parameter name="mdns_mode" transfer-ownership="none">
++            <doc xml:space="preserve"
++                 filename="libp2panda/include/p2panda.h"
++                 line="378">The MDNS decovery mode</doc>
++            <type name="MdnsDiscoveryMode" c:type="P2pandaMdnsDiscoveryMode"/>
++          </parameter>
++        </parameters>
++      </constructor>
++      <method name="spawn_async"
++              c:identifier="p2panda_node_spawn_async"
++              glib:finish-func="spawn_finish">
++        <doc xml:space="preserve"
++             filename="libp2panda/include/p2panda.h"
++             line="391">Spawn the node.
++
++Before spawning the node no network communcation takes place, and the [class@Node]
++can't be used.</doc>
++        <source-position filename="libp2panda/include/p2panda.h" line="404"/>
++        <return-value transfer-ownership="none">
++          <type name="none" c:type="void"/>
++        </return-value>
++        <parameters>
++          <instance-parameter name="node" transfer-ownership="none">
++            <type name="Node" c:type="P2pandaNode*"/>
++          </instance-parameter>
++          <parameter name="cancellable"
++                     transfer-ownership="none"
++                     nullable="1"
++                     allow-none="1">
++            <type name="Gio.Cancellable" c:type="GCancellable*"/>
++          </parameter>
++          <parameter name="callback"
++                     transfer-ownership="none"
++                     nullable="1"
++                     allow-none="1"
++                     scope="async"
++                     closure="2">
++            <type name="Gio.AsyncReadyCallback" c:type="GAsyncReadyCallback"/>
++          </parameter>
++          <parameter name="user_data"
++                     transfer-ownership="none"
++                     nullable="1"
++                     allow-none="1">
++            <doc xml:space="preserve"
++                 filename="libp2panda/include/p2panda.h"
++                 line="396">user data to pass to @callback</doc>
++            <type name="gpointer" c:type="gpointer"/>
++          </parameter>
++        </parameters>
++      </method>
++      <method name="spawn_finish"
++              c:identifier="p2panda_node_spawn_finish"
++              throws="1">
++        <doc xml:space="preserve"
++             filename="libp2panda/include/p2panda.h"
++             line="409">Finishes the [method@Node.spawn_async] call.</doc>
++        <source-position filename="libp2panda/include/p2panda.h" line="419"/>
++        <return-value transfer-ownership="none">
++          <type name="gboolean" c:type="gboolean"/>
++        </return-value>
++        <parameters>
++          <instance-parameter name="node" transfer-ownership="none">
++            <type name="Node" c:type="P2pandaNode*"/>
++          </instance-parameter>
++          <parameter name="result" transfer-ownership="none">
++            <doc xml:space="preserve"
++                 filename="libp2panda/include/p2panda.h"
++                 line="412">A [iface@Gio.AsyncResult]</doc>
++            <type name="Gio.AsyncResult" c:type="GAsyncResult*"/>
++          </parameter>
++        </parameters>
++      </method>
++      <property name="bootstrap"
++                readable="0"
++                writable="1"
++                construct-only="1"
++                transfer-ownership="none">
++        <doc xml:space="preserve"
++             filename="libp2panda/include/p2panda.h"
++             line="9">A node that is used to find other nodes.</doc>
++        <type name="NodeId"/>
++      </property>
++      <property name="database-url"
++                readable="0"
++                writable="1"
++                construct-only="1"
++                transfer-ownership="none"
++                default-value="NULL">
++        <doc xml:space="preserve"
++             filename="libp2panda/include/p2panda.h"
++             line="15">The [uri](https://www.sqlite.org/uri.html) to a sqlite database.</doc>
++        <type name="utf8" c:type="gchar*"/>
++      </property>
++      <property name="mdns-mode"
++                readable="0"
++                writable="1"
++                construct-only="1"
++                transfer-ownership="none"
++                default-value="Active">
++        <type name="MdnsDiscoveryMode"/>
++      </property>
++      <property name="network-id"
++                readable="0"
++                writable="1"
++                construct-only="1"
++                transfer-ownership="none">
++        <doc xml:space="preserve"
++             filename="libp2panda/include/p2panda.h"
++             line="21">The id of the network to this node will join.</doc>
++        <type name="NetworkId"/>
++      </property>
++      <property name="private-key"
++                readable="0"
++                writable="1"
++                construct-only="1"
++                transfer-ownership="none">
++        <doc xml:space="preserve"
++             filename="libp2panda/include/p2panda.h"
++             line="27">The private key representing the node's identity.</doc>
++        <type name="PrivateKey"/>
++      </property>
++      <property name="relay-url"
++                readable="0"
++                writable="1"
++                construct-only="1"
++                transfer-ownership="none">
++        <doc xml:space="preserve"
++             filename="libp2panda/include/p2panda.h"
++             line="33">The url to a [iroh relay](https://docs.iroh.computer/concepts/relays).</doc>
++        <type name="GLib.Uri"/>
++      </property>
++      <glib:signal name="system-event" when="last">
++        <doc xml:space="preserve"
++             filename="libp2panda/include/p2panda.h"
++             line="39">Emitted on system events.
++
++This signal is emitted on the main context that was thread default when the node was spawned.</doc>
++        <return-value transfer-ownership="none">
++          <type name="none" c:type="void"/>
++        </return-value>
++      </glib:signal>
++    </class>
++    <record name="NodeClass"
++            c:type="P2pandaNodeClass"
++            glib:is-gtype-struct-for="Node">
++      <source-position filename="libp2panda/include/p2panda.h" line="135"/>
++      <field name="parent_class">
++        <type name="GObject.ObjectClass" c:type="GObjectClass"/>
++      </field>
++    </record>
++    <record name="NodeId"
++            c:type="P2pandaNodeId"
++            opaque="1"
++            glib:type-name="P2pandaNodeId"
++            glib:get-type="p2panda_node_id_get_type"
++            c:symbol-prefix="node_id">
++      <source-position filename="libp2panda/include/p2panda.h" line="193"/>
++      <constructor name="new_from_data"
++                   c:identifier="p2panda_node_id_new_from_data"
++                   throws="1">
++        <source-position filename="libp2panda/include/p2panda.h" line="210"/>
++        <return-value transfer-ownership="full" nullable="1">
++          <doc xml:space="preserve"
++               filename="libp2panda/include/p2panda.h"
++               line="208">a new [struct@NodeId]</doc>
++          <type name="NodeId" c:type="P2pandaNodeId*"/>
++        </return-value>
++        <parameters>
++          <parameter name="data" transfer-ownership="none">
++            <array zero-terminated="0" c:type="const uint8_t*" fixed-size="32">
++              <type name="guint8" c:type="uint8_t"/>
++            </array>
++          </parameter>
++          <parameter name="relay_url"
++                     transfer-ownership="none"
++                     nullable="1"
++                     allow-none="1">
++            <doc xml:space="preserve"
++                 filename="libp2panda/include/p2panda.h"
++                 line="205">The url of a iroh Relay Server</doc>
++            <type name="GLib.Uri" c:type="GUri*"/>
++          </parameter>
++        </parameters>
++      </constructor>
++      <method name="copy" c:identifier="p2panda_node_id_copy">
++        <source-position filename="libp2panda/include/p2panda.h" line="197"/>
++        <return-value transfer-ownership="full">
++          <type name="NodeId" c:type="P2pandaNodeId*"/>
++        </return-value>
++        <parameters>
++          <instance-parameter name="node_id" transfer-ownership="none">
++            <type name="NodeId" c:type="P2pandaNodeId*"/>
++          </instance-parameter>
++        </parameters>
++      </method>
++      <method name="free" c:identifier="p2panda_node_id_free">
++        <source-position filename="libp2panda/include/p2panda.h" line="198"/>
++        <return-value transfer-ownership="none">
++          <type name="none" c:type="void"/>
++        </return-value>
++        <parameters>
++          <instance-parameter name="node_id" transfer-ownership="none">
++            <type name="NodeId" c:type="P2pandaNodeId*"/>
++          </instance-parameter>
++        </parameters>
++      </method>
++      <method name="get_data" c:identifier="p2panda_node_id_get_data">
++        <doc xml:space="preserve"
++             filename="libp2panda/include/p2panda.h"
++             line="214">Retrieves the raw bytes of the [struct@NodeId]</doc>
++        <source-position filename="libp2panda/include/p2panda.h" line="222"/>
++        <return-value transfer-ownership="none">
++          <array zero-terminated="0" c:type="const uint8_t*" fixed-size="32">
++            <type name="guint8" c:type="uint8_t"/>
++          </array>
++        </return-value>
++        <parameters>
++          <instance-parameter name="node_id" transfer-ownership="none">
++            <type name="NodeId" c:type="P2pandaNodeId*"/>
++          </instance-parameter>
++        </parameters>
++      </method>
++    </record>
++    <record name="PrivateKey"
++            c:type="P2pandaPrivateKey"
++            opaque="1"
++            glib:type-name="P2pandaPrivateKey"
++            glib:get-type="p2panda_private_key_get_type"
++            c:symbol-prefix="private_key">
++      <source-position filename="libp2panda/include/p2panda.h" line="276"/>
++      <constructor name="new" c:identifier="p2panda_private_key_new">
++        <source-position filename="libp2panda/include/p2panda.h" line="290"/>
++        <return-value transfer-ownership="full">
++          <type name="PrivateKey" c:type="P2pandaPrivateKey*"/>
++        </return-value>
++      </constructor>
++      <constructor name="new_from_data"
++                   c:identifier="p2panda_private_key_new_from_data">
++        <source-position filename="libp2panda/include/p2panda.h" line="298"/>
++        <return-value transfer-ownership="full">
++          <type name="PrivateKey" c:type="P2pandaPrivateKey*"/>
++        </return-value>
++        <parameters>
++          <parameter name="data" transfer-ownership="none">
++            <array zero-terminated="0" c:type="const uint8_t*" fixed-size="32">
++              <type name="guint8" c:type="uint8_t"/>
++            </array>
++          </parameter>
++        </parameters>
++      </constructor>
++      <method name="copy" c:identifier="p2panda_private_key_copy">
++        <source-position filename="libp2panda/include/p2panda.h" line="280"/>
++        <return-value transfer-ownership="full">
++          <type name="PrivateKey" c:type="P2pandaPrivateKey*"/>
++        </return-value>
++        <parameters>
++          <instance-parameter name="private_key" transfer-ownership="none">
++            <type name="PrivateKey" c:type="P2pandaPrivateKey*"/>
++          </instance-parameter>
++        </parameters>
++      </method>
++      <method name="free" c:identifier="p2panda_private_key_free">
++        <source-position filename="libp2panda/include/p2panda.h" line="281"/>
++        <return-value transfer-ownership="none">
++          <type name="none" c:type="void"/>
++        </return-value>
++        <parameters>
++          <instance-parameter name="private_key" transfer-ownership="none">
++            <type name="PrivateKey" c:type="P2pandaPrivateKey*"/>
++          </instance-parameter>
++        </parameters>
++      </method>
++      <method name="get_data" c:identifier="p2panda_private_key_get_data">
++        <doc xml:space="preserve"
++             filename="libp2panda/include/p2panda.h"
++             line="300">Retrieves the raw bytes of the [struct@PrivateKey]</doc>
++        <source-position filename="libp2panda/include/p2panda.h" line="308"/>
++        <return-value transfer-ownership="none">
++          <array zero-terminated="0" c:type="const uint8_t*" fixed-size="32">
++            <type name="guint8" c:type="uint8_t"/>
++          </array>
++        </return-value>
++        <parameters>
++          <instance-parameter name="private_key" transfer-ownership="none">
++            <type name="PrivateKey" c:type="P2pandaPrivateKey*"/>
++          </instance-parameter>
++        </parameters>
++      </method>
++      <method name="get_public_key"
++              c:identifier="p2panda_private_key_get_public_key">
++        <doc xml:space="preserve"
++             filename="libp2panda/include/p2panda.h"
++             line="319">Retrieves the the [struct@PublicKey]</doc>
++        <source-position filename="libp2panda/include/p2panda.h" line="327"/>
++        <return-value transfer-ownership="full">
++          <type name="PublicKey" c:type="P2pandaPublicKey*"/>
++        </return-value>
++        <parameters>
++          <instance-parameter name="private_key" transfer-ownership="none">
++            <type name="PrivateKey" c:type="P2pandaPrivateKey*"/>
++          </instance-parameter>
++        </parameters>
++      </method>
++    </record>
++    <record name="PublicKey"
++            c:type="P2pandaPublicKey"
++            opaque="1"
++            glib:type-name="P2pandaPublicKey"
++            glib:get-type="p2panda_public_key_get_type"
++            c:symbol-prefix="public_key">
++      <source-position filename="libp2panda/include/p2panda.h" line="310"/>
++      <constructor name="new_from_data"
++                   c:identifier="p2panda_public_key_new_from_data"
++                   throws="1">
++        <source-position filename="libp2panda/include/p2panda.h" line="336"/>
++        <return-value transfer-ownership="full" nullable="1">
++          <doc xml:space="preserve"
++               filename="libp2panda/include/p2panda.h"
++               line="334">a new [struct@PublicKey]</doc>
++          <type name="PublicKey" c:type="P2pandaPublicKey*"/>
++        </return-value>
++        <parameters>
++          <parameter name="data" transfer-ownership="none">
++            <array zero-terminated="0" c:type="const uint8_t*" fixed-size="32">
++              <type name="guint8" c:type="uint8_t"/>
++            </array>
++          </parameter>
++        </parameters>
++      </constructor>
++      <method name="copy" c:identifier="p2panda_public_key_copy">
++        <source-position filename="libp2panda/include/p2panda.h" line="314"/>
++        <return-value transfer-ownership="full">
++          <type name="PublicKey" c:type="P2pandaPublicKey*"/>
++        </return-value>
++        <parameters>
++          <instance-parameter name="public_key" transfer-ownership="none">
++            <type name="PublicKey" c:type="P2pandaPublicKey*"/>
++          </instance-parameter>
++        </parameters>
++      </method>
++      <method name="free" c:identifier="p2panda_public_key_free">
++        <source-position filename="libp2panda/include/p2panda.h" line="315"/>
++        <return-value transfer-ownership="none">
++          <type name="none" c:type="void"/>
++        </return-value>
++        <parameters>
++          <instance-parameter name="public_key" transfer-ownership="none">
++            <type name="PublicKey" c:type="P2pandaPublicKey*"/>
++          </instance-parameter>
++        </parameters>
++      </method>
++      <method name="get_data" c:identifier="p2panda_public_key_get_data">
++        <doc xml:space="preserve"
++             filename="libp2panda/include/p2panda.h"
++             line="339">Retrieves the raw bytes of the [struct@PublicKey]</doc>
++        <source-position filename="libp2panda/include/p2panda.h" line="347"/>
++        <return-value transfer-ownership="none">
++          <array zero-terminated="0" c:type="const uint8_t*" fixed-size="32">
++            <type name="guint8" c:type="uint8_t"/>
++          </array>
++        </return-value>
++        <parameters>
++          <instance-parameter name="public_key" transfer-ownership="none">
++            <type name="PublicKey" c:type="P2pandaPublicKey*"/>
++          </instance-parameter>
++        </parameters>
++      </method>
++    </record>
++    <class name="Topic"
++           c:symbol-prefix="topic"
++           c:type="P2pandaTopic"
++           parent="GObject.Object"
++           glib:type-name="P2pandaTopic"
++           glib:get-type="p2panda_topic_get_type"
++           glib:type-struct="TopicClass">
++      <doc xml:space="preserve"
++           filename="libp2panda/include/p2panda.h"
++           line="137">The subscription handle to a topic.</doc>
++      <source-position filename="libp2panda/include/p2panda.h" line="143"/>
++      <constructor name="new" c:identifier="p2panda_topic_new">
++        <doc xml:space="preserve"
++             filename="libp2panda/include/p2panda.h"
++             line="425">Create a topic handle for the give [class@Node]</doc>
++        <source-position filename="libp2panda/include/p2panda.h" line="435"/>
++        <return-value transfer-ownership="full">
++          <doc xml:space="preserve"
++               filename="libp2panda/include/p2panda.h"
++               line="433">a new [class@Topic]</doc>
++          <type name="Topic" c:type="P2pandaTopic*"/>
++        </return-value>
++        <parameters>
++          <parameter name="node" transfer-ownership="none">
++            <type name="Node" c:type="P2pandaNode*"/>
++          </parameter>
++          <parameter name="topic_id"
++                     transfer-ownership="none"
++                     nullable="1"
++                     allow-none="1">
++            <type name="TopicId" c:type="P2pandaTopicId*"/>
++          </parameter>
++          <parameter name="flags" transfer-ownership="none">
++            <type name="guint" c:type="uint"/>
++          </parameter>
++        </parameters>
++      </constructor>
++      <method name="publish_async"
++              c:identifier="p2panda_topic_publish_async"
++              glib:finish-func="publish_finish">
++        <doc xml:space="preserve"
++             filename="libp2panda/include/p2panda.h"
++             line="471">Publish a message to a topic.</doc>
++        <source-position filename="libp2panda/include/p2panda.h" line="483"/>
++        <return-value transfer-ownership="none">
++          <type name="none" c:type="void"/>
++        </return-value>
++        <parameters>
++          <instance-parameter name="topic" transfer-ownership="none">
++            <type name="Topic" c:type="P2pandaTopic*"/>
++          </instance-parameter>
++          <parameter name="bytes" transfer-ownership="none">
++            <type name="GLib.Bytes" c:type="GBytes*"/>
++          </parameter>
++          <parameter name="ephemeral" transfer-ownership="none">
++            <doc xml:space="preserve"
++                 filename="libp2panda/include/p2panda.h"
++                 line="475">Whether this message should be ephemeral or persistent</doc>
++            <type name="gboolean" c:type="gboolean"/>
++          </parameter>
++          <parameter name="cancellable"
++                     transfer-ownership="none"
++                     nullable="1"
++                     allow-none="1">
++            <doc xml:space="preserve"
++                 filename="libp2panda/include/p2panda.h"
++                 line="476">
++@callback (nullable):</doc>
++            <type name="Gio.Cancellable" c:type="GCancellable*"/>
++          </parameter>
++          <parameter name="callback"
++                     transfer-ownership="none"
++                     nullable="1"
++                     allow-none="1"
++                     scope="async"
++                     closure="4">
++            <type name="Gio.AsyncReadyCallback" c:type="GAsyncReadyCallback"/>
++          </parameter>
++          <parameter name="user_data"
++                     transfer-ownership="none"
++                     nullable="1"
++                     allow-none="1">
++            <doc xml:space="preserve"
++                 filename="libp2panda/include/p2panda.h"
++                 line="478">user data to pass to @callback</doc>
++            <type name="gpointer" c:type="gpointer"/>
++          </parameter>
++        </parameters>
++      </method>
++      <method name="publish_finish"
++              c:identifier="p2panda_topic_publish_finish"
++              throws="1">
++        <doc xml:space="preserve"
++             filename="libp2panda/include/p2panda.h"
++             line="490">Finishes the [method@Topic.publish_async] call.</doc>
++        <source-position filename="libp2panda/include/p2panda.h" line="500"/>
++        <return-value transfer-ownership="none">
++          <type name="gboolean" c:type="gboolean"/>
++        </return-value>
++        <parameters>
++          <instance-parameter name="topic" transfer-ownership="none">
++            <type name="Topic" c:type="P2pandaTopic*"/>
++          </instance-parameter>
++          <parameter name="result" transfer-ownership="none">
++            <doc xml:space="preserve"
++                 filename="libp2panda/include/p2panda.h"
++                 line="493">A [iface@Gio.AsyncResult]</doc>
++            <type name="Gio.AsyncResult" c:type="GAsyncResult*"/>
++          </parameter>
++        </parameters>
++      </method>
++      <method name="spawn_async"
++              c:identifier="p2panda_topic_spawn_async"
++              glib:finish-func="spawn_finish">
++        <doc xml:space="preserve"
++             filename="libp2panda/include/p2panda.h"
++             line="439">Spawn the topic.
++
++Before spawning the topic no network communcation takes place, and the [class@Topic]
++won't be able to send nor receive messages.</doc>
++        <source-position filename="libp2panda/include/p2panda.h" line="452"/>
++        <return-value transfer-ownership="none">
++          <type name="none" c:type="void"/>
++        </return-value>
++        <parameters>
++          <instance-parameter name="topic" transfer-ownership="none">
++            <type name="Topic" c:type="P2pandaTopic*"/>
++          </instance-parameter>
++          <parameter name="cancellable"
++                     transfer-ownership="none"
++                     nullable="1"
++                     allow-none="1">
++            <type name="Gio.Cancellable" c:type="GCancellable*"/>
++          </parameter>
++          <parameter name="callback"
++                     transfer-ownership="none"
++                     nullable="1"
++                     allow-none="1"
++                     scope="async"
++                     closure="2">
++            <type name="Gio.AsyncReadyCallback" c:type="GAsyncReadyCallback"/>
++          </parameter>
++          <parameter name="user_data"
++                     transfer-ownership="none"
++                     nullable="1"
++                     allow-none="1">
++            <doc xml:space="preserve"
++                 filename="libp2panda/include/p2panda.h"
++                 line="444">user data to pass to @callback</doc>
++            <type name="gpointer" c:type="gpointer"/>
++          </parameter>
++        </parameters>
++      </method>
++      <method name="spawn_finish"
++              c:identifier="p2panda_topic_spawn_finish"
++              throws="1">
++        <doc xml:space="preserve"
++             filename="libp2panda/include/p2panda.h"
++             line="457">Finishes the [method@Topic.spawn_async] call.</doc>
++        <source-position filename="libp2panda/include/p2panda.h" line="467"/>
++        <return-value transfer-ownership="none">
++          <type name="gboolean" c:type="gboolean"/>
++        </return-value>
++        <parameters>
++          <instance-parameter name="topic" transfer-ownership="none">
++            <type name="Topic" c:type="P2pandaTopic*"/>
++          </instance-parameter>
++          <parameter name="result" transfer-ownership="none">
++            <doc xml:space="preserve"
++                 filename="libp2panda/include/p2panda.h"
++                 line="460">A [iface@Gio.AsyncResult]</doc>
++            <type name="Gio.AsyncResult" c:type="GAsyncResult*"/>
++          </parameter>
++        </parameters>
++      </method>
++      <property name="flags"
++                writable="1"
++                construct-only="1"
++                transfer-ownership="none"
++                default-value="None">
++        <doc xml:space="preserve"
++             filename="libp2panda/include/p2panda.h"
++             line="54">Configuration for the [class@Topic].</doc>
++        <type name="TopicFlags"/>
++      </property>
++      <property name="node"
++                writable="1"
++                construct-only="1"
++                transfer-ownership="none">
++        <doc xml:space="preserve"
++             filename="libp2panda/include/p2panda.h"
++             line="47">A spawned [class@Node].</doc>
++        <type name="Node"/>
++      </property>
++      <property name="topic-id"
++                writable="1"
++                construct-only="1"
++                transfer-ownership="none">
++        <doc xml:space="preserve"
++             filename="libp2panda/include/p2panda.h"
++             line="61">The id of the topic this [class@Topic] will be subscribed to.</doc>
++        <type name="TopicId"/>
++      </property>
++      <glib:signal name="ephemeral-message" when="last">
++        <doc xml:space="preserve"
++             filename="libp2panda/include/p2panda.h"
++             line="80">Emitted on incomming ephemeral message.
++
++This signal is emitted on the main context that was thread default when the topic was spawned.</doc>
++        <return-value transfer-ownership="none">
++          <type name="none" c:type="void"/>
++        </return-value>
++        <parameters>
++          <parameter name="public_key" transfer-ownership="none">
++            <doc xml:space="preserve"
++                 filename="libp2panda/include/p2panda.h"
++                 line="83">The public key of the origin node of the message</doc>
++            <type name="PublicKey"/>
++          </parameter>
++          <parameter name="datetime" transfer-ownership="none">
++            <doc xml:space="preserve"
++                 filename="libp2panda/include/p2panda.h"
++                 line="84">The timestamp</doc>
++            <type name="GLib.DateTime"/>
++          </parameter>
++          <parameter name="bytes" transfer-ownership="none">
++            <doc xml:space="preserve"
++                 filename="libp2panda/include/p2panda.h"
++                 line="85">The content of the message</doc>
++            <type name="GLib.Bytes"/>
++          </parameter>
++        </parameters>
++      </glib:signal>
++      <glib:signal name="error" when="last">
++        <doc xml:space="preserve"
++             filename="libp2panda/include/p2panda.h"
++             line="118">Emitted when a topic finishes syncing.
++
++This signal is emitted on the main context that was thread default when the topic was spawned.</doc>
++        <return-value transfer-ownership="none">
++          <type name="none" c:type="void"/>
++        </return-value>
++        <parameters>
++          <parameter name="error" transfer-ownership="none">
++            <type name="GLib.Error"/>
++          </parameter>
++        </parameters>
++      </glib:signal>
++      <glib:signal name="message" when="last">
++        <doc xml:space="preserve"
++             filename="libp2panda/include/p2panda.h"
++             line="68">Emitted on incomming persistent message.
++
++This signal is emitted on the main context that was thread default when the topic was spawned.</doc>
++        <return-value transfer-ownership="none">
++          <type name="gboolean" c:type="gboolean"/>
++        </return-value>
++        <parameters>
++          <parameter name="public_key" transfer-ownership="none">
++            <doc xml:space="preserve"
++                 filename="libp2panda/include/p2panda.h"
++                 line="71">The public key of the origin node of the message</doc>
++            <type name="PublicKey"/>
++          </parameter>
++          <parameter name="datetime" transfer-ownership="none">
++            <doc xml:space="preserve"
++                 filename="libp2panda/include/p2panda.h"
++                 line="72">The timestamp</doc>
++            <type name="GLib.DateTime"/>
++          </parameter>
++          <parameter name="bytes" transfer-ownership="none">
++            <doc xml:space="preserve"
++                 filename="libp2panda/include/p2panda.h"
++                 line="73">The message</doc>
++            <type name="GLib.Bytes"/>
++          </parameter>
++        </parameters>
++      </glib:signal>
++      <glib:signal name="sync-ended" when="last">
++        <doc xml:space="preserve"
++             filename="libp2panda/include/p2panda.h"
++             line="107">Emitted when a topic finishes syncing.
++
++This signal is emitted on the main context that was thread default when the topic was spawned.</doc>
++        <return-value transfer-ownership="none">
++          <type name="none" c:type="void"/>
++        </return-value>
++        <parameters>
++          <parameter name="remote_node_id" transfer-ownership="none">
++            <doc xml:space="preserve"
++                 filename="libp2panda/include/p2panda.h"
++                 line="110">The public key for the remote node</doc>
++            <type name="NodeId"/>
++          </parameter>
++          <parameter name="session_id" transfer-ownership="none">
++            <type name="guint64" c:type="guint64"/>
++          </parameter>
++        </parameters>
++      </glib:signal>
++      <glib:signal name="sync-started" when="last">
++        <doc xml:space="preserve"
++             filename="libp2panda/include/p2panda.h"
++             line="92">Emitted for errors.
++
++This signal is emitted on the main context that was thread default when the topic was spawned.</doc>
++        <return-value transfer-ownership="none">
++          <type name="none" c:type="void"/>
++        </return-value>
++        <parameters>
++          <parameter name="remote_node_id" transfer-ownership="none">
++            <doc xml:space="preserve"
++                 filename="libp2panda/include/p2panda.h"
++                 line="95">The public key for the remote node</doc>
++            <type name="NodeId"/>
++          </parameter>
++          <parameter name="session_id" transfer-ownership="none">
++            <type name="guint64" c:type="guint64"/>
++          </parameter>
++          <parameter name="incomming_operations" transfer-ownership="none">
++            <type name="guint64" c:type="guint64"/>
++          </parameter>
++          <parameter name="outgoing_operations" transfer-ownership="none">
++            <type name="guint64" c:type="guint64"/>
++          </parameter>
++          <parameter name="incoming_bytes" transfer-ownership="none">
++            <type name="guint64" c:type="guint64"/>
++          </parameter>
++          <parameter name="outgoing_bytes" transfer-ownership="none">
++            <type name="guint64" c:type="guint64"/>
++          </parameter>
++        </parameters>
++      </glib:signal>
++    </class>
++    <record name="TopicClass"
++            c:type="P2pandaTopicClass"
++            glib:is-gtype-struct-for="Topic">
++      <source-position filename="libp2panda/include/p2panda.h" line="143"/>
++      <field name="parent_class">
++        <type name="GObject.ObjectClass" c:type="GObjectClass"/>
++      </field>
++    </record>
++    <bitfield name="TopicFlags"
++              glib:type-name="P2pandaTopicFlags"
++              glib:get-type="p2panda_topic_flags_get_type"
++              c:type="P2pandaTopicFlags">
++      <member name="none"
++              value="0"
++              c:identifier="P2PANDA_TOPIC_NONE"
++              glib:nick="none"
++              glib:name="None">
++      </member>
++      <member name="persistent"
++              value="1"
++              c:identifier="P2PANDA_TOPIC_PERSISTENT"
++              glib:nick="persistent"
++              glib:name="Persistent">
++      </member>
++      <member name="ephemeral"
++              value="2"
++              c:identifier="P2PANDA_TOPIC_EPHEMERAL"
++              glib:nick="ephemeral"
++              glib:name="Ephemeral">
++      </member>
++      <member name="from_start"
++              value="4"
++              c:identifier="P2PANDA_TOPIC_FROM_START"
++              glib:nick="from-start"
++              glib:name="FromStart">
++      </member>
++    </bitfield>
++    <record name="TopicId"
++            c:type="P2pandaTopicId"
++            opaque="1"
++            glib:type-name="P2pandaTopicId"
++            glib:get-type="p2panda_topic_id_get_type"
++            c:symbol-prefix="topic_id">
++      <source-position filename="libp2panda/include/p2panda.h" line="242"/>
++      <constructor name="new" c:identifier="p2panda_topic_id_new">
++        <source-position filename="libp2panda/include/p2panda.h" line="251"/>
++        <return-value transfer-ownership="full">
++          <type name="TopicId" c:type="P2pandaTopicId*"/>
++        </return-value>
++      </constructor>
++      <constructor name="new_from_data"
++                   c:identifier="p2panda_topic_id_new_from_data">
++        <source-position filename="libp2panda/include/p2panda.h" line="264"/>
++        <return-value transfer-ownership="full">
++          <doc xml:space="preserve"
++               filename="libp2panda/include/p2panda.h"
++               line="262">a new [struct@TopicId]</doc>
++          <type name="TopicId" c:type="P2pandaTopicId*"/>
++        </return-value>
++        <parameters>
++          <parameter name="data" transfer-ownership="none">
++            <array zero-terminated="0" c:type="const uint8_t*" fixed-size="32">
++              <type name="guint8" c:type="uint8_t"/>
++            </array>
++          </parameter>
++        </parameters>
++      </constructor>
++      <method name="copy" c:identifier="p2panda_topic_id_copy">
++        <source-position filename="libp2panda/include/p2panda.h" line="253"/>
++        <return-value transfer-ownership="full">
++          <type name="TopicId" c:type="P2pandaTopicId*"/>
++        </return-value>
++        <parameters>
++          <instance-parameter name="topic_id" transfer-ownership="none">
++            <type name="TopicId" c:type="P2pandaTopicId*"/>
++          </instance-parameter>
++        </parameters>
++      </method>
++      <method name="free" c:identifier="p2panda_topic_id_free">
++        <source-position filename="libp2panda/include/p2panda.h" line="254"/>
++        <return-value transfer-ownership="none">
++          <type name="none" c:type="void"/>
++        </return-value>
++        <parameters>
++          <instance-parameter name="topic_id" transfer-ownership="none">
++            <type name="TopicId" c:type="P2pandaTopicId*"/>
++          </instance-parameter>
++        </parameters>
++      </method>
++      <method name="get_data" c:identifier="p2panda_topic_id_get_data">
++        <doc xml:space="preserve"
++             filename="libp2panda/include/p2panda.h"
++             line="266">Retrieves the raw bytes of the [struct@TopicId]</doc>
++        <source-position filename="libp2panda/include/p2panda.h" line="274"/>
++        <return-value transfer-ownership="none">
++          <array zero-terminated="0" c:type="const uint8_t*" fixed-size="32">
++            <type name="guint8" c:type="uint8_t"/>
++          </array>
++        </return-value>
++        <parameters>
++          <instance-parameter name="topic_id" transfer-ownership="none">
++            <type name="TopicId" c:type="P2pandaTopicId*"/>
++          </instance-parameter>
++        </parameters>
++      </method>
++    </record>
++    <function name="error_quark"
++              c:identifier="p2panda_error_quark"
++              moved-to="Error.quark">
++      <doc xml:space="preserve"
++           filename="libp2panda/include/p2panda.h"
++           line="591">Error quark for [error@Error]</doc>
++      <return-value transfer-ownership="none">
++        <doc xml:space="preserve"
++             filename="libp2panda/include/p2panda.h"
++             line="596">The error domain</doc>
++        <type name="GLib.Quark" c:type="GQuark"/>
++      </return-value>
++    </function>
++  </namespace>
++</repository>
+diff --git a/examples/p2panda-gobject-go/p2panda/main.go b/examples/p2panda-gobject-go/p2panda/main.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..df08f3e46ba1746712e492650df5c686262317b1
+--- /dev/null
++++ b/examples/p2panda-gobject-go/p2panda/main.go
+@@ -0,0 +1,38 @@
++// Package p2panda was automatically generated by codeberg.org/puregotk/puregotk DO NOT EDIT
++package p2panda
++
++import "codeberg.org/puregotk/puregotk/v4/gobject/types"
++
++type TopicFlags int
++
++var xTopicFlagsGLibType func() types.GType
++
++func TopicFlagsGLibType() types.GType {
++	return xTopicFlagsGLibType()
++}
++
++const (
++	TopicNoneValue TopicFlags = 0
++
++	TopicPersistentValue TopicFlags = 1
++
++	TopicEphemeralValue TopicFlags = 2
++
++	TopicFromStartValue TopicFlags = 4
++)
++
++type MdnsDiscoveryMode int
++
++var xMdnsDiscoveryModeGLibType func() types.GType
++
++func MdnsDiscoveryModeGLibType() types.GType {
++	return xMdnsDiscoveryModeGLibType()
++}
++
++const (
++
++	// Broadcast this node and look for other nodes via MDNS
++	MdnsDiscoveryModeActiveValue MdnsDiscoveryMode = 0
++	// Look for other nodes vie MDNS but do not broadcast this node
++	MdnsDiscoveryModePassiveValue MdnsDiscoveryMode = 1
++)
+diff --git a/examples/p2panda-gobject-go/p2panda/p2panda.go b/examples/p2panda-gobject-go/p2panda/p2panda.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..f46dbe49132e8aaa2746610e1abd25d5672c6ae5
+--- /dev/null
++++ b/examples/p2panda-gobject-go/p2panda/p2panda.go
+@@ -0,0 +1,775 @@
++// Package p2panda was automatically generated by codeberg.org/puregotk/puregotk DO NOT EDIT
++package p2panda
++
++import (
++	"structs"
++	"unsafe"
++
++	"codeberg.org/puregotk/purego"
++	"codeberg.org/puregotk/puregotk/pkg/core"
++	"codeberg.org/puregotk/puregotk/v4/gio"
++	"codeberg.org/puregotk/puregotk/v4/glib"
++	"codeberg.org/puregotk/puregotk/v4/gobject"
++	"codeberg.org/puregotk/puregotk/v4/gobject/types"
++)
++
++type Hash struct {
++	_ structs.HostLayout
++}
++
++var xHashGLibType func() types.GType
++
++func HashGLibType() types.GType {
++	return xHashGLibType()
++}
++
++func (x *Hash) GoPointer() uintptr {
++	return uintptr(unsafe.Pointer(x))
++}
++
++var xHashCopy func(uintptr) *Hash
++
++func (x *Hash) Copy() *Hash {
++	cret := xHashCopy(x.GoPointer())
++	return cret
++}
++
++var xHashFree func(uintptr)
++
++func (x *Hash) Free() {
++	xHashFree(x.GoPointer())
++}
++
++type NetworkId struct {
++	_ structs.HostLayout
++}
++
++var xNetworkIdGLibType func() types.GType
++
++func NetworkIdGLibType() types.GType {
++	return xNetworkIdGLibType()
++}
++
++func (x *NetworkId) GoPointer() uintptr {
++	return uintptr(unsafe.Pointer(x))
++}
++
++var xNewNetworkId func() *NetworkId
++
++func NewNetworkId() *NetworkId {
++	cret := xNewNetworkId()
++	return cret
++}
++
++var xNewNetworkIdFromData func([32]byte) *NetworkId
++
++func NewNetworkIdFromData(DataVar [32]byte) *NetworkId {
++	cret := xNewNetworkIdFromData(DataVar)
++	return cret
++}
++
++var xNetworkIdCopy func(uintptr) *NetworkId
++
++func (x *NetworkId) Copy() *NetworkId {
++	cret := xNetworkIdCopy(x.GoPointer())
++	return cret
++}
++
++var xNetworkIdFree func(uintptr)
++
++func (x *NetworkId) Free() {
++	xNetworkIdFree(x.GoPointer())
++}
++
++var xNetworkIdGetData func(uintptr) uintptr
++
++// Retrieves the raw bytes of the [struct@NetworkId]
++func (x *NetworkId) GetData() uintptr {
++	cret := xNetworkIdGetData(x.GoPointer())
++	return cret
++}
++
++type NodeClass struct {
++	_ structs.HostLayout
++
++	ParentClass gobject.ObjectClass
++}
++
++func (x *NodeClass) GoPointer() uintptr {
++	return uintptr(unsafe.Pointer(x))
++}
++
++type NodeId struct {
++	_ structs.HostLayout
++}
++
++var xNodeIdGLibType func() types.GType
++
++func NodeIdGLibType() types.GType {
++	return xNodeIdGLibType()
++}
++
++func (x *NodeId) GoPointer() uintptr {
++	return uintptr(unsafe.Pointer(x))
++}
++
++var xNewNodeIdFromData func([32]byte, *glib.Uri, **glib.Error) *NodeId
++
++func NewNodeIdFromData(DataVar [32]byte, RelayUrlVar *glib.Uri) (*NodeId, error) {
++	var cerr *glib.Error
++
++	cret := xNewNodeIdFromData(DataVar, RelayUrlVar, &cerr)
++	if cerr == nil {
++		return cret, nil
++	}
++	return cret, cerr
++}
++
++var xNodeIdCopy func(uintptr) *NodeId
++
++func (x *NodeId) Copy() *NodeId {
++	cret := xNodeIdCopy(x.GoPointer())
++	return cret
++}
++
++var xNodeIdFree func(uintptr)
++
++func (x *NodeId) Free() {
++	xNodeIdFree(x.GoPointer())
++}
++
++var xNodeIdGetData func(uintptr) uintptr
++
++// Retrieves the raw bytes of the [struct@NodeId]
++func (x *NodeId) GetData() uintptr {
++	cret := xNodeIdGetData(x.GoPointer())
++	return cret
++}
++
++type PrivateKey struct {
++	_ structs.HostLayout
++}
++
++var xPrivateKeyGLibType func() types.GType
++
++func PrivateKeyGLibType() types.GType {
++	return xPrivateKeyGLibType()
++}
++
++func (x *PrivateKey) GoPointer() uintptr {
++	return uintptr(unsafe.Pointer(x))
++}
++
++var xNewPrivateKey func() *PrivateKey
++
++func NewPrivateKey() *PrivateKey {
++	cret := xNewPrivateKey()
++	return cret
++}
++
++var xNewPrivateKeyFromData func([32]byte) *PrivateKey
++
++func NewPrivateKeyFromData(DataVar [32]byte) *PrivateKey {
++	cret := xNewPrivateKeyFromData(DataVar)
++	return cret
++}
++
++var xPrivateKeyCopy func(uintptr) *PrivateKey
++
++func (x *PrivateKey) Copy() *PrivateKey {
++	cret := xPrivateKeyCopy(x.GoPointer())
++	return cret
++}
++
++var xPrivateKeyFree func(uintptr)
++
++func (x *PrivateKey) Free() {
++	xPrivateKeyFree(x.GoPointer())
++}
++
++var xPrivateKeyGetData func(uintptr) uintptr
++
++// Retrieves the raw bytes of the [struct@PrivateKey]
++func (x *PrivateKey) GetData() uintptr {
++	cret := xPrivateKeyGetData(x.GoPointer())
++	return cret
++}
++
++var xPrivateKeyGetPublicKey func(uintptr) *PublicKey
++
++// Retrieves the the [struct@PublicKey]
++func (x *PrivateKey) GetPublicKey() *PublicKey {
++	cret := xPrivateKeyGetPublicKey(x.GoPointer())
++	return cret
++}
++
++type PublicKey struct {
++	_ structs.HostLayout
++}
++
++var xPublicKeyGLibType func() types.GType
++
++func PublicKeyGLibType() types.GType {
++	return xPublicKeyGLibType()
++}
++
++func (x *PublicKey) GoPointer() uintptr {
++	return uintptr(unsafe.Pointer(x))
++}
++
++var xNewPublicKeyFromData func([32]byte, **glib.Error) *PublicKey
++
++func NewPublicKeyFromData(DataVar [32]byte) (*PublicKey, error) {
++	var cerr *glib.Error
++
++	cret := xNewPublicKeyFromData(DataVar, &cerr)
++	if cerr == nil {
++		return cret, nil
++	}
++	return cret, cerr
++}
++
++var xPublicKeyCopy func(uintptr) *PublicKey
++
++func (x *PublicKey) Copy() *PublicKey {
++	cret := xPublicKeyCopy(x.GoPointer())
++	return cret
++}
++
++var xPublicKeyFree func(uintptr)
++
++func (x *PublicKey) Free() {
++	xPublicKeyFree(x.GoPointer())
++}
++
++var xPublicKeyGetData func(uintptr) uintptr
++
++// Retrieves the raw bytes of the [struct@PublicKey]
++func (x *PublicKey) GetData() uintptr {
++	cret := xPublicKeyGetData(x.GoPointer())
++	return cret
++}
++
++type TopicClass struct {
++	_ structs.HostLayout
++
++	ParentClass gobject.ObjectClass
++}
++
++func (x *TopicClass) GoPointer() uintptr {
++	return uintptr(unsafe.Pointer(x))
++}
++
++type TopicId struct {
++	_ structs.HostLayout
++}
++
++var xTopicIdGLibType func() types.GType
++
++func TopicIdGLibType() types.GType {
++	return xTopicIdGLibType()
++}
++
++func (x *TopicId) GoPointer() uintptr {
++	return uintptr(unsafe.Pointer(x))
++}
++
++var xNewTopicId func() *TopicId
++
++func NewTopicId() *TopicId {
++	cret := xNewTopicId()
++	return cret
++}
++
++var xNewTopicIdFromData func([32]byte) *TopicId
++
++func NewTopicIdFromData(DataVar [32]byte) *TopicId {
++	cret := xNewTopicIdFromData(DataVar)
++	return cret
++}
++
++var xTopicIdCopy func(uintptr) *TopicId
++
++func (x *TopicId) Copy() *TopicId {
++	cret := xTopicIdCopy(x.GoPointer())
++	return cret
++}
++
++var xTopicIdFree func(uintptr)
++
++func (x *TopicId) Free() {
++	xTopicIdFree(x.GoPointer())
++}
++
++var xTopicIdGetData func(uintptr) uintptr
++
++// Retrieves the raw bytes of the [struct@TopicId]
++func (x *TopicId) GetData() uintptr {
++	cret := xTopicIdGetData(x.GoPointer())
++	return cret
++}
++
++// Errors that may happen while interacting with a node and topic
++type Error int
++
++var xErrorGLibType func() types.GType
++
++func ErrorGLibType() types.GType {
++	return xErrorGLibType()
++}
++
++const (
++
++	// Generic type for all other errors.
++	ErrorFailedValue Error = 0
++	// Failed to spawn node.
++	ErrorSpawnNodeValue Error = 1
++	// Failed to spawn topic.
++	ErrorSpawnTopicValue Error = 2
++	// Topic or Node wasn't spawned.
++	ErrorNotSpawnedValue Error = 3
++	// Unable to decode a message.
++	ErrorDecodingValue Error = 4
++	// Unable to replay a message.
++	ErrorReplayValue Error = 5
++	// Message was send to a topic without the PERSISTENT flag.
++	ErrorHasNoPersistentValue Error = 6
++	// Message was send to a topic without the EPHEMERAL flag.
++	ErrorHasNoEphemeralValue Error = 7
++	// Failed to publish a message.
++	ErrorPublishValue Error = 8
++	// Invalid sigature, when parsing [struct@NodeId] or [struct@PrivateKey].
++	ErrorSignatureValue Error = 9
++)
++
++var xErrorQuark func() glib.Quark
++
++// Error quark for [error@Error]
++func ErrorQuark() glib.Quark {
++	cret := xErrorQuark()
++	return cret
++}
++
++// [class@Node] main entry point.
++type Node struct {
++	gobject.Object
++}
++
++var xNodeGLibType func() types.GType
++
++func NodeGLibType() types.GType {
++	return xNodeGLibType()
++}
++
++func NodeNewFromInternalPtr(ptr uintptr) *Node {
++	cls := &Node{}
++	cls.Ptr = ptr
++	return cls
++}
++
++var xNewNode func(*PrivateKey, string, *NetworkId, *glib.Uri, *NodeId, MdnsDiscoveryMode) uintptr
++
++// Creates a new node with the given options.
++func NewNode(PrivateKeyVar *PrivateKey, DatabaseUrlVar string, NetworkIdVar *NetworkId, RelayUrlVar *glib.Uri, BootstrapNodeIdVar *NodeId, MdnsModeVar MdnsDiscoveryMode) *Node {
++	var cls *Node
++
++	cret := xNewNode(PrivateKeyVar, DatabaseUrlVar, NetworkIdVar, RelayUrlVar, BootstrapNodeIdVar, MdnsModeVar)
++
++	if cret == 0 {
++		return nil
++	}
++	cls = &Node{}
++	cls.Ptr = cret
++	return cls
++}
++
++var xNodeSpawnAsync func(uintptr, uintptr, uintptr, uintptr)
++
++// Spawn the node.
++//
++// Before spawning the node no network communcation takes place, and the [class@Node]
++// can't be used.
++func (x *Node) SpawnAsync(CancellableVar *gio.Cancellable, CallbackVar *gio.AsyncReadyCallback, UserDataVar uintptr) {
++	xNodeSpawnAsync(x.GoPointer(), CancellableVar.GoPointer(), glib.NewCallbackNullable(CallbackVar), UserDataVar)
++}
++
++var xNodeSpawnFinish func(uintptr, uintptr, **glib.Error) bool
++
++// Finishes the [method@Node.spawn_async] call.
++func (x *Node) SpawnFinish(ResultVar gio.AsyncResult) (bool, error) {
++	var cerr *glib.Error
++
++	cret := xNodeSpawnFinish(x.GoPointer(), ResultVar.GoPointer(), &cerr)
++	if cerr == nil {
++		return cret, nil
++	}
++	return cret, cerr
++}
++
++func (c *Node) GoPointer() uintptr {
++	if c == nil {
++		return 0
++	}
++	return c.Ptr
++}
++
++func (c *Node) SetGoPointer(ptr uintptr) {
++	c.Ptr = ptr
++}
++
++// SetPropertyBootstrap sets the "bootstrap" property.
++// A node that is used to find other nodes.
++func (x *Node) SetPropertyBootstrap(value uintptr) {
++	var v gobject.Value
++	v.Init(gobject.TypePointerVal)
++	v.SetPointer(value)
++	x.SetProperty("bootstrap", &v)
++}
++
++// SetPropertyDatabaseUrl sets the "database-url" property.
++// The [uri](https://www.sqlite.org/uri.html) to a sqlite database.
++func (x *Node) SetPropertyDatabaseUrl(value string) {
++	var v gobject.Value
++	v.Init(gobject.TypeStringVal)
++	v.SetString(value)
++	x.SetProperty("database-url", &v)
++}
++
++// SetPropertyNetworkId sets the "network-id" property.
++// The id of the network to this node will join.
++func (x *Node) SetPropertyNetworkId(value uintptr) {
++	var v gobject.Value
++	v.Init(gobject.TypePointerVal)
++	v.SetPointer(value)
++	x.SetProperty("network-id", &v)
++}
++
++// SetPropertyPrivateKey sets the "private-key" property.
++// The private key representing the node's identity.
++func (x *Node) SetPropertyPrivateKey(value uintptr) {
++	var v gobject.Value
++	v.Init(gobject.TypePointerVal)
++	v.SetPointer(value)
++	x.SetProperty("private-key", &v)
++}
++
++// SetPropertyRelayUrl sets the "relay-url" property.
++// The url to a [iroh relay](https://docs.iroh.computer/concepts/relays).
++func (x *Node) SetPropertyRelayUrl(value uintptr) {
++	var v gobject.Value
++	v.Init(gobject.TypePointerVal)
++	v.SetPointer(value)
++	x.SetProperty("relay-url", &v)
++}
++
++// Emitted on system events.
++//
++// This signal is emitted on the main context that was thread default when the node was spawned.
++func (x *Node) ConnectSystemEvent(cb *func(Node)) uint32 {
++	cbPtr := uintptr(unsafe.Pointer(cb))
++	if cbRefPtr, ok := glib.GetCallback(cbPtr); ok {
++		return gobject.SignalConnect(x.GoPointer(), "system-event", cbRefPtr)
++	}
++
++	fcb := func(clsPtr uintptr) {
++		fa := Node{}
++		fa.Ptr = clsPtr
++		cbFn := *cb
++
++		cbFn(fa)
++	}
++	cbRefPtr := purego.NewCallback(fcb)
++	glib.SaveCallback(cbPtr, cbRefPtr)
++	return gobject.SignalConnect(x.GoPointer(), "system-event", cbRefPtr)
++}
++
++// The subscription handle to a topic.
++type Topic struct {
++	gobject.Object
++}
++
++var xTopicGLibType func() types.GType
++
++func TopicGLibType() types.GType {
++	return xTopicGLibType()
++}
++
++func TopicNewFromInternalPtr(ptr uintptr) *Topic {
++	cls := &Topic{}
++	cls.Ptr = ptr
++	return cls
++}
++
++var xNewTopic func(uintptr, *TopicId, uint32) uintptr
++
++// Create a topic handle for the give [class@Node]
++func NewTopic(NodeVar *Node, TopicIdVar *TopicId, FlagsVar uint32) *Topic {
++	var cls *Topic
++
++	cret := xNewTopic(NodeVar.GoPointer(), TopicIdVar, FlagsVar)
++
++	if cret == 0 {
++		return nil
++	}
++	cls = &Topic{}
++	cls.Ptr = cret
++	return cls
++}
++
++var xTopicPublishAsync func(uintptr, *glib.Bytes, bool, uintptr, uintptr, uintptr)
++
++// Publish a message to a topic.
++func (x *Topic) PublishAsync(BytesVar *glib.Bytes, EphemeralVar bool, CancellableVar *gio.Cancellable, CallbackVar *gio.AsyncReadyCallback, UserDataVar uintptr) {
++	xTopicPublishAsync(x.GoPointer(), BytesVar, EphemeralVar, CancellableVar.GoPointer(), glib.NewCallbackNullable(CallbackVar), UserDataVar)
++}
++
++var xTopicPublishFinish func(uintptr, uintptr, **glib.Error) bool
++
++// Finishes the [method@Topic.publish_async] call.
++func (x *Topic) PublishFinish(ResultVar gio.AsyncResult) (bool, error) {
++	var cerr *glib.Error
++
++	cret := xTopicPublishFinish(x.GoPointer(), ResultVar.GoPointer(), &cerr)
++	if cerr == nil {
++		return cret, nil
++	}
++	return cret, cerr
++}
++
++var xTopicSpawnAsync func(uintptr, uintptr, uintptr, uintptr)
++
++// Spawn the topic.
++//
++// Before spawning the topic no network communcation takes place, and the [class@Topic]
++// won't be able to send nor receive messages.
++func (x *Topic) SpawnAsync(CancellableVar *gio.Cancellable, CallbackVar *gio.AsyncReadyCallback, UserDataVar uintptr) {
++	xTopicSpawnAsync(x.GoPointer(), CancellableVar.GoPointer(), glib.NewCallbackNullable(CallbackVar), UserDataVar)
++}
++
++var xTopicSpawnFinish func(uintptr, uintptr, **glib.Error) bool
++
++// Finishes the [method@Topic.spawn_async] call.
++func (x *Topic) SpawnFinish(ResultVar gio.AsyncResult) (bool, error) {
++	var cerr *glib.Error
++
++	cret := xTopicSpawnFinish(x.GoPointer(), ResultVar.GoPointer(), &cerr)
++	if cerr == nil {
++		return cret, nil
++	}
++	return cret, cerr
++}
++
++func (c *Topic) GoPointer() uintptr {
++	if c == nil {
++		return 0
++	}
++	return c.Ptr
++}
++
++func (c *Topic) SetGoPointer(ptr uintptr) {
++	c.Ptr = ptr
++}
++
++// SetPropertyTopicId sets the "topic-id" property.
++// The id of the topic this [class@Topic] will be subscribed to.
++func (x *Topic) SetPropertyTopicId(value uintptr) {
++	var v gobject.Value
++	v.Init(gobject.TypePointerVal)
++	v.SetPointer(value)
++	x.SetProperty("topic-id", &v)
++}
++
++// GetPropertyTopicId gets the "topic-id" property.
++// The id of the topic this [class@Topic] will be subscribed to.
++func (x *Topic) GetPropertyTopicId() uintptr {
++	var v gobject.Value
++	x.GetProperty("topic-id", &v)
++	return v.GetPointer()
++}
++
++// Emitted on incomming ephemeral message.
++//
++// This signal is emitted on the main context that was thread default when the topic was spawned.
++func (x *Topic) ConnectEphemeralMessage(cb *func(Topic, uintptr, uintptr, uintptr)) uint32 {
++	cbPtr := uintptr(unsafe.Pointer(cb))
++	if cbRefPtr, ok := glib.GetCallback(cbPtr); ok {
++		return gobject.SignalConnect(x.GoPointer(), "ephemeral-message", cbRefPtr)
++	}
++
++	fcb := func(clsPtr uintptr, PublicKeyVarp uintptr, DatetimeVarp uintptr, BytesVarp uintptr) {
++		fa := Topic{}
++		fa.Ptr = clsPtr
++		cbFn := *cb
++
++		cbFn(fa, PublicKeyVarp, DatetimeVarp, BytesVarp)
++	}
++	cbRefPtr := purego.NewCallback(fcb)
++	glib.SaveCallback(cbPtr, cbRefPtr)
++	return gobject.SignalConnect(x.GoPointer(), "ephemeral-message", cbRefPtr)
++}
++
++// Emitted when a topic finishes syncing.
++//
++// This signal is emitted on the main context that was thread default when the topic was spawned.
++func (x *Topic) ConnectError(cb *func(Topic, uintptr)) uint32 {
++	cbPtr := uintptr(unsafe.Pointer(cb))
++	if cbRefPtr, ok := glib.GetCallback(cbPtr); ok {
++		return gobject.SignalConnect(x.GoPointer(), "error", cbRefPtr)
++	}
++
++	fcb := func(clsPtr uintptr, ErrorVarp uintptr) {
++		fa := Topic{}
++		fa.Ptr = clsPtr
++		cbFn := *cb
++
++		cbFn(fa, ErrorVarp)
++	}
++	cbRefPtr := purego.NewCallback(fcb)
++	glib.SaveCallback(cbPtr, cbRefPtr)
++	return gobject.SignalConnect(x.GoPointer(), "error", cbRefPtr)
++}
++
++// Emitted on incomming persistent message.
++//
++// This signal is emitted on the main context that was thread default when the topic was spawned.
++func (x *Topic) ConnectMessage(cb *func(Topic, uintptr, uintptr, uintptr) bool) uint32 {
++	cbPtr := uintptr(unsafe.Pointer(cb))
++	if cbRefPtr, ok := glib.GetCallback(cbPtr); ok {
++		return gobject.SignalConnect(x.GoPointer(), "message", cbRefPtr)
++	}
++
++	fcb := func(clsPtr uintptr, PublicKeyVarp uintptr, DatetimeVarp uintptr, BytesVarp uintptr) bool {
++		fa := Topic{}
++		fa.Ptr = clsPtr
++		cbFn := *cb
++
++		return cbFn(fa, PublicKeyVarp, DatetimeVarp, BytesVarp)
++	}
++	cbRefPtr := purego.NewCallback(fcb)
++	glib.SaveCallback(cbPtr, cbRefPtr)
++	return gobject.SignalConnect(x.GoPointer(), "message", cbRefPtr)
++}
++
++// Emitted when a topic finishes syncing.
++//
++// This signal is emitted on the main context that was thread default when the topic was spawned.
++func (x *Topic) ConnectSyncEnded(cb *func(Topic, uintptr, uint64)) uint32 {
++	cbPtr := uintptr(unsafe.Pointer(cb))
++	if cbRefPtr, ok := glib.GetCallback(cbPtr); ok {
++		return gobject.SignalConnect(x.GoPointer(), "sync-ended", cbRefPtr)
++	}
++
++	fcb := func(clsPtr uintptr, RemoteNodeIdVarp uintptr, SessionIdVarp uint64) {
++		fa := Topic{}
++		fa.Ptr = clsPtr
++		cbFn := *cb
++
++		cbFn(fa, RemoteNodeIdVarp, SessionIdVarp)
++	}
++	cbRefPtr := purego.NewCallback(fcb)
++	glib.SaveCallback(cbPtr, cbRefPtr)
++	return gobject.SignalConnect(x.GoPointer(), "sync-ended", cbRefPtr)
++}
++
++// Emitted for errors.
++//
++// This signal is emitted on the main context that was thread default when the topic was spawned.
++func (x *Topic) ConnectSyncStarted(cb *func(Topic, uintptr, uint64, uint64, uint64, uint64, uint64)) uint32 {
++	cbPtr := uintptr(unsafe.Pointer(cb))
++	if cbRefPtr, ok := glib.GetCallback(cbPtr); ok {
++		return gobject.SignalConnect(x.GoPointer(), "sync-started", cbRefPtr)
++	}
++
++	fcb := func(clsPtr uintptr, RemoteNodeIdVarp uintptr, SessionIdVarp uint64, IncommingOperationsVarp uint64, OutgoingOperationsVarp uint64, IncomingBytesVarp uint64, OutgoingBytesVarp uint64) {
++		fa := Topic{}
++		fa.Ptr = clsPtr
++		cbFn := *cb
++
++		cbFn(fa, RemoteNodeIdVarp, SessionIdVarp, IncommingOperationsVarp, OutgoingOperationsVarp, IncomingBytesVarp, OutgoingBytesVarp)
++	}
++	cbRefPtr := purego.NewCallback(fcb)
++	glib.SaveCallback(cbPtr, cbRefPtr)
++	return gobject.SignalConnect(x.GoPointer(), "sync-started", cbRefPtr)
++}
++
++func init() {
++	core.SetPackageName("P2PANDA", "p2panda-0")
++	core.SetSharedLibraries("P2PANDA", []string{"libp2panda-0.so.0", "libp2panda-0.0.dylib"})
++	var libs []uintptr
++	for _, libPath := range core.GetPaths("P2PANDA") {
++		lib, err := purego.Dlopen(libPath, purego.RTLD_NOW|purego.RTLD_GLOBAL)
++		if err != nil {
++			panic(err)
++		}
++		libs = append(libs, lib)
++	}
++
++	core.PuregoSafeRegister(&xErrorGLibType, libs, "p2panda_error_get_type")
++
++	core.PuregoSafeRegister(&xErrorQuark, libs, "p2panda_error_quark")
++
++	core.PuregoSafeRegister(&xHashGLibType, libs, "p2panda_hash_get_type")
++
++	core.PuregoSafeRegister(&xHashCopy, libs, "p2panda_hash_copy")
++	core.PuregoSafeRegister(&xHashFree, libs, "p2panda_hash_free")
++
++	core.PuregoSafeRegister(&xNetworkIdGLibType, libs, "p2panda_network_id_get_type")
++
++	core.PuregoSafeRegister(&xNewNetworkId, libs, "p2panda_network_id_new")
++	core.PuregoSafeRegister(&xNewNetworkIdFromData, libs, "p2panda_network_id_new_from_data")
++
++	core.PuregoSafeRegister(&xNetworkIdCopy, libs, "p2panda_network_id_copy")
++	core.PuregoSafeRegister(&xNetworkIdFree, libs, "p2panda_network_id_free")
++	core.PuregoSafeRegister(&xNetworkIdGetData, libs, "p2panda_network_id_get_data")
++
++	core.PuregoSafeRegister(&xNodeIdGLibType, libs, "p2panda_node_id_get_type")
++
++	core.PuregoSafeRegister(&xNewNodeIdFromData, libs, "p2panda_node_id_new_from_data")
++
++	core.PuregoSafeRegister(&xNodeIdCopy, libs, "p2panda_node_id_copy")
++	core.PuregoSafeRegister(&xNodeIdFree, libs, "p2panda_node_id_free")
++	core.PuregoSafeRegister(&xNodeIdGetData, libs, "p2panda_node_id_get_data")
++
++	core.PuregoSafeRegister(&xPrivateKeyGLibType, libs, "p2panda_private_key_get_type")
++
++	core.PuregoSafeRegister(&xNewPrivateKey, libs, "p2panda_private_key_new")
++	core.PuregoSafeRegister(&xNewPrivateKeyFromData, libs, "p2panda_private_key_new_from_data")
++
++	core.PuregoSafeRegister(&xPrivateKeyCopy, libs, "p2panda_private_key_copy")
++	core.PuregoSafeRegister(&xPrivateKeyFree, libs, "p2panda_private_key_free")
++	core.PuregoSafeRegister(&xPrivateKeyGetData, libs, "p2panda_private_key_get_data")
++	core.PuregoSafeRegister(&xPrivateKeyGetPublicKey, libs, "p2panda_private_key_get_public_key")
++
++	core.PuregoSafeRegister(&xPublicKeyGLibType, libs, "p2panda_public_key_get_type")
++
++	core.PuregoSafeRegister(&xNewPublicKeyFromData, libs, "p2panda_public_key_new_from_data")
++
++	core.PuregoSafeRegister(&xPublicKeyCopy, libs, "p2panda_public_key_copy")
++	core.PuregoSafeRegister(&xPublicKeyFree, libs, "p2panda_public_key_free")
++	core.PuregoSafeRegister(&xPublicKeyGetData, libs, "p2panda_public_key_get_data")
++
++	core.PuregoSafeRegister(&xTopicIdGLibType, libs, "p2panda_topic_id_get_type")
++
++	core.PuregoSafeRegister(&xNewTopicId, libs, "p2panda_topic_id_new")
++	core.PuregoSafeRegister(&xNewTopicIdFromData, libs, "p2panda_topic_id_new_from_data")
++
++	core.PuregoSafeRegister(&xTopicIdCopy, libs, "p2panda_topic_id_copy")
++	core.PuregoSafeRegister(&xTopicIdFree, libs, "p2panda_topic_id_free")
++	core.PuregoSafeRegister(&xTopicIdGetData, libs, "p2panda_topic_id_get_data")
++
++	core.PuregoSafeRegister(&xNodeGLibType, libs, "p2panda_node_get_type")
++
++	core.PuregoSafeRegister(&xNewNode, libs, "p2panda_node_new")
++
++	core.PuregoSafeRegister(&xNodeSpawnAsync, libs, "p2panda_node_spawn_async")
++	core.PuregoSafeRegister(&xNodeSpawnFinish, libs, "p2panda_node_spawn_finish")
++
++	core.PuregoSafeRegister(&xTopicGLibType, libs, "p2panda_topic_get_type")
++
++	core.PuregoSafeRegister(&xNewTopic, libs, "p2panda_topic_new")
++
++	core.PuregoSafeRegister(&xTopicPublishAsync, libs, "p2panda_topic_publish_async")
++	core.PuregoSafeRegister(&xTopicPublishFinish, libs, "p2panda_topic_publish_finish")
++	core.PuregoSafeRegister(&xTopicSpawnAsync, libs, "p2panda_topic_spawn_async")
++	core.PuregoSafeRegister(&xTopicSpawnFinish, libs, "p2panda_topic_spawn_finish")
++}
+
