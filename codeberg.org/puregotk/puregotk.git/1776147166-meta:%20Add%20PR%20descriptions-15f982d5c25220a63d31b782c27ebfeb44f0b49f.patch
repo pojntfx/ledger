@@ -1,0 +1,96 @@
+From 15f982d5c25220a63d31b782c27ebfeb44f0b49f Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Mon, 13 Apr 2026 23:12:46 -0700
+Subject: [PATCH] meta: Add PR descriptions
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/prds.md b/prds.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..16ac1766bb48a021f914557c3afd2151a4bd7d4c
+--- /dev/null
++++ b/prds.md
+@@ -0,0 +1,81 @@
++Generate `throws` parameter correctly
++
++While reworking the formatting and imports generation systems I noticed that we don't handle `throws="1"` correctly in all paths - if there we no parameters, we'd not add the error parameter. This PR fixes that.
++
++Example that reproduces the issue:
++
++```go
++package main
++
++import (
++	"fmt"
++
++	"codeberg.org/puregotk/puregotk/v4/gio"
++)
++
++func main() {
++	c := gio.NewCancellable()
++	c.Cancel()
++
++	_, err := c.SetErrorIfCancelled()
++	fmt.Println("error:", err)
++}
++```
++
++On `main`:
++
++```shell
++$ go run ./cmd/throws-verification/
++error: <nil>
++```
++
++On this branch the error is thrown correctly:
++
++```shell
++$ go run ./cmd/throws-verification/
++error: Gtk reported an error with message: 'Operation was cancelled', domain: '59' and code: '19'
++```
++
++Rework formatting and import generation
++
++Blocked by https://codeberg.org/puregotk/puregotk/pulls/46
++
++On `main`, running `./gen.sh` is quite slow:
++
++```shell
++$ time ./gen.sh 
++generating go files...
++making sure imports are correct...
++formatting files...
++running a second pass for goimports...
++running go vet...
++# ...
++
++real    1m1.772s
++user    1m11.937s
++sys     0m35.716s
++```
++
++It's slow mostly because of `goimports`, which has to scan every single file in order to add the imports. `gofumpt` is also called in `gen.sh`, not in the generator.
++
++This PR improves the generation speed quite significantly; `./gen.sh` takes just a little ~4s:
++
++```shell
++pojntfx@node-1w7jr9qswe5jsmcgqsxbjtnc4:~/Projects/puregotk-neo$ time ./gen.sh 
++generating go files...
++running go vet...
++# ...
++
++real    0m3.030s
++user    0m3.775s
++sys     0m0.459s
++```
++
++This is done with two changes (see the individual commits):
++
++1) Calling `gofumpt` in-process through the Go API instead of by spawning a subprocess
++2) Tracking imports while we're generating the bindings, and then adding them in the template instead of letting `goimports` handle them
++
++I've taken special care to make sure that generating 3rd-party libraries doesn't break; see the changes to `examples/`. The new `Dependency` struct can be used to explicitly map external GIR namespaces to the relevant Go packages.
++
++I already re-ran the script - there are no changes in the generated code, except for formatting in one of the examples - it looks like the state on `main` wasn't formatted properly.
+\ No newline at end of file
+
