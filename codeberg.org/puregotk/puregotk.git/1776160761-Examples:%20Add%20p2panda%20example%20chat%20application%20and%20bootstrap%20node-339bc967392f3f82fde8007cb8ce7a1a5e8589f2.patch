@@ -1,0 +1,320 @@
+From 339bc967392f3f82fde8007cb8ce7a1a5e8589f2 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Tue, 14 Apr 2026 02:59:21 -0700
+Subject: [PATCH] Examples: Add p2panda example chat application and bootstrap node
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/examples/p2pandaapp-cli-gomod/cmd/p2pandaapp-cli-gomod-bootstrap/main.go b/examples/p2pandaapp-cli-gomod/cmd/p2pandaapp-cli-gomod-bootstrap/main.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..eadfaa9f2bbfed0077b6f3d48bf69f38076e5226
+--- /dev/null
++++ b/examples/p2pandaapp-cli-gomod/cmd/p2pandaapp-cli-gomod-bootstrap/main.go
+@@ -0,0 +1,80 @@
++package main
++
++import (
++	"encoding/hex"
++	"flag"
++	"fmt"
++	"log/slog"
++	"os"
++	"os/signal"
++	"syscall"
++	"unsafe"
++
++	"codeberg.org/puregotk/puregotk/examples/p2panda-gobject-go/p2panda"
++	"codeberg.org/puregotk/puregotk/v4/gio"
++	"codeberg.org/puregotk/puregotk/v4/glib"
++)
++
++func hexTo32(s string) [32]byte {
++	b, err := hex.DecodeString(s)
++	if err != nil {
++		panic(err)
++	}
++	var out [32]byte
++	copy(out[:], b)
++	return out
++}
++
++func main() {
++	relayFlag := flag.String("relay", "https://euc1-1.relay.n0.iroh-canary.iroh.link", "relay URL")
++	networkFlag := flag.String("network", "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2", "network ID hex")
++
++	flag.Parse()
++
++	loop := glib.NewMainLoop(glib.MainContextDefault(), false)
++
++	relayURI, err := glib.UriParse(*relayFlag, glib.GUriFlagsNoneValue)
++	if err != nil {
++		panic(err)
++	}
++
++	networkID := p2panda.NewNetworkIdFromData(hexTo32(*networkFlag))
++	defer networkID.Free()
++
++	pk := p2panda.NewPrivateKey()
++	defer pk.Free()
++
++	pubKey := pk.GetPublicKey()
++	defer pubKey.Free()
++	pubHex := hex.EncodeToString(unsafe.Slice((*byte)(unsafe.Pointer(pubKey.GetData())), 32))
++
++	node := p2panda.NewNode(
++		pk,
++		"sqlite::memory:",
++		networkID,
++		relayURI,
++		nil,
++		p2panda.MdnsDiscoveryModeActiveValue,
++	)
++
++	var onSpawn gio.AsyncReadyCallback = func(_, resultPtr, _ uintptr) {
++		if _, err := node.SpawnFinish(&gio.AsyncResultBase{Ptr: resultPtr}); err != nil {
++			panic(err)
++		}
++
++		slog.Info("Bootstrap node running", "pubkey", pubHex)
++
++		fmt.Println(pubHex)
++	}
++	node.SpawnAsync(nil, &onSpawn, 0)
++
++	sig := make(chan os.Signal, 1)
++	signal.Notify(sig, os.Interrupt, syscall.SIGTERM)
++	go func() {
++		<-sig
++
++		loop.Quit()
++	}()
++
++	loop.Run()
++}
+diff --git a/examples/p2pandaapp-cli-gomod/cmd/p2pandaapp-cli-gomod-chat/main.go b/examples/p2pandaapp-cli-gomod/cmd/p2pandaapp-cli-gomod-chat/main.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..33f4ed5a2dd68a3102fb492c1bd6a73e55ae9e99
+--- /dev/null
++++ b/examples/p2pandaapp-cli-gomod/cmd/p2pandaapp-cli-gomod-chat/main.go
+@@ -0,0 +1,169 @@
++package main
++
++import (
++	"bufio"
++	"encoding/hex"
++	"flag"
++	"fmt"
++	"log/slog"
++	"os"
++	"os/signal"
++	"syscall"
++	"unsafe"
++
++	"codeberg.org/puregotk/puregotk/examples/p2panda-gobject-go/p2panda"
++	"codeberg.org/puregotk/puregotk/v4/gio"
++	"codeberg.org/puregotk/puregotk/v4/glib"
++)
++
++func hexTo32(s string) [32]byte {
++	b, err := hex.DecodeString(s)
++	if err != nil {
++		panic(err)
++	}
++	var out [32]byte
++	copy(out[:], b)
++	return out
++}
++
++func ptrHex(ptr uintptr, n int) string {
++	return hex.EncodeToString(unsafe.Slice((*byte)(unsafe.Pointer(ptr)), n))
++}
++
++func main() {
++	relayFlag := flag.String("relay", "https://euc1-1.relay.n0.iroh-canary.iroh.link", "relay URL")
++	networkFlag := flag.String("network", "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2", "network ID hex")
++	topicFlag := flag.String("topic", "f0e1d2c3b4a5f6e7d8c9b0a1f2e3d4c5b6a7f8e9d0c1b2a3f4e5d6c7b8a9f0e1", "topic ID hex")
++	peerFlag := flag.String("peer", "", "node ID hex/pubkey of a peer to bootstrap from")
++
++	flag.Parse()
++
++	loop := glib.NewMainLoop(glib.MainContextDefault(), false)
++
++	relayURI, err := glib.UriParse(*relayFlag, glib.GUriFlagsNoneValue)
++	if err != nil {
++		panic(err)
++	}
++
++	networkID := p2panda.NewNetworkIdFromData(hexTo32(*networkFlag))
++	defer networkID.Free()
++
++	topicID := p2panda.NewTopicIdFromData(hexTo32(*topicFlag))
++	defer topicID.Free()
++
++	pk := p2panda.NewPrivateKey()
++	defer pk.Free()
++
++	ownPubKey := pk.GetPublicKey()
++	defer ownPubKey.Free()
++	ownHex := ptrHex(ownPubKey.GetData(), 32)
++
++	var bootstrap *p2panda.NodeId
++	if *peerFlag != "" {
++		b, err := p2panda.NewNodeIdFromData(hexTo32(*peerFlag), relayURI)
++		if err != nil {
++			panic(err)
++		}
++		bootstrap = b
++		defer bootstrap.Free()
++	}
++
++	node := p2panda.NewNode(
++		pk,
++		"sqlite::memory:",
++		networkID,
++		relayURI,
++		bootstrap,
++		p2panda.MdnsDiscoveryModeActiveValue,
++	)
++
++	var onNodeSpawn gio.AsyncReadyCallback = func(_, resultPtr, _ uintptr) {
++		if _, err := node.SpawnFinish(&gio.AsyncResultBase{Ptr: resultPtr}); err != nil {
++			panic(err)
++		}
++
++		slog.Info("Node ready", "pubkey", ownHex, "peer-flag", "--peer "+ownHex)
++
++		tp := p2panda.NewTopic(node, topicID, uint32(p2panda.TopicEphemeralValue|p2panda.TopicPersistentValue))
++
++		onMsg := func(_ p2panda.Topic, pkPtr, dtPtr, bPtr uintptr) bool {
++			from := ptrHex((*p2panda.PublicKey)(unsafe.Pointer(pkPtr)).GetData(), 32)
++			if from == ownHex {
++				return true
++			}
++
++			dt := (*glib.DateTime)(unsafe.Pointer(dtPtr))
++			msg := (*glib.Bytes)(unsafe.Pointer(bPtr))
++
++			var sz uint
++			fmt.Printf("[%s] %s: %s\n", dt.FormatIso8601(), from[:8], string(unsafe.Slice((*byte)(unsafe.Pointer(msg.GetData(&sz))), sz)))
++
++			return true
++		}
++		tp.ConnectMessage(&onMsg)
++
++		onEph := func(_ p2panda.Topic, pkPtr, dtPtr, bPtr uintptr) {
++			from := ptrHex((*p2panda.PublicKey)(unsafe.Pointer(pkPtr)).GetData(), 32)
++			if from == ownHex {
++				return
++			}
++
++			dt := (*glib.DateTime)(unsafe.Pointer(dtPtr))
++			msg := (*glib.Bytes)(unsafe.Pointer(bPtr))
++
++			var sz uint
++			fmt.Printf("[%s] %s: %s\n", dt.FormatIso8601(), from[:8], string(unsafe.Slice((*byte)(unsafe.Pointer(msg.GetData(&sz))), sz)))
++		}
++		tp.ConnectEphemeralMessage(&onEph)
++
++		var onTopicSpawn gio.AsyncReadyCallback = func(_, tpResultPtr, _ uintptr) {
++			if _, err := tp.SpawnFinish(&gio.AsyncResultBase{Ptr: tpResultPtr}); err != nil {
++				panic(err)
++			}
++
++			slog.Info("Topic ready, type messages and press enter to send")
++
++			go func() {
++				sc := bufio.NewScanner(os.Stdin)
++				for sc.Scan() {
++					if line := sc.Text(); line != "" {
++						m := line
++						var fn glib.SourceFunc = func(uintptr) bool {
++							d := glib.NewBytes([]byte(m), uint(len(m)))
++							var onPub gio.AsyncReadyCallback = func(_, pResultPtr, _ uintptr) {
++								if _, err := tp.PublishFinish(&gio.AsyncResultBase{Ptr: pResultPtr}); err != nil {
++									panic(err)
++								}
++							}
++
++							tp.PublishAsync(d, false, nil, &onPub, 0)
++
++							return false
++						}
++
++						glib.IdleAdd(&fn, 0)
++					}
++				}
++
++				if err := sc.Err(); err != nil {
++					panic(err)
++				}
++
++				var quit glib.SourceFunc = func(uintptr) bool { loop.Quit(); return false }
++				glib.IdleAdd(&quit, 0)
++			}()
++		}
++		tp.SpawnAsync(nil, &onTopicSpawn, 0)
++	}
++	node.SpawnAsync(nil, &onNodeSpawn, 0)
++
++	sig := make(chan os.Signal, 1)
++	signal.Notify(sig, os.Interrupt, syscall.SIGTERM)
++	go func() {
++		<-sig
++
++		loop.Quit()
++	}()
++
++	loop.Run()
++}
+diff --git a/examples/p2pandaapp-cli-gomod/gen.go b/examples/p2pandaapp-cli-gomod/gen.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..2a15559e2e9e7c7b7d4f460dd1f6b8e93355d3db
+--- /dev/null
++++ b/examples/p2pandaapp-cli-gomod/gen.go
+@@ -0,0 +1,3 @@
++package p2pandaapp
++
++//go:generate sh -c "if [ -z \"$FLATPAK_ID\" ]; then GOWORK=off go tool github.com/dennwc/flatpak-go-mod --json . && GOWORK=off go tool github.com/dennwc/flatpak-go-mod --json --module-name p2pandagobjectgo ../p2panda-gobject-go; fi"
+diff --git a/examples/p2pandaapp-cli-gomod/go.mod b/examples/p2pandaapp-cli-gomod/go.mod
+new file mode 100644
+index 0000000000000000000000000000000000000000..496a29b513048ad3a8ce85b13e2da52cdb6b7392
+--- /dev/null
++++ b/examples/p2pandaapp-cli-gomod/go.mod
+@@ -0,0 +1,22 @@
++module codeberg.org/puregotk/puregotk/examples/myapp-gnome-gomod
++
++go 1.25.0
++
++tool github.com/dennwc/flatpak-go-mod
++
++require (
++	codeberg.org/puregotk/puregotk v0.0.0-00010101000000-000000000000
++	codeberg.org/puregotk/puregotk/examples/p2panda-gobject-go v0.0.0-00010101000000-000000000000
++)
++
++require (
++	codeberg.org/puregotk/purego v0.0.0-20260224095105-2513c838cb80 // indirect
++	github.com/dennwc/flatpak-go-mod v0.1.1-0.20251220152743-1642390bc050 // indirect
++	github.com/goccy/go-yaml v1.18.0 // indirect
++	golang.org/x/mod v0.31.0 // indirect
++)
++
++replace (
++	codeberg.org/puregotk/puregotk v0.0.0-00010101000000-000000000000 => ../..
++	codeberg.org/puregotk/puregotk/examples/p2panda-gobject-go v0.0.0-00010101000000-000000000000 => ../p2panda-gobject-go
++)
+diff --git a/examples/p2pandaapp-cli-gomod/go.sum b/examples/p2pandaapp-cli-gomod/go.sum
+new file mode 100644
+index 0000000000000000000000000000000000000000..1d2fa471e9a63e29928e316476b793f3bd672f38
+--- /dev/null
++++ b/examples/p2pandaapp-cli-gomod/go.sum
+@@ -0,0 +1,8 @@
++codeberg.org/puregotk/purego v0.0.0-20260224095105-2513c838cb80 h1:y5ZxMLLOjl4xc2tBl02olxZQ06xbbKiR+2ipBfDrVcs=
++codeberg.org/puregotk/purego v0.0.0-20260224095105-2513c838cb80/go.mod h1:hVVM4ddvYRlc3IcK3CXJPlMwd/vaLj7gdDBZ6oPgT8w=
++github.com/dennwc/flatpak-go-mod v0.1.1-0.20251220152743-1642390bc050 h1:muRW0tgYbXMfg8XjDGrv3TfWLEj3osTP4MPDGqlslbc=
++github.com/dennwc/flatpak-go-mod v0.1.1-0.20251220152743-1642390bc050/go.mod h1:wpz1r09m7dCJS2rTFe5x95DdtjP97osxkPJkdHptFYI=
++github.com/goccy/go-yaml v1.18.0 h1:8W7wMFS12Pcas7KU+VVkaiCng+kG8QiFeFwzFb+rwuw=
++github.com/goccy/go-yaml v1.18.0/go.mod h1:XBurs7gK8ATbW4ZPGKgcbrY1Br56PdM69F7LkFRi1kA=
++golang.org/x/mod v0.31.0 h1:HaW9xtz0+kOcWKwli0ZXy79Ix+UW/vOfmWI5QVd2tgI=
++golang.org/x/mod v0.31.0/go.mod h1:43JraMp9cGx1Rx3AqioxrbrhNsLl2l/iNAvuBkrezpg=
+
