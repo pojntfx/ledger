@@ -1,0 +1,99 @@
+From 8e2c4b3890dd1cbf879721d8ddbcd8c9c9b378d0 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Tue, 14 Apr 2026 02:22:20 -0700
+Subject: [PATCH] Don't overwrite the builder properties each time we call `set_property` on it
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/p2panda-gobject/src/node.rs b/p2panda-gobject/src/node.rs
+index d5828ac14e264c3d140cf73465e03f87654fa8fc..3cfb28726626e3d544d2211e53a9f7e97bd6f4c6 100644
+--- a/p2panda-gobject/src/node.rs
++++ b/p2panda-gobject/src/node.rs
+@@ -167,53 +167,65 @@         fn set_property(&self, _id: usize, value: &glib::Value, pspec: &glib::ParamSpec) {
+             self.node_builder.replace_with(|builder| {
+                 let builder = builder.take().unwrap_or_else(node::Node::builder);
+ 
+-                match pspec.name() {
+-                    "private-key" => value
++                Some(match pspec.name() {
++                    "private-key" => match value
+                         .get::<Option<PrivateKey>>()
+                         .expect("type conformity checked by `Object::set_property`")
+-                        .map(|private_key| builder.private_key(private_key.0)),
+-                    "database-url" => value
++                    {
++                        Some(private_key) => builder.private_key(private_key.0),
++                        None => builder,
++                    },
++                    "database-url" => match value
+                         .get::<Option<&str>>()
+                         .expect("type conformity checked by `Object::set_property`")
+-                        .map(|database_url| builder.database_url(database_url)),
++                    {
++                        Some(database_url) => builder.database_url(database_url),
++                        None => builder,
++                    },
+                     /*"ack-policy" => {
+                         let ack_policy = value
+                             .get::<AckPolicy>()
+                             .expect("type conformity checked by `Object::set_property`");
+-                        Some(builder.ack_policy(ack_policy.into()))
++                        builder.ack_policy(ack_policy.into())
+                     }*/
+-                    "network-id" => value
++                    "network-id" => match value
+                         .get::<Option<NetworkId>>()
+                         .expect("type conformity checked by `Object::set_property`")
+-                        .map(|network_id| builder.network_id(network_id.0)),
+-                    "relay-url" => value
++                    {
++                        Some(network_id) => builder.network_id(network_id.0),
++                        None => builder,
++                    },
++                    "relay-url" => match value
+                         .get::<Option<glib::Uri>>()
+                         .expect("type conformity checked by `Object::set_property`")
+-                        .map(|relay_url| {
+-                            builder.relay_url(
+-                                node::RelayUrl::from_str(relay_url.to_str().as_str())
+-                                    .expect("Malformed URL"),
+-                            )
+-                        }),
+-                    "bootstrap" => value
++                    {
++                        Some(relay_url) => builder.relay_url(
++                            node::RelayUrl::from_str(relay_url.to_str().as_str())
++                                .expect("Malformed URL"),
++                        ),
++                        None => builder,
++                    },
++                    "bootstrap" => match value
+                         .get::<Option<NodeId>>()
+                         .expect("type conformity checked by `Object::set_property`")
+-                        .map(|node_id| {
++                    {
++                        Some(node_id) => {
+                             let id = node_id.id;
+                             let relay_url = node_id
+                                 .relay_url
+                                 .expect("A boostrap node needs a known relay url");
+-
+                             builder.bootstrap(id, relay_url)
+-                        }),
++                        }
++                        None => builder,
++                    },
+                     "mdns-mode" => {
+                         let mdns_mode = value
+                             .get::<MdnsDiscoveryMode>()
+                             .expect("type conformity checked by `Object::set_property`");
+-                        Some(builder.mdns_mode(mdns_mode.into()))
++                        builder.mdns_mode(mdns_mode.into())
+                     }
+                     _ => unimplemented!(),
+-                }
++                })
+             });
+         }
+     }
+
