@@ -1,0 +1,199 @@
+From d859d08a8a345c2aba8501a134c459773b0d579b Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Tue, 14 Apr 2026 23:51:50 -0700
+Subject: [PATCH] GIR: Convert non-string slice arguments to pointers for arm64 compatibility
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/internal/gir/pass/pass.go b/internal/gir/pass/pass.go
+index a299b598a6bab4c0b5809e286b848586ccda3aea..270117cf2050e8a7c8d97a0e7640bf32922d4122 100644
+--- a/internal/gir/pass/pass.go
++++ b/internal/gir/pass/pass.go
+@@ -241,7 +241,7 @@ 			constructors[i] = types.FuncTemplate{
+ 				Name:  util.ConstructorName(c.Name, rec.Name),
+ 				CName: c.CIdentifier,
+ 				Doc:   c.Doc.StringSafe(),
+-				Args:  c.Parameters.Template(ns.Name, "", p.Types, c.Throws, imps),
++				Args:  c.Parameters.Template(ns.Name, "", p.Types, c.Throws, false, imps),
+ 				Ret:   c.ReturnValue.Template(ns.Name, "", p.Types, c.Throws, imps),
+ 			}
+ 		}
+@@ -255,7 +255,7 @@ 				_type = "uintptr"
+ 				fieldName = "x" + util.SnakeToCamel(f.Name) // Prefix callback pointer fields with `x` to make them private
+ 
+ 				callbackName := util.SnakeToCamel(f.Name)
+-				args := f.Callback.Parameters.Template(ns.Name, "", p.Types, f.Callback.Throws, imps)
++				args := f.Callback.Parameters.Template(ns.Name, "", p.Types, f.Callback.Throws, true, imps)
+ 				ret := f.Callback.ReturnValue.Template(ns.Name, "", p.Types, f.Callback.Throws, imps)
+ 
+ 				apiTypes := args.API.Types
+@@ -339,7 +339,7 @@ 			receivers = append(receivers, types.FuncTemplate{
+ 				Doc:   f.Doc.StringSafe(),
+ 				Name:  name,
+ 				CName: f.CIdentifier,
+-				Args:  f.Parameters.Template(ns.Name, "", p.Types, f.Throws, imps),
++				Args:  f.Parameters.Template(ns.Name, "", p.Types, f.Throws, false, imps),
+ 				Ret:   f.ReturnValue.Template(ns.Name, "", p.Types, f.Throws, imps),
+ 			})
+ 		}
+@@ -362,7 +362,7 @@ 		cbImps := types.NewImportSet(pkgName, p.impModule, p.impPackageImports)
+ 		cbT := types.CallbackTemplate{
+ 			Doc:  cb.Doc.StringSafe(),
+ 			Name: cb.Name,
+-			Args: cb.Parameters.Template(ns.Name, "", p.Types, cb.Throws, cbImps),
++			Args: cb.Parameters.Template(ns.Name, "", p.Types, cb.Throws, true, cbImps),
+ 			Ret:  cb.ReturnValue.Template(ns.Name, "", p.Types, cb.Throws, cbImps),
+ 		}
+ 		for _, t := range cbT.Args.Pure.Types {
+@@ -415,7 +415,7 @@ 		pf.functions = append(pf.functions, types.FuncTemplate{
+ 			Name:  name,
+ 			CName: f.CIdentifier,
+ 			Doc:   f.Doc.StringSafe(),
+-			Args:  f.Parameters.Template(ns.Name, "", p.Types, f.Throws, pf.imps),
++			Args:  f.Parameters.Template(ns.Name, "", p.Types, f.Throws, false, pf.imps),
+ 			Ret:   f.ReturnValue.Template(ns.Name, "", p.Types, f.Throws, pf.imps),
+ 		})
+ 	}
+@@ -437,7 +437,7 @@ 			constructors[i] = types.FuncTemplate{
+ 				Name:  util.ConstructorName(c.Name, cls.Name),
+ 				CName: c.CIdentifier,
+ 				Doc:   c.Doc.StringSafe(),
+-				Args:  c.Parameters.Template(ns.Name, "", p.Types, c.Throws, imps),
++				Args:  c.Parameters.Template(ns.Name, "", p.Types, c.Throws, false, imps),
+ 				Ret:   c.ReturnValue.Template(ns.Name, "", p.Types, c.Throws, imps),
+ 			}
+ 		}
+@@ -452,7 +452,7 @@ 			signals[i] = types.SignalsTemplate{
+ 				Doc:   s.Doc.StringSafe(),
+ 				Name:  util.DashToCamel(s.Name),
+ 				CName: s.Name,
+-				Args:  s.Parameters.Template(ns.Name, "", p.Types, false, imps),
++				Args:  s.Parameters.Template(ns.Name, "", p.Types, false, true, imps),
+ 				Ret:   s.ReturnValue.Template(ns.Name, "", p.Types, false, imps),
+ 			}
+ 		}
+@@ -464,7 +464,7 @@ 			receivers[i] = types.FuncTemplate{
+ 				Doc:   f.Doc.StringSafe(),
+ 				Name:  name,
+ 				CName: f.CIdentifier,
+-				Args:  f.Parameters.Template(ns.Name, "", p.Types, f.Throws, imps),
++				Args:  f.Parameters.Template(ns.Name, "", p.Types, f.Throws, false, imps),
+ 				Ret:   f.ReturnValue.Template(ns.Name, "", p.Types, f.Throws, imps),
+ 			}
+ 		}
+@@ -475,7 +475,7 @@ 			functions[i] = types.FuncTemplate{
+ 				Name:  name,
+ 				CName: f.CIdentifier,
+ 				Doc:   f.Doc.StringSafe(),
+-				Args:  f.Parameters.Template(ns.Name, "", p.Types, f.Throws, imps),
++				Args:  f.Parameters.Template(ns.Name, "", p.Types, f.Throws, false, imps),
+ 				Ret:   f.ReturnValue.Template(ns.Name, "", p.Types, f.Throws, imps),
+ 			}
+ 		}
+diff --git a/internal/gir/types/interface.go b/internal/gir/types/interface.go
+index 992519499a2bfafd5575a2d7d00dcab2077ddadc..d482f44951fc41db08578c1551ea9a52836a9825 100644
+--- a/internal/gir/types/interface.go
++++ b/internal/gir/types/interface.go
+@@ -33,7 +33,7 @@ 			FuncTemplate: FuncTemplate{
+ 				Doc:   m.Doc.StringSafe(),
+ 				CName: m.CIdentifier,
+ 				Name:  name,
+-				Args:  m.Parameters.Template(currns, ins, kinds, m.Throws, imps),
++				Args:  m.Parameters.Template(currns, ins, kinds, m.Throws, false, imps),
+ 				Ret:   m.ReturnValue.Template(currns, ins, kinds, m.Throws, imps),
+ 			},
+ 		})
+diff --git a/internal/gir/types/template.go b/internal/gir/types/template.go
+index 4f3d352725344c7fdda20d7cf335d498dc44621a..91dede9e5c2c12178234f2fab7de67f39932fc43 100644
+--- a/internal/gir/types/template.go
++++ b/internal/gir/types/template.go
+@@ -29,7 +29,7 @@ 	// API are the arguments as suitable for a Go API
+ 	API argsTemplate
+ }
+ 
+-func (f *funcArgsTemplate) AddAPI(t string, n string, k Kind, ns string, nullable bool, isOut bool, imps *ImportSet) {
++func (f *funcArgsTemplate) AddAPI(t string, n string, k Kind, ns string, nullable bool, isOut bool, isCallback bool, imps *ImportSet) {
+ 	c := n
+ 	stars := strings.Count(t, "*")
+ 	gobjectNs := "gobject."
+@@ -79,6 +79,16 @@ 				imps.AddPkg("gobject")
+ 			} else if stars == 1 {
+ 				c = n + ".GoPointer()"
+ 			}
++		case SliceType:
++			// On arm64 we can't pass slice arguments to purego, only amd64 supports this
++			// To avoid one option for arm64 and one for amd64, we pass them as pointers directly on both
++			// []string is excluded since our fork of purego manually converts those into a `strings.ByteSlice`
++			// See https://codeberg.org/puregotk/purego/commit/b71757b9ba42ef0b5a84b3b73af0cdd8ec81e01c
++			// Slice arguments aren't supported on callbacks, so we skip those completely
++			if !isCallback && t != "[]string" && strings.HasPrefix(t, "[]") {
++				c = fmt.Sprintf("uintptr(unsafe.Pointer(unsafe.SliceData(%s)))", n)
++				imps.AddUnsafe()
++			}
+ 		}
+ 
+ 		// special case for varargs
+@@ -94,7 +104,7 @@ 	f.API.Full = append(f.API.Full, n+" "+t)
+ 	imps.TrackGoType(t)
+ }
+ 
+-func (f *funcArgsTemplate) AddPure(t string, n string, k Kind, isOut bool) {
++func (f *funcArgsTemplate) AddPure(t string, n string, k Kind, isOut bool, isCallback bool) {
+ 	n += "p"
+ 	c := n
+ 	stars := strings.Count(t, "*")
+@@ -138,6 +148,15 @@ 			} else {
+ 				c = fmt.Sprintf("%s{Ptr: %s}", t+"Base", n)
+ 				t = strings.Repeat("*", stars-1) + "uintptr"
+ 			}
++		case SliceType:
++			// On arm64 we can't pass slice arguments to purego, only amd64 supports this
++			// To avoid one option for arm64 and one for amd64, we pass them as pointers directly on both
++			// []string is excluded since our fork of purego manually converts those into a `strings.ByteSlice`
++			// See https://codeberg.org/puregotk/purego/commit/b71757b9ba42ef0b5a84b3b73af0cdd8ec81e01c
++			// Slice arguments aren't supported on callbacks, so we skip those completely
++			if !isCallback && t != "[]string" && strings.HasPrefix(t, "[]") {
++				t = "uintptr"
++			}
+ 		}
+ 	}
+ 	f.Pure.Names = append(f.Pure.Names, n)
+@@ -166,7 +185,7 @@
+ 	return false
+ }
+ 
+-func (f *funcArgsTemplate) Add(p Parameter, ins string, ns string, kinds KindMap, imps *ImportSet) {
++func (f *funcArgsTemplate) Add(p Parameter, ins string, ns string, kinds KindMap, isCallback bool, imps *ImportSet) {
+ 	// get the lookup namespace
+ 	// as if the interface namespace is non-empty
+ 	// means we can also lookup in the namespace of the interface
+@@ -192,8 +211,8 @@ 	varName := p.VarName()
+ 
+ 	isOut := p.Direction == "out"
+ 
+-	f.AddAPI(goType, varName, kind, ns, p.Nullable, isOut, imps)
+-	f.AddPure(goType, varName, kind, isOut)
++	f.AddAPI(goType, varName, kind, ns, p.Nullable, isOut, isCallback, imps)
++	f.AddPure(goType, varName, kind, isOut, isCallback)
+ }
+ 
+ func (f *funcArgsTemplate) AddThrows(ns string, imps *ImportSet) {
+diff --git a/internal/gir/types/types.go b/internal/gir/types/types.go
+index 4854b8d6240fd4de9a4694d3c2e01c37186efc35..a2472c868a978acbbe4cc7065178d719945acb4d 100644
+--- a/internal/gir/types/types.go
++++ b/internal/gir/types/types.go
+@@ -674,11 +674,11 @@ 	// could also do first letter to lower?
+ 	return snaked + "Var"
+ }
+ 
+-func (p *Parameters) Template(ns string, ifacens string, kinds KindMap, throws bool, imps *ImportSet) funcArgsTemplate {
++func (p *Parameters) Template(ns string, ifacens string, kinds KindMap, throws bool, isCallback bool, imps *ImportSet) funcArgsTemplate {
+ 	args := funcArgsTemplate{}
+ 	if p != nil {
+ 		for _, par := range p.Parameters {
+-			args.Add(par, ifacens, ns, kinds, imps)
++			args.Add(par, ifacens, ns, kinds, isCallback, imps)
+ 		}
+ 	}
+ 	if throws {
+
