@@ -1,0 +1,27 @@
+From 2d9123e2061ff8cc666172bd1c3888f3a9d5b2fb Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Tue, 14 Apr 2026 23:31:37 -0700
+Subject: [PATCH] GIR: Support loading both libaries with trailing `.so.N` and `just .so` by default on macOS
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/internal/gir/pass/pass.go b/internal/gir/pass/pass.go
+index 0cbed2bba63a5b0c0e4a0779587b235db5cbd62c..a299b598a6bab4c0b5809e286b848586ccda3aea 100644
+--- a/internal/gir/pass/pass.go
++++ b/internal/gir/pass/pass.go
+@@ -523,11 +523,11 @@ 			}
+ 		}
+ 	}
+ 
+-	// Derive macOS .dylib equivalents from .so names
++	// Derive macOS .dylib equivalents from .so names (e.g. `libfoo.so.4` → `libfoo.4.dylib`, `libfoo.so` → `libfoo.dylib`)
+ 	var dylibNames []string
+ 	for _, soName := range sharedLibraries {
+-		if strings.Contains(soName, ".so.") {
+-			dylibNames = append(dylibNames, strings.Replace(soName, ".so.", ".", 1)+".dylib")
++		if base, suffix, ok := strings.Cut(soName, ".so"); ok {
++			dylibNames = append(dylibNames, base+suffix+".dylib")
+ 		}
+ 	}
+ 	sharedLibraries = append(sharedLibraries, dylibNames...)
+
