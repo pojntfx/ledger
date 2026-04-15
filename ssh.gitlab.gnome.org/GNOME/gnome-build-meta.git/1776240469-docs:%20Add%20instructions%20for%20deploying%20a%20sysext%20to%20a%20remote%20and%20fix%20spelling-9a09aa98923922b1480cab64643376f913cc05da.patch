@@ -1,0 +1,62 @@
+From 9a09aa98923922b1480cab64643376f913cc05da Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Wed, 15 Apr 2026 01:07:49 -0700
+Subject: [PATCH] docs: Add instructions for deploying a sysext to a remote and fix spelling
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/CONTRIBUTING.md b/CONTRIBUTING.md
+index 69337afd3df6bda3efb845de4398e369cec4a304..6fd8f8f136eb3c76778263c70d48819d5955a85a 100644
+--- a/CONTRIBUTING.md
++++ b/CONTRIBUTING.md
+@@ -129,7 +129,7 @@ Now make the changes you want to make in your workspace, for example in `../linux/` or `../gnome-control-center/`. BuildStream will pick up your changes from this workspace automatically after you make them.
+ 
+ ## 7. Rebuilding GNOME OS with your changes and deploying them
+ 
+-While it's possible to rebuild the GNOME OS images on each change and reinstall them each time you make changes, this leads to a very slow iteration cycle and is not recommended. Instead, use the `systemd-sysext` and/or `systemd-sysupdate` workflows described in the following section to build and deploy your changes to your local workstation, VM or a different machine in a much faster way.
++While it's possible to rebuild the GNOME OS images on each change and reinstall them each time you make changes, this leads to a very slow iteration cycle and is not recommended. Instead, use the `systemd-sysext` and/or `systemd-sysupdate` workflows described in the following sections to build and deploy your changes to your local workstation, a VM, or a different machine in a much faster way.
+ 
+ You can significantly speed up rebuilds by running the following:
+ 
+@@ -149,7 +149,7 @@ Here, `strict: false` avoids rebuilding the whole chain on the next build, and `override-project-caches: true` disables remote cache lookups which, while helpful on the first build, can significantly slow down things on subsequent builds.
+ 
+ ### 7.1 Option 1: By building and installing a system extension (`systemd-sysext`)
+ 
+-> This option works best if you want to temporarily and quickly deploy your changes to your local workstation. No reboot is required to see your changes in action. The one component that can't be iterated on with system extensions is the kernel — for that, use the [`systemd-sysupdate` option](#72-option-2-by-building-serving-and-updating-from-a-local-sysupdate-repository-systemd-sysupdate) instead.
++> This option works best if you want to temporarily and quickly deploy your changes to your local workstation or a remote machine. No reboot is required to see your changes in action. The one component that can't be iterated on with system extensions is the kernel — for that, use the [`systemd-sysupdate` option](#72-option-2-by-building-serving-and-updating-from-a-local-sysupdate-repository-systemd-sysupdate) instead.
+ 
+ > While this works for any of the included apps too, not just system components, iterating on apps directly using Flatpak via for example [GNOME Builder](https://apps.gnome.org/Builder/) or [Foundry](https://gitlab.gnome.org/GNOME/foundry) is preferred.
+ 
+@@ -184,9 +184,30 @@ $ run0 rm /var/lib/extensions/zz-gnome-control-center.raw
+ $ run0 systemd-sysext refresh
+ ```
+ 
++On a remote workstation or VM, deploy the system extension by running the following:
++
++```shell
++$ scp zz-gnome-control-center.sysext.raw user@remote-workstation-hostname-or-ip:/tmp/
++$ ssh user@remote-workstation-hostname-or-ip run0 sysext-add --persistent /tmp/zz-gnome-control-center.sysext.raw
++$ ssh user@remote-workstation-hostname-or-ip run0 systemd-sysext refresh
++```
++
++If the component includes systemd units, reload the daemon by running the following:
++
++```shell
++$ ssh user@remote-workstation-hostname-or-ip run0 systemctl daemon-reload
++```
++
++To remove the system extension from a remote workstation or VM, run the following:
++
++```shell
++$ ssh user@remote-workstation-hostname-or-ip run0 rm /var/lib/extensions/zz-gnome-control-center.raw
++$ ssh user@remote-workstation-hostname-or-ip run0 systemd-sysext refresh
++```
++
+ ### 7.2 Option 2: By building, serving and updating from a local sysupdate repository (`systemd-sysupdate`)
+ 
+-> This option works best if you want to permanently deploy your changes to your local workstation, or if you want to deploy to a VM or a different workstation. A reboot is required to see your changes in action. Unlike with the [`systemd-sysext` option](#71-option-1-by-building-and-installing-a-system-extension-systemd-sysext), this option can be used to iterate on the kernel.
++> This option works best if you want to permanently deploy your changes to your local workstation, a VM, or a different workstation. A reboot is required to see your changes in action. Unlike with the [`systemd-sysext` option](#71-option-1-by-building-and-installing-a-system-extension-systemd-sysext), this option can be used to iterate on the kernel.
+ 
+ First, open a workspace for the component you want to work on as described in [Making changes](#6-making-changes). Then, each time you want to build a `systemd-sysupdate` image with your changes and serve it from a local repository, run the following:
+ 
+
