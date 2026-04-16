@@ -1,0 +1,62 @@
+From 435ca238090cfe4b635edc211c173eef4d00b055 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Wed, 15 Apr 2026 22:20:41 -0700
+Subject: [PATCH] Examples: Add macOS-specific notes to raw Go and Meson-based examples, pass in include dirs to `gi-docgen` explicitly for macOS support
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/examples/myapp-gnome-gomod/README.md b/examples/myapp-gnome-gomod/README.md
+index bf7ca484c4a78ee3fdb291ce08867490a3351d79..38a8d5a36b5d559bbdb4492a0c6fa2ab36ef5770 100644
+--- a/examples/myapp-gnome-gomod/README.md
++++ b/examples/myapp-gnome-gomod/README.md
+@@ -14,6 +14,13 @@ ```
+ 
+ Note the `ldflags` flag; without using Meson, the `.mo` files for i18n don't get installed to `/usr/share/locale` automatically, so we instead point `gettext` to read them from the local directory instead. If you install them manually, that is not something you have to do.
+ 
++<details>
++    <summary>Expand macOS instructions</summary>
++
++On macOS, the right value for `main.LocaleDir` depends on your package manager and architecture. Homebrew on macOS uses `/opt/homebrew/share/locale` for `arm64` and `/usr/local/share/locale` for `amd64`, MacPorts uses `/opt/local/share/locale`.
++
++</details>
++
+ Alternatively, you can build and run the application using Flatpak, which will also build `mylib-gtk-meson` for you and install the `.mo` files for i18n:
+ 
+ ```shell
+diff --git a/examples/myapp-gnome-meson/README.md b/examples/myapp-gnome-meson/README.md
+index 016db2762b41af22018a2ea04be85d03d3a18e5e..9d6b9630892adf49a2a3790c9b2255793a4aa835 100644
+--- a/examples/myapp-gnome-meson/README.md
++++ b/examples/myapp-gnome-meson/README.md
+@@ -7,10 +7,19 @@
+ To then build and install the application using Meson, run:
+ 
+ ```shell
++sudo ninja -C _build uninstall || true
++
+ meson setup _build --prefix=/usr --wipe && meson compile -C _build && sudo meson install -C _build
+ 
+ myapp-gnome-meson
+ ```
++
++<details>
++    <summary>Expand macOS instructions</summary>
++
++On macOS, `--prefix` depends on your package manager and architecture. Homebrew on macOS uses `/opt/homebrew` for `arm64` and `/usr/local` for `amd64`, MacPorts uses `/opt/local`.
++
++</details>
+ 
+ To update the `gettext` i18n resources, you can use:
+ 
+diff --git a/examples/mylib-gtk-meson/src/meson.build b/examples/mylib-gtk-meson/src/meson.build
+index 766ffae33659c112d35ee9829370dcf2a7c82f55..190f52bec7307e5186b926d31bd3fd7a229b9fad 100644
+--- a/examples/mylib-gtk-meson/src/meson.build
++++ b/examples/mylib-gtk-meson/src/meson.build
+@@ -171,6 +171,7 @@         'generate',
+         '--no-namespace-dir',
+         '--config=@INPUT0@',
+         '--output-dir=@OUTPUT@',
++        '--add-include-path=' + get_option('prefix') / get_option('datadir') / 'gir-1.0',
+         '@INPUT1@',
+     ],
+     install: true,
+
