@@ -1,0 +1,180 @@
+From e7df2cdcee961776158b08aa6d0e1488d7b1de47 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Wed, 15 Apr 2026 23:37:50 -0700
+Subject: [PATCH] Examples: Add support for GNOME Builder and Flathub-vendored Flatpak builder
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/examples/myapp-gnome-gomod/.gitignore b/examples/myapp-gnome-gomod/.gitignore
+index 0e593b1363141e7fc80f5a095bd4accd71d17a87..7e69e3ebe204ee28e2d026f2e9f0369a0dd2a296 100644
+--- a/examples/myapp-gnome-gomod/.gitignore
++++ b/examples/myapp-gnome-gomod/.gitignore
+@@ -1,8 +1,8 @@
+-_build
+-repo
+-builddir
+-.flatpak-builder
+ *.gresource
+ *.ui
+ *.mo
+ LINGUAS
++.flatpak-builder
++builddir
++repo
++vendor
+diff --git a/examples/myapp-gnome-gomod/README.md b/examples/myapp-gnome-gomod/README.md
+index 38a8d5a36b5d559bbdb4492a0c6fa2ab36ef5770..e8e44f4ce50aa439cbba29b271232907a60536be 100644
+--- a/examples/myapp-gnome-gomod/README.md
++++ b/examples/myapp-gnome-gomod/README.md
+@@ -21,12 +21,17 @@ On macOS, the right value for `main.LocaleDir` depends on your package manager and architecture. Homebrew on macOS uses `/opt/homebrew/share/locale` for `arm64` and `/usr/local/share/locale` for `amd64`, MacPorts uses `/opt/local/share/locale`.
+ 
+ </details>
+ 
+-Alternatively, you can build and run the application using Flatpak, which will also build `mylib-gtk-meson` for you and install the `.mo` files for i18n:
++You can also open the project in [GNOME Builder](https://flathub.org/apps/org.gnome.Builder) and run it by clicking the play button in the header bar, which will also build `mylib-gtk-meson` for you and install the `.mo` files for i18n.
++
++Alternatively you can use [flatpak-builder](https://docs.flathub.org/docs/for-app-authors/submission#before-submission) directly:
+ 
+ ```shell
+-flatpak-builder --force-clean --force-clean --user --repo=repo --install builddir page.codeberg.puregotk.MyAppGnomeGomod.json
+-
+-flatpak run page.codeberg.puregotk.MyAppGnomeGomod
++$ flatpak run --command=flatpak-builder org.flatpak.Builder --verbose --force-clean --keep-build-dirs --user --ccache --compose-url-policy=full --repo=repo builddir --install page.codeberg.puregotk.MyAppGnomeGomod.json
++$ flatpak run --command=flatpak-builder-lint org.flatpak.Builder manifest page.codeberg.puregotk.MyAppGnomeGomod.json
++$ flatpak run --command=flatpak-builder-lint org.flatpak.Builder repo repo
++$ flatpak run page.codeberg.puregotk.MyAppGnomeGomod
+ ```
++
++We're disabling the sandbox here because otherwise we can't access the `mylib-gtk-meson` directory.
+ 
+ ![Screenshot of myapp-gnome-gomod showing the main application window](../../docs/screenshot-myapp-gnome-gomod.png)
+diff --git a/examples/myapp-gnome-gomod/page.codeberg.puregotk.MyAppGnomeGomod.json b/examples/myapp-gnome-gomod/page.codeberg.puregotk.MyAppGnomeGomod.json
+index 5bdd227ca61f5a26687a3fdd9a051c37de42760d..74a3e6400c108ca430980675123016e0bc6baa5c 100644
+--- a/examples/myapp-gnome-gomod/page.codeberg.puregotk.MyAppGnomeGomod.json
++++ b/examples/myapp-gnome-gomod/page.codeberg.puregotk.MyAppGnomeGomod.json
+@@ -5,10 +5,6 @@   "runtime-version": "50",
+   "sdk": "org.gnome.Sdk",
+   "sdk-extensions": ["org.freedesktop.Sdk.Extension.golang"],
+   "command": "myapp-gnome-gomod",
+-  "build-options": {
+-    "append-path": "/usr/lib/sdk/golang/bin",
+-    "build-args": ["--filesystem=home"]
+-  },
+   "finish-args": [
+     "--socket=wayland",
+     "--socket=fallback-x11",
+@@ -19,6 +15,13 @@   "modules": [
+     {
+       "name": "mylib-gtk-meson",
+       "buildsystem": "meson",
++      "build-options": {
++        "prepend-path": "/usr/lib/sdk/golang/bin",
++        "env": {
++          "GOROOT": "/usr/lib/sdk/golang",
++          "GOPATH": "/run/build/mylib-gtk-meson/go"
++        }
++      },
+       "sources": [
+         {
+           "type": "dir",
+@@ -33,9 +36,9 @@     {
+       "name": "myapp-gnome-gomod",
+       "buildsystem": "simple",
+       "build-commands": [
+-        "mkdir -p vendor && cp modules.txt vendor/modules.txt",
+-        ". /usr/lib/sdk/golang/enable.sh && export GOBIN=\"/app/bin\" && go generate ./... && go build -o /app/bin/myapp-gnome-gomod -v -mod=vendor -ldflags='-X main.LocaleDir=/app/share/locale' ./src",
+-        "mkdir -p /app/share/locale && (cd po && find . -name '*.mo' -exec cp --parents {} /app/share/locale/ \\;)"
++        "bash -c '. /usr/lib/sdk/golang/enable.sh && ([ -f vendor/modules.txt ] || go mod vendor) && cp modules.txt vendor/modules.txt'",
++        "bash -c '. /usr/lib/sdk/golang/enable.sh && export GOBIN=\"/app/bin\" && go generate ./... && go build -o /app/bin/myapp-gnome-gomod -v -mod=vendor -ldflags=\"-X main.LocaleDir=/app/share/locale\" ./src'",
++        "bash -c 'mkdir -p /app/share/locale && (cd po && find . -name \"*.mo\" -exec cp --parents {} /app/share/locale/ \\;)'"
+       ],
+       "sources": [
+         { "type": "dir", "path": "." },
+diff --git a/examples/myapp-gnome-meson/.gitignore b/examples/myapp-gnome-meson/.gitignore
+index 070bbf540f481f378f4d824b2d478caad538b2fa..7e69e3ebe204ee28e2d026f2e9f0369a0dd2a296 100644
+--- a/examples/myapp-gnome-meson/.gitignore
++++ b/examples/myapp-gnome-meson/.gitignore
+@@ -1,7 +1,8 @@
+-_build
+-repo
+-builddir
+-.flatpak-builder
+ *.gresource
+ *.ui
+ *.mo
++LINGUAS
++.flatpak-builder
++builddir
++repo
++vendor
+diff --git a/examples/myapp-gnome-meson/README.md b/examples/myapp-gnome-meson/README.md
+index 9d6b9630892adf49a2a3790c9b2255793a4aa835..a127f706b14eed7ce3bf4c9de2f8b8e958f79f64 100644
+--- a/examples/myapp-gnome-meson/README.md
++++ b/examples/myapp-gnome-meson/README.md
+@@ -28,12 +28,17 @@ meson compile -C _build myapp-gnome-meson-pot
+ meson compile -C _build myapp-gnome-meson-update-po
+ ```
+ 
+-![Screenshot of myapp-gnome-meson showing the main application window](../../docs/screenshot-myapp-gnome-meson.png)
++You can also open the project in [GNOME Builder](https://flathub.org/apps/org.gnome.Builder) and run it by clicking the play button in the header bar, which will also build `mylib-gtk-meson` for you and install the `.mo` files for i18n.
+ 
+-Alternatively, you can build and run the application using Flatpak, which will also build `mylib-gtk-meson` for you:
++Alternatively you can use [flatpak-builder](https://docs.flathub.org/docs/for-app-authors/submission#before-submission) directly:
+ 
+ ```shell
+-flatpak-builder --force-clean --force-clean --user --repo=repo --install builddir page.codeberg.puregotk.MyAppGnomeMeson.json
++$ flatpak run --command=flatpak-builder org.flatpak.Builder --verbose --force-clean --keep-build-dirs --user --ccache --compose-url-policy=full --repo=repo builddir --install page.codeberg.puregotk.MyAppGnomeMeson.json
++$ flatpak run --command=flatpak-builder-lint org.flatpak.Builder manifest page.codeberg.puregotk.MyAppGnomeMeson.json
++$ flatpak run --command=flatpak-builder-lint org.flatpak.Builder repo repo
++$ flatpak run page.codeberg.puregotk.MyAppGnomeMeson
++```
++
++We're disabling the sandbox here because otherwise we can't access the `mylib-gtk-meson` directory.
+ 
+-flatpak run page.codeberg.puregotk.MyAppGnomeMeson
+-```
++![Screenshot of myapp-gnome-meson showing the main application window](../../docs/screenshot-myapp-gnome-meson.png)
+diff --git a/examples/myapp-gnome-meson/page.codeberg.puregotk.MyAppGnomeMeson.json b/examples/myapp-gnome-meson/page.codeberg.puregotk.MyAppGnomeMeson.json
+index bd6c75523f6269a29d5188d742169440b85eeb31..fcc6906f09dce3fbf1986bcb23f927b4e56ff9cc 100644
+--- a/examples/myapp-gnome-meson/page.codeberg.puregotk.MyAppGnomeMeson.json
++++ b/examples/myapp-gnome-meson/page.codeberg.puregotk.MyAppGnomeMeson.json
+@@ -5,10 +5,6 @@   "runtime-version": "50",
+   "sdk": "org.gnome.Sdk",
+   "sdk-extensions": ["org.freedesktop.Sdk.Extension.golang"],
+   "command": "myapp-gnome-meson",
+-  "build-options": {
+-    "append-path": "/usr/lib/sdk/golang/bin",
+-    "build-args": ["--filesystem=home"]
+-  },
+   "finish-args": [
+     "--socket=wayland",
+     "--socket=fallback-x11",
+@@ -19,6 +15,13 @@   "modules": [
+     {
+       "name": "mylib-gtk-meson",
+       "buildsystem": "meson",
++      "build-options": {
++        "prepend-path": "/usr/lib/sdk/golang/bin",
++        "env": {
++          "GOROOT": "/usr/lib/sdk/golang",
++          "GOPATH": "/run/build/mylib-gtk-meson/go"
++        }
++      },
+       "sources": [
+         {
+           "type": "dir",
+@@ -32,6 +35,13 @@     },
+     {
+       "name": "myapp-gnome-meson",
+       "buildsystem": "meson",
++      "build-options": {
++        "prepend-path": "/usr/lib/sdk/golang/bin",
++        "env": {
++          "GOROOT": "/usr/lib/sdk/golang",
++          "GOPATH": "/run/build/myapp-gnome-meson/go"
++        }
++      },
+       "sources": [
+         { "type": "dir", "path": "." },
+         {
+
