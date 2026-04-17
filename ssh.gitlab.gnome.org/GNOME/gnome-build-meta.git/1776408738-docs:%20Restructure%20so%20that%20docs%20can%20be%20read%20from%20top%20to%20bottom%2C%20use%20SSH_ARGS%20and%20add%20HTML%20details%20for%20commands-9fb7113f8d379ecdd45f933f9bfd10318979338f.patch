@@ -1,0 +1,246 @@
+From 9fb7113f8d379ecdd45f933f9bfd10318979338f Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Thu, 16 Apr 2026 23:52:18 -0700
+Subject: [PATCH] docs: Restructure so that docs can be read from top to bottom, use SSH_ARGS and add HTML details for commands
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/CONTRIBUTING.md b/CONTRIBUTING.md
+index 54b1c427657a4ae8f43fb3141ab4eaa7f3a4659a..c4772562afbf7f3c6ebfc041003a09aa1809cc5d 100644
+--- a/CONTRIBUTING.md
++++ b/CONTRIBUTING.md
+@@ -78,7 +78,13 @@ The first build might take a while depending on your workstation's specs and which secure boot key configuration you've set up earlier. On a 2025 workstation with a fast SSD, 32 GB of RAM, 24 cores, and a 1 Gb/s internet connection, the first build with the `snakeoil` keys takes about 25 minutes and requires about 50 GB of disk space. Subsequent rebuilds are much faster and take about one minute from making a change to seeing the change running on the workstation.
+ 
+ ### 4.1 Option 1: In a virtual machine
+ 
+-To build and start a virtual machine with secure boot and a TPM, run the following; secure boot keys are generated automatically if they don't already exist:
++First, build and serve a local sysupdate repository in a separate terminal so the virtual machine can later enable the `devel` extension and others:
++
++```shell
++$ utils/run-sysupdate-repo.sh --devel # Append `--same-version` to avoid rebuilding the whole chain on the next run
++```
++
++Then, in another terminal, build and start a virtual machine with secure boot and a TPM by running the following; if you didn't already generate the secure boot keys in [Setting up secure boot keys](#3-setting-up-secure-boot-keys), they will be generated automatically:
+ 
+ ```shell
+ $ ./utils/run-secure-vm.sh --gtk --debug-systemd --local-updates # Append `--rebuild-iso --reset-installed --reset-secure-state` to rebuild the image and completely reset the virtual machine, or drop `--gtk` to use a SPICE display (e.g. Field Monitor or Remote Viewer) instead
+@@ -129,7 +135,9 @@ Now make the changes you want to make in your workspace, for example in `../linux/` or `../gnome-control-center/`. BuildStream will pick up your changes from this workspace automatically after you make them.
+ 
+ ## 7. Rebuilding GNOME OS with your changes and deploying them
+ 
+-While it's possible to rebuild the GNOME OS images on each change and reinstall them each time you make changes, this leads to a very slow iteration cycle and is not recommended. Instead, use the `systemd-sysext` and/or `systemd-sysupdate` workflows described in the following sections to build and deploy your changes to your local workstation, a VM, or a different machine in a much faster way.
++While it's possible to rebuild the GNOME OS images on each change and reinstall them each time you make changes, this leads to a very slow iteration cycle and is not recommended. Instead, use the `systemd-sysext` and/or `systemd-sysupdate` workflows described in the following sections to build and deploy your changes to your local workstation, a remote machine, or a virtual machine in a much faster way.
++
++> The following uses `$SSH_ARGS` as placeholder SSH arguments when targeting a virtual machine or a remote machine. For a virtual machine started with `./utils/run-secure-vm.sh`, use the arguments printed after running `./utils/run-secure-vm.sh` (e.g. `export SSH_ARGS="-i ssh/ephemeral root@vsock/777"`). For a remote machine, set `export SSH_ARGS="user@remote-machine-hostname-or-ip"`.
+ 
+ You can significantly speed up rebuilds by running the following:
+ 
+@@ -149,14 +157,13 @@ Here, `strict: false` avoids rebuilding the whole chain on the next build, and `override-project-caches: true` disables remote cache lookups which, while helpful on the first build, can significantly slow down things on subsequent builds. By default, the cache is stored in `~/.cache/buildstream`. Note disabling the remote cache lookups will cause a slow fresh build from scratch without the caches the first time you run a `bst` command afterwards.
+ 
+ ### 7.1 Option 1: By building and installing a system extension (`systemd-sysext`)
+ 
+-> This option works best if you want to temporarily and quickly deploy your changes to your local workstation or a remote machine. No reboot is required to see your changes in action. The one component that can't be iterated on with system extensions is the kernel — for that, use the [`systemd-sysupdate` option](#72-option-2-by-building-serving-and-updating-from-a-local-sysupdate-repository-systemd-sysupdate) instead.
++> This option works best if you want to temporarily and quickly deploy your changes to your local workstation, a remote machine, or a virtual machine. No reboot is required to see your changes in action. The one component that can't be iterated on with system extensions is the kernel. For that, use the [`systemd-sysupdate` option](#72-option-2-by-building-serving-and-updating-from-a-local-sysupdate-repository-systemd-sysupdate) instead.
+ 
+ > While this works for any of the included apps too, not just system components, iterating on apps directly using Flatpak via for example [GNOME Builder](https://apps.gnome.org/Builder/) or [Foundry](https://gitlab.gnome.org/GNOME/foundry) is preferred.
+ 
+ First, open a workspace for the component you want to work on as described in [Making changes](#6-making-changes). Then, each time you want to build a system extension with your changes, run the following:
+ 
+ ```shell
+-$ bst build core/gnome-control-center.bst
+ $ sysext-build-element --verbose zz-gnome-control-center core/gnome-control-center.bst
+ ```
+ 
+@@ -164,11 +171,14 @@ The system extension should now be available at `./zz-gnome-control-center.sysext.raw`.
+ 
+ > System extensions are applied alphabetically, so you want to prefix them (as we did above with `zz-`) in order to avoid being overwritten by other system extensions that will be loaded.
+ 
+-Now you can deploy it to your workstation:
++<details>
++<summary>Expand instructions for deploying to your local workstation</summary>
++
++To deploy the system extension on your local workstation, run the following:
+ 
+ ```shell
+ $ run0 sysext-add --persistent zz-gnome-control-center.sysext.raw
+-$ run0 systemd-sysext refresh
++$ run0 systemd-sysext refresh --force
+ ```
+ 
+ If the component includes systemd units, reload the daemon by running the following:
+@@ -177,42 +187,64 @@ ```shell
+ $ run0 systemctl daemon-reload
+ ```
+ 
+-To remove the system extension from your workstation, run the following:
++To remove the system extension from your local workstation, run the following:
+ 
+ ```shell
+ $ run0 rm /var/lib/extensions/zz-gnome-control-center.raw
+-$ run0 systemd-sysext refresh
++$ run0 systemd-sysext refresh --force
+ ```
+ 
++</details>
++
+ <details>
+-<summary>Expand remote deployment instructions</summary>
++<summary>Expand instructions for deploying to a virtual or remote machine</summary>
+ 
+-On a remote workstation or VM, deploy the system extension by running the following:
++First, enable the `devel` extension to get `sysext-add` (skip this step if it's already enabled):
++
++> On a virtual machine, enabling the `devel` extension pulls from the local sysupdate repository, so `utils/run-sysupdate-repo.sh --devel` must be running as described in [In a virtual machine](#41-option-1-in-a-virtual-machine).
+ 
+ ```shell
+-$ scp zz-gnome-control-center.sysext.raw user@remote-workstation-hostname-or-ip:/tmp/
+-$ ssh user@remote-workstation-hostname-or-ip run0 sysext-add --persistent /tmp/zz-gnome-control-center.sysext.raw
+-$ ssh user@remote-workstation-hostname-or-ip run0 systemd-sysext refresh
++$ ssh $SSH_ARGS run0 updatectl enable devel --now
++$ ssh $SSH_ARGS run0 systemd-sysext refresh --force
++```
++
++Then copy the system extension to the target. For a **remote machine** use `scp`:
++
++```shell
++$ scp zz-gnome-control-center.sysext.raw $SSH_ARGS:/tmp/
++```
++
++For a **virtual machine**, `scp` can't parse the vsock address, so pipe the file over `ssh` instead:
++
++```shell
++$ ssh $SSH_ARGS "cat > /tmp/zz-gnome-control-center.sysext.raw" < zz-gnome-control-center.sysext.raw
++```
++
++Then apply the system extension by running the following:
++
++```shell
++$ ssh $SSH_ARGS run0 sysext-add --persistent /tmp/zz-gnome-control-center.sysext.raw
++$ ssh $SSH_ARGS run0 systemd-sysext refresh --force
+ ```
+ 
+ If the component includes systemd units, reload the daemon by running the following:
+ 
+ ```shell
+-$ ssh user@remote-workstation-hostname-or-ip run0 systemctl daemon-reload
++$ ssh $SSH_ARGS run0 systemctl daemon-reload
+ ```
+ 
+-To remove the system extension from a remote workstation or VM, run the following:
++To remove the system extension from the target, run the following:
+ 
+ ```shell
+-$ ssh user@remote-workstation-hostname-or-ip run0 rm /var/lib/extensions/zz-gnome-control-center.raw
+-$ ssh user@remote-workstation-hostname-or-ip run0 systemd-sysext refresh
++$ ssh $SSH_ARGS run0 rm /var/lib/extensions/zz-gnome-control-center.raw
++$ ssh $SSH_ARGS run0 systemd-sysext refresh --force
+ ```
+ 
+ </details>
+ 
+ ### 7.2 Option 2: By building, serving and updating from a local sysupdate repository (`systemd-sysupdate`)
+ 
+-> This option works best if you want to permanently deploy your changes to your local workstation, a VM, or a different workstation. A reboot is required to see your changes in action. Unlike with the [`systemd-sysext` option](#71-option-1-by-building-and-installing-a-system-extension-systemd-sysext), this option can be used to iterate on the kernel.
++> This option works best if you want to permanently deploy your changes to your local workstation, a remote machine, or a virtual machine. A reboot is required to see your changes in action. Unlike with the [`systemd-sysext` option](#71-option-1-by-building-and-installing-a-system-extension-systemd-sysext), this option can be used to iterate on the kernel.
+ 
+ First, open a workspace for the component you want to work on as described in [Making changes](#6-making-changes). Then, each time you want to build a `systemd-sysupdate` image with your changes and serve it from a local repository, run the following:
+ 
+@@ -220,43 +252,84 @@ ```shell
+ $ utils/run-sysupdate-repo.sh --devel # Append `--same-version` to avoid rebuilding the whole chain on the next run
+ ```
+ 
+-In a second terminal, configure `systemd-sysupdate` to use the local repository and update to the images you've built by running the following:
++In a second terminal, configure `systemd-sysupdate` to use the local repository and update to the images you've built.
++
++<details>
++<summary>Expand instructions for updating your local workstation</summary>
++
++To configure your local workstation to use the local repository and update, run the following:
+ 
+ ```shell
+-$ run0 utils/enable-local-repo.sh --local # You can skip this step if you're deploying to a VM started with `./utils/run-secure-vm.sh --local-updates`
++$ run0 utils/enable-local-repo.sh --local
+ $ updatectl update host@l.1 # Without passing `--same-version` to run-sysupdate-repo.sh, the number after `l.` increments on each run
+ $ systemctl reboot
+ ```
+ 
++After rebooting, select the new version (`l.1`) from the `systemd-boot` menu. If you're using disk encryption, at the TPM PIN prompt enter your disk recovery key, not your TPM PIN.
++
++</details>
++
+ <details>
+-<summary>Expand remote deployment instructions</summary>
++<summary>Expand instructions for updating a virtual or remote machine</summary>
++
++If you're targeting a virtual machine started with `./utils/run-secure-vm.sh --local-updates`, the local repository is already enabled, so you can skip the copy and `enable-local-repo.sh` steps below and go straight to `updatectl update`.
++
++Otherwise, copy `utils/` and `files/boot-keys/` to the target. For a **remote machine**, use `scp`:
++
++```shell
++$ ssh $SSH_ARGS mkdir -p /tmp/gnome-build-meta
++$ scp -r utils/ files/boot-keys/ $SSH_ARGS:/tmp/gnome-build-meta/
++```
++
++For a **virtual machine**, `scp` can't parse the vsock address, so pipe a tar stream over `ssh` instead:
++
++```shell
++$ tar -cf - utils/ files/boot-keys/ | ssh $SSH_ARGS "mkdir -p /tmp/gnome-build-meta && tar -xf - -C /tmp/gnome-build-meta"
++```
++
++Then enable the local repository. For a **remote machine** point at the host serving the repository:
++
++```shell
++$ ssh $SSH_ARGS run0 /tmp/gnome-build-meta/utils/enable-local-repo.sh --pubring /tmp/gnome-build-meta/files/boot-keys/import-pubring.pgp http://your-hostname-or-ip:8080
++```
++
++For a **virtual machine**, point at the QEMU user-networking gateway to the host:
++
++```shell
++$ ssh $SSH_ARGS run0 /tmp/gnome-build-meta/utils/enable-local-repo.sh --pubring /tmp/gnome-build-meta/files/boot-keys/import-pubring.pgp http://10.0.2.2:8080
++```
+ 
+-On a remote workstation or a VM not started with `./utils/run-secure-vm.sh --local-updates`, run the following:
++Finally, update and reboot:
+ 
+ ```shell
+-$ scp -r utils/ files/boot-keys/ user@remote-workstation-hostname-or-ip:/tmp/gnome-build-meta/
+-$ ssh user@remote-workstation-hostname-or-ip run0 /tmp/gnome-build-meta/utils/enable-local-repo.sh --pubring /tmp/gnome-build-meta/files/boot-keys/import-pubring.pgp http://your-hostname-or-ip:8080
+-$ ssh user@remote-workstation-hostname-or-ip updatectl update host@l.1 # Without passing `--same-version` to run-sysupdate-repo.sh, the number after `l.` increments on each run
+-$ ssh user@remote-workstation-hostname-or-ip systemctl reboot
++$ ssh $SSH_ARGS run0 updatectl update host@l.1 # Without passing `--same-version` to run-sysupdate-repo.sh, the number after `l.` increments on each run
++$ ssh $SSH_ARGS run0 systemctl reboot
+ ```
+ 
+-After rebooting, select the new version (`l.1`) from the `systemd-boot` menu. If you're using disk encryption, at the TPM PIN prompt enter your disk recovery key, not your TPM PIN.
++After rebooting, select the new version (`l.1`) from the `systemd-boot` menu. If the target uses disk encryption, at the TPM PIN prompt enter your disk recovery key, not your TPM PIN.
+ 
+ </details>
+ 
+-To configure `systemd-sysupdate` on your workstation to no longer use your local repository, run the following:
++To configure `systemd-sysupdate` to no longer use your local repository:
++
++<details>
++<summary>Expand instructions for cleaning up your local workstation</summary>
++
++On your local workstation, run the following:
+ 
+ ```shell
+ $ run0 utils/enable-local-repo.sh --clean
+ ```
+ 
++</details>
++
+ <details>
+-<summary>Expand remote cleanup instructions</summary>
++<summary>Expand instructions for cleaning up a virtual or remote machine</summary>
+ 
+-On a remote workstation or a VM not started with `./utils/run-secure-vm.sh --local-updates`, run the following:
++On a virtual machine not started with `./utils/run-secure-vm.sh --local-updates`, or on a remote machine, run the following:
+ 
+ ```shell
+-$ ssh user@remote-workstation-hostname-or-ip run0 /tmp/gnome-build-meta/utils/enable-local-repo.sh --clean
++$ ssh $SSH_ARGS run0 /tmp/gnome-build-meta/utils/enable-local-repo.sh --clean
+ ```
+ 
+ </details>
+
