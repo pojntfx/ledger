@@ -1,0 +1,699 @@
+From ba0cabea55570aad2ac1a4da81239cc38e24a6e2 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Fri, 17 Apr 2026 23:39:29 -0700
+Subject: [PATCH] docs: Split contribution docs into root and OS documents; move additional README content to root
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/CONTRIBUTING.md b/CONTRIBUTING.md
+index 23d2d8c637d7d1df97d09d9d705d3ce7cf4f4af2..643967b2be8d62d979d6691b0157b5773320cab9 100644
+--- a/CONTRIBUTING.md
++++ b/CONTRIBUTING.md
+@@ -1,29 +1,22 @@
+-# Contributing to GNOME OS
++# Contributing to GNOME Build Metadata
+ 
+ ## 1. Setting up the build environment
+ 
+-GNOME OS is a [BuildStream](https://www.buildstream.build/) project. If you're using GNOME OS as your developer workstation, you can set up all the tools and dependencies you need to build GNOME OS by enabling the `devel` extension:
++The content of this repository is a [BuildStream](https://www.buildstream.build/) project. For more information on BuildStream, check out its [user guide](https://docs.buildstream.build/2.7/main_using.html) and [reference documentation](https://docs.buildstream.build/2.7/main_core.html) for all available features and options.
++
++If you're using GNOME OS as your developer workstation, you can set up all the tools and dependencies you need to build this repository by enabling the `devel` extension:
+ 
+ ```shell
+ $ updatectl enable devel --now
+ ```
+ 
+-Alternatively, you can use [Toolbox](https://containertoolbx.org/) to get a containerised build environment like so:
++Alternatively, you can use [Toolbox](https://containertoolbx.org/) to get a containerized build environment like so:
+ 
+ ```shell
+ $ toolbox create -i registry.gitlab.com/freedesktop-sdk/infrastructure/freedesktop-sdk-docker-images/bst2
+ $ toolbox enter bst2
+ ```
+ 
+-For [automated integration tests](#8-running-automated-integration-tests), you also need to install the [ssam_openqa](https://gitlab.gnome.org/sthursfield/ssam_openqa) tool manually like so:
+-
+-```shell
+-curl -Lo ~/.local/bin/ssam_openqa "https://gitlab.gnome.org/api/v4/projects/sthursfield%2Fssam_openqa/packages/generic/$(uname -m)-unknown-linux-gnu/$(curl "https://gitlab.gnome.org/api/v4/projects/sthursfield%2Fssam_openqa/packages?package_name=$(uname -m)-unknown-linux-gnu&sort=desc" | jq -r '.[0].version')/ssam_openqa"
+-chmod +x ~/.local/bin/ssam_openqa
+-```
+-
+-The [TigerVNC viewer](https://flathub.org/apps/org.tigervnc.vncviewer) can be helpful in order to follow along as the automated integration tests are running. Field Monitor and Remote Viewer can not connect to the VNC server used for the automated integration tests.
+-
+ ## 2. Forking and cloning the GNOME Build Metadata repository
+ 
+ First, create a fork of the repo in your account by visiting https://gitlab.gnome.org/GNOME/gnome-build-meta/-/forks/new. Then, clone the repository to a local directory on your workstation:
+@@ -47,79 +40,15 @@ ```
+ 
+ If you need help with your contributions, ask for help in [`#gnome-os:gnome.org` on Matrix](https://matrix.to/#/#gnome-os:gnome.org).
+ 
+-## 3. Setting up secure boot keys
+-
+-Before building images, you need to generate secure boot keys. For fast local development, you can use the `snakeoil` keys; these are the same keys CI/CD uses, which means that you can re-use the CI/CD caches for your local builds instead of rebuilding everything from source. Keep in mind however that these keys are publicly known and as a result provide zero security. To use them, run the following:
+-
+-```shell
+-$ make -C files/boot-keys clean
+-$ make -C files/boot-keys IMPORT_MODE=snakeoil
+-```
+-
+-If you want to deploy your local builds to your system, use the `local` import mode, which uses the `snakeoil` keys for the bootloader components but generates random keys for all other components by running the following:
+-
+-```shell
+-$ make -C files/boot-keys clean
+-$ make -C files/boot-keys IMPORT_MODE=local
+-```
+-
+-You can also generate completely fresh keys, which causes all components to be rebuilt by running the following:
+-
+-```shell
+-$ make -C files/boot-keys clean
+-$ make -C files/boot-keys
+-```
+-
+-## 4. Building and booting a GNOME OS image
+-
+-> If you're already running GNOME OS (e.g. if you installed it by using the [prebuilt images](https://os.gnome.org/)) and want to deploy your changes to it directly, you can skip this step and jump directly to the [Making changes](#6-making-changes) section instead
+-
+-The first build might take a while depending on your workstation's specs and which secure boot key configuration you've set up earlier. On a 2025 workstation with a fast SSD, 32 GB of RAM, 24 cores, and a 1 Gb/s internet connection, the first build with the `snakeoil` keys takes about 25 minutes and requires about 50 GB of disk space. Subsequent rebuilds are much faster and take about one minute from making a change to seeing the change running on the workstation.
+-
+-### 4.1 Option 1: In a virtual machine
+-
+-First, build and serve a local sysupdate repository in a separate terminal so the virtual machine can later enable the `devel` extension and others:
+-
+-```shell
+-$ utils/run-sysupdate-repo.sh --devel # Append `--same-version` to avoid rebuilding the whole chain on the next run
+-```
+-
+-Then, in another terminal, build and start a virtual machine with secure boot and a TPM by running the following; if you didn't already generate the secure boot keys in [Setting up secure boot keys](#3-setting-up-secure-boot-keys), they will be generated automatically:
+-
+-```shell
+-$ ./utils/run-secure-vm.sh --gtk --debug-systemd --local-updates # Append `--rebuild-iso --reset-installed --reset-secure-state` to rebuild the image and completely reset the virtual machine, or drop `--gtk` to use a SPICE display (e.g. Field Monitor or Remote Viewer) instead
+-```
+-
+-The virtual machine image and state can be found at `./current-secure-vm/`; the GTK display will open and allow you to interact with the virtual machine. The SSH command (and SPICE address, if enabled) to connect to the virtual machine will be printed to your console.
+-
+-### 4.2 Option 2: On physical hardware
+-
+-First, generate the secure boot keys as described in [Setting up secure boot keys](#3-setting-up-secure-boot-keys). Then build the ISO by running the following:
+-
+-```shell
+-$ bst build gnomeos/live-image.bst
+-$ bst artifact checkout gnomeos/live-image.bst --directory ./iso
+-```
+-
+-The ISO can be found at `./iso/disk.iso`.
+-
+-You can now write the ISO to a USB stick and boot from it on physical hardware, or manually boot from it in a virtual machine.
+-
+-## 5. Installing your locally built GNOME OS image to disk
+-
+-If you have secure boot enabled, `systemd-boot` will offer to auto-enroll the secure boot keys on the first boot.
+-
+-After booting, [GNOME Initial Setup](https://gitlab.gnome.org/GNOME/gnome-initial-setup) will ask you to set up the system. After it has completed, the [GNOME OS proto-installer](./files/gnomeos/live/proto-installer) will automatically start and prompt you to install GNOME OS to disk, which you should do.
+-
+-## 6. Making changes
+-
+-The content of this repository is a [BuildStream](https://www.buildstream.build/) project. For more information on BuildStream, check out its [user guide](https://docs.buildstream.build/2.7/main_using.html) and [reference documentation](https://docs.buildstream.build/2.7/main_core.html) for all available features and options.
++## 3. Making changes
+ 
+ You can find definitions for components, their build steps and dependencies under `elements/`. Elements can depend on other elements and composed together to build complete targets like the ones in [published build outputs](./README.md#published-build-outputs). Adding a new component or dependency generally means adding a new buildstream element and modifying existing ones to include it in its list dependencies.
+ 
+ We use the [Freedesktop SDK](https://freedesktop-sdk.io/) as a base for a lot of our components, using a [BuildStream junction](https://docs.buildstream.build/2.7/junctions/junction-elements.html). This means that some components are shared and changes to those components should be done upstream in the Freedesktop SDK. Such components are prefixed with `freedesktop-sdk.bst:` when listed as a dependency, so they are easy to spot.
+ 
+-First, create a workspace for the GNOME OS components you want to work on; for example for the Linux kernel:
++The first build might take a while depending on your workstation's specs. On a 2025 workstation with a fast SSD, 32 GB of RAM, 24 cores, and a 1 Gb/s internet connection, the first build takes about 25 minutes and requires about 50 GB of disk space. Subsequent rebuilds are much faster and take about one minute from making a change to seeing the change running on the workstation.
++
++First, create a workspace for the component you want to work on; for example for the Linux kernel:
+ 
+ ```shell
+ $ bst workspace open freedesktop-sdk.bst:components/linux.bst --directory ../linux/
+@@ -139,13 +68,13 @@ ```
+ 
+ Now make the changes you want to make in your workspace, for example in `../linux/` or `../gnome-control-center/`. BuildStream will pick up your changes from this workspace automatically after you make them.
+ 
+-## 7. Rebuilding GNOME OS with your changes and deploying them
+-
+-While it's possible to rebuild the GNOME OS images on each change and reinstall them each time you make changes, this leads to a very slow iteration cycle and is not recommended. Instead, use the `systemd-sysext` and/or `systemd-sysupdate` workflows described in the following sections to build and deploy your changes to your local workstation, a remote machine, or a virtual machine in a much faster way.
++How to build, deploy and test depends on which build output you're contributing to. Follow the dedicated guide for each:
+ 
+-> The following uses `$SSH_ARGS` as placeholder SSH arguments when targeting a virtual machine or a remote machine. For a virtual machine started with `./utils/run-secure-vm.sh`, use the arguments printed after running `./utils/run-secure-vm.sh` (e.g. `export SSH_ARGS="-i ssh/ephemeral root@vsock/777"`). For a remote machine, set `export SSH_ARGS="user@remote-machine-hostname-or-ip"`.
++- **GNOME OS**: See [docs/contributing-os.md](./docs/contributing-os.md)
++- **GNOME Flatpak runtimes**: See [docs/contributing-flatpak.md](./docs/contributing-flatpak.md)
++- **GNOME OCI images**: See [docs/contributing-oci.md](./docs/contributing-oci.md)
+ 
+-You can significantly speed up rebuilds by running the following:
++**After** the first build has completed, you can significantly speed up rebuilds by running the following:
+ 
+ ```shell
+ $ cat > ~/.config/buildstream.conf << 'EOT'
+@@ -161,232 +90,41 @@ ```
+ 
+ Here, `strict: false` avoids rebuilding the whole chain on the next build by disabling [strict mode](https://docs.buildstream.build/2.7/developing/strict-mode.html), and `override-project-caches: true` disables [remote cache](https://docs.buildstream.build/2.7/using_configuring_cache_server.html) lookups which, while helpful on the first build, can significantly slow down things on subsequent builds. By default, the cache is stored in `~/.cache/buildstream`. Note disabling the remote cache lookups will cause a slow fresh build from scratch without the caches the first time you run a `bst` command afterwards.
+ 
+-### 7.1 Option 1: By building and installing a system extension (`systemd-sysext`)
+-
+-> This option works best if you want to temporarily and quickly deploy your changes to your local workstation, a remote machine, or a virtual machine. No reboot is required to see your changes in action. The one component that can't be iterated on with system extensions is the kernel. For that, use the [`systemd-sysupdate` option](#72-option-2-by-building-serving-and-updating-from-a-local-sysupdate-repository-systemd-sysupdate) instead.
+-
+-> While this works for any of the included apps too, not just system components, iterating on apps directly using Flatpak via for example [GNOME Builder](https://apps.gnome.org/Builder/) or [Foundry](https://gitlab.gnome.org/GNOME/foundry) is preferred.
+-
+-First, open a workspace for the component you want to work on as described in [Making changes](#6-making-changes). Then, each time you want to build a system extension with your changes, run the following:
+-
+-```shell
+-$ sysext-build-element --verbose zz-gnome-control-center core/gnome-control-center.bst
+-```
+-
+-The system extension should now be available at `./zz-gnome-control-center.sysext.raw`.
+-
+-> System extensions are applied alphabetically, so you want to prefix them (as we did above with `zz-`) in order to avoid being overwritten by other system extensions that will be loaded.
+-
+-<details>
+-<summary>Expand instructions for deploying to your local workstation</summary>
+-
+-To deploy the system extension on your local workstation, run the following:
+-
+-```shell
+-$ run0 sysext-add --persistent zz-gnome-control-center.sysext.raw
+-$ run0 systemd-sysext refresh --force
+-```
+-
+-If the component includes systemd units, reload the daemon by running the following:
+-
+-```shell
+-$ run0 systemctl daemon-reload
+-```
+-
+-To remove the system extension from your local workstation, run the following:
+-
+-```shell
+-$ run0 rm /var/lib/extensions/zz-gnome-control-center.raw
+-$ run0 systemd-sysext refresh --force
+-```
+-
+-</details>
+-
+-<details>
+-<summary>Expand instructions for deploying to a virtual or remote machine</summary>
+-
+-First, enable the `devel` extension to get `sysext-add` (skip this step if it's already enabled):
+-
+-> On a virtual machine, enabling the `devel` extension pulls from the local sysupdate repository, so `utils/run-sysupdate-repo.sh --devel` must be running as described in [In a virtual machine](#41-option-1-in-a-virtual-machine).
+-
+-```shell
+-$ ssh $SSH_ARGS run0 updatectl enable devel --now
+-$ ssh $SSH_ARGS run0 systemd-sysext refresh --force
+-```
+-
+-Then copy the system extension to the target. For a **remote machine** use `scp`:
+-
+-```shell
+-$ scp zz-gnome-control-center.sysext.raw $SSH_ARGS:/tmp/
+-```
+-
+-For a **virtual machine**, `scp` can't parse the vsock address, so pipe the file over `ssh` instead:
+-
+-```shell
+-$ ssh $SSH_ARGS "cat > /tmp/zz-gnome-control-center.sysext.raw" < zz-gnome-control-center.sysext.raw
+-```
+-
+-Then apply the system extension by running the following:
++For individual elements, you can also build them and, to inspect the result, check out the built artifact to a directory or drop into a runtime shell:
+ 
+ ```shell
+-$ ssh $SSH_ARGS run0 sysext-add --persistent /tmp/zz-gnome-control-center.sysext.raw
+-$ ssh $SSH_ARGS run0 systemd-sysext refresh --force
++$ bst build core/gnome-shell.bst
++$ bst artifact checkout core/gnome-shell.bst --directory ./gnome-shell-artifact
++$ bst shell core/gnome-shell.bst
+ ```
+ 
+-If the component includes systemd units, reload the daemon by running the following:
++You can also get a build shell to inspect the environment. Note that only the specified dependencies are staged; if you need a utility for debugging (vim, strace, etc.) you will have to add them as build-dependencies:
+ 
+ ```shell
+-$ ssh $SSH_ARGS run0 systemctl daemon-reload
++$ bst shell --build core/gnome-shell.bst
+ ```
+ 
+-To remove the system extension from the target, run the following:
++It's also possible to build for another architecture using QEMU:
+ 
+ ```shell
+-$ ssh $SSH_ARGS run0 rm /var/lib/extensions/zz-gnome-control-center.raw
+-$ ssh $SSH_ARGS run0 systemd-sysext refresh --force
++$ bst -o arch aarch64 build sdk/gjs.bst
++$ bst -o arch aarch64 shell --build sdk/gjs.bst
+ ```
+ 
+-</details>
+-
+-### 7.2 Option 2: By building, serving and updating from a local sysupdate repository (`systemd-sysupdate`)
+-
+-> This option works best if you want to permanently deploy your changes to your local workstation, a remote machine, or a virtual machine. A reboot is required to see your changes in action. Unlike with the [`systemd-sysext` option](#71-option-1-by-building-and-installing-a-system-extension-systemd-sysext), this option can be used to iterate on the kernel.
+-
+-First, open a workspace for the component you want to work on as described in [Making changes](#6-making-changes). Then, each time you want to build a `systemd-sysupdate` image with your changes and serve it from a local repository, run the following:
+-
+-```shell
+-$ utils/run-sysupdate-repo.sh --devel # Append `--same-version` to avoid rebuilding the whole chain on the next run
+-```
+-
+-In a second terminal, configure `systemd-sysupdate` to use the local repository and update to the images you've built.
+-
+-<details>
+-<summary>Expand instructions for updating your local workstation</summary>
+-
+-To configure your local workstation to use the local repository and update, run the following:
+-
+-```shell
+-$ run0 utils/enable-local-repo.sh --local
+-$ updatectl update host@l.1 # Without passing `--same-version` to run-sysupdate-repo.sh, the number after `l.` increments on each run
+-$ systemctl reboot
+-```
+-
+-After rebooting, select the new version (`l.1`) from the `systemd-boot` menu. If you're using disk encryption, at the TPM PIN prompt enter your disk recovery key, not your TPM PIN.
+-
+-</details>
+-
+-<details>
+-<summary>Expand instructions for updating a virtual or remote machine</summary>
+-
+-If you're targeting a virtual machine started with `./utils/run-secure-vm.sh --local-updates`, the local repository is already enabled, so you can skip the copy and `enable-local-repo.sh` steps below and go straight to `updatectl update`.
+-
+-Otherwise, copy `utils/` and `files/boot-keys/` to the target. For a **remote machine**, use `scp`:
+-
+-```shell
+-$ ssh $SSH_ARGS mkdir -p /tmp/gnome-build-meta
+-$ scp -r utils/ files/boot-keys/ $SSH_ARGS:/tmp/gnome-build-meta/
+-```
+-
+-For a **virtual machine**, `scp` can't parse the vsock address, so pipe a tar stream over `ssh` instead:
+-
+-```shell
+-$ tar -cf - utils/ files/boot-keys/ | ssh $SSH_ARGS "mkdir -p /tmp/gnome-build-meta && tar -xf - -C /tmp/gnome-build-meta"
+-```
+-
+-Then enable the local repository. For a **remote machine** point at the host serving the repository:
+-
+-```shell
+-$ ssh $SSH_ARGS run0 /tmp/gnome-build-meta/utils/enable-local-repo.sh --pubring /tmp/gnome-build-meta/files/boot-keys/import-pubring.pgp http://your-hostname-or-ip:8080
+-```
+-
+-For a **virtual machine**, point at the QEMU user-networking gateway to the host:
+-
+-```shell
+-$ ssh $SSH_ARGS run0 /tmp/gnome-build-meta/utils/enable-local-repo.sh --pubring /tmp/gnome-build-meta/files/boot-keys/import-pubring.pgp http://10.0.2.2:8080
+-```
+-
+-Finally, update and reboot:
+-
+-```shell
+-$ ssh $SSH_ARGS run0 updatectl update host@l.1 # Without passing `--same-version` to run-sysupdate-repo.sh, the number after `l.` increments on each run
+-$ ssh $SSH_ARGS run0 systemctl reboot
+-```
+-
+-After rebooting, select the new version (`l.1`) from the `systemd-boot` menu. If the target uses disk encryption, at the TPM PIN prompt enter your disk recovery key, not your TPM PIN.
+-
+-</details>
+-
+-To configure `systemd-sysupdate` to no longer use your local repository:
+-
+-<details>
+-<summary>Expand instructions for cleaning up your local workstation</summary>
+-
+-On your local workstation, run the following:
+-
+-```shell
+-$ run0 utils/enable-local-repo.sh --clean
+-```
+-
+-</details>
+-
+-<details>
+-<summary>Expand instructions for cleaning up a virtual or remote machine</summary>
+-
+-On a virtual machine not started with `./utils/run-secure-vm.sh --local-updates`, or on a remote machine, run the following:
+-
+-```shell
+-$ ssh $SSH_ARGS run0 /tmp/gnome-build-meta/utils/enable-local-repo.sh --clean
+-```
+-
+-</details>
+-
+-## 8. Running automated integration tests
+-
+-The automated integration tests, which also run in CI/CD, can be used to make sure that your changes didn't break anything that already exists. To get started, fetch the test code and needles:
+-
+-```shell
+-$ git clone https://gitlab.gnome.org/gnome/openqa-utils tests/openqa/utils
+-$ git clone https://gitlab.gnome.org/gnome/openqa-needles tests/openqa/needles
+-```
+-
+-Then build the ISO as described in [On physical hardware](#42-option-2-on-physical-hardware). The ISO is required because the tests run in a virtual machine. Once the ISO is ready, convert it to an image by running the following:
+-
+-```shell
+-$ run0 ./utils/to-raw.sh ./iso/disk.iso ./iso/disk.img
+-$ run0 ./tests/openqa/utils/expand_disk.sh ./iso/disk.img 12 GB
+-```
+-
+-Next, start the automated integration tests:
+-
+-```shell
+-$ rm -rf ./iso/test-output
+-$ ssam_openqa run --hdd-path ./iso/disk.img --iso-path ./iso/disk.iso --tests-path ./tests/openqa --output-path ./iso/test-output
+-```
+-
+-To debug tests interactively or follow along as they are running, press <kbd>Ctrl</kbd>+<kbd>C</kbd>, and enter `t` to get the TigerVNC command you can use to connect. You can then enter `c` to continue or `a` to abort. To connect with TigerVNC, run the following, replacing the example command below with the one printed after entering `t`:
+-
+-```shell
+-$ flatpak run org.tigervnc.vncviewer localhost:43681 -Shared -ViewOnly
+-```
+-
+-## 9. Opening a merge request with your changes
++## 4. Opening a merge request with your changes
+ 
+ Once you have carefully reviewed and tested your changes, you can contribute them upstream.
+ 
+-### 9.1 Option 1: Changes to an upstream component
++### 4.1 Option 1: Changes to an upstream component
+ 
+-How to do so depends on the individual project you've made changes to, since each project has its own contribution conventions and guidelines. For GNOME OS components such as the Linux kernel, GNOME Shell, or GNOME Settings, these are usually described in each project's repository. If you've used `bst workspace open`, you can find them in the workspace directory you checked out to (e.g. `../linux/` or `../gnome-control-center/`).
++How to do so depends on the individual project you've made changes to, since each project has its own contribution conventions and guidelines. For components such as the Linux kernel, GNOME Shell, or GNOME Settings, these are usually described in each project's repository. If you've used `bst workspace open`, you can find them in the workspace directory you checked out to (e.g. `../linux/` or `../gnome-control-center/`).
+ 
+-Once your change has been merged upstream and a new release has been created, the next [`update_refs`](.gitlab-ci.yml) job in CI/CD will usually automatically update the references to include the new upstream version with your changes.
++Once your change has been merged upstream and a new release has been created, the next [`update_refs`](.gitlab-ci.yml) job in CI/CD will usually automatically update the references to include the new upstream version with your changes. Once merged, CI/CD will build and deploy new prebuilt [build outputs](./README.md#published-build-outputs).
+ 
+-### 9.2 Option 2: Changes to GNOME OS itself
++### 4.2 Option 2: Changes to GNOME Build Metadata itself
+ 
+-If you've made a change to GNOME OS itself, such as adding or modifying a BuildStream element, configuration, or board, you can `git add` your changes, `git commit` them, `git push` them to your fork, and open a merge request by visiting https://gitlab.gnome.org/your-username/gnome-build-meta/-/merge_requests/new?merge_request%5Bsource_branch%5D=my-intended-change (adjust `your-username` to your GNOME GitLab username and `my-intended-change` to your branch name).
++If you've made a change to GNOME Build Metadata itself, such as adding or modifying a BuildStream element, configuration, or board, you can `git add` your changes, `git commit` them, `git push` them to your fork, and open a merge request by visiting https://gitlab.gnome.org/your-username/gnome-build-meta/-/merge_requests/new?merge_request%5Bsource_branch%5D=my-intended-change (adjust `your-username` to your GNOME GitLab username and `my-intended-change` to your branch name).
+ 
+ Be sure to select the correct target branch; the default is `master`, so if you're contributing a change to a different version, switch it to that version's branch, e.g. `gnome-50`. Fill out the merge request description (it might be helpful to look at [recently merged MRs](https://gitlab.gnome.org/GNOME/gnome-build-meta/-/merge_requests/?sort=created_date&state=merged&first_page_size=20) for inspiration), submit it, and someone will review it for you.
+ 
+-Once approved, CI/CD will build your MR and run the automated integration tests to make sure nothing breaks.
+-
+-## 10. What happens after your changes are merged
+-
+-Once your changes have landed in the `gnome-build-meta` repository, either directly or via an upstream release picked up by [`update_refs`](.gitlab-ci.yml), CI/CD will build and deploy new prebuilt images and update the `systemd-sysupdate` repository. You can then upgrade to the latest version using GNOME Software, `updatectl`, or by installing the latest prebuilt image.
++Once approved, CI/CD will build your MR and run the automated integration tests to make sure nothing breaks. Once merged, either directly or via an upstream release picked up by [`update_refs`](.gitlab-ci.yml), CI/CD will build and deploy new prebuilt [build outputs](./README.md#published-build-outputs).
+diff --git a/docs/contributing-os.md b/docs/contributing-os.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..62e45f11cee9cd1d2b4d3a1e8d66563935017576
+--- /dev/null
++++ b/docs/contributing-os.md
+@@ -0,0 +1,294 @@
++# Contributing to GNOME OS
++
++This guide covers the GNOME OS-specific parts of contributing. Read [CONTRIBUTING.md](../CONTRIBUTING.md) first for the general setup.
++
++For [automated integration tests](#5-running-automated-integration-tests), you also need to install the [ssam_openqa](https://gitlab.gnome.org/sthursfield/ssam_openqa) tool manually like so:
++
++```shell
++curl -Lo ~/.local/bin/ssam_openqa "https://gitlab.gnome.org/api/v4/projects/sthursfield%2Fssam_openqa/packages/generic/$(uname -m)-unknown-linux-gnu/$(curl "https://gitlab.gnome.org/api/v4/projects/sthursfield%2Fssam_openqa/packages?package_name=$(uname -m)-unknown-linux-gnu&sort=desc" | jq -r '.[0].version')/ssam_openqa"
++chmod +x ~/.local/bin/ssam_openqa
++```
++
++The [TigerVNC viewer](https://flathub.org/apps/org.tigervnc.vncviewer) can be helpful in order to follow along as the automated integration tests are running. Field Monitor and Remote Viewer can not connect to the VNC server used for the automated integration tests.
++
++## 1. Setting up secure boot keys
++
++Before building images, you need to generate secure boot keys. For fast local development, you can use the `snakeoil` keys; these are the same keys CI/CD uses, which means that you can re-use the CI/CD caches for your local builds instead of rebuilding everything from source. Keep in mind however that these keys are publicly known and as a result provide zero security. To use them, run the following:
++
++```shell
++$ make -C files/boot-keys clean
++$ make -C files/boot-keys IMPORT_MODE=snakeoil
++```
++
++If you want to deploy your local builds to your system, use the `local` import mode, which uses the `snakeoil` keys for the bootloader components but generates random keys for all other components by running the following:
++
++```shell
++$ make -C files/boot-keys clean
++$ make -C files/boot-keys IMPORT_MODE=local
++```
++
++You can also generate completely fresh keys, which causes all components to be rebuilt by running the following:
++
++```shell
++$ make -C files/boot-keys clean
++$ make -C files/boot-keys
++```
++
++## 2. Building and booting a GNOME OS image
++
++> If you're already running GNOME OS (e.g. if you installed it by using the [prebuilt images](https://os.gnome.org/)) and want to deploy your changes to it directly, you can skip this step and jump directly to the [Rebuilding GNOME OS with your changes and deploying them](#4-rebuilding-gnome-os-with-your-changes-and-deploying-them) section instead
++
++### 2.1 Option 1: In a virtual machine
++
++First, build and serve a local sysupdate repository in a separate terminal so the virtual machine can later enable the `devel` extension and others:
++
++```shell
++$ utils/run-sysupdate-repo.sh --devel # Append `--same-version` to avoid rebuilding the whole chain on the next run
++```
++
++Then, in another terminal, build and start a virtual machine with secure boot and a TPM by running the following; if you didn't already generate the secure boot keys in [Setting up secure boot keys](#1-setting-up-secure-boot-keys), they will be generated automatically:
++
++```shell
++$ ./utils/run-secure-vm.sh --gtk --debug-systemd --local-updates # Append `--rebuild-iso --reset-installed --reset-secure-state` to rebuild the image and completely reset the virtual machine, or drop `--gtk` to use a SPICE display (e.g. Field Monitor or Remote Viewer) instead
++```
++
++The virtual machine image and state can be found at `./current-secure-vm/`; the GTK display will open and allow you to interact with the virtual machine. The SSH command (and SPICE address, if enabled) to connect to the virtual machine will be printed to your console.
++
++### 2.2 Option 2: On physical hardware
++
++First, generate the secure boot keys as described in [Setting up secure boot keys](#1-setting-up-secure-boot-keys). Then build the ISO by running the following:
++
++```shell
++$ bst build gnomeos/live-image.bst
++$ bst artifact checkout gnomeos/live-image.bst --directory ./iso
++```
++
++The ISO can be found at `./iso/disk.iso`.
++
++You can now write the ISO to a USB stick and boot from it on physical hardware, or manually boot from it in a virtual machine.
++
++We also experimentally support the [OnePlus 6](./rest-of-repo/docs/ONEPLUS5.md) and [Fairphone 5](./rest-of-repo/docs/FP5.md). Installation on those devices requires special steps and some things may not work, so please consult the respective linked documentation.
++
++## 3. Installing your locally built GNOME OS image to disk
++
++If you have secure boot enabled, `systemd-boot` will offer to auto-enroll the secure boot keys on the first boot.
++
++After booting, [GNOME Initial Setup](https://gitlab.gnome.org/GNOME/gnome-initial-setup) will ask you to set up the system. After it has completed, the [GNOME OS proto-installer](../files/gnomeos/live/proto-installer) will automatically start and prompt you to install GNOME OS to disk, which you should do.
++
++## 4. Rebuilding GNOME OS with your changes and deploying them
++
++While it's possible to rebuild the GNOME OS images on each change and reinstall them each time you make changes, this leads to a very slow iteration cycle and is not recommended. Instead, use the `systemd-sysext` and/or `systemd-sysupdate` workflows described in the following sections to build and deploy your changes to your local workstation, a remote machine, or a virtual machine in a much faster way.
++
++> The following uses `$SSH_ARGS` as placeholder SSH arguments when targeting a virtual machine or a remote machine. For a virtual machine started with `./utils/run-secure-vm.sh`, use the arguments printed after running `./utils/run-secure-vm.sh` (e.g. `export SSH_ARGS="-i ssh/ephemeral root@vsock/777"`). For a remote machine, set `export SSH_ARGS="user@remote-machine-hostname-or-ip"`.
++
++### 4.1 Option 1: By building and installing a system extension (`systemd-sysext`)
++
++> This option works best if you want to temporarily and quickly deploy your changes to your local workstation, a remote machine, or a virtual machine. No reboot is required to see your changes in action. The one component that can't be iterated on with system extensions is the kernel. For that, use the [`systemd-sysupdate` option](#42-option-2-by-building-serving-and-updating-from-a-local-sysupdate-repository-systemd-sysupdate) instead.
++
++> While this works for any of the included apps too, not just system components, iterating on apps directly using Flatpak via for example [GNOME Builder](https://apps.gnome.org/Builder/) or [Foundry](https://gitlab.gnome.org/GNOME/foundry) is preferred.
++
++First, open a workspace for the component you want to work on as described in [Making changes](../CONTRIBUTING.md#3-making-changes). Then, each time you want to build a system extension with your changes, run the following:
++
++```shell
++$ sysext-build-element --verbose zz-gnome-control-center core/gnome-control-center.bst
++```
++
++The system extension should now be available at `./zz-gnome-control-center.sysext.raw`.
++
++> System extensions are applied alphabetically, so you want to prefix them (as we did above with `zz-`) in order to avoid being overwritten by other system extensions that will be loaded.
++
++<details>
++<summary>Expand instructions for deploying to your local workstation</summary>
++
++To deploy the system extension on your local workstation, run the following:
++
++```shell
++$ run0 sysext-add --persistent zz-gnome-control-center.sysext.raw
++$ run0 systemd-sysext refresh --force
++```
++
++If the component includes systemd units, reload the daemon by running the following:
++
++```shell
++$ run0 systemctl daemon-reload
++```
++
++To remove the system extension from your local workstation, run the following:
++
++```shell
++$ run0 rm /var/lib/extensions/zz-gnome-control-center.raw
++$ run0 systemd-sysext refresh --force
++```
++
++</details>
++
++<details>
++<summary>Expand instructions for deploying to a virtual or remote machine</summary>
++
++First, enable the `devel` extension to get `sysext-add` (skip this step if it's already enabled):
++
++> On a virtual machine, enabling the `devel` extension pulls from the local sysupdate repository, so `utils/run-sysupdate-repo.sh --devel` must be running as described in [In a virtual machine](#21-option-1-in-a-virtual-machine).
++
++```shell
++$ ssh $SSH_ARGS run0 updatectl enable devel --now
++$ ssh $SSH_ARGS run0 systemd-sysext refresh --force
++```
++
++Then copy the system extension to the target. For a **remote machine** use `scp`:
++
++```shell
++$ scp zz-gnome-control-center.sysext.raw $SSH_ARGS:/tmp/
++```
++
++For a **virtual machine**, `scp` can't parse the vsock address, so pipe the file over `ssh` instead:
++
++```shell
++$ ssh $SSH_ARGS "cat > /tmp/zz-gnome-control-center.sysext.raw" < zz-gnome-control-center.sysext.raw
++```
++
++Then apply the system extension by running the following:
++
++```shell
++$ ssh $SSH_ARGS run0 sysext-add --persistent /tmp/zz-gnome-control-center.sysext.raw
++$ ssh $SSH_ARGS run0 systemd-sysext refresh --force
++```
++
++If the component includes systemd units, reload the daemon by running the following:
++
++```shell
++$ ssh $SSH_ARGS run0 systemctl daemon-reload
++```
++
++To remove the system extension from the target, run the following:
++
++```shell
++$ ssh $SSH_ARGS run0 rm /var/lib/extensions/zz-gnome-control-center.raw
++$ ssh $SSH_ARGS run0 systemd-sysext refresh --force
++```
++
++</details>
++
++### 4.2 Option 2: By building, serving and updating from a local sysupdate repository (`systemd-sysupdate`)
++
++> This option works best if you want to permanently deploy your changes to your local workstation, a remote machine, or a virtual machine. A reboot is required to see your changes in action. Unlike with the [`systemd-sysext` option](#41-option-1-by-building-and-installing-a-system-extension-systemd-sysext), this option can be used to iterate on the kernel.
++
++First, open a workspace for the component you want to work on as described in [Making changes](../CONTRIBUTING.md#3-making-changes). Then, each time you want to build a `systemd-sysupdate` image with your changes and serve it from a local repository, run the following:
++
++```shell
++$ utils/run-sysupdate-repo.sh --devel # Append `--same-version` to avoid rebuilding the whole chain on the next run
++```
++
++In a second terminal, configure `systemd-sysupdate` to use the local repository and update to the images you've built.
++
++<details>
++<summary>Expand instructions for updating your local workstation</summary>
++
++To configure your local workstation to use the local repository and update, run the following:
++
++```shell
++$ run0 utils/enable-local-repo.sh --local
++$ updatectl update host@l.1 # Without passing `--same-version` to run-sysupdate-repo.sh, the number after `l.` increments on each run
++$ systemctl reboot
++```
++
++After rebooting, select the new version (`l.1`) from the `systemd-boot` menu. If you're using disk encryption, at the TPM PIN prompt enter your disk recovery key, not your TPM PIN.
++
++</details>
++
++<details>
++<summary>Expand instructions for updating a virtual or remote machine</summary>
++
++If you're targeting a virtual machine started with `./utils/run-secure-vm.sh --local-updates`, the local repository is already enabled, so you can skip the copy and `enable-local-repo.sh` steps below and go straight to `updatectl update`.
++
++Otherwise, copy `utils/` and `files/boot-keys/` to the target. For a **remote machine**, use `scp`:
++
++```shell
++$ ssh $SSH_ARGS mkdir -p /tmp/gnome-build-meta
++$ scp -r utils/ files/boot-keys/ $SSH_ARGS:/tmp/gnome-build-meta/
++```
++
++For a **virtual machine**, `scp` can't parse the vsock address, so pipe a tar stream over `ssh` instead:
++
++```shell
++$ tar -cf - utils/ files/boot-keys/ | ssh $SSH_ARGS "mkdir -p /tmp/gnome-build-meta && tar -xf - -C /tmp/gnome-build-meta"
++```
++
++Then enable the local repository. For a **remote machine** point at the host serving the repository:
++
++```shell
++$ ssh $SSH_ARGS run0 /tmp/gnome-build-meta/utils/enable-local-repo.sh --pubring /tmp/gnome-build-meta/files/boot-keys/import-pubring.pgp http://your-hostname-or-ip:8080
++```
++
++For a **virtual machine**, point at the QEMU user-networking gateway to the host:
++
++```shell
++$ ssh $SSH_ARGS run0 /tmp/gnome-build-meta/utils/enable-local-repo.sh --pubring /tmp/gnome-build-meta/files/boot-keys/import-pubring.pgp http://10.0.2.2:8080
++```
++
++Finally, update and reboot:
++
++```shell
++$ ssh $SSH_ARGS run0 updatectl update host@l.1 # Without passing `--same-version` to run-sysupdate-repo.sh, the number after `l.` increments on each run
++$ ssh $SSH_ARGS run0 systemctl reboot
++```
++
++After rebooting, select the new version (`l.1`) from the `systemd-boot` menu. If the target uses disk encryption, at the TPM PIN prompt enter your disk recovery key, not your TPM PIN.
++
++</details>
++
++To configure `systemd-sysupdate` to no longer use your local repository:
++
++<details>
++<summary>Expand instructions for cleaning up your local workstation</summary>
++
++On your local workstation, run the following:
++
++```shell
++$ run0 utils/enable-local-repo.sh --clean
++```
++
++</details>
++
++<details>
++<summary>Expand instructions for cleaning up a virtual or remote machine</summary>
++
++On a virtual machine not started with `./utils/run-secure-vm.sh --local-updates`, or on a remote machine, run the following:
++
++```shell
++$ ssh $SSH_ARGS run0 /tmp/gnome-build-meta/utils/enable-local-repo.sh --clean
++```
++
++</details>
++
++## 5. Running automated integration tests
++
++The automated integration tests, which also run in CI/CD, can be used to make sure that your changes didn't break anything that already exists. To get started, fetch the test code and needles:
++
++```shell
++$ git clone https://gitlab.gnome.org/gnome/openqa-utils tests/openqa/utils
++$ git clone https://gitlab.gnome.org/gnome/openqa-needles tests/openqa/needles
++```
++
++Then build the ISO as described in [On physical hardware](#22-option-2-on-physical-hardware). The ISO is required because the tests run in a virtual machine. Once the ISO is ready, convert it to an image by running the following:
++
++```shell
++$ run0 ./utils/to-raw.sh ./iso/disk.iso ./iso/disk.img
++$ run0 ./tests/openqa/utils/expand_disk.sh ./iso/disk.img 12 GB
++```
++
++Next, start the automated integration tests:
++
++```shell
++$ rm -rf ./iso/test-output
++$ ssam_openqa run --hdd-path ./iso/disk.img --iso-path ./iso/disk.iso --tests-path ./tests/openqa --output-path ./iso/test-output
++```
++
++To debug tests interactively or follow along as they are running, press <kbd>Ctrl</kbd>+<kbd>C</kbd>, and enter `t` to get the TigerVNC command you can use to connect. You can then enter `c` to continue or `a` to abort. To connect with TigerVNC, run the following, replacing the example command below with the one printed after entering `t`:
++
++```shell
++$ flatpak run org.tigervnc.vncviewer localhost:43681 -Shared -ViewOnly
++```
++
++## 6. Opening a merge request with your changes
++
++See [Opening a merge request with your changes in CONTRIBUTING.md](../CONTRIBUTING.md#4-opening-a-merge-request-with-your-changes).
+
