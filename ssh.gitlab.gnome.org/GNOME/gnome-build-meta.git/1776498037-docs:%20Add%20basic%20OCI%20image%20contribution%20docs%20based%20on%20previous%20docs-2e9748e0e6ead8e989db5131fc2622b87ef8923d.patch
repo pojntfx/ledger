@@ -1,0 +1,142 @@
+From 2e9748e0e6ead8e989db5131fc2622b87ef8923d Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Sat, 18 Apr 2026 00:40:37 -0700
+Subject: [PATCH] docs: Add basic OCI image contribution docs based on previous docs
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/CONTRIBUTING.md b/CONTRIBUTING.md
+index 643967b2be8d62d979d6691b0157b5773320cab9..8e00161a89c256b504ea349b8a2d205a4a89599d 100644
+--- a/CONTRIBUTING.md
++++ b/CONTRIBUTING.md
+@@ -42,7 +42,7 @@ If you need help with your contributions, ask for help in [`#gnome-os:gnome.org` on Matrix](https://matrix.to/#/#gnome-os:gnome.org).
+ 
+ ## 3. Making changes
+ 
+-You can find definitions for components, their build steps and dependencies under `elements/`. Elements can depend on other elements and composed together to build complete targets like the ones in [published build outputs](./README.md#published-build-outputs). Adding a new component or dependency generally means adding a new buildstream element and modifying existing ones to include it in its list dependencies.
++You can find definitions for components, their build steps and dependencies under `elements/`. Elements can depend on other elements and composed together to build complete targets like the ones in [published build outputs in CONTRIBUTING.md](./README.md#published-build-outputs). Adding a new component or dependency generally means adding a new buildstream element and modifying existing ones to include it in its list dependencies.
+ 
+ We use the [Freedesktop SDK](https://freedesktop-sdk.io/) as a base for a lot of our components, using a [BuildStream junction](https://docs.buildstream.build/2.7/junctions/junction-elements.html). This means that some components are shared and changes to those components should be done upstream in the Freedesktop SDK. Such components are prefixed with `freedesktop-sdk.bst:` when listed as a dependency, so they are easy to spot.
+ 
+diff --git a/docs/contributing-flatpak.md b/docs/contributing-flatpak.md
+index 12bebf47b7d94d43740f135099395c4d817f7e6c..d001350f0a47ee1c2cac2653167823998ba94620 100644
+--- a/docs/contributing-flatpak.md
++++ b/docs/contributing-flatpak.md
+@@ -2,7 +2,7 @@ # Contributing to the GNOME Flatpak runtimes
+ 
+ This guide covers the Flatpak runtime-specific parts of contributing. Read [CONTRIBUTING.md](../CONTRIBUTING.md) first for the general setup.
+ 
+-## 1. Building and using a runtime locally
++## 1. Building and installing the runtimes locally
+ 
+ First, build the runtime, then check it out into a Flatpak repository:
+ 
+@@ -18,7 +18,7 @@ $ flatpak remote-add --user --no-gpg-verify testrepo repo
+ $ flatpak install testrepo org.gnome.Sdk org.gnome.Platform
+ ```
+ 
+-The extensions (`org.gnome.Sdk.Debug`, `org.gnome.Sdk.Docs`, `org.gnome.Platform.Locale`, arch-compat layers, etc.) at [`flatpak/extensions-repo.bst`](../elements/flatpak/extensions-repo.bst) can be built and installed by following the same pattern.
++The extensions (`org.gnome.Sdk.Debug`, `org.gnome.Sdk.Docs`, `org.gnome.Platform.Locale`, arch-compat layers, etc.) at [`flatpak/extensions-repo.bst`](../elements/flatpak/extensions-repo.bst) can be built and installed by following the same pattern (see also [published build outputs in CONTRIBUTING.md](./README.md#published-build-outputs)).
+ 
+ To remove the runtime again, simply remove the remote:
+ 
+@@ -26,7 +26,7 @@ ```shell
+ $ flatpak remote-delete --user testrepo
+ ```
+ 
+-## 2. Testing your changes
++## 2. Using the locally built runtimes
+ 
+ Run a shell in the SDK to poke at it directly:
+ 
+diff --git a/docs/contributing-oci.md b/docs/contributing-oci.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..680dc44d9dbeba80ec3bfa6d904ed0551ab7bc9a
+--- /dev/null
++++ b/docs/contributing-oci.md
+@@ -0,0 +1,84 @@
++# Contributing to the GNOME OCI images
++
++This guide covers the OCI-image-specific parts of contributing. Read [CONTRIBUTING.md](../CONTRIBUTING.md) first for the general setup.
++
++We provide OCI images that are as close as possible to the other format we pack images into (Flatpak, DDIs). This is done cause sometimes its easier to leverage existing OCI tooling for certain tasks. Unlike our other images, the OCI images are not "Supported" in the same ways and only exist for testing and development. They are not meant to be used for any kind of deployments.
++
++They are built and pushed to the container registry [quay.io](https://quay.io/repository/gnome_infrastructure/gnome-build-meta?tab=tags&tag=latest) through the CI job `deploy-oci`.
++
++The goals of the GNOME OCI images are:
++
++- Make it possible to test parts of the stack with OCI tooling
++  - ex. Sometimes it's easier to run a GNOME OS container image rather than a whole VM
++  - ex. Weird behavior in a library that shows up in the Runtime, but its easier to test and debug the library with toolbox rather than adding modules to the Flatpak manifest
++
++- Make it possible to develop parts of the stack with the image
++  - Develop a module against GNOME OS from any system that has an OCI runtime
++  - Can be used as the CI image (directly or extended with ci-templates)
++
++Deploying applications against the images is a non-goal. We have Flatpak and Flathub.
++
++These OCI images are currently available (see also [published build outputs in CONTRIBUTING.md](./README.md#published-build-outputs)):
++
++- Platform: Mirror of the org.gnome.Platform Flatpak Runtime
++- Sdk: Mirror of the org.gnome.Sdk Flatpak Runtime
++  - Includes Docs Extension
++  - Includes Debug Extension (Until we have debuginfod)
++  - Toolbox compatible
++- GNOME OS: Mirror of the OS /usr tree
++  - Includes Locales
++  - Toolbox compatible
++  - Bootc compatible
++- GNOME OS Devel: The Development System Extension on top of the OS image
++  - Includes Locales
++  - Includes Docs
++  - Includes Debug Symbols (Until we have debuginfod)
++  - Toolbox compatible
++  - Bootc compatible
++
++## 1. Building the OCI images locally
++
++First, build the elements:
++
++```bash
++$ bst build oci/platform/image.bst oci/sdk/image.bst oci/gnomeos/image.bst oci/gnomeos-devel/image.bst
++```
++
++Then import them into Podman:
++
++```bash
++$ bst artifact checkout --tar - oci/platform/image.bst | podman load
++$ bst artifact checkout --tar - oci/sdk/image.bst | podman load
++$ bst artifact checkout --tar - oci/gnomeos/image.bst | podman load
++$ bst artifact checkout --tar - oci/gnomeos-devel/image.bst | podman load
++```
++
++## 2. Using the locally built OCI images with Toolbox/Distrobox
++
++You can use the container images with [Toolbox](https://github.com/containers/toolbox) or [Distrobox](https://distrobox.it/) as an easy way to create containers.
++
++To create a toolbox from an image:
++
++```bash
++$ toolbox create gnomeos-nightly -i quay.io/gnome_infrastructure/gnome-build-meta:gnomeos-devel-nightly
++$ toolbox enter gnomeos-nightly
++```
++
++Note that Toolbox containers are updated using an update mechanism inside the container that will directly modify the container filesystem. GNOME OS does not have such mechanism. When used in combination with Toolbox you will need to re-create the container if you want to update it and the toolchain it includes.
++
++While some of the OCI images are compatible with `bootc`, it's not a supported distribution channel. This is only for testing reasons and there are be no plans of supporting a GNOME OS `bootc` image.
++
++We think [Discoverable Disk Image](https://uapi-group.org/specifications/specs/discoverable_disk_image/) and systemd is a better fit for our usecase and requirements. The only supported channel is and will remain the DDI images found in `elements/gnomeos`. More details on the subject can be found in this [Thread](https://discourse.gnome.org/t/why-did-gnome-os-choose-systemd-sysupdate-over-bootc/24642/2).
++
++To generate and test a bootc image you will need the following:
++
++```bash
++$ ./utils/generate-bootc-image.sh gnomeos /tmp
++$ ./utils/run-secure-vm.sh --image /tmp/bootable.img
++```
++
++See [Contributing to GNOME OS](./contributing-os.md) for more information on `./utils/run-secure-vm.sh`.
++
++## 3. Opening a merge request with your changes
++
++See [Opening a merge request with your changes in CONTRIBUTING.md](../CONTRIBUTING.md#4-opening-a-merge-request-with-your-changes).
+
