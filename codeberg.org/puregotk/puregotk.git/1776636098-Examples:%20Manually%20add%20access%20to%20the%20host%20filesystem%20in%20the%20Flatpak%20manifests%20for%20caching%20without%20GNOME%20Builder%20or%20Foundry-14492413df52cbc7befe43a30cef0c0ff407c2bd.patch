@@ -1,0 +1,128 @@
+From 14492413df52cbc7befe43a30cef0c0ff407c2bd Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Sun, 19 Apr 2026 15:01:38 -0700
+Subject: [PATCH] Examples: Manually add access to the host filesystem in the Flatpak manifests for caching without GNOME Builder or Foundry
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/examples/myapp-gnome-gomod/README.md b/examples/myapp-gnome-gomod/README.md
+index e8e44f4ce50aa439cbba29b271232907a60536be..75cb8268e41d94bd3c4c1f06a2dc91936e506098 100644
+--- a/examples/myapp-gnome-gomod/README.md
++++ b/examples/myapp-gnome-gomod/README.md
+@@ -32,6 +32,6 @@ $ flatpak run --command=flatpak-builder-lint org.flatpak.Builder repo repo
+ $ flatpak run page.codeberg.puregotk.MyAppGnomeGomod
+ ```
+ 
+-We're disabling the sandbox here because otherwise we can't access the `mylib-gtk-meson` directory.
++We're disabling the sandbox here because otherwise we can't access the `mylib-gtk-meson` directory and Go cache on the system.
+ 
+ ![Screenshot of myapp-gnome-gomod showing the main application window](../../docs/screenshot-myapp-gnome-gomod.png)
+diff --git a/examples/myapp-gnome-gomod/page.codeberg.puregotk.MyAppGnomeGomod.json b/examples/myapp-gnome-gomod/page.codeberg.puregotk.MyAppGnomeGomod.json
+index 74a3e6400c108ca430980675123016e0bc6baa5c..2150ea4ca85f7484ab0c32037e8ee769dec9883d 100644
+--- a/examples/myapp-gnome-gomod/page.codeberg.puregotk.MyAppGnomeGomod.json
++++ b/examples/myapp-gnome-gomod/page.codeberg.puregotk.MyAppGnomeGomod.json
+@@ -17,6 +17,7 @@       "name": "mylib-gtk-meson",
+       "buildsystem": "meson",
+       "build-options": {
+         "prepend-path": "/usr/lib/sdk/golang/bin",
++        "build-args": ["--filesystem=home"],
+         "env": {
+           "GOROOT": "/usr/lib/sdk/golang",
+           "GOPATH": "/run/build/mylib-gtk-meson/go"
+@@ -35,6 +36,9 @@     },
+     {
+       "name": "myapp-gnome-gomod",
+       "buildsystem": "simple",
++      "build-options": {
++        "build-args": ["--filesystem=home"]
++      },
+       "build-commands": [
+         "bash -c '. /usr/lib/sdk/golang/enable.sh && ([ -f vendor/modules.txt ] || go mod vendor) && cp modules.txt vendor/modules.txt'",
+         "bash -c '. /usr/lib/sdk/golang/enable.sh && export GOBIN=\"/app/bin\" && go generate ./... && go build -o /app/bin/myapp-gnome-gomod -v -mod=vendor -ldflags=\"-X main.LocaleDir=/app/share/locale\" ./src'",
+diff --git a/examples/myapp-gnome-meson/README.md b/examples/myapp-gnome-meson/README.md
+index a127f706b14eed7ce3bf4c9de2f8b8e958f79f64..9eb381772756c0b9df03831a8595f2fcd750c42d 100644
+--- a/examples/myapp-gnome-meson/README.md
++++ b/examples/myapp-gnome-meson/README.md
+@@ -39,6 +39,6 @@ $ flatpak run --command=flatpak-builder-lint org.flatpak.Builder repo repo
+ $ flatpak run page.codeberg.puregotk.MyAppGnomeMeson
+ ```
+ 
+-We're disabling the sandbox here because otherwise we can't access the `mylib-gtk-meson` directory.
++We're disabling the sandbox here because otherwise we can't access the `mylib-gtk-meson` directory and Go cache on the system.
+ 
+ ![Screenshot of myapp-gnome-meson showing the main application window](../../docs/screenshot-myapp-gnome-meson.png)
+diff --git a/examples/myapp-gnome-meson/page.codeberg.puregotk.MyAppGnomeMeson.json b/examples/myapp-gnome-meson/page.codeberg.puregotk.MyAppGnomeMeson.json
+index fcc6906f09dce3fbf1986bcb23f927b4e56ff9cc..60c3ef64b2dc491cb424d30bbb6fc74a5450719c 100644
+--- a/examples/myapp-gnome-meson/page.codeberg.puregotk.MyAppGnomeMeson.json
++++ b/examples/myapp-gnome-meson/page.codeberg.puregotk.MyAppGnomeMeson.json
+@@ -17,6 +17,7 @@       "name": "mylib-gtk-meson",
+       "buildsystem": "meson",
+       "build-options": {
+         "prepend-path": "/usr/lib/sdk/golang/bin",
++        "build-args": ["--filesystem=home"],
+         "env": {
+           "GOROOT": "/usr/lib/sdk/golang",
+           "GOPATH": "/run/build/mylib-gtk-meson/go"
+@@ -37,6 +38,7 @@       "name": "myapp-gnome-meson",
+       "buildsystem": "meson",
+       "build-options": {
+         "prepend-path": "/usr/lib/sdk/golang/bin",
++        "build-args": ["--filesystem=home"],
+         "env": {
+           "GOROOT": "/usr/lib/sdk/golang",
+           "GOPATH": "/run/build/myapp-gnome-meson/go"
+diff --git a/examples/mylib-gtk-meson/README.md b/examples/mylib-gtk-meson/README.md
+index 382620d46dca7850c4fb9acf91e245c8b7278b3d..cdffcdcfa98ba44e88365bab2530258eea336740 100644
+--- a/examples/mylib-gtk-meson/README.md
++++ b/examples/mylib-gtk-meson/README.md
+@@ -47,12 +47,15 @@ The GJS example app simply displays the custom widget written in Go, which looks like this:
+ 
+ ![Screenshot of example.js showing the custom widget, which is a simple libadwaita app with a button that says "click me"](../../docs/screenshot-example-js.png)
+ 
+-Alternatively, you can also build the library and example using Flatpak and then start it like so:
++You can also use [flatpak-builder](https://docs.flathub.org/docs/for-app-authors/submission#before-submission) to build the library for you and install the `.mo` files for i18n:
+ 
+ ```shell
+-flatpak-builder --force-clean --force-clean --user --repo=repo --install builddir page.codeberg.puregotk.MyLibGtkMesonExample.json
++$ flatpak run --command=flatpak-builder org.flatpak.Builder --verbose --force-clean --keep-build-dirs --user --ccache --compose-url-policy=full --repo=repo builddir --install page.codeberg.puregotk.MyLibGtkMesonExample.json
++$ flatpak run --command=flatpak-builder-lint org.flatpak.Builder manifest page.codeberg.puregotk.MyLibGtkMesonExample.json
++$ flatpak run --command=flatpak-builder-lint org.flatpak.Builder repo repo
++$ flatpak run page.codeberg.puregotk.MyLibGtkMesonExample
++```
+ 
+-flatpak run page.codeberg.puregotk.MyLibGtkMesonExample
+-```
++We're disabling the sandbox here because otherwise we can't acccess the Go cache on the system.
+ 
+ If you want to import the custom widget from Go, you'll have to generate bindings to the custom library using puregotk. For an example of how to do that, see [../mylib-gtk-meson-go](../mylib-gtk-meson-go/).
+diff --git a/examples/mylib-gtk-meson/page.codeberg.puregotk.MyLibGtkMesonExample.json b/examples/mylib-gtk-meson/page.codeberg.puregotk.MyLibGtkMesonExample.json
+index 741ddf9c732e20ba6f75b087143cee7c9c183196..7be0cc83f43ab46bf76f4f8ddc0bca82b094472f 100644
+--- a/examples/mylib-gtk-meson/page.codeberg.puregotk.MyLibGtkMesonExample.json
++++ b/examples/mylib-gtk-meson/page.codeberg.puregotk.MyLibGtkMesonExample.json
+@@ -5,10 +5,6 @@   "runtime-version": "50",
+   "sdk": "org.gnome.Sdk",
+   "sdk-extensions": ["org.freedesktop.Sdk.Extension.golang"],
+   "command": "example.js",
+-  "build-options": {
+-    "append-path": "/usr/lib/sdk/golang/bin",
+-    "build-args": ["--filesystem=home"]
+-  },
+   "finish-args": [
+     "--socket=wayland",
+     "--socket=fallback-x11",
+@@ -19,6 +15,14 @@   "modules": [
+     {
+       "name": "mylib-gtk-meson",
+       "buildsystem": "meson",
++      "build-options": {
++        "prepend-path": "/usr/lib/sdk/golang/bin",
++        "build-args": ["--filesystem=home"],
++        "env": {
++          "GOROOT": "/usr/lib/sdk/golang",
++          "GOPATH": "/run/build/mylib-gtk-meson/go"
++        }
++      },
+       "sources": [
+         { "type": "dir", "path": "." },
+         {
+
