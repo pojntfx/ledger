@@ -1,0 +1,668 @@
+From e61d58ee7e91c9f412cc4b9dc0df875f51ff3750 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Mon, 20 Apr 2026 23:26:40 -0700
+Subject: [PATCH] feat: Add example CLI chat app for `p2panda-gobject` Go bindings
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/examples/p2pandaapp-cli-gomod/.gitignore b/examples/p2pandaapp-cli-gomod/.gitignore
+new file mode 100644
+index 0000000000000000000000000000000000000000..2e53f0ed48cd2b2da396b12b1ff447792b67b825
+--- /dev/null
++++ b/examples/p2pandaapp-cli-gomod/.gitignore
+@@ -0,0 +1,4 @@
++.flatpak-builder
++builddir
++repo
++vendor
+diff --git a/examples/p2pandaapp-cli-gomod/README.md b/examples/p2pandaapp-cli-gomod/README.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..0cdd3f86f1e93cb62262b3b8eb0a7df1ecc3d49d
+--- /dev/null
++++ b/examples/p2pandaapp-cli-gomod/README.md
+@@ -0,0 +1,86 @@
++# p2pandaapp-cli-gomod
++
++This example implements a chat CLI using puregotk with the standard Go build system.
++
++First, make sure the `libp2panda` library is built and installed on your system (see [../../](../../) for instructions).
++
++To then run the chat using the standard Go build system:
++
++```shell
++$ go generate ./...
++
++$ go run ./cmd/p2pandaapp-cli-gomod-chat/
++```
++
++To run the bootstrap node:
++
++```shell
++$ go run ./cmd/p2pandaapp-cli-gomod-bootstrap/
++```
++
++Connect two chat peers on the same local network (mDNS):
++
++```shell
++# Terminal 1
++$ go run ./cmd/p2pandaapp-cli-gomod-chat/
++
++# Terminal 2
++$ go run ./cmd/p2pandaapp-cli-gomod-chat/
++```
++
++Connect two chat peers across networks using a bootstrap:
++
++```shell
++# Terminal 1 (or a server): start a bootstrap node
++$ go run ./cmd/p2pandaapp-cli-gomod-bootstrap/
++# Prints: <node-id-hex>
++
++# Terminal 2: connect via the bootstrap
++$ go run ./cmd/p2pandaapp-cli-gomod-chat/ --peer <node-id-hex>
++
++# Terminal 3: connect via the bootstrap or directly via another peer
++$ go run ./cmd/p2pandaapp-cli-gomod-chat/ --peer <node-id-hex>
++```
++
++You can also open the project in [GNOME Builder](https://flathub.org/apps/org.gnome.Builder) and run it by clicking the play button in the header bar, which will also build `libp2panda` for you.
++
++Alternatively you can use [flatpak-builder](https://docs.flathub.org/docs/for-app-authors/submission#before-submission) directly:
++
++```shell
++$ flatpak run --command=flatpak-builder org.flatpak.Builder --verbose --force-clean --keep-build-dirs --user --ccache --compose-url-policy=full --repo=repo --install builddir page.codeberg.pojntfx.P2PandaAppCLIGomod.json
++$ flatpak run --command=flatpak-builder-lint org.flatpak.Builder manifest page.codeberg.pojntfx.P2PandaAppCLIGomod.json
++$ flatpak run --command=flatpak-builder-lint org.flatpak.Builder repo repo
++$ flatpak run page.codeberg.pojntfx.P2PandaAppCLIGomod
++```
++
++We're disabling the sandbox here because otherwise we can't access the `p2panda-gobject-go` directory and Go cache on the system.
++
++To run the bootstrap node using Flatpak:
++
++```shell
++$ flatpak run --command=p2pandaapp-cli-gomod-bootstrap page.codeberg.pojntfx.P2PandaAppCLIGomod
++```
++
++Connect two chat peers on the same local network (mDNS) using Flatpak:
++
++```shell
++# Terminal 1
++$ flatpak run page.codeberg.pojntfx.P2PandaAppCLIGomod
++
++# Terminal 2
++$ flatpak run page.codeberg.pojntfx.P2PandaAppCLIGomod
++```
++
++Connect two chat peers across networks using a bootstrap using Flatpak:
++
++```shell
++# Terminal 1 (or a server): start a bootstrap node
++$ flatpak run --command=p2pandaapp-cli-gomod-bootstrap page.codeberg.pojntfx.P2PandaAppCLIGomod
++# Prints: <node-id-hex>
++
++# Terminal 2: connect via the bootstrap
++$ flatpak run page.codeberg.pojntfx.P2PandaAppCLIGomod --peer <node-id-hex>
++
++# Terminal 3: connect via the bootstrap or directly via another peer
++$ flatpak run page.codeberg.pojntfx.P2PandaAppCLIGomod --peer <node-id-hex>
++```
+diff --git a/examples/p2pandaapp-cli-gomod/cmd/p2pandaapp-cli-gomod-bootstrap/main.go b/examples/p2pandaapp-cli-gomod/cmd/p2pandaapp-cli-gomod-bootstrap/main.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..5db9a4901fa87f150a8027e9c12dbb465793ec1a
+--- /dev/null
++++ b/examples/p2pandaapp-cli-gomod/cmd/p2pandaapp-cli-gomod-bootstrap/main.go
+@@ -0,0 +1,80 @@
++package main
++
++import (
++	"encoding/hex"
++	"flag"
++	"fmt"
++	"log/slog"
++	"os"
++	"os/signal"
++	"syscall"
++	"unsafe"
++
++	"codeberg.org/pojntfx/p2panda-gobject-go/p2panda"
++	"codeberg.org/puregotk/puregotk/v4/gio"
++	"codeberg.org/puregotk/puregotk/v4/glib"
++)
++
++func hexTo32(s string) [32]byte {
++	b, err := hex.DecodeString(s)
++	if err != nil {
++		panic(err)
++	}
++	var out [32]byte
++	copy(out[:], b)
++	return out
++}
++
++func main() {
++	relayFlag := flag.String("relay", "https://euc1-1.relay.n0.iroh-canary.iroh.link", "Relay URL")
++	networkFlag := flag.String("network", "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2", "Network ID hex")
++
++	flag.Parse()
++
++	loop := glib.NewMainLoop(glib.MainContextDefault(), false)
++
++	relayURI, err := glib.UriParse(*relayFlag, glib.GUriFlagsNoneValue)
++	if err != nil {
++		panic(err)
++	}
++
++	networkID := p2panda.NewNetworkIdFromData(hexTo32(*networkFlag))
++	defer networkID.Free()
++
++	pk := p2panda.NewPrivateKey()
++	defer pk.Free()
++
++	pubKey := pk.GetPublicKey()
++	defer pubKey.Free()
++	pubHex := hex.EncodeToString(unsafe.Slice((*byte)(unsafe.Pointer(pubKey.GetData())), 32))
++
++	node := p2panda.NewNode(
++		pk,
++		"sqlite::memory:",
++		networkID,
++		relayURI,
++		nil,
++		p2panda.MdnsDiscoveryModeActiveValue,
++	)
++
++	var onSpawn gio.AsyncReadyCallback = func(_, resultPtr, _ uintptr) {
++		if _, err := node.SpawnFinish(&gio.AsyncResultBase{Ptr: resultPtr}); err != nil {
++			panic(err)
++		}
++
++		slog.Info("Bootstrap node running", "pubkey", pubHex)
++
++		fmt.Println(pubHex)
++	}
++	node.SpawnAsync(nil, &onSpawn, 0)
++
++	sig := make(chan os.Signal, 1)
++	signal.Notify(sig, os.Interrupt, syscall.SIGTERM)
++	go func() {
++		<-sig
++
++		loop.Quit()
++	}()
++
++	loop.Run()
++}
+diff --git a/examples/p2pandaapp-cli-gomod/cmd/p2pandaapp-cli-gomod-chat/main.go b/examples/p2pandaapp-cli-gomod/cmd/p2pandaapp-cli-gomod-chat/main.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..9acd420d0d642206ee2e98e97714aeb5e3c20465
+--- /dev/null
++++ b/examples/p2pandaapp-cli-gomod/cmd/p2pandaapp-cli-gomod-chat/main.go
+@@ -0,0 +1,169 @@
++package main
++
++import (
++	"bufio"
++	"encoding/hex"
++	"flag"
++	"fmt"
++	"log/slog"
++	"os"
++	"os/signal"
++	"syscall"
++	"unsafe"
++
++	"codeberg.org/pojntfx/p2panda-gobject-go/p2panda"
++	"codeberg.org/puregotk/puregotk/v4/gio"
++	"codeberg.org/puregotk/puregotk/v4/glib"
++)
++
++func hexTo32(s string) [32]byte {
++	b, err := hex.DecodeString(s)
++	if err != nil {
++		panic(err)
++	}
++	var out [32]byte
++	copy(out[:], b)
++	return out
++}
++
++func ptrHex(ptr uintptr, n int) string {
++	return hex.EncodeToString(unsafe.Slice((*byte)(unsafe.Pointer(ptr)), n))
++}
++
++func main() {
++	relayFlag := flag.String("relay", "https://euc1-1.relay.n0.iroh-canary.iroh.link", "Relay URL")
++	networkFlag := flag.String("network", "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2", "Network ID hex")
++	topicFlag := flag.String("topic", "f0e1d2c3b4a5f6e7d8c9b0a1f2e3d4c5b6a7f8e9d0c1b2a3f4e5d6c7b8a9f0e1", "Topic ID hex")
++	peerFlag := flag.String("peer", "", "Node ID hex/pubkey of a peer to bootstrap from")
++
++	flag.Parse()
++
++	loop := glib.NewMainLoop(glib.MainContextDefault(), false)
++
++	relayURI, err := glib.UriParse(*relayFlag, glib.GUriFlagsNoneValue)
++	if err != nil {
++		panic(err)
++	}
++
++	networkID := p2panda.NewNetworkIdFromData(hexTo32(*networkFlag))
++	defer networkID.Free()
++
++	topicID := p2panda.NewTopicIdFromData(hexTo32(*topicFlag))
++	defer topicID.Free()
++
++	pk := p2panda.NewPrivateKey()
++	defer pk.Free()
++
++	ownPubKey := pk.GetPublicKey()
++	defer ownPubKey.Free()
++	ownHex := ptrHex(ownPubKey.GetData(), 32)
++
++	var bootstrap *p2panda.NodeId
++	if *peerFlag != "" {
++		b, err := p2panda.NewNodeIdFromData(hexTo32(*peerFlag), relayURI)
++		if err != nil {
++			panic(err)
++		}
++		bootstrap = b
++		defer bootstrap.Free()
++	}
++
++	node := p2panda.NewNode(
++		pk,
++		"sqlite::memory:",
++		networkID,
++		relayURI,
++		bootstrap,
++		p2panda.MdnsDiscoveryModeActiveValue,
++	)
++
++	var onNodeSpawn gio.AsyncReadyCallback = func(_, resultPtr, _ uintptr) {
++		if _, err := node.SpawnFinish(&gio.AsyncResultBase{Ptr: resultPtr}); err != nil {
++			panic(err)
++		}
++
++		slog.Info("Node ready", "pubkey", ownHex, "peer-flag", "--peer "+ownHex)
++
++		tp := p2panda.NewTopic(node, topicID, uint32(p2panda.TopicEphemeralValue|p2panda.TopicPersistentValue))
++
++		onMsg := func(_ p2panda.Topic, pkPtr, dtPtr, bPtr uintptr) bool {
++			from := ptrHex((*p2panda.PublicKey)(unsafe.Pointer(pkPtr)).GetData(), 32)
++			if from == ownHex {
++				return true
++			}
++
++			dt := (*glib.DateTime)(unsafe.Pointer(dtPtr))
++			msg := (*glib.Bytes)(unsafe.Pointer(bPtr))
++
++			var sz uint
++			fmt.Printf("[%s] %s: %s\n", dt.FormatIso8601(), from[:8], string(unsafe.Slice((*byte)(unsafe.Pointer(msg.GetData(&sz))), sz)))
++
++			return true
++		}
++		tp.ConnectMessage(&onMsg)
++
++		onEph := func(_ p2panda.Topic, pkPtr, dtPtr, bPtr uintptr) {
++			from := ptrHex((*p2panda.PublicKey)(unsafe.Pointer(pkPtr)).GetData(), 32)
++			if from == ownHex {
++				return
++			}
++
++			dt := (*glib.DateTime)(unsafe.Pointer(dtPtr))
++			msg := (*glib.Bytes)(unsafe.Pointer(bPtr))
++
++			var sz uint
++			fmt.Printf("[%s] %s: %s\n", dt.FormatIso8601(), from[:8], string(unsafe.Slice((*byte)(unsafe.Pointer(msg.GetData(&sz))), sz)))
++		}
++		tp.ConnectEphemeralMessage(&onEph)
++
++		var onTopicSpawn gio.AsyncReadyCallback = func(_, tpResultPtr, _ uintptr) {
++			if _, err := tp.SpawnFinish(&gio.AsyncResultBase{Ptr: tpResultPtr}); err != nil {
++				panic(err)
++			}
++
++			slog.Info("Topic ready, type messages and press enter to send")
++
++			go func() {
++				sc := bufio.NewScanner(os.Stdin)
++				for sc.Scan() {
++					if line := sc.Text(); line != "" {
++						m := line
++						var fn glib.SourceFunc = func(uintptr) bool {
++							d := glib.NewBytes([]byte(m), uint(len(m)))
++							var onPub gio.AsyncReadyCallback = func(_, pResultPtr, _ uintptr) {
++								if _, err := tp.PublishFinish(&gio.AsyncResultBase{Ptr: pResultPtr}); err != nil {
++									panic(err)
++								}
++							}
++
++							tp.PublishAsync(d, false, nil, &onPub, 0)
++
++							return false
++						}
++
++						glib.IdleAdd(&fn, 0)
++					}
++				}
++
++				if err := sc.Err(); err != nil {
++					panic(err)
++				}
++
++				var quit glib.SourceFunc = func(uintptr) bool { loop.Quit(); return false }
++				glib.IdleAdd(&quit, 0)
++			}()
++		}
++		tp.SpawnAsync(nil, &onTopicSpawn, 0)
++	}
++	node.SpawnAsync(nil, &onNodeSpawn, 0)
++
++	sig := make(chan os.Signal, 1)
++	signal.Notify(sig, os.Interrupt, syscall.SIGTERM)
++	go func() {
++		<-sig
++
++		loop.Quit()
++	}()
++
++	loop.Run()
++}
+diff --git a/examples/p2pandaapp-cli-gomod/gen.go b/examples/p2pandaapp-cli-gomod/gen.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..3442d9241d0f7961ad0bffcaca1147bab4aa2a78
+--- /dev/null
++++ b/examples/p2pandaapp-cli-gomod/gen.go
+@@ -0,0 +1,3 @@
++package p2pandaapp
++
++//go:generate sh -c "if [ -z \"$FLATPAK_ID\" ]; then GOWORK=off go tool github.com/dennwc/flatpak-go-mod --json . && GOWORK=off go tool github.com/dennwc/flatpak-go-mod --json --module-name p2pandagobjectgo ../..; fi"
+diff --git a/examples/p2pandaapp-cli-gomod/go.mod b/examples/p2pandaapp-cli-gomod/go.mod
+new file mode 100644
+index 0000000000000000000000000000000000000000..ed09c8230bcaa144d35bd1269dac19304dd18bb3
+--- /dev/null
++++ b/examples/p2pandaapp-cli-gomod/go.mod
+@@ -0,0 +1,19 @@
++module codeberg.org/pojntfx/p2panda-gobject-go/examples/p2pandaapp-cli-gomod
++
++go 1.25.0
++
++tool github.com/dennwc/flatpak-go-mod
++
++require (
++	codeberg.org/pojntfx/p2panda-gobject-go v0.0.0-00010101000000-000000000000
++	codeberg.org/puregotk/puregotk v0.0.0-20260414055327-2f5010d598c7
++)
++
++require (
++	codeberg.org/puregotk/purego v0.0.0-20260224095105-2513c838cb80 // indirect
++	github.com/dennwc/flatpak-go-mod v0.1.1-0.20251220152743-1642390bc050 // indirect
++	github.com/goccy/go-yaml v1.18.0 // indirect
++	golang.org/x/mod v0.31.0 // indirect
++)
++
++replace codeberg.org/pojntfx/p2panda-gobject-go v0.0.0-00010101000000-000000000000 => ../..
+diff --git a/examples/p2pandaapp-cli-gomod/go.mod.json b/examples/p2pandaapp-cli-gomod/go.mod.json
+new file mode 100644
+index 0000000000000000000000000000000000000000..aefeeb97968087bc1c493749b885ff67903fc68c
+--- /dev/null
++++ b/examples/p2pandaapp-cli-gomod/go.mod.json
+@@ -0,0 +1,42 @@
++[
++  {
++    "dest": "vendor",
++    "path": "modules.txt",
++    "type": "file"
++  },
++  {
++    "dest": "vendor/codeberg.org/puregotk/puregotk",
++    "sha256": "d630504e254caf3417040cf355b75065c7abea960ec3e20675deb697df17080f",
++    "strip-components": 3,
++    "type": "archive",
++    "url": "https://proxy.golang.org/codeberg.org/puregotk/puregotk/@v/v0.0.0-20260414055327-2f5010d598c7.zip"
++  },
++  {
++    "dest": "vendor/codeberg.org/puregotk/purego",
++    "sha256": "0d5fb9e11934b151ac357a9c0660e4dcd287d2f93db0829356415f6e6a8ef84b",
++    "strip-components": 3,
++    "type": "archive",
++    "url": "https://proxy.golang.org/codeberg.org/puregotk/purego/@v/v0.0.0-20260224095105-2513c838cb80.zip"
++  },
++  {
++    "dest": "vendor/github.com/dennwc/flatpak-go-mod",
++    "sha256": "f512c383d8067eca3bdb44999eb0e1ac60f59f63118793f4267517d1cce0c37d",
++    "strip-components": 3,
++    "type": "archive",
++    "url": "https://proxy.golang.org/github.com/dennwc/flatpak-go-mod/@v/v0.1.1-0.20251220152743-1642390bc050.zip"
++  },
++  {
++    "dest": "vendor/github.com/goccy/go-yaml",
++    "sha256": "51bf59a85a7e3e2b8e83e5f376a3229b01b673a39601c99e3a2c05931cc3e339",
++    "strip-components": 3,
++    "type": "archive",
++    "url": "https://proxy.golang.org/github.com/goccy/go-yaml/@v/v1.18.0.zip"
++  },
++  {
++    "dest": "vendor/golang.org/x/mod",
++    "sha256": "9b43daca51525bd50289c742999fe66336a653c90a23d2c55561b6fffd656e46",
++    "strip-components": 3,
++    "type": "archive",
++    "url": "https://proxy.golang.org/golang.org/x/mod/@v/v0.31.0.zip"
++  }
++]
+diff --git a/examples/p2pandaapp-cli-gomod/go.sum b/examples/p2pandaapp-cli-gomod/go.sum
+new file mode 100644
+index 0000000000000000000000000000000000000000..288a51a3434591ee46712bba19fcfe7e1c5d48d8
+--- /dev/null
++++ b/examples/p2pandaapp-cli-gomod/go.sum
+@@ -0,0 +1,10 @@
++codeberg.org/puregotk/purego v0.0.0-20260224095105-2513c838cb80 h1:y5ZxMLLOjl4xc2tBl02olxZQ06xbbKiR+2ipBfDrVcs=
++codeberg.org/puregotk/purego v0.0.0-20260224095105-2513c838cb80/go.mod h1:hVVM4ddvYRlc3IcK3CXJPlMwd/vaLj7gdDBZ6oPgT8w=
++codeberg.org/puregotk/puregotk v0.0.0-20260414055327-2f5010d598c7 h1:ONYLiuOSPHVw0MaK8eE8K8rPhrcfBuVWpFhYrQN7yBY=
++codeberg.org/puregotk/puregotk v0.0.0-20260414055327-2f5010d598c7/go.mod h1:KDQjaDscQiL2OiLWuBFBF4l/x/1DW+M0lPcQTa0Id0o=
++github.com/dennwc/flatpak-go-mod v0.1.1-0.20251220152743-1642390bc050 h1:muRW0tgYbXMfg8XjDGrv3TfWLEj3osTP4MPDGqlslbc=
++github.com/dennwc/flatpak-go-mod v0.1.1-0.20251220152743-1642390bc050/go.mod h1:wpz1r09m7dCJS2rTFe5x95DdtjP97osxkPJkdHptFYI=
++github.com/goccy/go-yaml v1.18.0 h1:8W7wMFS12Pcas7KU+VVkaiCng+kG8QiFeFwzFb+rwuw=
++github.com/goccy/go-yaml v1.18.0/go.mod h1:XBurs7gK8ATbW4ZPGKgcbrY1Br56PdM69F7LkFRi1kA=
++golang.org/x/mod v0.31.0 h1:HaW9xtz0+kOcWKwli0ZXy79Ix+UW/vOfmWI5QVd2tgI=
++golang.org/x/mod v0.31.0/go.mod h1:43JraMp9cGx1Rx3AqioxrbrhNsLl2l/iNAvuBkrezpg=
+diff --git a/examples/p2pandaapp-cli-gomod/modules.txt b/examples/p2pandaapp-cli-gomod/modules.txt
+new file mode 100644
+index 0000000000000000000000000000000000000000..f7829bd6f9c4e37260edfe0352a82cec2987e72c
+--- /dev/null
++++ b/examples/p2pandaapp-cli-gomod/modules.txt
+@@ -0,0 +1,38 @@
++# codeberg.org/pojntfx/p2panda-gobject-go v0.0.0-00010101000000-000000000000 => ../..
++## explicit; go 1.25.0
++codeberg.org/pojntfx/p2panda-gobject-go/p2panda
++# codeberg.org/puregotk/purego v0.0.0-20260224095105-2513c838cb80
++## explicit; go 1.18
++codeberg.org/puregotk/purego
++codeberg.org/puregotk/purego/internal/cgo
++codeberg.org/puregotk/purego/internal/fakecgo
++codeberg.org/puregotk/purego/internal/strings
++codeberg.org/puregotk/purego/internal/xreflect
++# codeberg.org/puregotk/puregotk v0.0.0-20260414055327-2f5010d598c7
++## explicit; go 1.24.0
++codeberg.org/puregotk/puregotk/internal/core
++codeberg.org/puregotk/puregotk/pkg/core
++codeberg.org/puregotk/puregotk/v4/gio
++codeberg.org/puregotk/puregotk/v4/glib
++codeberg.org/puregotk/puregotk/v4/gobject
++codeberg.org/puregotk/puregotk/v4/gobject/types
++# github.com/dennwc/flatpak-go-mod v0.1.1-0.20251220152743-1642390bc050
++## explicit; go 1.24.4
++github.com/dennwc/flatpak-go-mod
++# github.com/goccy/go-yaml v1.18.0
++## explicit; go 1.21.0
++github.com/goccy/go-yaml
++github.com/goccy/go-yaml/ast
++github.com/goccy/go-yaml/internal/errors
++github.com/goccy/go-yaml/internal/format
++github.com/goccy/go-yaml/lexer
++github.com/goccy/go-yaml/parser
++github.com/goccy/go-yaml/printer
++github.com/goccy/go-yaml/scanner
++github.com/goccy/go-yaml/token
++# golang.org/x/mod v0.31.0
++## explicit; go 1.24.0
++golang.org/x/mod/internal/lazyregexp
++golang.org/x/mod/modfile
++golang.org/x/mod/module
++golang.org/x/mod/semver
+diff --git a/examples/p2pandaapp-cli-gomod/p2pandagobjectgo.go.mod.json b/examples/p2pandaapp-cli-gomod/p2pandagobjectgo.go.mod.json
+new file mode 100644
+index 0000000000000000000000000000000000000000..4daed1ede3e60741af2638453fc9b19dc317586b
+--- /dev/null
++++ b/examples/p2pandaapp-cli-gomod/p2pandagobjectgo.go.mod.json
+@@ -0,0 +1,43 @@
++[
++  {
++    "dest": "vendor",
++    "dest-filename": "modules.txt",
++    "path": "p2pandagobjectgo.modules.txt",
++    "type": "file"
++  },
++  {
++    "dest": "vendor/codeberg.org/puregotk/purego",
++    "sha256": "0d5fb9e11934b151ac357a9c0660e4dcd287d2f93db0829356415f6e6a8ef84b",
++    "strip-components": 3,
++    "type": "archive",
++    "url": "https://proxy.golang.org/codeberg.org/puregotk/purego/@v/v0.0.0-20260224095105-2513c838cb80.zip"
++  },
++  {
++    "dest": "vendor/codeberg.org/puregotk/puregotk",
++    "sha256": "d630504e254caf3417040cf355b75065c7abea960ec3e20675deb697df17080f",
++    "strip-components": 3,
++    "type": "archive",
++    "url": "https://proxy.golang.org/codeberg.org/puregotk/puregotk/@v/v0.0.0-20260414055327-2f5010d598c7.zip"
++  },
++  {
++    "dest": "vendor/github.com/google/go-cmp",
++    "sha256": "64a9ce046f2c320e3783fba0d1f4a15f8a18f0b009b67bf27f7630919db3f539",
++    "strip-components": 3,
++    "type": "archive",
++    "url": "https://proxy.golang.org/github.com/google/go-cmp/@v/v0.7.0.zip"
++  },
++  {
++    "dest": "vendor/golang.org/x/tools",
++    "sha256": "7f58700da5c39d8d19587227d2421011d4cca04076c1c13ebbbe148b851677c6",
++    "strip-components": 3,
++    "type": "archive",
++    "url": "https://proxy.golang.org/golang.org/x/tools/@v/v0.38.0.zip"
++  },
++  {
++    "dest": "vendor/mvdan.cc/gofumpt",
++    "sha256": "d5e4b0bbe3486a8d96e0b4e0598b39c0ffe1f916530ec969eaef5d5f3f8e41ca",
++    "strip-components": 2,
++    "type": "archive",
++    "url": "https://proxy.golang.org/mvdan.cc/gofumpt/@v/v0.9.2.zip"
++  }
++]
+diff --git a/examples/p2pandaapp-cli-gomod/p2pandagobjectgo.modules.txt b/examples/p2pandaapp-cli-gomod/p2pandagobjectgo.modules.txt
+new file mode 100644
+index 0000000000000000000000000000000000000000..80a0fdf78a61c93dafe6aa619d2bc589b1339513
+--- /dev/null
++++ b/examples/p2pandaapp-cli-gomod/p2pandagobjectgo.modules.txt
+@@ -0,0 +1,37 @@
++# codeberg.org/puregotk/purego v0.0.0-20260224095105-2513c838cb80
++## explicit; go 1.18
++codeberg.org/puregotk/purego
++codeberg.org/puregotk/purego/internal/cgo
++codeberg.org/puregotk/purego/internal/fakecgo
++codeberg.org/puregotk/purego/internal/strings
++codeberg.org/puregotk/purego/internal/xreflect
++# codeberg.org/puregotk/puregotk v0.0.0-20260414055327-2f5010d598c7
++## explicit; go 1.24.0
++codeberg.org/puregotk/puregotk/internal/core
++codeberg.org/puregotk/puregotk/internal/gir/pass
++codeberg.org/puregotk/puregotk/internal/gir/types
++codeberg.org/puregotk/puregotk/internal/gir/util
++codeberg.org/puregotk/puregotk/pkg/core
++codeberg.org/puregotk/puregotk/pkg/gir/pass
++codeberg.org/puregotk/puregotk/pkg/gir/util
++codeberg.org/puregotk/puregotk/v4/gio
++codeberg.org/puregotk/puregotk/v4/glib
++codeberg.org/puregotk/puregotk/v4/gobject
++codeberg.org/puregotk/puregotk/v4/gobject/types
++# github.com/google/go-cmp v0.7.0
++## explicit; go 1.21
++github.com/google/go-cmp/cmp
++github.com/google/go-cmp/cmp/internal/diff
++github.com/google/go-cmp/cmp/internal/flags
++github.com/google/go-cmp/cmp/internal/function
++github.com/google/go-cmp/cmp/internal/value
++# golang.org/x/tools v0.38.0
++## explicit; go 1.24.0
++golang.org/x/tools/go/ast/astutil
++# mvdan.cc/gofumpt v0.9.2
++## explicit; go 1.24.0
++mvdan.cc/gofumpt/format
++mvdan.cc/gofumpt/internal/govendor/go/doc/comment
++mvdan.cc/gofumpt/internal/govendor/go/format
++mvdan.cc/gofumpt/internal/govendor/go/printer
++mvdan.cc/gofumpt/internal/version
+diff --git a/examples/p2pandaapp-cli-gomod/page.codeberg.pojntfx.P2PandaAppCLIGomod.json b/examples/p2pandaapp-cli-gomod/page.codeberg.pojntfx.P2PandaAppCLIGomod.json
+new file mode 100644
+index 0000000000000000000000000000000000000000..51238a39d20b04280339969f0486aca609917429
+--- /dev/null
++++ b/examples/p2pandaapp-cli-gomod/page.codeberg.pojntfx.P2PandaAppCLIGomod.json
+@@ -0,0 +1,57 @@
++{
++  "id": "page.codeberg.pojntfx.P2PandaAppCLIGomod",
++  "runtime": "org.freedesktop.Platform",
++  "runtime-version": "25.08",
++  "sdk": "org.freedesktop.Sdk",
++  "sdk-extensions": [
++    "org.freedesktop.Sdk.Extension.golang",
++    "org.freedesktop.Sdk.Extension.rust-stable"
++  ],
++  "command": "p2pandaapp-cli-gomod-chat",
++  "build-options": {
++    "append-path": "/usr/lib/sdk/golang/bin:/usr/lib/sdk/rust-stable/bin",
++    "build-args": ["--share=network", "--filesystem=home"],
++    "env": {
++      "CARGO_HOME": "/run/build/p2panda-gobject/cargo"
++    }
++  },
++  "finish-args": ["--share=network"],
++  "modules": [
++    {
++      "name": "p2panda-gobject",
++      "buildsystem": "meson",
++      "config-opts": [
++        "-Dvapi=false",
++        "-Dcapi_docs=false",
++        "-Dpython_tests=false"
++      ],
++      "sources": [
++        {
++          "type": "git",
++          "url": "https://github.com/pojntfx/p2panda-gobject.git",
++          "branch": "fix-bindings"
++        }
++      ]
++    },
++    {
++      "name": "p2pandaapp-cli-gomod",
++      "buildsystem": "simple",
++      "build-options": {
++        "build-args": ["--filesystem=home"]
++      },
++      "build-commands": [
++        "bash -c '. /usr/lib/sdk/golang/enable.sh && ([ -f vendor/modules.txt ] || go mod vendor) && cp modules.txt vendor/modules.txt'",
++        "bash -c '. /usr/lib/sdk/golang/enable.sh && export GOBIN=\"/app/bin\" && go generate ./... && go build -o /app/bin/p2pandaapp-cli-gomod-chat -v -mod=vendor ./cmd/p2pandaapp-cli-gomod-chat && go build -o /app/bin/p2pandaapp-cli-gomod-bootstrap -v -mod=vendor ./cmd/p2pandaapp-cli-gomod-bootstrap'"
++      ],
++      "sources": [
++        { "type": "dir", "path": "." },
++        {
++          "type": "dir",
++          "path": "../..",
++          "dest": "vendor/codeberg.org/pojntfx/p2panda-gobject-go"
++        },
++        "go.mod.json"
++      ]
++    }
++  ]
++}
+
