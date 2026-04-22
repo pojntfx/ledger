@@ -1,0 +1,397 @@
+From a666b7c86e9af78992f1d4ab6c021fa13f60e1bc Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Tue, 21 Apr 2026 22:52:46 -0700
+Subject: [PATCH] Examples: Add use new automatic parameter conversion
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/examples/myapp-gnome-gomod/src/application.go b/examples/myapp-gnome-gomod/src/application.go
+index d34f3a2a78f7fbdfd66ce0099c2c1485e5d69023..da7ba59d1bd9ade1b264b8f05dcf14c8f638e3fa 100644
+--- a/examples/myapp-gnome-gomod/src/application.go
++++ b/examples/myapp-gnome-gomod/src/application.go
+@@ -29,16 +29,16 @@ 	return v
+ }
+ 
+ func init() {
+-	var appClassInit gobject.ClassInitFunc = func(tc *gobject.TypeClass, u uintptr) {
+-		objClass := (*gobject.ObjectClass)(unsafe.Pointer(tc))
++	var appClassInit gobject.ClassInitFunc = func(GClassVar *gobject.TypeClass, ClassDataVar uintptr) {
++		objClass := (*gobject.ObjectClass)(unsafe.Pointer(GClassVar))
+ 
+-		objClass.OverrideConstructed(func(o *gobject.Object) {
+-			parentObjClass := (*gobject.ObjectClass)(unsafe.Pointer(tc.PeekParent()))
++		objClass.OverrideConstructed(func(ObjectVar *gobject.Object) {
++			parentObjClass := (*gobject.ObjectClass)(unsafe.Pointer(GClassVar.PeekParent()))
+ 
+-			parentObjClass.GetConstructed()(o)
++			parentObjClass.GetConstructed()(ObjectVar)
+ 
+ 			var parent adw.Application
+-			o.Cast(&parent)
++			ObjectVar.Cast(&parent)
+ 
+ 			app := &Application{
+ 				Application: parent,
+@@ -47,16 +47,16 @@
+ 			var pinner runtime.Pinner
+ 			pinner.Pin(app)
+ 
+-			var cleanupCallback glib.DestroyNotify = func(data uintptr) {
++			var cleanupCallback glib.DestroyNotify = func(DataVar uintptr) {
+ 				pinner.Unpin()
+ 			}
+-			o.SetDataFull(dataKeyGoInstance, uintptr(unsafe.Pointer(app)), &cleanupCallback)
++			ObjectVar.SetDataFull(dataKeyGoInstance, uintptr(unsafe.Pointer(app)), &cleanupCallback)
+ 		})
+ 
+-		applicationClass := (*gio.ApplicationClass)(unsafe.Pointer(tc))
++		applicationClass := (*gio.ApplicationClass)(unsafe.Pointer(GClassVar))
+ 
+-		applicationClass.OverrideActivate(func(a *gio.Application) {
+-			myApp := (*Application)(unsafe.Pointer(a.GetData(dataKeyGoInstance)))
++		applicationClass.OverrideActivate(func(ApplicationVar *gio.Application) {
++			myApp := (*Application)(unsafe.Pointer(ApplicationVar.GetData(dataKeyGoInstance)))
+ 
+ 			if myApp.window != nil {
+ 				myApp.window.ApplicationWindow.Present()
+@@ -64,7 +64,7 @@ 				return
+ 			}
+ 
+ 			var app gtk.Application
+-			a.Cast(&app)
++			ApplicationVar.Cast(&app)
+ 
+ 			obj := NewWindow("application", app)
+ 
+@@ -75,7 +75,7 @@ 			myApp.window.ApplicationWindow.Present()
+ 		})
+ 	}
+ 
+-	var appInstanceInit gobject.InstanceInitFunc = func(ti *gobject.TypeInstance, tc *gobject.TypeClass) {}
++	var appInstanceInit gobject.InstanceInitFunc = func(InstanceVar *gobject.TypeInstance, GClassVar *gobject.TypeClass) {}
+ 
+ 	var appParentQuery gobject.TypeQuery
+ 	gobject.NewTypeQuery(adw.ApplicationGLibType(), &appParentQuery)
+diff --git a/examples/myapp-gnome-gomod/src/window.go b/examples/myapp-gnome-gomod/src/window.go
+index 110456ad6f48c929158a957211995b32274d8f7f..7633ea845601477a0a66bb3f7dbd7a20782c3c61 100644
+--- a/examples/myapp-gnome-gomod/src/window.go
++++ b/examples/myapp-gnome-gomod/src/window.go
+@@ -36,20 +36,20 @@ 	w.buttonTest.SetSensitive(sensitive)
+ }
+ 
+ func init() {
+-	var windowClassInit gobject.ClassInitFunc = func(tc *gobject.TypeClass, u uintptr) {
+-		typeClass := (*gtk.WidgetClass)(unsafe.Pointer(tc))
++	var windowClassInit gobject.ClassInitFunc = func(GClassVar *gobject.TypeClass, ClassDataVar uintptr) {
++		typeClass := (*gtk.WidgetClass)(unsafe.Pointer(GClassVar))
+ 		typeClass.SetTemplateFromResource(ResourceWindowUIPath)
+ 
+ 		typeClass.BindTemplateChildFull("button_test", false, 0)
+ 
+-		objClass := (*gobject.ObjectClass)(unsafe.Pointer(tc))
++		objClass := (*gobject.ObjectClass)(unsafe.Pointer(GClassVar))
+ 
+-		objClass.OverrideConstructed(func(o *gobject.Object) {
+-			parentObjClass := (*gobject.ObjectClass)(unsafe.Pointer(tc.PeekParent()))
+-			parentObjClass.GetConstructed()(o)
++		objClass.OverrideConstructed(func(ObjectVar *gobject.Object) {
++			parentObjClass := (*gobject.ObjectClass)(unsafe.Pointer(GClassVar.PeekParent()))
++			parentObjClass.GetConstructed()(ObjectVar)
+ 
+ 			var parent adw.ApplicationWindow
+-			o.Cast(&parent)
++			ObjectVar.Cast(&parent)
+ 
+ 			parent.InitTemplate()
+ 
+@@ -68,12 +68,12 @@
+ 			var pinner runtime.Pinner
+ 			pinner.Pin(w)
+ 
+-			var cleanupCallback glib.DestroyNotify = func(data uintptr) {
++			var cleanupCallback glib.DestroyNotify = func(DataVar uintptr) {
+ 				pinner.Unpin()
+ 			}
+-			o.SetDataFull(dataKeyGoInstance, uintptr(unsafe.Pointer(w)), &cleanupCallback)
++			ObjectVar.SetDataFull(dataKeyGoInstance, uintptr(unsafe.Pointer(w)), &cleanupCallback)
+ 
+-			onButtonTestClicked := func(gtk.Button) {
++			onButtonTestClicked := func(self gtk.Button) {
+ 				fmt.Println("myapp-gnome-gomod test button clicked, opening mylib-gtk-meson window")
+ 
+ 				obj := gobject.NewObject(mylibgtkmeson.MainApplicationWindowGLibType(),
+@@ -83,14 +83,14 @@
+ 				var libWindow mylibgtkmeson.MainApplicationWindow
+ 				obj.Cast(&libWindow)
+ 
+-				onLibButtonTestClicked := func(sw mylibgtkmeson.MainApplicationWindow) {
++				onLibButtonTestClicked := func(self mylibgtkmeson.MainApplicationWindow) {
+ 					fmt.Println("mylib-gtk-meson test button clicked")
+ 
+ 					libWindow.ShowToast(L("Button was clicked!"))
+ 					libWindow.SetPropertyTestButtonSensitive(false)
+ 
+ 					var timer *time.Timer
+-					onDestroy := func(gtk.Widget) {
++					onDestroy := func(self gtk.Widget) {
+ 						if timer != nil {
+ 							timer.Stop()
+ 						}
+@@ -110,7 +110,7 @@ 			buttonTest.ConnectClicked(&onButtonTestClicked)
+ 		})
+ 	}
+ 
+-	var windowInstanceInit gobject.InstanceInitFunc = func(ti *gobject.TypeInstance, tc *gobject.TypeClass) {}
++	var windowInstanceInit gobject.InstanceInitFunc = func(InstanceVar *gobject.TypeInstance, GClassVar *gobject.TypeClass) {}
+ 
+ 	var windowParentQuery gobject.TypeQuery
+ 	gobject.NewTypeQuery(adw.ApplicationWindowGLibType(), &windowParentQuery)
+diff --git a/examples/myapp-gnome-meson/src/application.go b/examples/myapp-gnome-meson/src/application.go
+index 6ad3381c55ef523cda0635f54c695c9400ead3db..2982382b8df4e2c99067f46aeed9347b8dd26b5f 100644
+--- a/examples/myapp-gnome-meson/src/application.go
++++ b/examples/myapp-gnome-meson/src/application.go
+@@ -29,16 +29,16 @@ 	return v
+ }
+ 
+ func init() {
+-	var appClassInit gobject.ClassInitFunc = func(tc *gobject.TypeClass, u uintptr) {
+-		objClass := (*gobject.ObjectClass)(unsafe.Pointer(tc))
++	var appClassInit gobject.ClassInitFunc = func(GClassVar *gobject.TypeClass, ClassDataVar uintptr) {
++		objClass := (*gobject.ObjectClass)(unsafe.Pointer(GClassVar))
+ 
+-		objClass.OverrideConstructed(func(o *gobject.Object) {
+-			parentObjClass := (*gobject.ObjectClass)(unsafe.Pointer(tc.PeekParent()))
++		objClass.OverrideConstructed(func(ObjectVar *gobject.Object) {
++			parentObjClass := (*gobject.ObjectClass)(unsafe.Pointer(GClassVar.PeekParent()))
+ 
+-			parentObjClass.GetConstructed()(o)
++			parentObjClass.GetConstructed()(ObjectVar)
+ 
+ 			var parent adw.Application
+-			o.Cast(&parent)
++			ObjectVar.Cast(&parent)
+ 
+ 			app := &Application{
+ 				Application: parent,
+@@ -47,16 +47,16 @@
+ 			var pinner runtime.Pinner
+ 			pinner.Pin(app)
+ 
+-			var cleanupCallback glib.DestroyNotify = func(data uintptr) {
++			var cleanupCallback glib.DestroyNotify = func(DataVar uintptr) {
+ 				pinner.Unpin()
+ 			}
+-			o.SetDataFull(dataKeyGoInstance, uintptr(unsafe.Pointer(app)), &cleanupCallback)
++			ObjectVar.SetDataFull(dataKeyGoInstance, uintptr(unsafe.Pointer(app)), &cleanupCallback)
+ 		})
+ 
+-		applicationClass := (*gio.ApplicationClass)(unsafe.Pointer(tc))
++		applicationClass := (*gio.ApplicationClass)(unsafe.Pointer(GClassVar))
+ 
+-		applicationClass.OverrideActivate(func(a *gio.Application) {
+-			myApp := (*Application)(unsafe.Pointer(a.GetData(dataKeyGoInstance)))
++		applicationClass.OverrideActivate(func(ApplicationVar *gio.Application) {
++			myApp := (*Application)(unsafe.Pointer(ApplicationVar.GetData(dataKeyGoInstance)))
+ 
+ 			if myApp.window != nil {
+ 				myApp.window.ApplicationWindow.Present()
+@@ -64,7 +64,7 @@ 				return
+ 			}
+ 
+ 			var app gtk.Application
+-			a.Cast(&app)
++			ApplicationVar.Cast(&app)
+ 
+ 			obj := NewWindow("application", app)
+ 
+@@ -75,7 +75,7 @@ 			myApp.window.ApplicationWindow.Present()
+ 		})
+ 	}
+ 
+-	var appInstanceInit gobject.InstanceInitFunc = func(ti *gobject.TypeInstance, tc *gobject.TypeClass) {}
++	var appInstanceInit gobject.InstanceInitFunc = func(InstanceVar *gobject.TypeInstance, GClassVar *gobject.TypeClass) {}
+ 
+ 	var appParentQuery gobject.TypeQuery
+ 	gobject.NewTypeQuery(adw.ApplicationGLibType(), &appParentQuery)
+diff --git a/examples/myapp-gnome-meson/src/window.go b/examples/myapp-gnome-meson/src/window.go
+index 8ee2ed55375efc5ddf3b6dab0e744bfe0d44476d..7077ed4c3cdaee27f7c9cd4e5d39e6d3c63a96d9 100644
+--- a/examples/myapp-gnome-meson/src/window.go
++++ b/examples/myapp-gnome-meson/src/window.go
+@@ -36,20 +36,20 @@ 	w.buttonTest.SetSensitive(sensitive)
+ }
+ 
+ func init() {
+-	var windowClassInit gobject.ClassInitFunc = func(tc *gobject.TypeClass, u uintptr) {
+-		typeClass := (*gtk.WidgetClass)(unsafe.Pointer(tc))
++	var windowClassInit gobject.ClassInitFunc = func(GClassVar *gobject.TypeClass, ClassDataVar uintptr) {
++		typeClass := (*gtk.WidgetClass)(unsafe.Pointer(GClassVar))
+ 		typeClass.SetTemplateFromResource(ResourceWindowUIPath)
+ 
+ 		typeClass.BindTemplateChildFull("button_test", false, 0)
+ 
+-		objClass := (*gobject.ObjectClass)(unsafe.Pointer(tc))
++		objClass := (*gobject.ObjectClass)(unsafe.Pointer(GClassVar))
+ 
+-		objClass.OverrideConstructed(func(o *gobject.Object) {
+-			parentObjClass := (*gobject.ObjectClass)(unsafe.Pointer(tc.PeekParent()))
+-			parentObjClass.GetConstructed()(o)
++		objClass.OverrideConstructed(func(ObjectVar *gobject.Object) {
++			parentObjClass := (*gobject.ObjectClass)(unsafe.Pointer(GClassVar.PeekParent()))
++			parentObjClass.GetConstructed()(ObjectVar)
+ 
+ 			var parent adw.ApplicationWindow
+-			o.Cast(&parent)
++			ObjectVar.Cast(&parent)
+ 
+ 			parent.InitTemplate()
+ 
+@@ -68,12 +68,12 @@
+ 			var pinner runtime.Pinner
+ 			pinner.Pin(w)
+ 
+-			var cleanupCallback glib.DestroyNotify = func(data uintptr) {
++			var cleanupCallback glib.DestroyNotify = func(DataVar uintptr) {
+ 				pinner.Unpin()
+ 			}
+-			o.SetDataFull(dataKeyGoInstance, uintptr(unsafe.Pointer(w)), &cleanupCallback)
++			ObjectVar.SetDataFull(dataKeyGoInstance, uintptr(unsafe.Pointer(w)), &cleanupCallback)
+ 
+-			onButtonTestClicked := func(gtk.Button) {
++			onButtonTestClicked := func(self gtk.Button) {
+ 				fmt.Println("myapp-gnome-meson test button clicked, opening mylib-gtk-meson window")
+ 
+ 				obj := gobject.NewObject(mylibgtkmeson.MainApplicationWindowGLibType(),
+@@ -83,14 +83,14 @@
+ 				var libWindow mylibgtkmeson.MainApplicationWindow
+ 				obj.Cast(&libWindow)
+ 
+-				onLibButtonTestClicked := func(sw mylibgtkmeson.MainApplicationWindow) {
++				onLibButtonTestClicked := func(self mylibgtkmeson.MainApplicationWindow) {
+ 					fmt.Println("mylib-gtk-meson test button clicked")
+ 
+ 					libWindow.ShowToast(L("Button was clicked!"))
+ 					libWindow.SetPropertyTestButtonSensitive(false)
+ 
+ 					var timer *time.Timer
+-					onDestroy := func(gtk.Widget) {
++					onDestroy := func(self gtk.Widget) {
+ 						if timer != nil {
+ 							timer.Stop()
+ 						}
+@@ -110,7 +110,7 @@ 			buttonTest.ConnectClicked(&onButtonTestClicked)
+ 		})
+ 	}
+ 
+-	var windowInstanceInit gobject.InstanceInitFunc = func(ti *gobject.TypeInstance, tc *gobject.TypeClass) {}
++	var windowInstanceInit gobject.InstanceInitFunc = func(InstanceVar *gobject.TypeInstance, GClassVar *gobject.TypeClass) {}
+ 
+ 	var windowParentQuery gobject.TypeQuery
+ 	gobject.NewTypeQuery(adw.ApplicationWindowGLibType(), &windowParentQuery)
+diff --git a/examples/mylib-gtk-meson-go/mylibgtkmeson/window.go b/examples/mylib-gtk-meson-go/mylibgtkmeson/window.go
+index fe3609bf7bba313e7aa4abfd511ee4b60f0caaaa..da23f47ec130912f871e2875da73a0cbc86e58b9 100644
+--- a/examples/mylib-gtk-meson-go/mylibgtkmeson/window.go
++++ b/examples/mylib-gtk-meson-go/mylibgtkmeson/window.go
+@@ -66,7 +66,7 @@ 	x.GetProperty("test-button-sensitive", &v)
+ 	return v.GetBoolean()
+ }
+ 
+-func (x *MainApplicationWindow) ConnectButtonTestClicked(cb *func(MainApplicationWindow)) uint32 {
++func (x *MainApplicationWindow) ConnectButtonTestClicked(cb *func(self MainApplicationWindow)) uint32 {
+ 	cbPtr := uintptr(unsafe.Pointer(cb))
+ 	if cbRefPtr, ok := glib.GetCallback(cbPtr); ok {
+ 		return gobject.SignalConnect(x.GoPointer(), "button-test-clicked", cbRefPtr)
+diff --git a/examples/mylib-gtk-meson/src/window.go b/examples/mylib-gtk-meson/src/window.go
+index 99d47057e7379f333f35604daca3e19e649fde64..3bcd534bfd36b75f88081c0e53fd41759080a081 100644
+--- a/examples/mylib-gtk-meson/src/window.go
++++ b/examples/mylib-gtk-meson/src/window.go
+@@ -28,8 +28,8 @@ 	toastOverlay *adw.ToastOverlay
+ }
+ 
+ func init() {
+-	var classInit gobject.ClassInitFunc = func(tc *gobject.TypeClass, u uintptr) {
+-		typeClass := (*gtk.WidgetClass)(unsafe.Pointer(tc))
++	var classInit gobject.ClassInitFunc = func(GClassVar *gobject.TypeClass, ClassDataVar uintptr) {
++		typeClass := (*gtk.WidgetClass)(unsafe.Pointer(GClassVar))
+ 		typeClass.SetTemplateFromResource(resourceWindowUIPath)
+ 
+ 		typeClass.BindTemplateChildFull("button_test", false, 0)
+@@ -48,15 +48,15 @@ 			0,
+ 			nil,
+ 		)
+ 
+-		objClass := (*gobject.ObjectClass)(unsafe.Pointer(tc))
++		objClass := (*gobject.ObjectClass)(unsafe.Pointer(GClassVar))
+ 
+-		objClass.OverrideConstructed(func(o *gobject.Object) {
+-			parentObjClass := (*gobject.ObjectClass)(unsafe.Pointer(tc.PeekParent()))
++		objClass.OverrideConstructed(func(ObjectVar *gobject.Object) {
++			parentObjClass := (*gobject.ObjectClass)(unsafe.Pointer(GClassVar.PeekParent()))
+ 
+-			parentObjClass.GetConstructed()(o)
++			parentObjClass.GetConstructed()(ObjectVar)
+ 
+ 			var parent adw.ApplicationWindow
+-			o.Cast(&parent)
++			ObjectVar.Cast(&parent)
+ 
+ 			parent.InitTemplate()
+ 
+@@ -81,14 +81,14 @@
+ 			var pinner runtime.Pinner
+ 			pinner.Pin(w)
+ 
+-			var cleanupCallback glib.DestroyNotify = func(data uintptr) {
++			var cleanupCallback glib.DestroyNotify = func(DataVar uintptr) {
+ 				pinner.Unpin()
+ 			}
+-			o.SetDataFull(dataKeyGoInstance, uintptr(unsafe.Pointer(w)), &cleanupCallback)
++			ObjectVar.SetDataFull(dataKeyGoInstance, uintptr(unsafe.Pointer(w)), &cleanupCallback)
+ 
+-			onButtonTestClicked := func(gtk.Button) {
++			onButtonTestClicked := func(self gtk.Button) {
+ 				gobject.SignalEmit(
+-					o,
++					ObjectVar,
+ 					gobject.SignalLookup("button-test-clicked", gTypeMyLibGtkMesonMainApplicationWindow),
+ 					0,
+ 				)
+@@ -97,21 +97,21 @@
+ 			buttonTest.ConnectClicked(&onButtonTestClicked)
+ 		})
+ 
+-		objClass.OverrideSetProperty(func(o *gobject.Object, u uint32, v *gobject.Value, ps *gobject.ParamSpec) {
+-			switch u {
++		objClass.OverrideSetProperty(func(ObjectVar *gobject.Object, PropertyIdVar uint32, ValueVar *gobject.Value, PspecVar *gobject.ParamSpec) {
++			switch PropertyIdVar {
+ 			case propertyIdTestButtonSensitive:
+-				w := (*myLibGtkMesonMainApplicationWindow)(unsafe.Pointer(o.GetData(dataKeyGoInstance)))
++				w := (*myLibGtkMesonMainApplicationWindow)(unsafe.Pointer(ObjectVar.GetData(dataKeyGoInstance)))
+ 
+-				w.buttonTest.SetSensitive(v.GetBoolean())
++				w.buttonTest.SetSensitive(ValueVar.GetBoolean())
+ 			}
+ 		})
+ 
+-		objClass.OverrideGetProperty(func(o *gobject.Object, u uint32, v *gobject.Value, ps *gobject.ParamSpec) {
+-			switch u {
++		objClass.OverrideGetProperty(func(ObjectVar *gobject.Object, PropertyIdVar uint32, ValueVar *gobject.Value, PspecVar *gobject.ParamSpec) {
++			switch PropertyIdVar {
+ 			case propertyIdTestButtonSensitive:
+-				w := (*myLibGtkMesonMainApplicationWindow)(unsafe.Pointer(o.GetData(dataKeyGoInstance)))
++				w := (*myLibGtkMesonMainApplicationWindow)(unsafe.Pointer(ObjectVar.GetData(dataKeyGoInstance)))
+ 
+-				v.SetBoolean(w.buttonTest.IsSensitive())
++				ValueVar.SetBoolean(w.buttonTest.IsSensitive())
+ 			}
+ 		})
+ 
+@@ -126,7 +126,7 @@
+ 		objClass.InstallProperty(propertyIdTestButtonSensitive, pspec)
+ 	}
+ 
+-	var instanceInit gobject.InstanceInitFunc = func(ti *gobject.TypeInstance, tc *gobject.TypeClass) {}
++	var instanceInit gobject.InstanceInitFunc = func(InstanceVar *gobject.TypeInstance, GClassVar *gobject.TypeClass) {}
+ 
+ 	var parentQuery gobject.TypeQuery
+ 	gobject.NewTypeQuery(adw.ApplicationWindowGLibType(), &parentQuery)
+
