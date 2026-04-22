@@ -1,0 +1,201 @@
+From 7e42ccbd71cbd77ffc747c7163b50d5719f3c6fd Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Tue, 21 Apr 2026 22:53:11 -0700
+Subject: [PATCH] Examples: Add use new automatic parameter conversion
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/examples/p2pandaapp-cli-gomod/cmd/p2pandaapp-cli-gomod-bootstrap/main.go b/examples/p2pandaapp-cli-gomod/cmd/p2pandaapp-cli-gomod-bootstrap/main.go
+index 5db9a4901fa87f150a8027e9c12dbb465793ec1a..da3fd54e5c82020cee217749a70f97e42630b678 100644
+--- a/examples/p2pandaapp-cli-gomod/cmd/p2pandaapp-cli-gomod-bootstrap/main.go
++++ b/examples/p2pandaapp-cli-gomod/cmd/p2pandaapp-cli-gomod-bootstrap/main.go
+@@ -57,8 +57,8 @@ 		nil,
+ 		p2panda.MdnsDiscoveryModeActiveValue,
+ 	)
+ 
+-	var onSpawn gio.AsyncReadyCallback = func(_, resultPtr, _ uintptr) {
+-		if _, err := node.SpawnFinish(&gio.AsyncResultBase{Ptr: resultPtr}); err != nil {
++	var onSpawn gio.AsyncReadyCallback = func(SourceObjectVar, ResVar, DataVar uintptr) {
++		if _, err := node.SpawnFinish(&gio.AsyncResultBase{Ptr: ResVar}); err != nil {
+ 			panic(err)
+ 		}
+ 
+diff --git a/examples/p2pandaapp-cli-gomod/cmd/p2pandaapp-cli-gomod-chat/main.go b/examples/p2pandaapp-cli-gomod/cmd/p2pandaapp-cli-gomod-chat/main.go
+index 9acd420d0d642206ee2e98e97714aeb5e3c20465..3716355062c8d503686b544b4c1cfc38a4cdce23 100644
+--- a/examples/p2pandaapp-cli-gomod/cmd/p2pandaapp-cli-gomod-chat/main.go
++++ b/examples/p2pandaapp-cli-gomod/cmd/p2pandaapp-cli-gomod-chat/main.go
+@@ -77,8 +77,8 @@ 		bootstrap,
+ 		p2panda.MdnsDiscoveryModeActiveValue,
+ 	)
+ 
+-	var onNodeSpawn gio.AsyncReadyCallback = func(_, resultPtr, _ uintptr) {
+-		if _, err := node.SpawnFinish(&gio.AsyncResultBase{Ptr: resultPtr}); err != nil {
++	var onNodeSpawn gio.AsyncReadyCallback = func(SourceObjectVar, ResVar, DataVar uintptr) {
++		if _, err := node.SpawnFinish(&gio.AsyncResultBase{Ptr: ResVar}); err != nil {
+ 			panic(err)
+ 		}
+ 
+@@ -86,38 +86,32 @@ 		slog.Info("Node ready", "pubkey", ownHex, "peer-flag", "--peer "+ownHex)
+ 
+ 		tp := p2panda.NewTopic(node, topicID, uint32(p2panda.TopicEphemeralValue|p2panda.TopicPersistentValue))
+ 
+-		onMsg := func(_ p2panda.Topic, pkPtr, dtPtr, bPtr uintptr) bool {
+-			from := ptrHex((*p2panda.PublicKey)(unsafe.Pointer(pkPtr)).GetData(), 32)
++		onMsg := func(self p2panda.Topic, PublicKeyVar *p2panda.PublicKey, DatetimeVar *glib.DateTime, BytesVar *glib.Bytes) bool {
++			from := ptrHex(PublicKeyVar.GetData(), 32)
+ 			if from == ownHex {
+ 				return true
+ 			}
+ 
+-			dt := (*glib.DateTime)(unsafe.Pointer(dtPtr))
+-			msg := (*glib.Bytes)(unsafe.Pointer(bPtr))
+-
+ 			var sz uint
+-			fmt.Printf("[%s] %s: %s\n", dt.FormatIso8601(), from[:8], string(unsafe.Slice((*byte)(unsafe.Pointer(msg.GetData(&sz))), sz)))
++			fmt.Printf("[%s] %s: %s\n", DatetimeVar.FormatIso8601(), from[:8], string(unsafe.Slice((*byte)(unsafe.Pointer(BytesVar.GetData(&sz))), sz)))
+ 
+ 			return true
+ 		}
+ 		tp.ConnectMessage(&onMsg)
+ 
+-		onEph := func(_ p2panda.Topic, pkPtr, dtPtr, bPtr uintptr) {
+-			from := ptrHex((*p2panda.PublicKey)(unsafe.Pointer(pkPtr)).GetData(), 32)
++		onEph := func(self p2panda.Topic, PublicKeyVar *p2panda.PublicKey, DatetimeVar *glib.DateTime, BytesVar *glib.Bytes) {
++			from := ptrHex(PublicKeyVar.GetData(), 32)
+ 			if from == ownHex {
+ 				return
+ 			}
+ 
+-			dt := (*glib.DateTime)(unsafe.Pointer(dtPtr))
+-			msg := (*glib.Bytes)(unsafe.Pointer(bPtr))
+-
+ 			var sz uint
+-			fmt.Printf("[%s] %s: %s\n", dt.FormatIso8601(), from[:8], string(unsafe.Slice((*byte)(unsafe.Pointer(msg.GetData(&sz))), sz)))
++			fmt.Printf("[%s] %s: %s\n", DatetimeVar.FormatIso8601(), from[:8], string(unsafe.Slice((*byte)(unsafe.Pointer(BytesVar.GetData(&sz))), sz)))
+ 		}
+ 		tp.ConnectEphemeralMessage(&onEph)
+ 
+-		var onTopicSpawn gio.AsyncReadyCallback = func(_, tpResultPtr, _ uintptr) {
+-			if _, err := tp.SpawnFinish(&gio.AsyncResultBase{Ptr: tpResultPtr}); err != nil {
++		var onTopicSpawn gio.AsyncReadyCallback = func(SourceObjectVar, ResVar, DataVar uintptr) {
++			if _, err := tp.SpawnFinish(&gio.AsyncResultBase{Ptr: ResVar}); err != nil {
+ 				panic(err)
+ 			}
+ 
+@@ -128,10 +122,10 @@ 				sc := bufio.NewScanner(os.Stdin)
+ 				for sc.Scan() {
+ 					if line := sc.Text(); line != "" {
+ 						m := line
+-						var fn glib.SourceFunc = func(uintptr) bool {
++						var fn glib.SourceFunc = func(UserDataVar uintptr) bool {
+ 							d := glib.NewBytes([]byte(m), uint(len(m)))
+-							var onPub gio.AsyncReadyCallback = func(_, pResultPtr, _ uintptr) {
+-								if _, err := tp.PublishFinish(&gio.AsyncResultBase{Ptr: pResultPtr}); err != nil {
++							var onPub gio.AsyncReadyCallback = func(SourceObjectVar, ResVar, DataVar uintptr) {
++								if _, err := tp.PublishFinish(&gio.AsyncResultBase{Ptr: ResVar}); err != nil {
+ 									panic(err)
+ 								}
+ 							}
+@@ -149,7 +143,7 @@ 				if err := sc.Err(); err != nil {
+ 					panic(err)
+ 				}
+ 
+-				var quit glib.SourceFunc = func(uintptr) bool { loop.Quit(); return false }
++				var quit glib.SourceFunc = func(UserDataVar uintptr) bool { loop.Quit(); return false }
+ 				glib.IdleAdd(&quit, 0)
+ 			}()
+ 		}
+diff --git a/p2panda/p2panda.go b/p2panda/p2panda.go
+index f46dbe49132e8aaa2746610e1abd25d5672c6ae5..8ea2e15f71bed46e3ed81c77e9fdfdac003f2f5c 100644
+--- a/p2panda/p2panda.go
++++ b/p2panda/p2panda.go
+@@ -465,7 +465,7 @@
+ // Emitted on system events.
+ //
+ // This signal is emitted on the main context that was thread default when the node was spawned.
+-func (x *Node) ConnectSystemEvent(cb *func(Node)) uint32 {
++func (x *Node) ConnectSystemEvent(cb *func(self Node)) uint32 {
+ 	cbPtr := uintptr(unsafe.Pointer(cb))
+ 	if cbRefPtr, ok := glib.GetCallback(cbPtr); ok {
+ 		return gobject.SignalConnect(x.GoPointer(), "system-event", cbRefPtr)
+@@ -590,13 +590,13 @@
+ // Emitted on incomming ephemeral message.
+ //
+ // This signal is emitted on the main context that was thread default when the topic was spawned.
+-func (x *Topic) ConnectEphemeralMessage(cb *func(Topic, uintptr, uintptr, uintptr)) uint32 {
++func (x *Topic) ConnectEphemeralMessage(cb *func(self Topic, PublicKeyVar *PublicKey, DatetimeVar *glib.DateTime, BytesVar *glib.Bytes)) uint32 {
+ 	cbPtr := uintptr(unsafe.Pointer(cb))
+ 	if cbRefPtr, ok := glib.GetCallback(cbPtr); ok {
+ 		return gobject.SignalConnect(x.GoPointer(), "ephemeral-message", cbRefPtr)
+ 	}
+ 
+-	fcb := func(clsPtr uintptr, PublicKeyVarp uintptr, DatetimeVarp uintptr, BytesVarp uintptr) {
++	fcb := func(clsPtr uintptr, PublicKeyVarp *PublicKey, DatetimeVarp *glib.DateTime, BytesVarp *glib.Bytes) {
+ 		fa := Topic{}
+ 		fa.Ptr = clsPtr
+ 		cbFn := *cb
+@@ -611,13 +611,13 @@
+ // Emitted when a topic finishes syncing.
+ //
+ // This signal is emitted on the main context that was thread default when the topic was spawned.
+-func (x *Topic) ConnectError(cb *func(Topic, uintptr)) uint32 {
++func (x *Topic) ConnectError(cb *func(self Topic, ErrorVar *glib.Error)) uint32 {
+ 	cbPtr := uintptr(unsafe.Pointer(cb))
+ 	if cbRefPtr, ok := glib.GetCallback(cbPtr); ok {
+ 		return gobject.SignalConnect(x.GoPointer(), "error", cbRefPtr)
+ 	}
+ 
+-	fcb := func(clsPtr uintptr, ErrorVarp uintptr) {
++	fcb := func(clsPtr uintptr, ErrorVarp *glib.Error) {
+ 		fa := Topic{}
+ 		fa.Ptr = clsPtr
+ 		cbFn := *cb
+@@ -632,13 +632,13 @@
+ // Emitted on incomming persistent message.
+ //
+ // This signal is emitted on the main context that was thread default when the topic was spawned.
+-func (x *Topic) ConnectMessage(cb *func(Topic, uintptr, uintptr, uintptr) bool) uint32 {
++func (x *Topic) ConnectMessage(cb *func(self Topic, PublicKeyVar *PublicKey, DatetimeVar *glib.DateTime, BytesVar *glib.Bytes) bool) uint32 {
+ 	cbPtr := uintptr(unsafe.Pointer(cb))
+ 	if cbRefPtr, ok := glib.GetCallback(cbPtr); ok {
+ 		return gobject.SignalConnect(x.GoPointer(), "message", cbRefPtr)
+ 	}
+ 
+-	fcb := func(clsPtr uintptr, PublicKeyVarp uintptr, DatetimeVarp uintptr, BytesVarp uintptr) bool {
++	fcb := func(clsPtr uintptr, PublicKeyVarp *PublicKey, DatetimeVarp *glib.DateTime, BytesVarp *glib.Bytes) bool {
+ 		fa := Topic{}
+ 		fa.Ptr = clsPtr
+ 		cbFn := *cb
+@@ -653,13 +653,13 @@
+ // Emitted when a topic finishes syncing.
+ //
+ // This signal is emitted on the main context that was thread default when the topic was spawned.
+-func (x *Topic) ConnectSyncEnded(cb *func(Topic, uintptr, uint64)) uint32 {
++func (x *Topic) ConnectSyncEnded(cb *func(self Topic, RemoteNodeIdVar *NodeId, SessionIdVar uint64)) uint32 {
+ 	cbPtr := uintptr(unsafe.Pointer(cb))
+ 	if cbRefPtr, ok := glib.GetCallback(cbPtr); ok {
+ 		return gobject.SignalConnect(x.GoPointer(), "sync-ended", cbRefPtr)
+ 	}
+ 
+-	fcb := func(clsPtr uintptr, RemoteNodeIdVarp uintptr, SessionIdVarp uint64) {
++	fcb := func(clsPtr uintptr, RemoteNodeIdVarp *NodeId, SessionIdVarp uint64) {
+ 		fa := Topic{}
+ 		fa.Ptr = clsPtr
+ 		cbFn := *cb
+@@ -674,13 +674,13 @@
+ // Emitted for errors.
+ //
+ // This signal is emitted on the main context that was thread default when the topic was spawned.
+-func (x *Topic) ConnectSyncStarted(cb *func(Topic, uintptr, uint64, uint64, uint64, uint64, uint64)) uint32 {
++func (x *Topic) ConnectSyncStarted(cb *func(self Topic, RemoteNodeIdVar *NodeId, SessionIdVar uint64, IncommingOperationsVar uint64, OutgoingOperationsVar uint64, IncomingBytesVar uint64, OutgoingBytesVar uint64)) uint32 {
+ 	cbPtr := uintptr(unsafe.Pointer(cb))
+ 	if cbRefPtr, ok := glib.GetCallback(cbPtr); ok {
+ 		return gobject.SignalConnect(x.GoPointer(), "sync-started", cbRefPtr)
+ 	}
+ 
+-	fcb := func(clsPtr uintptr, RemoteNodeIdVarp uintptr, SessionIdVarp uint64, IncommingOperationsVarp uint64, OutgoingOperationsVarp uint64, IncomingBytesVarp uint64, OutgoingBytesVarp uint64) {
++	fcb := func(clsPtr uintptr, RemoteNodeIdVarp *NodeId, SessionIdVarp uint64, IncommingOperationsVarp uint64, OutgoingOperationsVarp uint64, IncomingBytesVarp uint64, OutgoingBytesVarp uint64) {
+ 		fa := Topic{}
+ 		fa.Ptr = clsPtr
+ 		cbFn := *cb
+
