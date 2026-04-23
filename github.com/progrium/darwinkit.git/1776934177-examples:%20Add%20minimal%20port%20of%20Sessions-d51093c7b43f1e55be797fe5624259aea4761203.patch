@@ -1,0 +1,712 @@
+From d51093c7b43f1e55be797fe5624259aea4761203 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Thu, 23 Apr 2026 01:49:37 -0700
+Subject: [PATCH] examples: Add minimal port of Sessions
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/examples/Sessions/main.go b/examples/Sessions/main.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..0d1a22dd292b525b813a2e4aa9dfb94b7cb212d9
+--- /dev/null
++++ b/examples/Sessions/main.go
+@@ -0,0 +1,689 @@
++package main
++
++import (
++	"fmt"
++	"math"
++
++	"github.com/progrium/darwinkit/helper/action"
++	"github.com/progrium/darwinkit/macos"
++	"github.com/progrium/darwinkit/macos/appkit"
++	"github.com/progrium/darwinkit/macos/foundation"
++	"github.com/progrium/darwinkit/objc"
++)
++
++const (
++	minDialValue = 30   // seconds per tick
++	maxDialValue = 3600 // 60 minutes max
++)
++
++type pomodoro struct {
++	app            appkit.Application
++	window         appkit.Window
++	statusItem     appkit.StatusItem
++	toggleItem     appkit.MenuItem // in the status-bar menu
++	menuToggleItem appkit.MenuItem // in the main menu bar's Timer menu
++
++	dial         DialView
++	timeLabel    appkit.TextField
++	actionButton appkit.Button
++	plusButton   appkit.Button
++	minusButton  appkit.Button
++
++	timer       foundation.Timer
++	totalSec    int
++	remainingMs int // remaining milliseconds when running/paused
++	running     bool
++	dragPaused  bool // timer was running, now paused for a drag
++}
++
++// DialView is a circular dial: grey track, colored arc indicating progress, a
++// knob at the current angle. Draggable to set duration in minDialValue-second
++// increments.
++type DialView struct {
++	appkit.View `objc:"NSView"`
++}
++
++func (v DialView) IsFlipped() bool { return true }
++
++func (v DialView) AcceptsFirstMouse(event appkit.IEvent) bool { return true }
++
++// MouseDownCanMoveWindow returns false so that with the window's
++// movableByWindowBackground=true, clicks inside the dial start a drag gesture
++// instead of moving the window.
++func (v DialView) MouseDownCanMoveWindow() bool { return false }
++
++func (v DialView) owner() *pomodoro { return activePomodoro }
++
++func (v DialView) DrawRect(dirty foundation.Rect) {
++	p := v.owner()
++	bounds := v.Bounds()
++	w, h := bounds.Size.Width, bounds.Size.Height
++	cx, cy := w/2, h/2
++	r := math.Min(cx, cy) - 10
++
++	dark := isDarkMode()
++
++	trackColor := appkit.Color_ColorWithSRGBRedGreenBlueAlpha(0.55, 0.55, 0.55, 0.35)
++	if dark {
++		trackColor = appkit.Color_ColorWithSRGBRedGreenBlueAlpha(0.70, 0.70, 0.70, 0.25)
++	}
++	idleColor := appkit.Color_ColorWithSRGBRedGreenBlueAlpha(0.40, 0.52, 0.96, 1.0) // blue accent
++	runningColor := appkit.Color_ColorWithSRGBRedGreenBlueAlpha(0.93, 0.32, 0.28, 1.0)
++	idleFill := appkit.Color_ColorWithSRGBRedGreenBlueAlpha(0.40, 0.52, 0.96, 0.20)
++	runningFill := appkit.Color_ColorWithSRGBRedGreenBlueAlpha(0.93, 0.32, 0.28, 0.20)
++
++	const lineW = 8.0
++
++	// Track ring.
++	track := appkit.NewBezierPath()
++	track.AppendBezierPathWithArcWithCenterRadiusStartAngleEndAngle(
++		foundation.Point{X: cx, Y: cy}, r, 0, 360)
++	track.SetLineWidth(lineW)
++	trackColor.Set()
++	track.Stroke()
++
++	if p == nil || p.totalSec <= 0 {
++		return
++	}
++
++	// Two angles: setAngle = where the total duration sits on the dial
++	// (relative to 60 minutes = full circle), progressAngle = how far we've
++	// moved along that when a timer is running.
++	setFrac := float64(p.totalSec) / float64(maxDialValue)
++	setAngle := 2 * math.Pi * setFrac
++
++	var fillAngle float64
++	var lineColor appkit.Color
++	var fillColor appkit.Color
++	if p.running && p.remainingMs > 0 {
++		ratio := float64(p.remainingMs) / 1000.0 / float64(p.totalSec)
++		fillAngle = setAngle * ratio
++		lineColor = runningColor
++		fillColor = runningFill
++	} else {
++		fillAngle = setAngle
++		lineColor = idleColor
++		fillColor = idleFill
++	}
++
++	// Flipped coord system (IsFlipped=true): angle 0 is +x (east) going
++	// clockwise. We want 0 at north (12 o'clock) going clockwise.
++	startDeg := -90.0
++	endDeg := startDeg + rad2deg(fillAngle)
++
++	// Filled pie wedge.
++	wedge := appkit.NewBezierPath()
++	wedge.MoveToPoint(foundation.Point{X: cx, Y: cy})
++	wedge.AppendBezierPathWithArcWithCenterRadiusStartAngleEndAngle(
++		foundation.Point{X: cx, Y: cy}, r, startDeg, endDeg)
++	wedge.ClosePath()
++	fillColor.Set()
++	wedge.Fill()
++
++	// Colored arc on top of the track.
++	arc := appkit.NewBezierPath()
++	arc.AppendBezierPathWithArcWithCenterRadiusStartAngleEndAngle(
++		foundation.Point{X: cx, Y: cy}, r, startDeg, endDeg)
++	arc.SetLineWidth(lineW)
++	arc.SetLineCapStyle(appkit.LineCapStyleRound)
++	lineColor.Set()
++	arc.Stroke()
++
++	// Knob at end of arc.
++	knobAngle := deg2rad(endDeg)
++	knobX := cx + r*math.Cos(knobAngle)
++	knobY := cy + r*math.Sin(knobAngle)
++	knob := appkit.NewBezierPath()
++	knob.AppendBezierPathWithArcWithCenterRadiusStartAngleEndAngle(
++		foundation.Point{X: knobX, Y: knobY}, 6, 0, 360)
++	lineColor.Set()
++	knob.Fill()
++}
++
++// Mouse handlers take concrete appkit.Event (not the IEvent interface)
++// because darwinkit's protocol dispatcher marshals the incoming NSEvent*
++// into a concrete Event value. Using the interface here produced an itab
++// whose Ptr() call segfaulted.
++func (v DialView) MouseDown(event appkit.Event) {
++	if p := v.owner(); p != nil {
++		p.onDialBegin(v, event)
++	}
++}
++
++func (v DialView) MouseDragged(event appkit.Event) {
++	if p := v.owner(); p != nil {
++		p.onDialUpdate(v, event)
++	}
++}
++
++func (v DialView) MouseUp(event appkit.Event) {
++	if p := v.owner(); p != nil {
++		p.onDialEnd(v, event)
++	}
++}
++
++// activePomodoro is a package-global because darwinkit's custom-class pattern
++// makes it awkward to thread instance state into the DrawRect/mouse callbacks.
++var activePomodoro *pomodoro
++
++var dialViewClass objc.UserClass[DialView]
++
++// retained holds objc-retained values whose identity must outlive the stack
++// frame that created them. objc.Retain attaches a release finalizer to the
++// Go pointer it's given, so we need to keep the pointer reachable for the
++// lifetime of the process — storing it here does that.
++var retained []any
++
++// keepAlive stores v in the process-lifetime "retained" slice. Combined with
++// objc.Retain on the same pointer, this keeps the Go-side finalizer (which
++// calls release on the ObjC object) from firing before we're done using it.
++func keepAlive[T any](v *T) { retained = append(retained, v) }
++
++func main() {
++	dialViewClass = objc.NewClass[DialView](
++		objc.Sel("isFlipped"),
++		objc.Sel("acceptsFirstMouse:"),
++		objc.Sel("mouseDownCanMoveWindow"),
++		objc.Sel("drawRect:"),
++		objc.Sel("mouseDown:"),
++		objc.Sel("mouseDragged:"),
++		objc.Sel("mouseUp:"),
++	)
++	objc.RegisterClass(dialViewClass)
++
++	macos.RunApp(func(app appkit.Application, delegate *appkit.ApplicationDelegate) {
++		p := &pomodoro{
++			app:      app,
++			totalSec: 25 * 60,
++		}
++		activePomodoro = p
++
++		p.buildMainMenu()
++		p.buildWindow()
++		p.buildStatusItem()
++		p.render()
++
++		delegate.SetApplicationShouldTerminateAfterLastWindowClosed(func(appkit.Application) bool {
++			return false
++		})
++		app.SetActivationPolicy(appkit.ApplicationActivationPolicyRegular)
++		app.ActivateIgnoringOtherApps(true)
++	})
++}
++
++func (p *pomodoro) buildMainMenu() {
++	mainMenu := appkit.NewMenuWithTitle("MainMenu")
++
++	appMenuItem := appkit.NewMenuItemWithSelector("", "", objc.Selector{})
++	appMenu := appkit.NewMenuWithTitle("Sessions")
++	appMenu.AddItem(appkit.NewMenuItemWithAction("About Sessions", "", func(sender objc.Object) {
++		p.app.OrderFrontStandardAboutPanel(sender)
++	}))
++	appMenu.AddItem(appkit.MenuItem_SeparatorItem())
++	appMenu.AddItem(appkit.NewMenuItemWithAction("Hide Sessions", "h", func(objc.Object) { p.app.Hide(nil) }))
++	appMenu.AddItem(appkit.NewMenuItemWithAction("Quit Sessions", "q", func(objc.Object) { p.app.Terminate(nil) }))
++	appMenuItem.SetSubmenu(appMenu)
++	mainMenu.AddItem(appMenuItem)
++
++	editMenuItem := appkit.NewMenuItemWithSelector("", "", objc.Selector{})
++	editMenu := appkit.NewMenuWithTitle("Edit")
++	editMenu.AddItem(appkit.NewMenuItemWithSelector("Cut", "x", objc.Sel("cut:")))
++	editMenu.AddItem(appkit.NewMenuItemWithSelector("Copy", "c", objc.Sel("copy:")))
++	editMenu.AddItem(appkit.NewMenuItemWithSelector("Paste", "v", objc.Sel("paste:")))
++	editMenu.AddItem(appkit.NewMenuItemWithSelector("Select All", "a", objc.Sel("selectAll:")))
++	editMenuItem.SetSubmenu(editMenu)
++	mainMenu.AddItem(editMenuItem)
++
++	timerMenuItem := appkit.NewMenuItemWithSelector("", "", objc.Selector{})
++	timerMenu := appkit.NewMenuWithTitle("Timer")
++	// ⌘Space is Spotlight; ⌘Return is the common primary-action chord in
++	// macOS apps (Linear, Calendar, Things).
++	p.menuToggleItem = appkit.NewMenuItemWithAction("Start Timer", "\r",
++		func(objc.Object) { p.toggleTimer() })
++	timerMenu.AddItem(p.menuToggleItem)
++	timerMenu.AddItem(appkit.MenuItem_SeparatorItem())
++	// "=" is the unshifted key for +, matching the common "Zoom In" convention.
++	timerMenu.AddItem(appkit.NewMenuItemWithAction("Add 30 Seconds", "=",
++		func(objc.Object) { p.addTime() }))
++	timerMenu.AddItem(appkit.NewMenuItemWithAction("Remove 30 Seconds", "-",
++		func(objc.Object) { p.removeTime() }))
++	timerMenuItem.SetSubmenu(timerMenu)
++	mainMenu.AddItem(timerMenuItem)
++
++	p.app.SetMainMenu(mainMenu)
++}
++
++func (p *pomodoro) buildWindow() {
++	const (
++		dialSize   = 200.0
++		fontSize   = 24.0
++		sidePad    = 28.0
++		titleBarH  = 28.0 // transparent titlebar area at the top
++		dialTopPad = 8.0  // tight space under the titlebar for visual centering
++		barH       = 56.0 // bottom button strip (Liquid Glass card)
++		dialBotPad = 16.0 // breathing room above the bar
++	)
++	winW := dialSize + 2*sidePad
++	winH := titleBarH + dialTopPad + dialSize + dialBotPad + barH
++
++	// Liquid Glass-friendly window: full-size content view under a transparent
++	// titlebar, title text hidden, draggable from the whole surface.
++	w := appkit.NewWindowWithSizeAndStyle(winW, winH,
++		appkit.WindowStyleMaskTitled|
++			appkit.WindowStyleMaskClosable|
++			appkit.WindowStyleMaskMiniaturizable|
++			appkit.WindowStyleMaskFullSizeContentView)
++	objc.Retain(&w)
++	keepAlive(&w)
++	p.window = w
++	p.window.SetTitle("Sessions")
++	p.window.SetTitleVisibility(appkit.WindowTitleHidden)
++	p.window.SetTitlebarAppearsTransparent(true)
++	p.window.SetMovableByWindowBackground(true)
++
++	// UnderWindowBackground material with BehindWindow blending — the
++	// default Liquid Glass window surface on Tahoe.
++	bg := appkit.NewVisualEffectViewWithFrame(foundation.Rect{
++		Size: foundation.Size{Width: winW, Height: winH},
++	})
++	bg.SetMaterial(appkit.VisualEffectMaterialUnderWindowBackground)
++	bg.SetBlendingMode(appkit.VisualEffectBlendingModeBehindWindow)
++	bg.SetState(appkit.VisualEffectStateActive)
++	p.window.SetContentView(bg)
++	content := p.window.ContentView()
++
++	// Dial sits between the bottom button bar and the transparent titlebar
++	// (bottom-left origin coords).
++	dialX := (winW - dialSize) / 2
++	dialY := barH + dialBotPad
++
++	dial := dialViewClass.New()
++	dial.InitWithFrame(foundation.Rect{
++		Origin: foundation.Point{X: dialX, Y: dialY},
++		Size:   foundation.Size{Width: dialSize, Height: dialSize},
++	})
++	objc.Retain(&dial)
++	keepAlive(&dial)
++	p.dial = dial
++	// DialView's MouseDown takes appkit.Event (concrete) rather than
++	// appkit.IEvent, so Go's type system no longer sees it as satisfying
++	// appkit.IView. Bypass the compile-time check by calling -addSubview:
++	// directly via objc.
++	objc.Call[objc.Void](content, objc.Sel("addSubview:"), dial.Object)
++
++	// Central time label on an NSVisualEffectView "card" — HUD-window material
++	// with rounded corners keeps the digits readable over the dial.
++	font := appkit.Font_MonospacedDigitSystemFontOfSizeWeight(fontSize, appkit.FontWeightBold)
++	ascender := font.Ascender()
++	descender := font.Descender() // negative
++	glyphH := ascender - descender
++	labelW := fontSize * 3.4 // "00:00" at this weight
++	dialCenterX := dialX + dialSize/2
++	dialCenterY := dialY + dialSize/2
++
++	cardPadX := 14.0
++	cardPadY := 6.0
++	cardW := labelW + 2*cardPadX
++	cardH := glyphH + 2*cardPadY
++	card := appkit.NewVisualEffectViewWithFrame(foundation.Rect{
++		Origin: foundation.Point{X: dialCenterX - cardW/2, Y: dialCenterY - cardH/2},
++		Size:   foundation.Size{Width: cardW, Height: cardH},
++	})
++	card.SetMaterial(appkit.VisualEffectMaterialHUDWindow)
++	card.SetBlendingMode(appkit.VisualEffectBlendingModeWithinWindow)
++	card.SetState(appkit.VisualEffectStateActive)
++	card.SetWantsLayer(true)
++	card.Layer().SetCornerRadius(cardH / 2)
++	card.Layer().SetMasksToBounds(true)
++	card.SetAutoresizingMask(appkit.ViewNotSizable)
++	content.AddSubview(card)
++
++	p.timeLabel = appkit.NewLabel("25:00")
++	p.timeLabel.SetAutoresizingMask(appkit.ViewNotSizable)
++	p.timeLabel.SetFont(font)
++	p.timeLabel.SetAlignment(appkit.CenterTextAlignment)
++	p.timeLabel.SetDrawsBackground(false)
++	p.timeLabel.SetFrame(foundation.Rect{
++		Origin: foundation.Point{X: cardPadX, Y: cardPadY},
++		Size:   foundation.Size{Width: labelW, Height: glyphH},
++	})
++	card.AddSubview(p.timeLabel)
++
++	// Bottom button bar — NSToolbar always attaches to the titlebar on macOS,
++	// so for a bottom-anchored Liquid Glass strip we build it ourselves from
++	// an NSVisualEffectView with header-view material.
++	p.buildBottomBar(content, winW, barH)
++
++	// Intercept the close button so hitting red-X hides the window instead of
++	// destroying it; the timer keeps running and the menu-bar item can bring
++	// the window back.
++	wd := &appkit.WindowDelegate{}
++	wd.SetWindowShouldClose(func(sender appkit.Window) bool {
++		sender.OrderOut(nil)
++		return false
++	})
++	keepAlive(&wd)
++	p.window.SetDelegate(wd)
++
++	p.window.Center()
++	p.window.MakeKeyAndOrderFront(nil)
++}
++
++// NSBezelStyleGlass (macOS 26+) isn't in darwinkit's NSBezelStyle enum yet;
++// raw value from the macOS 26.4 SDK's AppKit/NSButtonCell.h. It's the Tahoe
++// Liquid Glass bezel — rendered as a pill when a title is set, or as a circle
++// when the button is square and image-only.
++const bezelStyleGlass appkit.BezelStyle = 16
++
++func (p *pomodoro) buildBottomBar(content appkit.View, winW, barH float64) {
++	const (
++		btnH    = 28.0
++		btnGap  = 10.0
++		actionW = 120.0
++		actionH = 32.0
++	)
++
++	// No separate bar container — on Tahoe, NSBezelStyleGlass buttons carry
++	// their own Liquid Glass chrome and Apple's own apps (Weather, Music,
++	// Freeform) let them float directly on the window's background material.
++	bar := content
++
++	// Build the three buttons, centered as a group inside the bar.
++	minusImg := appkit.Image_ImageWithSystemSymbolNameAccessibilityDescription("minus", "Remove 30 seconds")
++	plusImg := appkit.Image_ImageWithSystemSymbolNameAccessibilityDescription("plus", "Add 30 seconds")
++
++	rowW := btnH + btnGap + actionW + btnGap + btnH
++	rowX := (winW - rowW) / 2
++	btnY := (barH - btnH) / 2
++	actionY := (barH - actionH) / 2
++
++	p.minusButton = appkit.ButtonClass.ButtonWithImageTargetAction(minusImg, objc.Object{}, objc.Selector{})
++	// Tahoe renders a square-framed, image-only Glass button as a circle.
++	p.minusButton.SetBezelStyle(bezelStyleGlass)
++	p.minusButton.SetToolTip("Remove 30 seconds")
++	p.minusButton.SetFrame(foundation.Rect{
++		Origin: foundation.Point{X: rowX, Y: btnY},
++		Size:   foundation.Size{Width: btnH, Height: btnH},
++	})
++	action.Set(p.minusButton, func(objc.Object) { p.removeTime() })
++	bar.AddSubview(p.minusButton)
++
++	p.actionButton = appkit.NewButtonWithTitle("Start Timer")
++	p.actionButton.SetBezelStyle(bezelStyleGlass)
++	p.actionButton.SetKeyEquivalent("\r")
++	p.actionButton.SetFrame(foundation.Rect{
++		Origin: foundation.Point{X: rowX + btnH + btnGap, Y: actionY},
++		Size:   foundation.Size{Width: actionW, Height: actionH},
++	})
++	action.Set(p.actionButton, func(objc.Object) { p.toggleTimer() })
++	bar.AddSubview(p.actionButton)
++
++	p.plusButton = appkit.ButtonClass.ButtonWithImageTargetAction(plusImg, objc.Object{}, objc.Selector{})
++	p.plusButton.SetBezelStyle(bezelStyleGlass)
++	p.plusButton.SetToolTip("Add 30 seconds")
++	p.plusButton.SetFrame(foundation.Rect{
++		Origin: foundation.Point{X: rowX + btnH + btnGap + actionW + btnGap, Y: btnY},
++		Size:   foundation.Size{Width: btnH, Height: btnH},
++	})
++	action.Set(p.plusButton, func(objc.Object) { p.addTime() })
++	bar.AddSubview(p.plusButton)
++}
++
++func (p *pomodoro) buildStatusItem() {
++	item := appkit.StatusBar_SystemStatusBar().StatusItemWithLength(appkit.VariableStatusItemLength)
++	objc.Retain(&item)
++	keepAlive(&item)
++	p.statusItem = item
++
++	// The title is rendered as a single NSAttributedString that embeds the
++	// SF Symbol as an NSTextAttachment next to the time text — this is how
++	// first-party menu-bar apps avoid the image-vs-text misalignment that
++	// setImage: + setTitle: produces.
++
++	menu := appkit.NewMenuWithTitle("sessions")
++	menu.AddItem(appkit.NewMenuItemWithAction("Show Window", "", func(objc.Object) { p.showWindow() }))
++	menu.AddItem(appkit.MenuItem_SeparatorItem())
++	p.toggleItem = appkit.NewMenuItemWithAction("Start Timer", "", func(objc.Object) { p.toggleTimer() })
++	menu.AddItem(p.toggleItem)
++	menu.AddItem(appkit.MenuItem_SeparatorItem())
++	menu.AddItem(appkit.NewMenuItemWithAction("Quit", "q", func(objc.Object) { p.app.Terminate(nil) }))
++	p.statusItem.SetMenu(menu)
++}
++
++// Dial interactions -----------------------------------------------------------
++
++func (p *pomodoro) onDialBegin(v DialView, e appkit.Event) {
++	if p.running {
++		p.dragPaused = true
++		p.stopTicker()
++	}
++	p.applyDialEvent(v, e)
++	p.render()
++}
++
++func (p *pomodoro) onDialUpdate(v DialView, e appkit.Event) {
++	p.applyDialEvent(v, e)
++	p.render()
++}
++
++func (p *pomodoro) onDialEnd(v DialView, e appkit.Event) {
++	if p.dragPaused {
++		// Timer was running before the drag — resume with the new duration.
++		p.dragPaused = false
++		p.remainingMs = p.totalSec * 1000
++		p.running = true
++		p.startTicker()
++	} else if !p.running && p.totalSec > 0 {
++		// User dragged to set a duration from idle — start the timer.
++		p.startTimer()
++	}
++	p.render()
++}
++
++func (p *pomodoro) applyDialEvent(v DialView, e appkit.Event) {
++	// event.locationInWindow is in window (bottom-left-origin) coords. Convert
++	// to our flipped dial-local coords by subtracting the view frame origin
++	// and flipping Y within the view's height.
++	win := e.LocationInWindow()
++	frame := v.Frame()
++	viewH := frame.Size.Height
++	localX := win.X - frame.Origin.X
++	localY := viewH - (win.Y - frame.Origin.Y)
++	cx, cy := frame.Size.Width/2, viewH/2
++	dx, dy := localX-cx, localY-cy
++	if math.Hypot(dx, dy) < 15 {
++		return
++	}
++	// Angle where 0 = 12 o'clock, clockwise; +y is down (IsFlipped).
++	a := math.Atan2(dx, -dy)
++	if a < 0 {
++		a += 2 * math.Pi
++	}
++	intervals := int((a / (2 * math.Pi)) * float64(maxDialValue/minDialValue))
++	if intervals == 0 {
++		intervals = maxDialValue / minDialValue
++	}
++	newTotal := intervals * minDialValue
++	if newTotal != p.totalSec {
++		hapticTap()
++	}
++	p.totalSec = newTotal
++	if p.running || p.dragPaused {
++		p.remainingMs = p.totalSec * 1000
++	}
++}
++
++// hapticTap fires a trackpad "alignment" bump. On Macs without Force Touch
++// trackpads this is a no-op.
++func hapticTap() {
++	appkit.HapticFeedbackManager_DefaultPerformer().PerformFeedbackPatternPerformanceTime(
++		appkit.HapticFeedbackPatternAlignment,
++		appkit.HapticFeedbackPerformanceTimeDefault,
++	)
++}
++
++// menuBarAttributedTitle builds a single NSAttributedString containing an
++// SF-Symbol text attachment followed by the time. Embedding the symbol as
++// a glyph in the same attributed string makes the menu-bar button lay out
++// symbol and text on a shared baseline — setImage: + setTitle: separately
++// leaves them on mismatched vertical metrics.
++func menuBarAttributedTitle(symbol, text string) foundation.AttributedString {
++	font := appkit.Font_MenuBarFontOfSize(0)
++	cfg := appkit.ImageSymbolConfiguration_ConfigurationWithPointSizeWeight(13, appkit.FontWeightRegular)
++	img := appkit.Image_ImageWithSystemSymbolNameAccessibilityDescription(symbol, "Sessions").
++		ImageWithSymbolConfiguration(cfg)
++
++	att := appkit.NewTextAttachment()
++	att.SetImage(img)
++	symbolStr := foundation.AttributedString_AttributedStringWithAttachment(att)
++
++	out := foundation.NewMutableAttributedStringWithAttributedString(symbolStr)
++	out.AppendAttributedString(
++		foundation.NewAttributedStringWithStringAttributes(" "+text, map[foundation.AttributedStringKey]objc.IObject{
++			"NSFont": font,
++		}),
++	)
++	return out.AttributedString
++}
++
++// Timer control ---------------------------------------------------------------
++
++func (p *pomodoro) toggleTimer() {
++	if p.running {
++		p.stopTimer()
++	} else if p.totalSec > 0 {
++		p.startTimer()
++	}
++}
++
++func (p *pomodoro) startTimer() {
++	p.running = true
++	p.remainingMs = p.totalSec * 1000
++	p.startTicker()
++	p.render()
++}
++
++func (p *pomodoro) stopTimer() {
++	p.running = false
++	p.stopTicker()
++	p.render()
++}
++
++func (p *pomodoro) startTicker() {
++	p.timer = foundation.Timer_ScheduledTimerWithTimeIntervalRepeatsBlock(0.1, true, func(foundation.Timer) {
++		p.tick()
++	})
++}
++
++func (p *pomodoro) stopTicker() {
++	if !p.timer.Object.IsNil() {
++		p.timer.Invalidate()
++		p.timer = foundation.Timer{}
++	}
++}
++
++func (p *pomodoro) tick() {
++	p.remainingMs -= 100
++	if p.remainingMs <= 0 {
++		p.remainingMs = 0
++		p.running = false
++		p.stopTicker()
++		appkit.HapticFeedbackManager_DefaultPerformer().PerformFeedbackPatternPerformanceTime(
++			appkit.HapticFeedbackPatternLevelChange,
++			appkit.HapticFeedbackPerformanceTimeNow,
++		)
++		notify("Session Finished", "Time to take a break.")
++		p.app.ActivateIgnoringOtherApps(true)
++	}
++	p.render()
++}
++
++func (p *pomodoro) addTime() {
++	if p.totalSec+minDialValue > maxDialValue {
++		return
++	}
++	p.totalSec += minDialValue
++	if p.running {
++		p.remainingMs = p.totalSec * 1000
++	}
++	p.render()
++}
++
++func (p *pomodoro) removeTime() {
++	if p.totalSec-minDialValue < minDialValue {
++		return
++	}
++	p.totalSec -= minDialValue
++	if p.running {
++		p.remainingMs = p.totalSec * 1000
++	}
++	p.render()
++}
++
++func (p *pomodoro) showWindow() {
++	p.app.ActivateIgnoringOtherApps(true)
++	p.window.MakeKeyAndOrderFront(nil)
++}
++
++// Rendering -------------------------------------------------------------------
++
++func (p *pomodoro) render() {
++	var displaySec int
++	if p.running || p.dragPaused {
++		displaySec = (p.remainingMs + 999) / 1000
++	} else {
++		displaySec = p.totalSec
++	}
++	timeStr := fmt.Sprintf("%02d:%02d", displaySec/60, displaySec%60)
++	p.timeLabel.SetStringValue(timeStr)
++
++	actionTitle := "Start Timer"
++	actionBezel := appkit.Color_ColorWithSRGBRedGreenBlueAlpha(0.40, 0.52, 0.96, 1.0)
++	if p.running {
++		actionTitle = "Stop"
++		actionBezel = appkit.Color_ColorWithSRGBRedGreenBlueAlpha(0.93, 0.32, 0.28, 1.0)
++	}
++	p.actionButton.SetTitle(actionTitle)
++	p.actionButton.SetBezelColor(actionBezel)
++	if !p.toggleItem.Object.IsNil() {
++		p.toggleItem.SetTitle(actionTitle)
++	}
++	if !p.menuToggleItem.Object.IsNil() {
++		p.menuToggleItem.SetTitle(actionTitle)
++	}
++	p.plusButton.SetEnabled(p.totalSec+minDialValue <= maxDialValue)
++	p.minusButton.SetEnabled(p.totalSec-minDialValue >= minDialValue)
++
++	// SF Symbol changes with state; built inline into the attributed title.
++	symbol := "stopwatch"
++	if p.running {
++		symbol = "play.fill"
++	}
++	p.statusItem.Button().SetAttributedTitle(menuBarAttributedTitle(symbol, timeStr))
++
++	p.dial.SetNeedsDisplay(true)
++}
++
++// Helpers ---------------------------------------------------------------------
++
++func notify(title, body string) {
++	// NSUserNotification is unavailable on recent macOS and UNUserNotification
++	// requires a signed app bundle, so fall back to a modal NSAlert. Also
++	// play a system sound; +[NSSound soundNamed:] takes the basename of any
++	// .aiff in /System/Library/Sounds.
++	if sound := objc.Call[objc.Object](objc.GetClass("NSSound"), objc.Sel("soundNamed:"), "Glass"); !sound.IsNil() {
++		objc.Call[objc.Void](sound, objc.Sel("play"))
++	}
++	alert := appkit.NewAlert()
++	alert.SetMessageText(title)
++	alert.SetInformativeText(body)
++	alert.RunModal()
++}
++
++func isDarkMode() bool {
++	defaults := foundation.UserDefaults_StandardUserDefaults()
++	return defaults.StringForKey("AppleInterfaceStyle") == "Dark"
++}
++
++func deg2rad(d float64) float64 { return d * math.Pi / 180 }
++func rad2deg(r float64) float64 { return r * 180 / math.Pi }
+diff --git a/examples/Sessions/main.sh b/examples/Sessions/main.sh
+new file mode 100755
+index 0000000000000000000000000000000000000000..500b9bdf489cfd86741036aac5bd01cf7522b098
+--- /dev/null
++++ b/examples/Sessions/main.sh
+@@ -0,0 +1,3 @@
++#!/usr/bin/env bash
++
++go run -gcflags "all=-N" -x .
+
