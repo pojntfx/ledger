@@ -1,0 +1,55 @@
+From 06332e000466b6cf3a0290abc834bfcb922e9ba3 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Thu, 23 Apr 2026 01:49:24 -0700
+Subject: [PATCH] fix: Add basic support for macOS 26
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/macos/appkit/appkit_priming.go b/macos/appkit/appkit_priming.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..0ad40589063adcb4cbc5f7eae14727ba04081728
+--- /dev/null
++++ b/macos/appkit/appkit_priming.go
+@@ -0,0 +1,29 @@
++package appkit
++
++// #cgo CFLAGS: -x objective-c -fno-objc-arc
++// #cgo LDFLAGS: -framework Foundation -framework AppKit
++// #import <Foundation/Foundation.h>
++// #import <AppKit/AppKit.h>
++//
++// // primeAppearanceSystem works around -[NSApplication init] throwing
++// // NSInternalInconsistencyException("required built-in appearance
++// // SystemAppearance not found") for non-bundled processes on modern macOS:
++// // +[NSAppearance _initializeCoreUI]'s dispatch_once block looks up the
++// // SystemAppearance resource bundle via its identifier, which NSBundle only
++// // knows about after it has been loaded at least once. Instantiating the
++// // bundle by path here registers its identifier in NSBundle's cache before
++// // AppKit queries for it.
++// static void primeAppearanceSystem(void) {
++//     static dispatch_once_t once;
++//     dispatch_once(&once, ^{
++//         (void)[NSBundle bundleWithPath:@"/System/Library/CoreServices/SystemAppearance.bundle"];
++//     });
++// }
++import "C"
++
++// PrimeAppearanceSystem primes AppKit's appearance lookups before the shared
++// application is constructed. See the C comment above for the underlying
++// macOS issue. Safe to call multiple times.
++func PrimeAppearanceSystem() {
++	C.primeAppearanceSystem()
++}
+diff --git a/macos/macos.go b/macos/macos.go
+index efe9f3696500c1e1894c6ffbf77d47007e5a3ead..75f39079760f3f3f7c22cbd858b8112ea4e44a24 100644
+--- a/macos/macos.go
++++ b/macos/macos.go
+@@ -16,6 +16,7 @@ // It also wraps run with runtime.LockOSThread() and should be called from main.
+ func RunApp(didLaunch func(appkit.Application, *appkit.ApplicationDelegate)) {
+ 	runtime.LockOSThread()
+ 	defer runtime.UnlockOSThread()
++	appkit.PrimeAppearanceSystem()
+ 	app := appkit.Application_SharedApplication()
+ 	delegate := &appkit.ApplicationDelegate{}
+ 	delegate.SetApplicationDidFinishLaunching(func(notification foundation.Notification) {
+
