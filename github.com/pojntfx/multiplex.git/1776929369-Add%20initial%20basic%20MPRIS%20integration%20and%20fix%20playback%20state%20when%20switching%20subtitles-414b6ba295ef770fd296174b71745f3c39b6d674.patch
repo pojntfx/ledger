@@ -1,0 +1,2483 @@
+From 414b6ba295ef770fd296174b71745f3c39b6d674 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Thu, 23 Apr 2026 00:29:29 -0700
+Subject: [PATCH] Add initial basic MPRIS integration and fix playback state when switching subtitles
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/assets/resources/controls.blp b/assets/resources/controls.blp
+index b9d88e8beeec718692b9915fef912455c4634f2f..32460cb7b5a480698b0fd9013a3c020079582454 100644
+--- a/assets/resources/controls.blp
++++ b/assets/resources/controls.blp
+@@ -65,6 +65,7 @@           MenuButton menu_button {
+             icon-name: 'open-menu-symbolic';
+             primary: true;
+             tooltip-text: _("Main Menu");
++            valign: center;
+           }
+ 
+           [end]
+@@ -76,6 +77,7 @@
+             icon-name: 'system-users-symbolic';
+             popover: users_popover;
+             tooltip-text: _("Show Peers");
++            valign: center;
+           }
+ 
+           styles [
+diff --git a/com.pojtinger.felicitas.Multiplex.json b/com.pojtinger.felicitas.Multiplex.json
+index 91192b50e071766f95be3dd2aeb31d108053ef8f..36ab3fe864a0f590868398bb47f026702d963560 100644
+--- a/com.pojtinger.felicitas.Multiplex.json
++++ b/com.pojtinger.felicitas.Multiplex.json
+@@ -15,7 +15,8 @@     "--share=network",
+     "--filesystem=xdg-download:rw",
+     "--filesystem=xdg-videos:rw",
+     "--filesystem=/tmp:rw",
+-    "--talk-name=org.freedesktop.Flatpak"
++    "--talk-name=org.freedesktop.Flatpak",
++    "--own-name=org.mpris.MediaPlayer2.com.pojtinger.felicitas.Multiplex"
+   ],
+   "modules": [
+     {
+diff --git a/go.mod b/go.mod
+index e5c5917f750da9f610677a49c215f74093c1cc8a..f202ff2900acec93024f971a73fb050c0318207f 100644
+--- a/go.mod
++++ b/go.mod
+@@ -66,6 +66,7 @@ 	github.com/gorilla/websocket v1.5.3 // indirect
+ 	github.com/huandu/xstrings v1.5.0 // indirect
+ 	github.com/json-iterator/go v1.1.12 // indirect
+ 	github.com/klauspost/cpuid/v2 v2.3.0 // indirect
++	github.com/leberKleber/go-mpris v1.1.0 // indirect
+ 	github.com/mattn/go-colorable v0.1.14 // indirect
+ 	github.com/mattn/go-isatty v0.0.21 // indirect
+ 	github.com/minio/sha256-simd v1.0.1 // indirect
+diff --git a/go.mod.json b/go.mod.json
+index 5c27cc340d8f8aeffe7f7abddb28e62599f3133b..d794d5ddbd7e297f19e0770f677c688b8c466bd4 100644
+--- a/go.mod.json
++++ b/go.mod.json
+@@ -397,6 +397,13 @@     "type": "archive",
+     "url": "https://proxy.golang.org/github.com/klauspost/cpuid/v2/@v/v2.3.0.zip"
+   },
+   {
++    "dest": "vendor/github.com/leberKleber/go-mpris",
++    "sha256": "ea297faefb69d219a0cc97554504644c879c073efe9d4f0a690369bfb154b318",
++    "strip-components": 3,
++    "type": "archive",
++    "url": "https://proxy.golang.org/github.com/leber!kleber/go-mpris/@v/v1.1.0.zip"
++  },
++  {
+     "dest": "vendor/github.com/mattn/go-colorable",
+     "sha256": "5e0e7925a070bb5bd11b4097e1a7b608167f0217ee83901b44c135f6e5e85c78",
+     "strip-components": 3,
+diff --git a/go.sum b/go.sum
+index 8f6b1faef6b8e6a53f4fec446acadd0b8166a88b..2a87e8f13f2e53e7b82e26bb73365481e71d4ea0 100644
+--- a/go.sum
++++ b/go.sum
+@@ -238,6 +238,8 @@ github.com/kr/pty v1.1.1/go.mod h1:pFQYn66WHrOpPYNljwOMqo10TkYh1fy3cYio2l3bCsQ=
+ github.com/kr/text v0.1.0/go.mod h1:4Jbv+DJW3UT/LiOwJeYQe1efqtUx/iVham/4vfdArNI=
+ github.com/kr/text v0.2.0 h1:5Nx0Ya0ZqY2ygV366QzturHI13Jq95ApcVaJBhpS+AY=
+ github.com/kr/text v0.2.0/go.mod h1:eLer722TekiGuMkidMxC/pM04lWEeraHUUmBw8l2grE=
++github.com/leberKleber/go-mpris v1.1.0 h1:bHAnmUjVoxAs4uMHH9lfQ8bOm284UWtI7JhLvkiF7O8=
++github.com/leberKleber/go-mpris v1.1.0/go.mod h1:OwKywFZwFGC0p/8xBUTUXMIFZy0Rq/7C6EayfeASTA0=
+ github.com/ledongthuc/pdf v0.0.0-20220302134840-0c2507a12d80/go.mod h1:imJHygn/1yfhB7XSJJKlFZKl/J+dCPAknuiaGOshXAs=
+ github.com/mailru/easyjson v0.7.7/go.mod h1:xzfreul335JAWq5oZzymOObrkdz5UnU4kGfJJLY9Nlc=
+ github.com/mattn/go-colorable v0.1.14 h1:9A9LHSqF/7dyVVX6g0U9cwm9pG3kP9gSzcuIPHPsaIE=
+diff --git a/internal/components/controls_window.go b/internal/components/controls_window.go
+index dff830188ee550fdd0c23bf0329050d5d4be84c7..83e49c447891c722f92ce388396fd87473759724 100644
+--- a/internal/components/controls_window.go
++++ b/internal/components/controls_window.go
+@@ -32,6 +32,7 @@ 	"github.com/mitchellh/mapstructure"
+ 	"github.com/pojntfx/htorrent/pkg/client"
+ 	"github.com/pojntfx/htorrent/pkg/server"
+ 	"github.com/pojntfx/multiplex/assets/resources"
++	"github.com/pojntfx/multiplex/internal/mpris"
+ 	"github.com/pojntfx/multiplex/internal/player"
+ 	"github.com/pojntfx/multiplex/internal/utils"
+ 	api "github.com/pojntfx/multiplex/pkg/api/webrtc/v1"
+@@ -125,6 +126,7 @@ 	bufferedPeer         *wrtcconn.Peer
+ 	bufferedDecoder      *json.Decoder
+ 
+ 	player *player.Player
++	mpris  *mpris.Service
+ 
+ 	// Dialog state (re-applied each time the dialog is re-presented, since
+ 	// Adw.Dialog destroys itself on Close()).
+@@ -501,6 +503,12 @@ 	})
+ 
+ 	controlsW.player = player.New(controlsW.pictureVideo)
+ 
++	if svc, err := mpris.New(resources.AppID, resources.AppID, &mprisController{c: controlsW}); err == nil {
++		controlsW.mpris = svc
++	} else {
++		log.Warn().Err(err).Msg("Could not register MPRIS service")
++	}
++
+ 	AddMainMenu(
+ 		controlsW.ctx,
+ 		controlsW.app,
+@@ -544,6 +552,11 @@
+ 			progressBarTicker.Stop()
+ 
+ 			controlsW.player.Stop()
++
++			if controlsW.mpris != nil {
++				_ = controlsW.mpris.Close()
++				controlsW.mpris = nil
++			}
+ 
+ 			return false
+ 		}
+@@ -1081,6 +1094,8 @@
+ 				controlsW.elapsedTrackLabel.SetLabel(formatDuration(elapsed))
+ 				controlsW.remainingTrackLabel.SetLabel("-" + formatDuration(remaining))
+ 			}
++
++			controlsW.mpris.Refresh()
+ 		}
+ 
+ 		for {
+@@ -1465,6 +1480,90 @@ 	motion.ConnectLeave(&onLeave)
+ 	controlsW.ApplicationWindow.Widget.AddController(&motion.EventController)
+ 
+ 	scheduleHide()
++}
++
++// mprisController adapts a *ControlsWindow to the mpris.Controller interface.
++// D-Bus methods land on an MPRIS worker goroutine, so widget calls must be
++// marshalled onto the GTK main loop via glib.IdleAdd.
++type mprisController struct {
++	c *ControlsWindow
++}
++
++func (m *mprisController) onMain(fn func()) {
++	var cb glib.SourceFunc = func(uintptr) bool {
++		fn()
++		return false
++	}
++	glib.IdleAdd(&cb, 0)
++}
++
++func (m *mprisController) Play() {
++	m.onMain(func() {
++		m.c.playButton.SetIconName(pauseIcon)
++		m.c.player.Play()
++	})
++}
++
++func (m *mprisController) Pause() {
++	m.onMain(func() {
++		m.c.playButton.SetIconName(playIcon)
++		m.c.player.Pause()
++	})
++}
++
++func (m *mprisController) PlayPause() {
++	m.onMain(func() {
++		if m.c.player.IsPlaying() {
++			m.c.playButton.SetIconName(playIcon)
++			m.c.player.Pause()
++		} else {
++			m.c.playButton.SetIconName(pauseIcon)
++			m.c.player.Play()
++		}
++	})
++}
++
++func (m *mprisController) Stop() {
++	m.onMain(func() {
++		m.c.player.Stop()
++		m.c.ApplicationWindow.Close()
++	})
++}
++
++func (m *mprisController) Seek(offset time.Duration) {
++	m.onMain(func() {
++		pos := m.c.player.Position() + offset
++		if pos < 0 {
++			pos = 0
++		}
++		m.c.player.Seek(pos)
++	})
++}
++
++func (m *mprisController) SetPosition(pos time.Duration) {
++	m.onMain(func() { m.c.player.Seek(pos) })
++}
++
++func (m *mprisController) Raise() {
++	m.onMain(func() { m.c.ApplicationWindow.Present() })
++}
++
++func (m *mprisController) Quit() {
++	m.onMain(func() { m.c.app.Application.Quit() })
++}
++
++func (m *mprisController) Position() time.Duration { return m.c.player.Position() }
++func (m *mprisController) Duration() time.Duration { return m.c.player.Duration() }
++func (m *mprisController) IsPlaying() bool         { return m.c.player.IsPlaying() }
++func (m *mprisController) IsPaused() bool {
++	return m.c.player.State() == gst.StatePausedValue
++}
++
++func (m *mprisController) Title() string {
++	if m.c.torrentTitle != "" {
++		return m.c.torrentTitle
++	}
++	return getDisplayPathWithoutRoot(m.c.selectedTorrentMedia)
+ }
+ 
+ func init() {
+diff --git a/internal/mpris/mpris.go b/internal/mpris/mpris.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..2b59e32b80854beddb81216f39f503e6e6a82494
+--- /dev/null
++++ b/internal/mpris/mpris.go
+@@ -0,0 +1,239 @@
++// Package mpris exposes an org.mpris.MediaPlayer2 service on the session bus
++// so GNOME Shell, the media-keys plugin and other MPRIS consumers can observe
++// and control playback. Only the subset of the spec we can meaningfully
++// implement is exported.
++package mpris
++
++import (
++	"sync"
++	"time"
++
++	"github.com/godbus/dbus/v5"
++	"github.com/godbus/dbus/v5/introspect"
++	"github.com/godbus/dbus/v5/prop"
++	mpris "github.com/leberKleber/go-mpris"
++)
++
++const (
++	objectPath     = "/org/mpris/MediaPlayer2"
++	rootInterface  = "org.mpris.MediaPlayer2"
++	playerIface    = "org.mpris.MediaPlayer2.Player"
++	busNamePrefix  = "org.mpris.MediaPlayer2."
++)
++
++// Controller is implemented by the application to service MPRIS requests.
++// All methods must be safe to call from a non-main goroutine — the D-Bus
++// handler runs on its own thread.
++type Controller interface {
++	Play()
++	Pause()
++	PlayPause()
++	Stop()
++	Seek(offset time.Duration) // positive forwards, negative backwards
++	SetPosition(pos time.Duration)
++	Raise() // bring window to front
++	Quit()
++
++	Position() time.Duration
++	Duration() time.Duration
++	IsPlaying() bool
++	IsPaused() bool
++
++	// Title is shown in GNOME Shell under the player entry.
++	Title() string
++}
++
++// Service wraps a D-Bus connection exposing the MPRIS interface.
++// A nil *Service is a no-op so callers can treat it as always-on.
++type Service struct {
++	mu     sync.Mutex
++	conn   *dbus.Conn
++	props  *prop.Properties
++	ctrl   Controller
++	appID  string
++}
++
++// New registers the MPRIS service on the session bus. `appID` is the flatpak
++// application id, used to build the well-known bus name. `desktopEntry` is
++// the .desktop file basename without the extension.
++func New(appID, desktopEntry string, ctrl Controller) (*Service, error) {
++	conn, err := dbus.SessionBus()
++	if err != nil {
++		return nil, err
++	}
++
++	s := &Service{conn: conn, ctrl: ctrl, appID: appID}
++
++	root := &rootHandler{s: s, desktopEntry: desktopEntry}
++	player := &playerHandler{s: s}
++
++	if err := conn.Export(root, objectPath, rootInterface); err != nil {
++		return nil, err
++	}
++	if err := conn.Export(player, objectPath, playerIface); err != nil {
++		return nil, err
++	}
++
++	props := prop.New(conn, objectPath, map[string]map[string]*prop.Prop{
++		rootInterface: {
++			"CanQuit":             readOnly(true),
++			"CanRaise":            readOnly(true),
++			"HasTrackList":        readOnly(false),
++			"Identity":            readOnly("Multiplex"),
++			"DesktopEntry":        readOnly(desktopEntry),
++			"SupportedUriSchemes": readOnly([]string{"magnet", "http", "https", "file"}),
++			"SupportedMimeTypes":  readOnly([]string{"video/mp4", "video/x-matroska", "video/webm", "video/quicktime", "video/x-msvideo"}),
++		},
++		playerIface: {
++			"PlaybackStatus": readOnly(string(mpris.PlaybackStatusStopped)),
++			"Rate":           readOnly(1.0),
++			"MinimumRate":    readOnly(1.0),
++			"MaximumRate":    readOnly(1.0),
++			"Metadata":       readOnly(mpris.Metadata{}),
++			"Volume":         readOnly(1.0),
++			"Position":       readOnly(int64(0)),
++			"CanGoNext":      readOnly(false),
++			"CanGoPrevious":  readOnly(false),
++			"CanPlay":        readOnly(true),
++			"CanPause":       readOnly(true),
++			"CanSeek":        readOnly(true),
++			"CanControl":     readOnly(true),
++		},
++	})
++	s.props = props
++
++	node := &introspect.Node{
++		Name: objectPath,
++		Interfaces: []introspect.Interface{
++			introspect.IntrospectData,
++			prop.IntrospectData,
++			{
++				Name:       rootInterface,
++				Methods:    introspect.Methods(root),
++				Properties: props.Introspection(rootInterface),
++			},
++			{
++				Name:       playerIface,
++				Methods:    introspect.Methods(player),
++				Properties: props.Introspection(playerIface),
++				Signals: []introspect.Signal{
++					{Name: "Seeked", Args: []introspect.Arg{{Name: "Position", Type: "x"}}},
++				},
++			},
++		},
++	}
++	if err := conn.Export(introspect.NewIntrospectable(node), objectPath, "org.freedesktop.DBus.Introspectable"); err != nil {
++		return nil, err
++	}
++
++	reply, err := conn.RequestName(busNamePrefix+appID, dbus.NameFlagDoNotQueue)
++	if err != nil {
++		return nil, err
++	}
++	if reply != dbus.RequestNameReplyPrimaryOwner {
++		// Bus name taken — still functional, just won't be the primary player.
++	}
++
++	return s, nil
++}
++
++// Close releases the bus name and cleans up.
++func (s *Service) Close() error {
++	if s == nil || s.conn == nil {
++		return nil
++	}
++	s.mu.Lock()
++	defer s.mu.Unlock()
++
++	_, _ = s.conn.ReleaseName(busNamePrefix + s.appID)
++	return s.conn.Close()
++}
++
++// Refresh pushes the current player state onto the bus, emitting
++// PropertiesChanged so GNOME Shell updates.
++func (s *Service) Refresh() {
++	if s == nil || s.props == nil || s.ctrl == nil {
++		return
++	}
++
++	status := mpris.PlaybackStatusStopped
++	switch {
++	case s.ctrl.IsPlaying():
++		status = mpris.PlaybackStatusPlaying
++	case s.ctrl.IsPaused():
++		status = mpris.PlaybackStatusPaused
++	}
++
++	meta := mpris.Metadata{
++		"mpris:trackid": dbus.MakeVariant(dbus.ObjectPath("/org/mpris/MediaPlayer2/Multiplex/CurrentTrack")),
++		"mpris:length":  dbus.MakeVariant(s.ctrl.Duration().Microseconds()),
++		"xesam:title":   dbus.MakeVariant(s.ctrl.Title()),
++	}
++
++	s.props.SetMust(playerIface, "PlaybackStatus", string(status))
++	s.props.SetMust(playerIface, "Metadata", meta)
++	s.props.SetMust(playerIface, "Position", s.ctrl.Position().Microseconds())
++}
++
++// EmitSeeked publishes a Seeked signal with the new position (used when the
++// app seeks internally so consumers can re-sync their position display).
++func (s *Service) EmitSeeked(pos time.Duration) {
++	if s == nil || s.conn == nil {
++		return
++	}
++	_ = s.conn.Emit(objectPath, playerIface+".Seeked", pos.Microseconds())
++}
++
++func readOnly(v interface{}) *prop.Prop {
++	return &prop.Prop{
++		Value:    v,
++		Writable: false,
++		Emit:     prop.EmitTrue,
++	}
++}
++
++// --- D-Bus method exports ---
++
++type rootHandler struct {
++	s            *Service
++	desktopEntry string
++}
++
++func (r *rootHandler) Raise() *dbus.Error {
++	r.s.ctrl.Raise()
++	return nil
++}
++
++func (r *rootHandler) Quit() *dbus.Error {
++	r.s.ctrl.Quit()
++	return nil
++}
++
++type playerHandler struct{ s *Service }
++
++func (p *playerHandler) Play() *dbus.Error      { p.s.ctrl.Play(); return nil }
++func (p *playerHandler) Pause() *dbus.Error     { p.s.ctrl.Pause(); return nil }
++func (p *playerHandler) PlayPause() *dbus.Error { p.s.ctrl.PlayPause(); return nil }
++func (p *playerHandler) Stop() *dbus.Error      { p.s.ctrl.Stop(); return nil }
++
++// Next/Previous are part of the spec but have no meaning for us — MPRIS
++// requires them to exist; we return without erroring so media keys don't
++// blow up.
++func (p *playerHandler) Next() *dbus.Error     { return nil }
++func (p *playerHandler) Previous() *dbus.Error { return nil }
++
++// Seek is called by D-Bus with a microsecond offset (positive or negative).
++func (p *playerHandler) Seek(offsetUsec int64) *dbus.Error {
++	p.s.ctrl.Seek(time.Duration(offsetUsec) * time.Microsecond)
++	return nil
++}
++
++// SetPosition is called with (trackId, position-microseconds). We accept any
++// trackId since we only have one track.
++func (p *playerHandler) SetPosition(_ dbus.ObjectPath, posUsec int64) *dbus.Error {
++	p.s.ctrl.SetPosition(time.Duration(posUsec) * time.Microsecond)
++	return nil
++}
++
++// OpenUri is not supported; the app does its own content acquisition.
++func (p *playerHandler) OpenUri(_ string) *dbus.Error { return nil }
+diff --git a/internal/player/player.go b/internal/player/player.go
+index 6c31d4e3f396640bf969261a81d0363716386d8a..db9bfab6a984fcfdb3d0906d3b75f7ded62994d8 100644
+--- a/internal/player/player.go
++++ b/internal/player/player.go
+@@ -346,8 +346,12 @@ func (p *Player) SetSubtitleURI(uri string) {
+ 	p.mu.Lock()
+ 	mainURI := p.uri
+ 	var pos int64
++	wasPlaying := false
+ 	if p.pipeline != nil {
+ 		p.pipeline.QueryPosition(gst.FormatTimeValue, &pos)
++		var cur, pending gst.State
++		p.pipeline.GetState(&cur, &pending, 0)
++		wasPlaying = cur == gst.StatePlayingValue
+ 	}
+ 	p.mu.Unlock()
+ 
+@@ -373,7 +377,9 @@ 		pipeline.GetState(&cur, &pending, gst.CLOCK_TIME_NONE)
+ 		if pos > 0 {
+ 			pipeline.SeekSimple(gst.FormatTimeValue, gst.SeekFlagFlushValue|gst.SeekFlagKeyUnitValue, pos)
+ 		}
+-		pipeline.SetState(gst.StatePlayingValue)
++		if wasPlaying {
++			pipeline.SetState(gst.StatePlayingValue)
++		}
+ 		return false
+ 	}
+ 	glib.IdleAdd(&onMain, 0)
+diff --git a/modules.txt b/modules.txt
+index 5da687faddba862eb8470c2f7ed482499c49c4f3..2c38f387edd935b24c811676cbac6d02efde61ed 100644
+--- a/modules.txt
++++ b/modules.txt
+@@ -215,6 +215,8 @@ github.com/goccy/go-yaml/token
+ # github.com/godbus/dbus/v5 v5.2.2
+ ## explicit; go 1.20
+ github.com/godbus/dbus/v5
++github.com/godbus/dbus/v5/introspect
++github.com/godbus/dbus/v5/prop
+ # github.com/google/btree v1.1.3
+ ## explicit; go 1.18
+ github.com/google/btree
+@@ -243,6 +245,9 @@ github.com/json-iterator/go
+ # github.com/klauspost/cpuid/v2 v2.3.0
+ ## explicit; go 1.22
+ github.com/klauspost/cpuid/v2
++# github.com/leberKleber/go-mpris v1.1.0
++## explicit; go 1.19
++github.com/leberKleber/go-mpris
+ # github.com/mattn/go-colorable v0.1.14
+ ## explicit; go 1.18
+ github.com/mattn/go-colorable
+diff --git a/po/de.po b/po/de.po
+index ecc5df5801e155b63b8d4d524ca39bcb07ae9f8f..c07d20972142a48da8acc958a5998694a5f48a9d 100644
+--- a/po/de.po
++++ b/po/de.po
+@@ -100,64 +100,64 @@ #: ../assets/resources/controls.ui:64 ../assets/resources/preparing.ui:34
+ msgid "Preparing Stream..."
+ msgstr "Stream wird vorbereitet..."
+ 
+-#: ../assets/resources/controls.blp:78 ../assets/resources/controls.ui:86
++#: ../assets/resources/controls.blp:79 ../assets/resources/controls.ui:87
+ msgid "Show Peers"
+ msgstr "Knoten anzeigen"
+ 
+-#: ../assets/resources/controls.blp:112 ../assets/resources/controls.ui:120
++#: ../assets/resources/controls.blp:114 ../assets/resources/controls.ui:122
+ msgid "Elapsed Time"
+ msgstr "Verstrichene Zeit"
+ 
+-#: ../assets/resources/controls.blp:117 ../assets/resources/controls.ui:126
++#: ../assets/resources/controls.blp:119 ../assets/resources/controls.ui:128
+ msgid "Playback Progress"
+ msgstr "Wiedergabefortschritt"
+ 
+-#: ../assets/resources/controls.blp:127 ../assets/resources/controls.ui:136
++#: ../assets/resources/controls.blp:129 ../assets/resources/controls.ui:138
+ msgid "Remaining Playback Time"
+ msgstr "Verbleibende Wiedergabezeit"
+ 
+-#: ../assets/resources/controls.blp:139
++#: ../assets/resources/controls.blp:141
+ #: ../internal/components/shortcuts_dialog.go:33
+-#: ../assets/resources/controls.ui:150
++#: ../assets/resources/controls.ui:152
+ msgid "Toggle Playback"
+ msgstr "Wiedergabe umschalten"
+ 
+-#: ../assets/resources/controls.blp:144 ../assets/resources/controls.ui:156
++#: ../assets/resources/controls.blp:146 ../assets/resources/controls.ui:158
+ msgid "Stop Playback"
+ msgstr "Wiedergabe stoppen"
+ 
+-#: ../assets/resources/controls.blp:160 ../assets/resources/controls.ui:175
++#: ../assets/resources/controls.blp:162 ../assets/resources/controls.ui:177
+ msgid "Change Audio Track"
+ msgstr "Audiospur wechseln"
+ 
+-#: ../assets/resources/controls.blp:165 ../assets/resources/controls.ui:181
++#: ../assets/resources/controls.blp:167 ../assets/resources/controls.ui:183
+ msgid "Change Subtitles"
+ msgstr "Untertitel wechseln"
+ 
+-#: ../assets/resources/controls.blp:174 ../assets/resources/controls.ui:192
++#: ../assets/resources/controls.blp:176 ../assets/resources/controls.ui:194
+ msgid "Mute/unmute"
+ msgstr "Stummschalten/Stummschaltung aufheben"
+ 
+-#: ../assets/resources/controls.blp:193
++#: ../assets/resources/controls.blp:195
+ #: ../internal/components/shortcuts_dialog.go:36
+-#: ../assets/resources/controls.ui:215
++#: ../assets/resources/controls.ui:217
+ msgid "Toggle Fullscreen"
+ msgstr "Vollbild umschalten"
+ 
+-#: ../assets/resources/controls.blp:228
+-#: ../internal/components/controls_window.go:370
+-#: ../assets/resources/controls.ui:254
++#: ../assets/resources/controls.blp:230
++#: ../internal/components/controls_window.go:372
++#: ../assets/resources/controls.ui:256
+ msgid "You're currently watching alone."
+ msgstr "Sie schauen derzeit alleine zu."
+ 
+-#: ../assets/resources/controls.blp:233 ../assets/resources/controls.ui:260
++#: ../assets/resources/controls.blp:235 ../assets/resources/controls.ui:262
+ msgid ""
+ "Ask the people you want to watch with to enter the following stream code:"
+ msgstr ""
+ "Bitten Sie die Personen, mit denen Sie zuschauen möchten, den folgenden "
+ "Stream-Code einzugeben:"
+ 
+-#: ../assets/resources/controls.blp:248 ../assets/resources/controls.ui:277
++#: ../assets/resources/controls.blp:250 ../assets/resources/controls.ui:279
+ msgid "Copy Stream Code to Clipboard"
+ msgstr "Stream-Code in Zwischenablage kopieren"
+ 
+@@ -424,72 +424,72 @@ #: ../internal/components/shortcuts_dialog.go:26
+ msgid "Quit"
+ msgstr "Beenden"
+ 
+-#: ../internal/components/controls_window.go:360
++#: ../internal/components/controls_window.go:362
+ msgid "Someone joined the session."
+ msgstr "Jemand ist der Sitzung beigetreten."
+ 
+-#: ../internal/components/controls_window.go:365
++#: ../internal/components/controls_window.go:367
+ msgid "Someone left the session."
+ msgstr "Jemand hat die Sitzung verlassen."
+ 
+-#: ../internal/components/controls_window.go:375
++#: ../internal/components/controls_window.go:377
+ msgid "You're currently watching with %v other person."
+ msgstr "Sie schauen derzeit mit %v weiterer Person."
+ 
+-#: ../internal/components/controls_window.go:379
++#: ../internal/components/controls_window.go:381
+ msgid "You're currently watching with %v other people."
+ msgstr "Sie schauen derzeit mit %v weiteren Personen."
+ 
+-#: ../internal/components/controls_window.go:413
+-#: ../internal/components/controls_window.go:466
++#: ../internal/components/controls_window.go:415
++#: ../internal/components/controls_window.go:468
+ msgid "%v MB/%v MB (%v peers)"
+ msgstr "%v MB/%v MB (%v Knoten)"
+ 
+-#: ../internal/components/controls_window.go:418
+-#: ../internal/components/controls_window.go:468
++#: ../internal/components/controls_window.go:420
++#: ../internal/components/controls_window.go:470
+ msgid "Searching for peers"
+ msgstr "Suche nach Knoten"
+ 
+-#: ../internal/components/controls_window.go:650
+-#: ../internal/components/controls_window.go:1358
++#: ../internal/components/controls_window.go:663
++#: ../internal/components/controls_window.go:1373
+ msgid "Track %v"
+ msgstr "Spur %v"
+ 
+-#: ../internal/components/controls_window.go:658
++#: ../internal/components/controls_window.go:671
+ #, fuzzy
+ msgid "Embedded subtitle %v"
+ msgstr "Integrierter Untertitel"
+ 
+-#: ../internal/components/controls_window.go:1137
+-#: ../internal/components/controls_window.go:1311
++#: ../internal/components/controls_window.go:1152
++#: ../internal/components/controls_window.go:1326
+ msgid "None"
+ msgstr "Keine"
+ 
+-#: ../internal/components/controls_window.go:1241
++#: ../internal/components/controls_window.go:1256
+ msgid "Disable subtitles"
+ msgstr "Untertitel deaktivieren"
+ 
+-#: ../internal/components/controls_window.go:1244
++#: ../internal/components/controls_window.go:1259
+ msgid "Integrated subtitle"
+ msgstr "Integrierter Untertitel"
+ 
+-#: ../internal/components/controls_window.go:1247
++#: ../internal/components/controls_window.go:1262
+ msgid "Subtitle from torrent"
+ msgstr "Untertitel aus Torrent"
+ 
+-#: ../internal/components/controls_window.go:1250
++#: ../internal/components/controls_window.go:1265
+ msgid "Manually added"
+ msgstr "Manuell hinzugefügt"
+ 
+-#: ../internal/components/controls_window.go:1262
++#: ../internal/components/controls_window.go:1277
+ msgid "Select subtitle file"
+ msgstr "Untertitel-Datei auswählen"
+ 
+-#: ../internal/components/controls_window.go:1356
++#: ../internal/components/controls_window.go:1371
+ msgid "Disable audio"
+ msgstr "Audio deaktivieren"
+ 
+-#: ../internal/components/controls_window.go:1362
++#: ../internal/components/controls_window.go:1377
+ msgid "Untitled Track"
+ msgstr "Unbenannte Spur"
+ 
+diff --git a/po/en_GB.po b/po/en_GB.po
+index 1d6ea18b18b08aa5709e06ae9ce50258f22e6541..86e0d95e8f320fbba841a2fb566237f17e2590b2 100644
+--- a/po/en_GB.po
++++ b/po/en_GB.po
+@@ -99,63 +99,63 @@ #: ../assets/resources/controls.ui:64 ../assets/resources/preparing.ui:34
+ msgid "Preparing Stream..."
+ msgstr "Preparing Stream..."
+ 
+-#: ../assets/resources/controls.blp:78 ../assets/resources/controls.ui:86
++#: ../assets/resources/controls.blp:79 ../assets/resources/controls.ui:87
+ msgid "Show Peers"
+ msgstr "Show Peers"
+ 
+-#: ../assets/resources/controls.blp:112 ../assets/resources/controls.ui:120
++#: ../assets/resources/controls.blp:114 ../assets/resources/controls.ui:122
+ msgid "Elapsed Time"
+ msgstr "Elapsed Time"
+ 
+-#: ../assets/resources/controls.blp:117 ../assets/resources/controls.ui:126
++#: ../assets/resources/controls.blp:119 ../assets/resources/controls.ui:128
+ msgid "Playback Progress"
+ msgstr "Playback Progress"
+ 
+-#: ../assets/resources/controls.blp:127 ../assets/resources/controls.ui:136
++#: ../assets/resources/controls.blp:129 ../assets/resources/controls.ui:138
+ msgid "Remaining Playback Time"
+ msgstr "Remaining Playback Time"
+ 
+-#: ../assets/resources/controls.blp:139
++#: ../assets/resources/controls.blp:141
+ #: ../internal/components/shortcuts_dialog.go:33
+-#: ../assets/resources/controls.ui:150
++#: ../assets/resources/controls.ui:152
+ msgid "Toggle Playback"
+ msgstr "Toggle Playback"
+ 
+-#: ../assets/resources/controls.blp:144 ../assets/resources/controls.ui:156
++#: ../assets/resources/controls.blp:146 ../assets/resources/controls.ui:158
+ msgid "Stop Playback"
+ msgstr "Stop Playback"
+ 
+-#: ../assets/resources/controls.blp:160 ../assets/resources/controls.ui:175
++#: ../assets/resources/controls.blp:162 ../assets/resources/controls.ui:177
+ msgid "Change Audio Track"
+ msgstr "Change Audio Track"
+ 
+-#: ../assets/resources/controls.blp:165 ../assets/resources/controls.ui:181
++#: ../assets/resources/controls.blp:167 ../assets/resources/controls.ui:183
+ msgid "Change Subtitles"
+ msgstr "Change Subtitles"
+ 
+-#: ../assets/resources/controls.blp:174 ../assets/resources/controls.ui:192
++#: ../assets/resources/controls.blp:176 ../assets/resources/controls.ui:194
+ msgid "Mute/unmute"
+ msgstr "Mute/unmute"
+ 
+-#: ../assets/resources/controls.blp:193
++#: ../assets/resources/controls.blp:195
+ #: ../internal/components/shortcuts_dialog.go:36
+-#: ../assets/resources/controls.ui:215
++#: ../assets/resources/controls.ui:217
+ msgid "Toggle Fullscreen"
+ msgstr "Toggle Fullscreen"
+ 
+-#: ../assets/resources/controls.blp:228
+-#: ../internal/components/controls_window.go:370
+-#: ../assets/resources/controls.ui:254
++#: ../assets/resources/controls.blp:230
++#: ../internal/components/controls_window.go:372
++#: ../assets/resources/controls.ui:256
+ msgid "You're currently watching alone."
+ msgstr "You're currently watching alone."
+ 
+-#: ../assets/resources/controls.blp:233 ../assets/resources/controls.ui:260
++#: ../assets/resources/controls.blp:235 ../assets/resources/controls.ui:262
+ msgid ""
+ "Ask the people you want to watch with to enter the following stream code:"
+ msgstr ""
+ "Ask the people you want to watch with to enter the following stream code:"
+ 
+-#: ../assets/resources/controls.blp:248 ../assets/resources/controls.ui:277
++#: ../assets/resources/controls.blp:250 ../assets/resources/controls.ui:279
+ msgid "Copy Stream Code to Clipboard"
+ msgstr "Copy Stream Code to Clipboard"
+ 
+@@ -420,72 +420,72 @@ #: ../internal/components/shortcuts_dialog.go:26
+ msgid "Quit"
+ msgstr "Quit"
+ 
+-#: ../internal/components/controls_window.go:360
++#: ../internal/components/controls_window.go:362
+ msgid "Someone joined the session."
+ msgstr "Someone joined the session."
+ 
+-#: ../internal/components/controls_window.go:365
++#: ../internal/components/controls_window.go:367
+ msgid "Someone left the session."
+ msgstr "Someone left the session."
+ 
+-#: ../internal/components/controls_window.go:375
++#: ../internal/components/controls_window.go:377
+ msgid "You're currently watching with %v other person."
+ msgstr "You're currently watching with %v other person."
+ 
+-#: ../internal/components/controls_window.go:379
++#: ../internal/components/controls_window.go:381
+ msgid "You're currently watching with %v other people."
+ msgstr "You're currently watching with %v other people."
+ 
+-#: ../internal/components/controls_window.go:413
+-#: ../internal/components/controls_window.go:466
++#: ../internal/components/controls_window.go:415
++#: ../internal/components/controls_window.go:468
+ msgid "%v MB/%v MB (%v peers)"
+ msgstr "%v MB/%v MB (%v peers)"
+ 
+-#: ../internal/components/controls_window.go:418
+-#: ../internal/components/controls_window.go:468
++#: ../internal/components/controls_window.go:420
++#: ../internal/components/controls_window.go:470
+ msgid "Searching for peers"
+ msgstr "Searching for peers"
+ 
+-#: ../internal/components/controls_window.go:650
+-#: ../internal/components/controls_window.go:1358
++#: ../internal/components/controls_window.go:663
++#: ../internal/components/controls_window.go:1373
+ msgid "Track %v"
+ msgstr "Track %v"
+ 
+-#: ../internal/components/controls_window.go:658
++#: ../internal/components/controls_window.go:671
+ #, fuzzy
+ msgid "Embedded subtitle %v"
+ msgstr "Integrated subtitle"
+ 
+-#: ../internal/components/controls_window.go:1137
+-#: ../internal/components/controls_window.go:1311
++#: ../internal/components/controls_window.go:1152
++#: ../internal/components/controls_window.go:1326
+ msgid "None"
+ msgstr "None"
+ 
+-#: ../internal/components/controls_window.go:1241
++#: ../internal/components/controls_window.go:1256
+ msgid "Disable subtitles"
+ msgstr "Disable subtitles"
+ 
+-#: ../internal/components/controls_window.go:1244
++#: ../internal/components/controls_window.go:1259
+ msgid "Integrated subtitle"
+ msgstr "Integrated subtitle"
+ 
+-#: ../internal/components/controls_window.go:1247
++#: ../internal/components/controls_window.go:1262
+ msgid "Subtitle from torrent"
+ msgstr "Subtitle from torrent"
+ 
+-#: ../internal/components/controls_window.go:1250
++#: ../internal/components/controls_window.go:1265
+ msgid "Manually added"
+ msgstr "Manually added"
+ 
+-#: ../internal/components/controls_window.go:1262
++#: ../internal/components/controls_window.go:1277
+ msgid "Select subtitle file"
+ msgstr "Select subtitle file"
+ 
+-#: ../internal/components/controls_window.go:1356
++#: ../internal/components/controls_window.go:1371
+ msgid "Disable audio"
+ msgstr "Disable audio"
+ 
+-#: ../internal/components/controls_window.go:1362
++#: ../internal/components/controls_window.go:1377
+ msgid "Untitled Track"
+ msgstr "Untitled Track"
+ 
+diff --git a/po/en_US.po b/po/en_US.po
+index 370d0665fb657cc0571a415bd8487d0b12e2a892..4f5f0f033438395097095fcd684b56d99b5ca007 100644
+--- a/po/en_US.po
++++ b/po/en_US.po
+@@ -99,63 +99,63 @@ #: ../assets/resources/controls.ui:64 ../assets/resources/preparing.ui:34
+ msgid "Preparing Stream..."
+ msgstr "Preparing Stream..."
+ 
+-#: ../assets/resources/controls.blp:78 ../assets/resources/controls.ui:86
++#: ../assets/resources/controls.blp:79 ../assets/resources/controls.ui:87
+ msgid "Show Peers"
+ msgstr "Show Peers"
+ 
+-#: ../assets/resources/controls.blp:112 ../assets/resources/controls.ui:120
++#: ../assets/resources/controls.blp:114 ../assets/resources/controls.ui:122
+ msgid "Elapsed Time"
+ msgstr "Elapsed Time"
+ 
+-#: ../assets/resources/controls.blp:117 ../assets/resources/controls.ui:126
++#: ../assets/resources/controls.blp:119 ../assets/resources/controls.ui:128
+ msgid "Playback Progress"
+ msgstr "Playback Progress"
+ 
+-#: ../assets/resources/controls.blp:127 ../assets/resources/controls.ui:136
++#: ../assets/resources/controls.blp:129 ../assets/resources/controls.ui:138
+ msgid "Remaining Playback Time"
+ msgstr "Remaining Playback Time"
+ 
+-#: ../assets/resources/controls.blp:139
++#: ../assets/resources/controls.blp:141
+ #: ../internal/components/shortcuts_dialog.go:33
+-#: ../assets/resources/controls.ui:150
++#: ../assets/resources/controls.ui:152
+ msgid "Toggle Playback"
+ msgstr "Toggle Playback"
+ 
+-#: ../assets/resources/controls.blp:144 ../assets/resources/controls.ui:156
++#: ../assets/resources/controls.blp:146 ../assets/resources/controls.ui:158
+ msgid "Stop Playback"
+ msgstr "Stop Playback"
+ 
+-#: ../assets/resources/controls.blp:160 ../assets/resources/controls.ui:175
++#: ../assets/resources/controls.blp:162 ../assets/resources/controls.ui:177
+ msgid "Change Audio Track"
+ msgstr "Change Audio Track"
+ 
+-#: ../assets/resources/controls.blp:165 ../assets/resources/controls.ui:181
++#: ../assets/resources/controls.blp:167 ../assets/resources/controls.ui:183
+ msgid "Change Subtitles"
+ msgstr "Change Subtitles"
+ 
+-#: ../assets/resources/controls.blp:174 ../assets/resources/controls.ui:192
++#: ../assets/resources/controls.blp:176 ../assets/resources/controls.ui:194
+ msgid "Mute/unmute"
+ msgstr "Mute/unmute"
+ 
+-#: ../assets/resources/controls.blp:193
++#: ../assets/resources/controls.blp:195
+ #: ../internal/components/shortcuts_dialog.go:36
+-#: ../assets/resources/controls.ui:215
++#: ../assets/resources/controls.ui:217
+ msgid "Toggle Fullscreen"
+ msgstr "Toggle Fullscreen"
+ 
+-#: ../assets/resources/controls.blp:228
+-#: ../internal/components/controls_window.go:370
+-#: ../assets/resources/controls.ui:254
++#: ../assets/resources/controls.blp:230
++#: ../internal/components/controls_window.go:372
++#: ../assets/resources/controls.ui:256
+ msgid "You're currently watching alone."
+ msgstr "You're currently watching alone."
+ 
+-#: ../assets/resources/controls.blp:233 ../assets/resources/controls.ui:260
++#: ../assets/resources/controls.blp:235 ../assets/resources/controls.ui:262
+ msgid ""
+ "Ask the people you want to watch with to enter the following stream code:"
+ msgstr ""
+ "Ask the people you want to watch with to enter the following stream code:"
+ 
+-#: ../assets/resources/controls.blp:248 ../assets/resources/controls.ui:277
++#: ../assets/resources/controls.blp:250 ../assets/resources/controls.ui:279
+ msgid "Copy Stream Code to Clipboard"
+ msgstr "Copy Stream Code to Clipboard"
+ 
+@@ -420,72 +420,72 @@ #: ../internal/components/shortcuts_dialog.go:26
+ msgid "Quit"
+ msgstr "Quit"
+ 
+-#: ../internal/components/controls_window.go:360
++#: ../internal/components/controls_window.go:362
+ msgid "Someone joined the session."
+ msgstr "Someone joined the session."
+ 
+-#: ../internal/components/controls_window.go:365
++#: ../internal/components/controls_window.go:367
+ msgid "Someone left the session."
+ msgstr "Someone left the session."
+ 
+-#: ../internal/components/controls_window.go:375
++#: ../internal/components/controls_window.go:377
+ msgid "You're currently watching with %v other person."
+ msgstr "You're currently watching with %v other person."
+ 
+-#: ../internal/components/controls_window.go:379
++#: ../internal/components/controls_window.go:381
+ msgid "You're currently watching with %v other people."
+ msgstr "You're currently watching with %v other people."
+ 
+-#: ../internal/components/controls_window.go:413
+-#: ../internal/components/controls_window.go:466
++#: ../internal/components/controls_window.go:415
++#: ../internal/components/controls_window.go:468
+ msgid "%v MB/%v MB (%v peers)"
+ msgstr "%v MB/%v MB (%v peers)"
+ 
+-#: ../internal/components/controls_window.go:418
+-#: ../internal/components/controls_window.go:468
++#: ../internal/components/controls_window.go:420
++#: ../internal/components/controls_window.go:470
+ msgid "Searching for peers"
+ msgstr "Searching for peers"
+ 
+-#: ../internal/components/controls_window.go:650
+-#: ../internal/components/controls_window.go:1358
++#: ../internal/components/controls_window.go:663
++#: ../internal/components/controls_window.go:1373
+ msgid "Track %v"
+ msgstr "Track %v"
+ 
+-#: ../internal/components/controls_window.go:658
++#: ../internal/components/controls_window.go:671
+ #, fuzzy
+ msgid "Embedded subtitle %v"
+ msgstr "Integrated subtitle"
+ 
+-#: ../internal/components/controls_window.go:1137
+-#: ../internal/components/controls_window.go:1311
++#: ../internal/components/controls_window.go:1152
++#: ../internal/components/controls_window.go:1326
+ msgid "None"
+ msgstr "None"
+ 
+-#: ../internal/components/controls_window.go:1241
++#: ../internal/components/controls_window.go:1256
+ msgid "Disable subtitles"
+ msgstr "Disable subtitles"
+ 
+-#: ../internal/components/controls_window.go:1244
++#: ../internal/components/controls_window.go:1259
+ msgid "Integrated subtitle"
+ msgstr "Integrated subtitle"
+ 
+-#: ../internal/components/controls_window.go:1247
++#: ../internal/components/controls_window.go:1262
+ msgid "Subtitle from torrent"
+ msgstr "Subtitle from torrent"
+ 
+-#: ../internal/components/controls_window.go:1250
++#: ../internal/components/controls_window.go:1265
+ msgid "Manually added"
+ msgstr "Manually added"
+ 
+-#: ../internal/components/controls_window.go:1262
++#: ../internal/components/controls_window.go:1277
+ msgid "Select subtitle file"
+ msgstr "Select subtitle file"
+ 
+-#: ../internal/components/controls_window.go:1356
++#: ../internal/components/controls_window.go:1371
+ msgid "Disable audio"
+ msgstr "Disable audio"
+ 
+-#: ../internal/components/controls_window.go:1362
++#: ../internal/components/controls_window.go:1377
+ msgid "Untitled Track"
+ msgstr "Untitled Track"
+ 
+diff --git a/po/fr.po b/po/fr.po
+index ee964dee89c0e0a6a13f854dd3b97c2220018368..1c8705b2cd209c28342e7a1990e87a88eb624808 100644
+--- a/po/fr.po
++++ b/po/fr.po
+@@ -99,64 +99,64 @@ #: ../assets/resources/controls.ui:64 ../assets/resources/preparing.ui:34
+ msgid "Preparing Stream..."
+ msgstr "Préparation du flux en cours…"
+ 
+-#: ../assets/resources/controls.blp:78 ../assets/resources/controls.ui:86
++#: ../assets/resources/controls.blp:79 ../assets/resources/controls.ui:87
+ msgid "Show Peers"
+ msgstr "Afficher les pairs"
+ 
+-#: ../assets/resources/controls.blp:112 ../assets/resources/controls.ui:120
++#: ../assets/resources/controls.blp:114 ../assets/resources/controls.ui:122
+ msgid "Elapsed Time"
+ msgstr "Temps écoulé"
+ 
+-#: ../assets/resources/controls.blp:117 ../assets/resources/controls.ui:126
++#: ../assets/resources/controls.blp:119 ../assets/resources/controls.ui:128
+ msgid "Playback Progress"
+ msgstr "Progression de la lecture"
+ 
+-#: ../assets/resources/controls.blp:127 ../assets/resources/controls.ui:136
++#: ../assets/resources/controls.blp:129 ../assets/resources/controls.ui:138
+ msgid "Remaining Playback Time"
+ msgstr "Temps de lecture restant"
+ 
+-#: ../assets/resources/controls.blp:139
++#: ../assets/resources/controls.blp:141
+ #: ../internal/components/shortcuts_dialog.go:33
+-#: ../assets/resources/controls.ui:150
++#: ../assets/resources/controls.ui:152
+ msgid "Toggle Playback"
+ msgstr "Basculer la lecture"
+ 
+-#: ../assets/resources/controls.blp:144 ../assets/resources/controls.ui:156
++#: ../assets/resources/controls.blp:146 ../assets/resources/controls.ui:158
+ msgid "Stop Playback"
+ msgstr "Arrêter la lecture"
+ 
+-#: ../assets/resources/controls.blp:160 ../assets/resources/controls.ui:175
++#: ../assets/resources/controls.blp:162 ../assets/resources/controls.ui:177
+ msgid "Change Audio Track"
+ msgstr "Changer de piste audio"
+ 
+-#: ../assets/resources/controls.blp:165 ../assets/resources/controls.ui:181
++#: ../assets/resources/controls.blp:167 ../assets/resources/controls.ui:183
+ msgid "Change Subtitles"
+ msgstr "Changer les sous-titres"
+ 
+-#: ../assets/resources/controls.blp:174 ../assets/resources/controls.ui:192
++#: ../assets/resources/controls.blp:176 ../assets/resources/controls.ui:194
+ msgid "Mute/unmute"
+ msgstr "Activer/désactiver le son"
+ 
+-#: ../assets/resources/controls.blp:193
++#: ../assets/resources/controls.blp:195
+ #: ../internal/components/shortcuts_dialog.go:36
+-#: ../assets/resources/controls.ui:215
++#: ../assets/resources/controls.ui:217
+ msgid "Toggle Fullscreen"
+ msgstr "Basculer en plein écran"
+ 
+-#: ../assets/resources/controls.blp:228
+-#: ../internal/components/controls_window.go:370
+-#: ../assets/resources/controls.ui:254
++#: ../assets/resources/controls.blp:230
++#: ../internal/components/controls_window.go:372
++#: ../assets/resources/controls.ui:256
+ msgid "You're currently watching alone."
+ msgstr "Vous regardez actuellement seul."
+ 
+-#: ../assets/resources/controls.blp:233 ../assets/resources/controls.ui:260
++#: ../assets/resources/controls.blp:235 ../assets/resources/controls.ui:262
+ msgid ""
+ "Ask the people you want to watch with to enter the following stream code:"
+ msgstr ""
+ "Demandez aux personnes avec qui vous souhaitez regarder d’entrer le code de "
+ "diffusion suivant :"
+ 
+-#: ../assets/resources/controls.blp:248 ../assets/resources/controls.ui:277
++#: ../assets/resources/controls.blp:250 ../assets/resources/controls.ui:279
+ msgid "Copy Stream Code to Clipboard"
+ msgstr "Copier le code de diffusion dans le presse-papiers"
+ 
+@@ -422,72 +422,72 @@ #: ../internal/components/shortcuts_dialog.go:26
+ msgid "Quit"
+ msgstr "Quitter"
+ 
+-#: ../internal/components/controls_window.go:360
++#: ../internal/components/controls_window.go:362
+ msgid "Someone joined the session."
+ msgstr "Quelqu'un a rejoint la session."
+ 
+-#: ../internal/components/controls_window.go:365
++#: ../internal/components/controls_window.go:367
+ msgid "Someone left the session."
+ msgstr "Quelqu'un a quitté la session."
+ 
+-#: ../internal/components/controls_window.go:375
++#: ../internal/components/controls_window.go:377
+ msgid "You're currently watching with %v other person."
+ msgstr "Vous regardez actuellement avec %v autre personne."
+ 
+-#: ../internal/components/controls_window.go:379
++#: ../internal/components/controls_window.go:381
+ msgid "You're currently watching with %v other people."
+ msgstr "Vous regardez actuellement avec %v autres personnes."
+ 
+-#: ../internal/components/controls_window.go:413
+-#: ../internal/components/controls_window.go:466
++#: ../internal/components/controls_window.go:415
++#: ../internal/components/controls_window.go:468
+ msgid "%v MB/%v MB (%v peers)"
+ msgstr "%v Mo/%v Mo (%v pairs)"
+ 
+-#: ../internal/components/controls_window.go:418
+-#: ../internal/components/controls_window.go:468
++#: ../internal/components/controls_window.go:420
++#: ../internal/components/controls_window.go:470
+ msgid "Searching for peers"
+ msgstr "Recherche de pairs"
+ 
+-#: ../internal/components/controls_window.go:650
+-#: ../internal/components/controls_window.go:1358
++#: ../internal/components/controls_window.go:663
++#: ../internal/components/controls_window.go:1373
+ msgid "Track %v"
+ msgstr "Piste %v"
+ 
+-#: ../internal/components/controls_window.go:658
++#: ../internal/components/controls_window.go:671
+ #, fuzzy
+ msgid "Embedded subtitle %v"
+ msgstr "Sous-titre intégré"
+ 
+-#: ../internal/components/controls_window.go:1137
+-#: ../internal/components/controls_window.go:1311
++#: ../internal/components/controls_window.go:1152
++#: ../internal/components/controls_window.go:1326
+ msgid "None"
+ msgstr "Aucun"
+ 
+-#: ../internal/components/controls_window.go:1241
++#: ../internal/components/controls_window.go:1256
+ msgid "Disable subtitles"
+ msgstr "Désactiver les sous-titres"
+ 
+-#: ../internal/components/controls_window.go:1244
++#: ../internal/components/controls_window.go:1259
+ msgid "Integrated subtitle"
+ msgstr "Sous-titre intégré"
+ 
+-#: ../internal/components/controls_window.go:1247
++#: ../internal/components/controls_window.go:1262
+ msgid "Subtitle from torrent"
+ msgstr "Sous-titre du torrent"
+ 
+-#: ../internal/components/controls_window.go:1250
++#: ../internal/components/controls_window.go:1265
+ msgid "Manually added"
+ msgstr "Ajouté manuellement"
+ 
+-#: ../internal/components/controls_window.go:1262
++#: ../internal/components/controls_window.go:1277
+ msgid "Select subtitle file"
+ msgstr "Sélectionner le fichier de sous-titres"
+ 
+-#: ../internal/components/controls_window.go:1356
++#: ../internal/components/controls_window.go:1371
+ msgid "Disable audio"
+ msgstr "Désactiver l'audio"
+ 
+-#: ../internal/components/controls_window.go:1362
++#: ../internal/components/controls_window.go:1377
+ msgid "Untitled Track"
+ msgstr "Piste sans titre"
+ 
+diff --git a/po/fr_CA.po b/po/fr_CA.po
+index ee964dee89c0e0a6a13f854dd3b97c2220018368..1c8705b2cd209c28342e7a1990e87a88eb624808 100644
+--- a/po/fr_CA.po
++++ b/po/fr_CA.po
+@@ -99,64 +99,64 @@ #: ../assets/resources/controls.ui:64 ../assets/resources/preparing.ui:34
+ msgid "Preparing Stream..."
+ msgstr "Préparation du flux en cours…"
+ 
+-#: ../assets/resources/controls.blp:78 ../assets/resources/controls.ui:86
++#: ../assets/resources/controls.blp:79 ../assets/resources/controls.ui:87
+ msgid "Show Peers"
+ msgstr "Afficher les pairs"
+ 
+-#: ../assets/resources/controls.blp:112 ../assets/resources/controls.ui:120
++#: ../assets/resources/controls.blp:114 ../assets/resources/controls.ui:122
+ msgid "Elapsed Time"
+ msgstr "Temps écoulé"
+ 
+-#: ../assets/resources/controls.blp:117 ../assets/resources/controls.ui:126
++#: ../assets/resources/controls.blp:119 ../assets/resources/controls.ui:128
+ msgid "Playback Progress"
+ msgstr "Progression de la lecture"
+ 
+-#: ../assets/resources/controls.blp:127 ../assets/resources/controls.ui:136
++#: ../assets/resources/controls.blp:129 ../assets/resources/controls.ui:138
+ msgid "Remaining Playback Time"
+ msgstr "Temps de lecture restant"
+ 
+-#: ../assets/resources/controls.blp:139
++#: ../assets/resources/controls.blp:141
+ #: ../internal/components/shortcuts_dialog.go:33
+-#: ../assets/resources/controls.ui:150
++#: ../assets/resources/controls.ui:152
+ msgid "Toggle Playback"
+ msgstr "Basculer la lecture"
+ 
+-#: ../assets/resources/controls.blp:144 ../assets/resources/controls.ui:156
++#: ../assets/resources/controls.blp:146 ../assets/resources/controls.ui:158
+ msgid "Stop Playback"
+ msgstr "Arrêter la lecture"
+ 
+-#: ../assets/resources/controls.blp:160 ../assets/resources/controls.ui:175
++#: ../assets/resources/controls.blp:162 ../assets/resources/controls.ui:177
+ msgid "Change Audio Track"
+ msgstr "Changer de piste audio"
+ 
+-#: ../assets/resources/controls.blp:165 ../assets/resources/controls.ui:181
++#: ../assets/resources/controls.blp:167 ../assets/resources/controls.ui:183
+ msgid "Change Subtitles"
+ msgstr "Changer les sous-titres"
+ 
+-#: ../assets/resources/controls.blp:174 ../assets/resources/controls.ui:192
++#: ../assets/resources/controls.blp:176 ../assets/resources/controls.ui:194
+ msgid "Mute/unmute"
+ msgstr "Activer/désactiver le son"
+ 
+-#: ../assets/resources/controls.blp:193
++#: ../assets/resources/controls.blp:195
+ #: ../internal/components/shortcuts_dialog.go:36
+-#: ../assets/resources/controls.ui:215
++#: ../assets/resources/controls.ui:217
+ msgid "Toggle Fullscreen"
+ msgstr "Basculer en plein écran"
+ 
+-#: ../assets/resources/controls.blp:228
+-#: ../internal/components/controls_window.go:370
+-#: ../assets/resources/controls.ui:254
++#: ../assets/resources/controls.blp:230
++#: ../internal/components/controls_window.go:372
++#: ../assets/resources/controls.ui:256
+ msgid "You're currently watching alone."
+ msgstr "Vous regardez actuellement seul."
+ 
+-#: ../assets/resources/controls.blp:233 ../assets/resources/controls.ui:260
++#: ../assets/resources/controls.blp:235 ../assets/resources/controls.ui:262
+ msgid ""
+ "Ask the people you want to watch with to enter the following stream code:"
+ msgstr ""
+ "Demandez aux personnes avec qui vous souhaitez regarder d’entrer le code de "
+ "diffusion suivant :"
+ 
+-#: ../assets/resources/controls.blp:248 ../assets/resources/controls.ui:277
++#: ../assets/resources/controls.blp:250 ../assets/resources/controls.ui:279
+ msgid "Copy Stream Code to Clipboard"
+ msgstr "Copier le code de diffusion dans le presse-papiers"
+ 
+@@ -422,72 +422,72 @@ #: ../internal/components/shortcuts_dialog.go:26
+ msgid "Quit"
+ msgstr "Quitter"
+ 
+-#: ../internal/components/controls_window.go:360
++#: ../internal/components/controls_window.go:362
+ msgid "Someone joined the session."
+ msgstr "Quelqu'un a rejoint la session."
+ 
+-#: ../internal/components/controls_window.go:365
++#: ../internal/components/controls_window.go:367
+ msgid "Someone left the session."
+ msgstr "Quelqu'un a quitté la session."
+ 
+-#: ../internal/components/controls_window.go:375
++#: ../internal/components/controls_window.go:377
+ msgid "You're currently watching with %v other person."
+ msgstr "Vous regardez actuellement avec %v autre personne."
+ 
+-#: ../internal/components/controls_window.go:379
++#: ../internal/components/controls_window.go:381
+ msgid "You're currently watching with %v other people."
+ msgstr "Vous regardez actuellement avec %v autres personnes."
+ 
+-#: ../internal/components/controls_window.go:413
+-#: ../internal/components/controls_window.go:466
++#: ../internal/components/controls_window.go:415
++#: ../internal/components/controls_window.go:468
+ msgid "%v MB/%v MB (%v peers)"
+ msgstr "%v Mo/%v Mo (%v pairs)"
+ 
+-#: ../internal/components/controls_window.go:418
+-#: ../internal/components/controls_window.go:468
++#: ../internal/components/controls_window.go:420
++#: ../internal/components/controls_window.go:470
+ msgid "Searching for peers"
+ msgstr "Recherche de pairs"
+ 
+-#: ../internal/components/controls_window.go:650
+-#: ../internal/components/controls_window.go:1358
++#: ../internal/components/controls_window.go:663
++#: ../internal/components/controls_window.go:1373
+ msgid "Track %v"
+ msgstr "Piste %v"
+ 
+-#: ../internal/components/controls_window.go:658
++#: ../internal/components/controls_window.go:671
+ #, fuzzy
+ msgid "Embedded subtitle %v"
+ msgstr "Sous-titre intégré"
+ 
+-#: ../internal/components/controls_window.go:1137
+-#: ../internal/components/controls_window.go:1311
++#: ../internal/components/controls_window.go:1152
++#: ../internal/components/controls_window.go:1326
+ msgid "None"
+ msgstr "Aucun"
+ 
+-#: ../internal/components/controls_window.go:1241
++#: ../internal/components/controls_window.go:1256
+ msgid "Disable subtitles"
+ msgstr "Désactiver les sous-titres"
+ 
+-#: ../internal/components/controls_window.go:1244
++#: ../internal/components/controls_window.go:1259
+ msgid "Integrated subtitle"
+ msgstr "Sous-titre intégré"
+ 
+-#: ../internal/components/controls_window.go:1247
++#: ../internal/components/controls_window.go:1262
+ msgid "Subtitle from torrent"
+ msgstr "Sous-titre du torrent"
+ 
+-#: ../internal/components/controls_window.go:1250
++#: ../internal/components/controls_window.go:1265
+ msgid "Manually added"
+ msgstr "Ajouté manuellement"
+ 
+-#: ../internal/components/controls_window.go:1262
++#: ../internal/components/controls_window.go:1277
+ msgid "Select subtitle file"
+ msgstr "Sélectionner le fichier de sous-titres"
+ 
+-#: ../internal/components/controls_window.go:1356
++#: ../internal/components/controls_window.go:1371
+ msgid "Disable audio"
+ msgstr "Désactiver l'audio"
+ 
+-#: ../internal/components/controls_window.go:1362
++#: ../internal/components/controls_window.go:1377
+ msgid "Untitled Track"
+ msgstr "Piste sans titre"
+ 
+diff --git a/po/multiplex.pot b/po/multiplex.pot
+index 10ec37611ca61ebc2407522629937de74dfa9b68..908ba1ef3e07acca3f318c2f8c10a68bd99c87c9 100644
+--- a/po/multiplex.pot
++++ b/po/multiplex.pot
+@@ -90,62 +90,62 @@ #: ../assets/resources/controls.ui:64 ../assets/resources/preparing.ui:34
+ msgid "Preparing Stream..."
+ msgstr ""
+ 
+-#: ../assets/resources/controls.blp:78 ../assets/resources/controls.ui:86
++#: ../assets/resources/controls.blp:79 ../assets/resources/controls.ui:87
+ msgid "Show Peers"
+ msgstr ""
+ 
+-#: ../assets/resources/controls.blp:112 ../assets/resources/controls.ui:120
++#: ../assets/resources/controls.blp:114 ../assets/resources/controls.ui:122
+ msgid "Elapsed Time"
+ msgstr ""
+ 
+-#: ../assets/resources/controls.blp:117 ../assets/resources/controls.ui:126
++#: ../assets/resources/controls.blp:119 ../assets/resources/controls.ui:128
+ msgid "Playback Progress"
+ msgstr ""
+ 
+-#: ../assets/resources/controls.blp:127 ../assets/resources/controls.ui:136
++#: ../assets/resources/controls.blp:129 ../assets/resources/controls.ui:138
+ msgid "Remaining Playback Time"
+ msgstr ""
+ 
+-#: ../assets/resources/controls.blp:139
++#: ../assets/resources/controls.blp:141
+ #: ../internal/components/shortcuts_dialog.go:33
+-#: ../assets/resources/controls.ui:150
++#: ../assets/resources/controls.ui:152
+ msgid "Toggle Playback"
+ msgstr ""
+ 
+-#: ../assets/resources/controls.blp:144 ../assets/resources/controls.ui:156
++#: ../assets/resources/controls.blp:146 ../assets/resources/controls.ui:158
+ msgid "Stop Playback"
+ msgstr ""
+ 
+-#: ../assets/resources/controls.blp:160 ../assets/resources/controls.ui:175
++#: ../assets/resources/controls.blp:162 ../assets/resources/controls.ui:177
+ msgid "Change Audio Track"
+ msgstr ""
+ 
+-#: ../assets/resources/controls.blp:165 ../assets/resources/controls.ui:181
++#: ../assets/resources/controls.blp:167 ../assets/resources/controls.ui:183
+ msgid "Change Subtitles"
+ msgstr ""
+ 
+-#: ../assets/resources/controls.blp:174 ../assets/resources/controls.ui:192
++#: ../assets/resources/controls.blp:176 ../assets/resources/controls.ui:194
+ msgid "Mute/unmute"
+ msgstr ""
+ 
+-#: ../assets/resources/controls.blp:193
++#: ../assets/resources/controls.blp:195
+ #: ../internal/components/shortcuts_dialog.go:36
+-#: ../assets/resources/controls.ui:215
++#: ../assets/resources/controls.ui:217
+ msgid "Toggle Fullscreen"
+ msgstr ""
+ 
+-#: ../assets/resources/controls.blp:228
+-#: ../internal/components/controls_window.go:370
+-#: ../assets/resources/controls.ui:254
++#: ../assets/resources/controls.blp:230
++#: ../internal/components/controls_window.go:372
++#: ../assets/resources/controls.ui:256
+ msgid "You're currently watching alone."
+ msgstr ""
+ 
+-#: ../assets/resources/controls.blp:233 ../assets/resources/controls.ui:260
++#: ../assets/resources/controls.blp:235 ../assets/resources/controls.ui:262
+ msgid ""
+ "Ask the people you want to watch with to enter the following stream code:"
+ msgstr ""
+ 
+-#: ../assets/resources/controls.blp:248 ../assets/resources/controls.ui:277
++#: ../assets/resources/controls.blp:250 ../assets/resources/controls.ui:279
+ msgid "Copy Stream Code to Clipboard"
+ msgstr ""
+ 
+@@ -406,71 +406,71 @@ #: ../internal/components/shortcuts_dialog.go:26
+ msgid "Quit"
+ msgstr ""
+ 
+-#: ../internal/components/controls_window.go:360
++#: ../internal/components/controls_window.go:362
+ msgid "Someone joined the session."
+ msgstr ""
+ 
+-#: ../internal/components/controls_window.go:365
++#: ../internal/components/controls_window.go:367
+ msgid "Someone left the session."
+ msgstr ""
+ 
+-#: ../internal/components/controls_window.go:375
++#: ../internal/components/controls_window.go:377
+ msgid "You're currently watching with %v other person."
+ msgstr ""
+ 
+-#: ../internal/components/controls_window.go:379
++#: ../internal/components/controls_window.go:381
+ msgid "You're currently watching with %v other people."
+ msgstr ""
+ 
+-#: ../internal/components/controls_window.go:413
+-#: ../internal/components/controls_window.go:466
++#: ../internal/components/controls_window.go:415
++#: ../internal/components/controls_window.go:468
+ msgid "%v MB/%v MB (%v peers)"
+ msgstr ""
+ 
+-#: ../internal/components/controls_window.go:418
+-#: ../internal/components/controls_window.go:468
++#: ../internal/components/controls_window.go:420
++#: ../internal/components/controls_window.go:470
+ msgid "Searching for peers"
+ msgstr ""
+ 
+-#: ../internal/components/controls_window.go:650
+-#: ../internal/components/controls_window.go:1358
++#: ../internal/components/controls_window.go:663
++#: ../internal/components/controls_window.go:1373
+ msgid "Track %v"
+ msgstr ""
+ 
+-#: ../internal/components/controls_window.go:658
++#: ../internal/components/controls_window.go:671
+ msgid "Embedded subtitle %v"
+ msgstr ""
+ 
+-#: ../internal/components/controls_window.go:1137
+-#: ../internal/components/controls_window.go:1311
++#: ../internal/components/controls_window.go:1152
++#: ../internal/components/controls_window.go:1326
+ msgid "None"
+ msgstr ""
+ 
+-#: ../internal/components/controls_window.go:1241
++#: ../internal/components/controls_window.go:1256
+ msgid "Disable subtitles"
+ msgstr ""
+ 
+-#: ../internal/components/controls_window.go:1244
++#: ../internal/components/controls_window.go:1259
+ msgid "Integrated subtitle"
+ msgstr ""
+ 
+-#: ../internal/components/controls_window.go:1247
++#: ../internal/components/controls_window.go:1262
+ msgid "Subtitle from torrent"
+ msgstr ""
+ 
+-#: ../internal/components/controls_window.go:1250
++#: ../internal/components/controls_window.go:1265
+ msgid "Manually added"
+ msgstr ""
+ 
+-#: ../internal/components/controls_window.go:1262
++#: ../internal/components/controls_window.go:1277
+ msgid "Select subtitle file"
+ msgstr ""
+ 
+-#: ../internal/components/controls_window.go:1356
++#: ../internal/components/controls_window.go:1371
+ msgid "Disable audio"
+ msgstr ""
+ 
+-#: ../internal/components/controls_window.go:1362
++#: ../internal/components/controls_window.go:1377
+ msgid "Untitled Track"
+ msgstr ""
+ 
+diff --git a/po/pl.po b/po/pl.po
+index a82338135c6b5f2a98926548ee96392294d4a746..b351f28959c748d9aa371b54cb6d21f9a5db3398 100644
+--- a/po/pl.po
++++ b/po/pl.po
+@@ -110,63 +110,63 @@ #: ../assets/resources/controls.ui:64 ../assets/resources/preparing.ui:34
+ msgid "Preparing Stream..."
+ msgstr "Przygotowywanie strumienia..."
+ 
+-#: ../assets/resources/controls.blp:78 ../assets/resources/controls.ui:86
++#: ../assets/resources/controls.blp:79 ../assets/resources/controls.ui:87
+ msgid "Show Peers"
+ msgstr "Pokaż peerów"
+ 
+-#: ../assets/resources/controls.blp:112 ../assets/resources/controls.ui:120
++#: ../assets/resources/controls.blp:114 ../assets/resources/controls.ui:122
+ msgid "Elapsed Time"
+ msgstr "Upłynięty Czas"
+ 
+-#: ../assets/resources/controls.blp:117 ../assets/resources/controls.ui:126
++#: ../assets/resources/controls.blp:119 ../assets/resources/controls.ui:128
+ msgid "Playback Progress"
+ msgstr "Progres Odtwarzania"
+ 
+-#: ../assets/resources/controls.blp:127 ../assets/resources/controls.ui:136
++#: ../assets/resources/controls.blp:129 ../assets/resources/controls.ui:138
+ msgid "Remaining Playback Time"
+ msgstr "Pozostały Czas Odtwarzania"
+ 
+-#: ../assets/resources/controls.blp:139
++#: ../assets/resources/controls.blp:141
+ #: ../internal/components/shortcuts_dialog.go:33
+-#: ../assets/resources/controls.ui:150
++#: ../assets/resources/controls.ui:152
+ msgid "Toggle Playback"
+ msgstr "Przełącz Odtwarzanie"
+ 
+-#: ../assets/resources/controls.blp:144 ../assets/resources/controls.ui:156
++#: ../assets/resources/controls.blp:146 ../assets/resources/controls.ui:158
+ msgid "Stop Playback"
+ msgstr "Zatrzymaj Odtwarzanie"
+ 
+-#: ../assets/resources/controls.blp:160 ../assets/resources/controls.ui:175
++#: ../assets/resources/controls.blp:162 ../assets/resources/controls.ui:177
+ msgid "Change Audio Track"
+ msgstr "Zmień Ścieżke Dźwiękową"
+ 
+-#: ../assets/resources/controls.blp:165 ../assets/resources/controls.ui:181
++#: ../assets/resources/controls.blp:167 ../assets/resources/controls.ui:183
+ msgid "Change Subtitles"
+ msgstr "Zmień Napisy"
+ 
+-#: ../assets/resources/controls.blp:174 ../assets/resources/controls.ui:192
++#: ../assets/resources/controls.blp:176 ../assets/resources/controls.ui:194
+ msgid "Mute/unmute"
+ msgstr "Wycisz/Odcisz"
+ 
+-#: ../assets/resources/controls.blp:193
++#: ../assets/resources/controls.blp:195
+ #: ../internal/components/shortcuts_dialog.go:36
+-#: ../assets/resources/controls.ui:215
++#: ../assets/resources/controls.ui:217
+ msgid "Toggle Fullscreen"
+ msgstr "Przełącz Pelny Ekran"
+ 
+-#: ../assets/resources/controls.blp:228
+-#: ../internal/components/controls_window.go:370
+-#: ../assets/resources/controls.ui:254
++#: ../assets/resources/controls.blp:230
++#: ../internal/components/controls_window.go:372
++#: ../assets/resources/controls.ui:256
+ msgid "You're currently watching alone."
+ msgstr "Aktualnie oglądasz sam."
+ 
+-#: ../assets/resources/controls.blp:233 ../assets/resources/controls.ui:260
++#: ../assets/resources/controls.blp:235 ../assets/resources/controls.ui:262
+ msgid ""
+ "Ask the people you want to watch with to enter the following stream code:"
+ msgstr ""
+ "Zapytaj osoby z którymi chcesz oglądać by wprowadzili ten kod strumienia:"
+ 
+-#: ../assets/resources/controls.blp:248 ../assets/resources/controls.ui:277
++#: ../assets/resources/controls.blp:250 ../assets/resources/controls.ui:279
+ msgid "Copy Stream Code to Clipboard"
+ msgstr "Skopiuj Kod Strumienia do Schowka"
+ 
+@@ -435,72 +435,72 @@ #: ../internal/components/shortcuts_dialog.go:26
+ msgid "Quit"
+ msgstr "Wyjdź"
+ 
+-#: ../internal/components/controls_window.go:360
++#: ../internal/components/controls_window.go:362
+ msgid "Someone joined the session."
+ msgstr "Ktoś dołączył do sesji."
+ 
+-#: ../internal/components/controls_window.go:365
++#: ../internal/components/controls_window.go:367
+ msgid "Someone left the session."
+ msgstr "Ktoś opuścił sesje."
+ 
+-#: ../internal/components/controls_window.go:375
++#: ../internal/components/controls_window.go:377
+ msgid "You're currently watching with %v other person."
+ msgstr "Aktualnie oglądasz z %v inną osobą."
+ 
+-#: ../internal/components/controls_window.go:379
++#: ../internal/components/controls_window.go:381
+ msgid "You're currently watching with %v other people."
+ msgstr "Aktualnie oglądasz z %v innymi osobami."
+ 
+-#: ../internal/components/controls_window.go:413
+-#: ../internal/components/controls_window.go:466
++#: ../internal/components/controls_window.go:415
++#: ../internal/components/controls_window.go:468
+ msgid "%v MB/%v MB (%v peers)"
+ msgstr "%v MB/%v MB (%v peerów)"
+ 
+-#: ../internal/components/controls_window.go:418
+-#: ../internal/components/controls_window.go:468
++#: ../internal/components/controls_window.go:420
++#: ../internal/components/controls_window.go:470
+ msgid "Searching for peers"
+ msgstr "Szukanie peerów"
+ 
+-#: ../internal/components/controls_window.go:650
+-#: ../internal/components/controls_window.go:1358
++#: ../internal/components/controls_window.go:663
++#: ../internal/components/controls_window.go:1373
+ msgid "Track %v"
+ msgstr "Ścieżka %v"
+ 
+-#: ../internal/components/controls_window.go:658
++#: ../internal/components/controls_window.go:671
+ #, fuzzy
+ msgid "Embedded subtitle %v"
+ msgstr "Zintegrowane napisy"
+ 
+-#: ../internal/components/controls_window.go:1137
+-#: ../internal/components/controls_window.go:1311
++#: ../internal/components/controls_window.go:1152
++#: ../internal/components/controls_window.go:1326
+ msgid "None"
+ msgstr "Żadna"
+ 
+-#: ../internal/components/controls_window.go:1241
++#: ../internal/components/controls_window.go:1256
+ msgid "Disable subtitles"
+ msgstr "Wyłącz napisy"
+ 
+-#: ../internal/components/controls_window.go:1244
++#: ../internal/components/controls_window.go:1259
+ msgid "Integrated subtitle"
+ msgstr "Zintegrowane napisy"
+ 
+-#: ../internal/components/controls_window.go:1247
++#: ../internal/components/controls_window.go:1262
+ msgid "Subtitle from torrent"
+ msgstr "Napisy z torrenta"
+ 
+-#: ../internal/components/controls_window.go:1250
++#: ../internal/components/controls_window.go:1265
+ msgid "Manually added"
+ msgstr "Manualnie dodano"
+ 
+-#: ../internal/components/controls_window.go:1262
++#: ../internal/components/controls_window.go:1277
+ msgid "Select subtitle file"
+ msgstr "Wybierz plik z napisami"
+ 
+-#: ../internal/components/controls_window.go:1356
++#: ../internal/components/controls_window.go:1371
+ msgid "Disable audio"
+ msgstr "Wyłącz audio"
+ 
+-#: ../internal/components/controls_window.go:1362
++#: ../internal/components/controls_window.go:1377
+ msgid "Untitled Track"
+ msgstr "Ścieżka bez tytulu"
+ 
+diff --git a/po/pt_BR.po b/po/pt_BR.po
+index 8de412b2dc23b97b56b6219a7f61095a116746dd..69a8a7181bcbd6ee377dacbd2cf60e192f002fad 100644
+--- a/po/pt_BR.po
++++ b/po/pt_BR.po
+@@ -109,64 +109,64 @@ #: ../assets/resources/controls.ui:64 ../assets/resources/preparing.ui:34
+ msgid "Preparing Stream..."
+ msgstr "Preparando o fluxo..."
+ 
+-#: ../assets/resources/controls.blp:78 ../assets/resources/controls.ui:86
++#: ../assets/resources/controls.blp:79 ../assets/resources/controls.ui:87
+ msgid "Show Peers"
+ msgstr "Mostrar colegas"
+ 
+-#: ../assets/resources/controls.blp:112 ../assets/resources/controls.ui:120
++#: ../assets/resources/controls.blp:114 ../assets/resources/controls.ui:122
+ msgid "Elapsed Time"
+ msgstr "Tempo decorrido"
+ 
+-#: ../assets/resources/controls.blp:117 ../assets/resources/controls.ui:126
++#: ../assets/resources/controls.blp:119 ../assets/resources/controls.ui:128
+ msgid "Playback Progress"
+ msgstr "Progresso da reprodução"
+ 
+-#: ../assets/resources/controls.blp:127 ../assets/resources/controls.ui:136
++#: ../assets/resources/controls.blp:129 ../assets/resources/controls.ui:138
+ msgid "Remaining Playback Time"
+ msgstr "Tempo de reprodução restante"
+ 
+-#: ../assets/resources/controls.blp:139
++#: ../assets/resources/controls.blp:141
+ #: ../internal/components/shortcuts_dialog.go:33
+-#: ../assets/resources/controls.ui:150
++#: ../assets/resources/controls.ui:152
+ msgid "Toggle Playback"
+ msgstr "Alternar reprodução"
+ 
+-#: ../assets/resources/controls.blp:144 ../assets/resources/controls.ui:156
++#: ../assets/resources/controls.blp:146 ../assets/resources/controls.ui:158
+ msgid "Stop Playback"
+ msgstr "Interromper reprodução"
+ 
+-#: ../assets/resources/controls.blp:160 ../assets/resources/controls.ui:175
++#: ../assets/resources/controls.blp:162 ../assets/resources/controls.ui:177
+ msgid "Change Audio Track"
+ msgstr "Alterar faixa de áudio"
+ 
+-#: ../assets/resources/controls.blp:165 ../assets/resources/controls.ui:181
++#: ../assets/resources/controls.blp:167 ../assets/resources/controls.ui:183
+ msgid "Change Subtitles"
+ msgstr "Alterar legendas"
+ 
+-#: ../assets/resources/controls.blp:174 ../assets/resources/controls.ui:192
++#: ../assets/resources/controls.blp:176 ../assets/resources/controls.ui:194
+ msgid "Mute/unmute"
+ msgstr "Silenciar/ativar som"
+ 
+-#: ../assets/resources/controls.blp:193
++#: ../assets/resources/controls.blp:195
+ #: ../internal/components/shortcuts_dialog.go:36
+-#: ../assets/resources/controls.ui:215
++#: ../assets/resources/controls.ui:217
+ msgid "Toggle Fullscreen"
+ msgstr "Alternar tela cheia"
+ 
+-#: ../assets/resources/controls.blp:228
+-#: ../internal/components/controls_window.go:370
+-#: ../assets/resources/controls.ui:254
++#: ../assets/resources/controls.blp:230
++#: ../internal/components/controls_window.go:372
++#: ../assets/resources/controls.ui:256
+ msgid "You're currently watching alone."
+ msgstr "Você está assistindo sozinho(a)."
+ 
+-#: ../assets/resources/controls.blp:233 ../assets/resources/controls.ui:260
++#: ../assets/resources/controls.blp:235 ../assets/resources/controls.ui:262
+ msgid ""
+ "Ask the people you want to watch with to enter the following stream code:"
+ msgstr ""
+ "Peça às pessoas com quem você deseja assistir que insiram o seguinte código "
+ "de transmissão:"
+ 
+-#: ../assets/resources/controls.blp:248 ../assets/resources/controls.ui:277
++#: ../assets/resources/controls.blp:250 ../assets/resources/controls.ui:279
+ msgid "Copy Stream Code to Clipboard"
+ msgstr "Copiar código de fluxo para a área de transferência"
+ 
+@@ -433,72 +433,72 @@ #: ../internal/components/shortcuts_dialog.go:26
+ msgid "Quit"
+ msgstr "Sair"
+ 
+-#: ../internal/components/controls_window.go:360
++#: ../internal/components/controls_window.go:362
+ msgid "Someone joined the session."
+ msgstr "Alguém entrou na sessão."
+ 
+-#: ../internal/components/controls_window.go:365
++#: ../internal/components/controls_window.go:367
+ msgid "Someone left the session."
+ msgstr "Alguém saiu da sessão."
+ 
+-#: ../internal/components/controls_window.go:375
++#: ../internal/components/controls_window.go:377
+ msgid "You're currently watching with %v other person."
+ msgstr "Você está assistindo a este vídeo com %v outra pessoa."
+ 
+-#: ../internal/components/controls_window.go:379
++#: ../internal/components/controls_window.go:381
+ msgid "You're currently watching with %v other people."
+ msgstr "Você está assistindo a esta transmissão com %v outras pessoas."
+ 
+-#: ../internal/components/controls_window.go:413
+-#: ../internal/components/controls_window.go:466
++#: ../internal/components/controls_window.go:415
++#: ../internal/components/controls_window.go:468
+ msgid "%v MB/%v MB (%v peers)"
+ msgstr "%v MB/%v MB (%v pares)"
+ 
+-#: ../internal/components/controls_window.go:418
+-#: ../internal/components/controls_window.go:468
++#: ../internal/components/controls_window.go:420
++#: ../internal/components/controls_window.go:470
+ msgid "Searching for peers"
+ msgstr "Em busca de colegas"
+ 
+-#: ../internal/components/controls_window.go:650
+-#: ../internal/components/controls_window.go:1358
++#: ../internal/components/controls_window.go:663
++#: ../internal/components/controls_window.go:1373
+ msgid "Track %v"
+ msgstr "Rastrear %v"
+ 
+-#: ../internal/components/controls_window.go:658
++#: ../internal/components/controls_window.go:671
+ #, fuzzy
+ msgid "Embedded subtitle %v"
+ msgstr "Legendas integradas"
+ 
+-#: ../internal/components/controls_window.go:1137
+-#: ../internal/components/controls_window.go:1311
++#: ../internal/components/controls_window.go:1152
++#: ../internal/components/controls_window.go:1326
+ msgid "None"
+ msgstr "Nenhum"
+ 
+-#: ../internal/components/controls_window.go:1241
++#: ../internal/components/controls_window.go:1256
+ msgid "Disable subtitles"
+ msgstr "Desativar legendas"
+ 
+-#: ../internal/components/controls_window.go:1244
++#: ../internal/components/controls_window.go:1259
+ msgid "Integrated subtitle"
+ msgstr "Legendas integradas"
+ 
+-#: ../internal/components/controls_window.go:1247
++#: ../internal/components/controls_window.go:1262
+ msgid "Subtitle from torrent"
+ msgstr "Legenda do torrent"
+ 
+-#: ../internal/components/controls_window.go:1250
++#: ../internal/components/controls_window.go:1265
+ msgid "Manually added"
+ msgstr "Adicionado manualmente"
+ 
+-#: ../internal/components/controls_window.go:1262
++#: ../internal/components/controls_window.go:1277
+ msgid "Select subtitle file"
+ msgstr "Selecione o arquivo de legenda"
+ 
+-#: ../internal/components/controls_window.go:1356
++#: ../internal/components/controls_window.go:1371
+ msgid "Disable audio"
+ msgstr "Desativar áudio"
+ 
+-#: ../internal/components/controls_window.go:1362
++#: ../internal/components/controls_window.go:1377
+ msgid "Untitled Track"
+ msgstr "Faixa sem título"
+ 
+diff --git a/po/tr.po b/po/tr.po
+index 61fce464170ddddcb650c5b6e04f41e0441e8864..795b60f22e0eefc5c8a4dae207ba326b5aa3c834 100644
+--- a/po/tr.po
++++ b/po/tr.po
+@@ -110,64 +110,64 @@ #: ../assets/resources/controls.ui:64 ../assets/resources/preparing.ui:34
+ msgid "Preparing Stream..."
+ msgstr "Akış hazırlanıyor..."
+ 
+-#: ../assets/resources/controls.blp:78 ../assets/resources/controls.ui:86
++#: ../assets/resources/controls.blp:79 ../assets/resources/controls.ui:87
+ msgid "Show Peers"
+ msgstr "Akranları Göster"
+ 
+-#: ../assets/resources/controls.blp:112 ../assets/resources/controls.ui:120
++#: ../assets/resources/controls.blp:114 ../assets/resources/controls.ui:122
+ msgid "Elapsed Time"
+ msgstr "Geçen Süre"
+ 
+-#: ../assets/resources/controls.blp:117 ../assets/resources/controls.ui:126
++#: ../assets/resources/controls.blp:119 ../assets/resources/controls.ui:128
+ msgid "Playback Progress"
+ msgstr "Oynatma İlerlemesi"
+ 
+-#: ../assets/resources/controls.blp:127 ../assets/resources/controls.ui:136
++#: ../assets/resources/controls.blp:129 ../assets/resources/controls.ui:138
+ msgid "Remaining Playback Time"
+ msgstr "Kalan Oynatma Süresi"
+ 
+-#: ../assets/resources/controls.blp:139
++#: ../assets/resources/controls.blp:141
+ #: ../internal/components/shortcuts_dialog.go:33
+-#: ../assets/resources/controls.ui:150
++#: ../assets/resources/controls.ui:152
+ msgid "Toggle Playback"
+ msgstr "Oynatmayı Aç/Kapat"
+ 
+-#: ../assets/resources/controls.blp:144 ../assets/resources/controls.ui:156
++#: ../assets/resources/controls.blp:146 ../assets/resources/controls.ui:158
+ msgid "Stop Playback"
+ msgstr "Oynatmayı Durdur"
+ 
+-#: ../assets/resources/controls.blp:160 ../assets/resources/controls.ui:175
++#: ../assets/resources/controls.blp:162 ../assets/resources/controls.ui:177
+ msgid "Change Audio Track"
+ msgstr "Ses Parçasını Değiştir"
+ 
+-#: ../assets/resources/controls.blp:165 ../assets/resources/controls.ui:181
++#: ../assets/resources/controls.blp:167 ../assets/resources/controls.ui:183
+ msgid "Change Subtitles"
+ msgstr "Altyazıları Değiştir"
+ 
+-#: ../assets/resources/controls.blp:174 ../assets/resources/controls.ui:192
++#: ../assets/resources/controls.blp:176 ../assets/resources/controls.ui:194
+ msgid "Mute/unmute"
+ msgstr "Sustur/Susturmayı kapat"
+ 
+-#: ../assets/resources/controls.blp:193
++#: ../assets/resources/controls.blp:195
+ #: ../internal/components/shortcuts_dialog.go:36
+-#: ../assets/resources/controls.ui:215
++#: ../assets/resources/controls.ui:217
+ msgid "Toggle Fullscreen"
+ msgstr "Tam Ekran Yap"
+ 
+-#: ../assets/resources/controls.blp:228
+-#: ../internal/components/controls_window.go:370
+-#: ../assets/resources/controls.ui:254
++#: ../assets/resources/controls.blp:230
++#: ../internal/components/controls_window.go:372
++#: ../assets/resources/controls.ui:256
+ msgid "You're currently watching alone."
+ msgstr "Şu anda tek başınıza izliyorsunuz."
+ 
+-#: ../assets/resources/controls.blp:233 ../assets/resources/controls.ui:260
++#: ../assets/resources/controls.blp:235 ../assets/resources/controls.ui:262
+ msgid ""
+ "Ask the people you want to watch with to enter the following stream code:"
+ msgstr ""
+ "Birlikte izlemek istediğiniz kişilerden aşağıdaki yayın kodunu girmelerini "
+ "isteyin:"
+ 
+-#: ../assets/resources/controls.blp:248 ../assets/resources/controls.ui:277
++#: ../assets/resources/controls.blp:250 ../assets/resources/controls.ui:279
+ msgid "Copy Stream Code to Clipboard"
+ msgstr "Akış Kodunu Panoya Kopyala"
+ 
+@@ -431,71 +431,71 @@ #: ../internal/components/shortcuts_dialog.go:26
+ msgid "Quit"
+ msgstr ""
+ 
+-#: ../internal/components/controls_window.go:360
++#: ../internal/components/controls_window.go:362
+ msgid "Someone joined the session."
+ msgstr ""
+ 
+-#: ../internal/components/controls_window.go:365
++#: ../internal/components/controls_window.go:367
+ msgid "Someone left the session."
+ msgstr ""
+ 
+-#: ../internal/components/controls_window.go:375
++#: ../internal/components/controls_window.go:377
+ msgid "You're currently watching with %v other person."
+ msgstr ""
+ 
+-#: ../internal/components/controls_window.go:379
++#: ../internal/components/controls_window.go:381
+ msgid "You're currently watching with %v other people."
+ msgstr ""
+ 
+-#: ../internal/components/controls_window.go:413
+-#: ../internal/components/controls_window.go:466
++#: ../internal/components/controls_window.go:415
++#: ../internal/components/controls_window.go:468
+ msgid "%v MB/%v MB (%v peers)"
+ msgstr ""
+ 
+-#: ../internal/components/controls_window.go:418
+-#: ../internal/components/controls_window.go:468
++#: ../internal/components/controls_window.go:420
++#: ../internal/components/controls_window.go:470
+ msgid "Searching for peers"
+ msgstr ""
+ 
+-#: ../internal/components/controls_window.go:650
+-#: ../internal/components/controls_window.go:1358
++#: ../internal/components/controls_window.go:663
++#: ../internal/components/controls_window.go:1373
+ msgid "Track %v"
+ msgstr ""
+ 
+-#: ../internal/components/controls_window.go:658
++#: ../internal/components/controls_window.go:671
+ msgid "Embedded subtitle %v"
+ msgstr ""
+ 
+-#: ../internal/components/controls_window.go:1137
+-#: ../internal/components/controls_window.go:1311
++#: ../internal/components/controls_window.go:1152
++#: ../internal/components/controls_window.go:1326
+ msgid "None"
+ msgstr ""
+ 
+-#: ../internal/components/controls_window.go:1241
++#: ../internal/components/controls_window.go:1256
+ msgid "Disable subtitles"
+ msgstr ""
+ 
+-#: ../internal/components/controls_window.go:1244
++#: ../internal/components/controls_window.go:1259
+ msgid "Integrated subtitle"
+ msgstr ""
+ 
+-#: ../internal/components/controls_window.go:1247
++#: ../internal/components/controls_window.go:1262
+ msgid "Subtitle from torrent"
+ msgstr ""
+ 
+-#: ../internal/components/controls_window.go:1250
++#: ../internal/components/controls_window.go:1265
+ msgid "Manually added"
+ msgstr ""
+ 
+-#: ../internal/components/controls_window.go:1262
++#: ../internal/components/controls_window.go:1277
+ msgid "Select subtitle file"
+ msgstr ""
+ 
+-#: ../internal/components/controls_window.go:1356
++#: ../internal/components/controls_window.go:1371
+ msgid "Disable audio"
+ msgstr ""
+ 
+-#: ../internal/components/controls_window.go:1362
++#: ../internal/components/controls_window.go:1377
+ msgid "Untitled Track"
+ msgstr ""
+ 
+diff --git a/po/vi.po b/po/vi.po
+index 9efe2a9449c18486c445f6d7e94e701cf7efb496..500919f8918784a0743377ba80357690307cd29a 100644
+--- a/po/vi.po
++++ b/po/vi.po
+@@ -109,62 +109,62 @@ #: ../assets/resources/controls.ui:64 ../assets/resources/preparing.ui:34
+ msgid "Preparing Stream..."
+ msgstr "Đang chuẩn bị stream..."
+ 
+-#: ../assets/resources/controls.blp:78 ../assets/resources/controls.ui:86
++#: ../assets/resources/controls.blp:79 ../assets/resources/controls.ui:87
+ msgid "Show Peers"
+ msgstr "Hiển thị thiết bị"
+ 
+-#: ../assets/resources/controls.blp:112 ../assets/resources/controls.ui:120
++#: ../assets/resources/controls.blp:114 ../assets/resources/controls.ui:122
+ msgid "Elapsed Time"
+ msgstr "Thời gian đã trôi qua"
+ 
+-#: ../assets/resources/controls.blp:117 ../assets/resources/controls.ui:126
++#: ../assets/resources/controls.blp:119 ../assets/resources/controls.ui:128
+ msgid "Playback Progress"
+ msgstr "Tiến trình phát lại"
+ 
+-#: ../assets/resources/controls.blp:127 ../assets/resources/controls.ui:136
++#: ../assets/resources/controls.blp:129 ../assets/resources/controls.ui:138
+ msgid "Remaining Playback Time"
+ msgstr "Thời gian phát lại còn lại"
+ 
+-#: ../assets/resources/controls.blp:139
++#: ../assets/resources/controls.blp:141
+ #: ../internal/components/shortcuts_dialog.go:33
+-#: ../assets/resources/controls.ui:150
++#: ../assets/resources/controls.ui:152
+ msgid "Toggle Playback"
+ msgstr "Chuyển đổi phát lại"
+ 
+-#: ../assets/resources/controls.blp:144 ../assets/resources/controls.ui:156
++#: ../assets/resources/controls.blp:146 ../assets/resources/controls.ui:158
+ msgid "Stop Playback"
+ msgstr "Dừng phát lại"
+ 
+-#: ../assets/resources/controls.blp:160 ../assets/resources/controls.ui:175
++#: ../assets/resources/controls.blp:162 ../assets/resources/controls.ui:177
+ msgid "Change Audio Track"
+ msgstr "Thay đổi bản âm thanh"
+ 
+-#: ../assets/resources/controls.blp:165 ../assets/resources/controls.ui:181
++#: ../assets/resources/controls.blp:167 ../assets/resources/controls.ui:183
+ msgid "Change Subtitles"
+ msgstr "Thay đổi phụ đề"
+ 
+-#: ../assets/resources/controls.blp:174 ../assets/resources/controls.ui:192
++#: ../assets/resources/controls.blp:176 ../assets/resources/controls.ui:194
+ msgid "Mute/unmute"
+ msgstr "Tắt/bật tiếng"
+ 
+-#: ../assets/resources/controls.blp:193
++#: ../assets/resources/controls.blp:195
+ #: ../internal/components/shortcuts_dialog.go:36
+-#: ../assets/resources/controls.ui:215
++#: ../assets/resources/controls.ui:217
+ msgid "Toggle Fullscreen"
+ msgstr "Bật/tắt toàn màn hình"
+ 
+-#: ../assets/resources/controls.blp:228
+-#: ../internal/components/controls_window.go:370
+-#: ../assets/resources/controls.ui:254
++#: ../assets/resources/controls.blp:230
++#: ../internal/components/controls_window.go:372
++#: ../assets/resources/controls.ui:256
+ msgid "You're currently watching alone."
+ msgstr "Bạn hiện đang xem một mình."
+ 
+-#: ../assets/resources/controls.blp:233 ../assets/resources/controls.ui:260
++#: ../assets/resources/controls.blp:235 ../assets/resources/controls.ui:262
+ msgid ""
+ "Ask the people you want to watch with to enter the following stream code:"
+ msgstr "Yêu cầu những người bạn muốn xem cùng nhập stream code sau:"
+ 
+-#: ../assets/resources/controls.blp:248 ../assets/resources/controls.ui:277
++#: ../assets/resources/controls.blp:250 ../assets/resources/controls.ui:279
+ msgid "Copy Stream Code to Clipboard"
+ msgstr "Sao chép stream code vào bộ nhớ tạm"
+ 
+@@ -429,72 +429,72 @@ #: ../internal/components/shortcuts_dialog.go:26
+ msgid "Quit"
+ msgstr "Thoát"
+ 
+-#: ../internal/components/controls_window.go:360
++#: ../internal/components/controls_window.go:362
+ msgid "Someone joined the session."
+ msgstr "Có người đã tham gia phiên họp."
+ 
+-#: ../internal/components/controls_window.go:365
++#: ../internal/components/controls_window.go:367
+ msgid "Someone left the session."
+ msgstr "Ai đó đã rời khỏi phiên họp."
+ 
+-#: ../internal/components/controls_window.go:375
++#: ../internal/components/controls_window.go:377
+ msgid "You're currently watching with %v other person."
+ msgstr "Bạn hiện đang xem với %v người khác."
+ 
+-#: ../internal/components/controls_window.go:379
++#: ../internal/components/controls_window.go:381
+ msgid "You're currently watching with %v other people."
+ msgstr "Bạn hiện đang xem cùng %v người khác."
+ 
+-#: ../internal/components/controls_window.go:413
+-#: ../internal/components/controls_window.go:466
++#: ../internal/components/controls_window.go:415
++#: ../internal/components/controls_window.go:468
+ msgid "%v MB/%v MB (%v peers)"
+ msgstr "%v MB/%v MB (%v thiết bị)"
+ 
+-#: ../internal/components/controls_window.go:418
+-#: ../internal/components/controls_window.go:468
++#: ../internal/components/controls_window.go:420
++#: ../internal/components/controls_window.go:470
+ msgid "Searching for peers"
+ msgstr "Đang tìm kiếm thiết bị"
+ 
+-#: ../internal/components/controls_window.go:650
+-#: ../internal/components/controls_window.go:1358
++#: ../internal/components/controls_window.go:663
++#: ../internal/components/controls_window.go:1373
+ msgid "Track %v"
+ msgstr "Track %v"
+ 
+-#: ../internal/components/controls_window.go:658
++#: ../internal/components/controls_window.go:671
+ #, fuzzy
+ msgid "Embedded subtitle %v"
+ msgstr "Phụ đề tích hợp"
+ 
+-#: ../internal/components/controls_window.go:1137
+-#: ../internal/components/controls_window.go:1311
++#: ../internal/components/controls_window.go:1152
++#: ../internal/components/controls_window.go:1326
+ msgid "None"
+ msgstr "Không có"
+ 
+-#: ../internal/components/controls_window.go:1241
++#: ../internal/components/controls_window.go:1256
+ msgid "Disable subtitles"
+ msgstr "Tắt phụ đề"
+ 
+-#: ../internal/components/controls_window.go:1244
++#: ../internal/components/controls_window.go:1259
+ msgid "Integrated subtitle"
+ msgstr "Phụ đề tích hợp"
+ 
+-#: ../internal/components/controls_window.go:1247
++#: ../internal/components/controls_window.go:1262
+ msgid "Subtitle from torrent"
+ msgstr "Phụ đề từ torrent"
+ 
+-#: ../internal/components/controls_window.go:1250
++#: ../internal/components/controls_window.go:1265
+ msgid "Manually added"
+ msgstr "Đã thêm thủ công"
+ 
+-#: ../internal/components/controls_window.go:1262
++#: ../internal/components/controls_window.go:1277
+ msgid "Select subtitle file"
+ msgstr "Chọn tệp phụ đề"
+ 
+-#: ../internal/components/controls_window.go:1356
++#: ../internal/components/controls_window.go:1371
+ msgid "Disable audio"
+ msgstr "Tắt âm thanh"
+ 
+-#: ../internal/components/controls_window.go:1362
++#: ../internal/components/controls_window.go:1377
+ msgid "Untitled Track"
+ msgstr "Bản nhạc không có tiêu đề"
+ 
+diff --git a/po/zh_Hans.po b/po/zh_Hans.po
+index 465b4411d1314f75ce94827b1c597f111878abdf..698aabc01c8a09b7cd7e0aa2fe4280b1db8e9589 100644
+--- a/po/zh_Hans.po
++++ b/po/zh_Hans.po
+@@ -105,62 +105,62 @@ #: ../assets/resources/controls.ui:64 ../assets/resources/preparing.ui:34
+ msgid "Preparing Stream..."
+ msgstr ""
+ 
+-#: ../assets/resources/controls.blp:78 ../assets/resources/controls.ui:86
++#: ../assets/resources/controls.blp:79 ../assets/resources/controls.ui:87
+ msgid "Show Peers"
+ msgstr ""
+ 
+-#: ../assets/resources/controls.blp:112 ../assets/resources/controls.ui:120
++#: ../assets/resources/controls.blp:114 ../assets/resources/controls.ui:122
+ msgid "Elapsed Time"
+ msgstr ""
+ 
+-#: ../assets/resources/controls.blp:117 ../assets/resources/controls.ui:126
++#: ../assets/resources/controls.blp:119 ../assets/resources/controls.ui:128
+ msgid "Playback Progress"
+ msgstr ""
+ 
+-#: ../assets/resources/controls.blp:127 ../assets/resources/controls.ui:136
++#: ../assets/resources/controls.blp:129 ../assets/resources/controls.ui:138
+ msgid "Remaining Playback Time"
+ msgstr ""
+ 
+-#: ../assets/resources/controls.blp:139
++#: ../assets/resources/controls.blp:141
+ #: ../internal/components/shortcuts_dialog.go:33
+-#: ../assets/resources/controls.ui:150
++#: ../assets/resources/controls.ui:152
+ msgid "Toggle Playback"
+ msgstr ""
+ 
+-#: ../assets/resources/controls.blp:144 ../assets/resources/controls.ui:156
++#: ../assets/resources/controls.blp:146 ../assets/resources/controls.ui:158
+ msgid "Stop Playback"
+ msgstr ""
+ 
+-#: ../assets/resources/controls.blp:160 ../assets/resources/controls.ui:175
++#: ../assets/resources/controls.blp:162 ../assets/resources/controls.ui:177
+ msgid "Change Audio Track"
+ msgstr ""
+ 
+-#: ../assets/resources/controls.blp:165 ../assets/resources/controls.ui:181
++#: ../assets/resources/controls.blp:167 ../assets/resources/controls.ui:183
+ msgid "Change Subtitles"
+ msgstr ""
+ 
+-#: ../assets/resources/controls.blp:174 ../assets/resources/controls.ui:192
++#: ../assets/resources/controls.blp:176 ../assets/resources/controls.ui:194
+ msgid "Mute/unmute"
+ msgstr ""
+ 
+-#: ../assets/resources/controls.blp:193
++#: ../assets/resources/controls.blp:195
+ #: ../internal/components/shortcuts_dialog.go:36
+-#: ../assets/resources/controls.ui:215
++#: ../assets/resources/controls.ui:217
+ msgid "Toggle Fullscreen"
+ msgstr ""
+ 
+-#: ../assets/resources/controls.blp:228
+-#: ../internal/components/controls_window.go:370
+-#: ../assets/resources/controls.ui:254
++#: ../assets/resources/controls.blp:230
++#: ../internal/components/controls_window.go:372
++#: ../assets/resources/controls.ui:256
+ msgid "You're currently watching alone."
+ msgstr ""
+ 
+-#: ../assets/resources/controls.blp:233 ../assets/resources/controls.ui:260
++#: ../assets/resources/controls.blp:235 ../assets/resources/controls.ui:262
+ msgid ""
+ "Ask the people you want to watch with to enter the following stream code:"
+ msgstr ""
+ 
+-#: ../assets/resources/controls.blp:248 ../assets/resources/controls.ui:277
++#: ../assets/resources/controls.blp:250 ../assets/resources/controls.ui:279
+ msgid "Copy Stream Code to Clipboard"
+ msgstr ""
+ 
+@@ -421,71 +421,71 @@ #: ../internal/components/shortcuts_dialog.go:26
+ msgid "Quit"
+ msgstr ""
+ 
+-#: ../internal/components/controls_window.go:360
++#: ../internal/components/controls_window.go:362
+ msgid "Someone joined the session."
+ msgstr ""
+ 
+-#: ../internal/components/controls_window.go:365
++#: ../internal/components/controls_window.go:367
+ msgid "Someone left the session."
+ msgstr ""
+ 
+-#: ../internal/components/controls_window.go:375
++#: ../internal/components/controls_window.go:377
+ msgid "You're currently watching with %v other person."
+ msgstr ""
+ 
+-#: ../internal/components/controls_window.go:379
++#: ../internal/components/controls_window.go:381
+ msgid "You're currently watching with %v other people."
+ msgstr ""
+ 
+-#: ../internal/components/controls_window.go:413
+-#: ../internal/components/controls_window.go:466
++#: ../internal/components/controls_window.go:415
++#: ../internal/components/controls_window.go:468
+ msgid "%v MB/%v MB (%v peers)"
+ msgstr ""
+ 
+-#: ../internal/components/controls_window.go:418
+-#: ../internal/components/controls_window.go:468
++#: ../internal/components/controls_window.go:420
++#: ../internal/components/controls_window.go:470
+ msgid "Searching for peers"
+ msgstr ""
+ 
+-#: ../internal/components/controls_window.go:650
+-#: ../internal/components/controls_window.go:1358
++#: ../internal/components/controls_window.go:663
++#: ../internal/components/controls_window.go:1373
+ msgid "Track %v"
+ msgstr ""
+ 
+-#: ../internal/components/controls_window.go:658
++#: ../internal/components/controls_window.go:671
+ msgid "Embedded subtitle %v"
+ msgstr ""
+ 
+-#: ../internal/components/controls_window.go:1137
+-#: ../internal/components/controls_window.go:1311
++#: ../internal/components/controls_window.go:1152
++#: ../internal/components/controls_window.go:1326
+ msgid "None"
+ msgstr ""
+ 
+-#: ../internal/components/controls_window.go:1241
++#: ../internal/components/controls_window.go:1256
+ msgid "Disable subtitles"
+ msgstr ""
+ 
+-#: ../internal/components/controls_window.go:1244
++#: ../internal/components/controls_window.go:1259
+ msgid "Integrated subtitle"
+ msgstr ""
+ 
+-#: ../internal/components/controls_window.go:1247
++#: ../internal/components/controls_window.go:1262
+ msgid "Subtitle from torrent"
+ msgstr ""
+ 
+-#: ../internal/components/controls_window.go:1250
++#: ../internal/components/controls_window.go:1265
+ msgid "Manually added"
+ msgstr ""
+ 
+-#: ../internal/components/controls_window.go:1262
++#: ../internal/components/controls_window.go:1277
+ msgid "Select subtitle file"
+ msgstr ""
+ 
+-#: ../internal/components/controls_window.go:1356
++#: ../internal/components/controls_window.go:1371
+ msgid "Disable audio"
+ msgstr ""
+ 
+-#: ../internal/components/controls_window.go:1362
++#: ../internal/components/controls_window.go:1377
+ msgid "Untitled Track"
+ msgstr ""
+ 
+
