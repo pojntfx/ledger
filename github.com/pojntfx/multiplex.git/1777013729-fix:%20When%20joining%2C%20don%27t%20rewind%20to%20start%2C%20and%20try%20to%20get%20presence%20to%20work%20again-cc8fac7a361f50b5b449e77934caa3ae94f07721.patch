@@ -1,0 +1,1630 @@
+From cc8fac7a361f50b5b449e77934caa3ae94f07721 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Thu, 23 Apr 2026 23:55:29 -0700
+Subject: [PATCH] fix: When joining, don't rewind to start, and try to get presence to work again
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/internal/components/controls_window.go b/internal/components/controls_window.go
+index a33d9128c72425e46bc407ec57facb81d4bda2d2..db08fccbffb9c9d42789f55012d01e924d36777b 100644
+--- a/internal/components/controls_window.go
++++ b/internal/components/controls_window.go
+@@ -272,17 +272,12 @@
+ 	controlsW.buttonHeaderbarTitle.SetLabel(controlsW.torrentTitle)
+ 	controlsW.buttonHeaderbarSubtitle.SetLabel(getDisplayPathWithoutRoot(controlsW.selectedTorrentMedia))
+ 
+-	log.Info().Msg("ControlsWindow.setup: entering p2panda session setup")
+-
+ 	if controlsW.topicHex == "" {
+ 		var buf [32]byte
+ 		if _, err := rand.Read(buf[:]); err != nil {
+ 			return err
+ 		}
+ 		controlsW.topicHex = hex.EncodeToString(buf[:])
+-		log.Info().Str("topic", controlsW.topicHex).Msg("Generated new topic id")
+-	} else {
+-		log.Info().Str("topic", controlsW.topicHex).Msg("Reusing topic id from MainWindow")
+ 	}
+ 
+ 	pauses := broadcast.NewRelay[bool]()
+@@ -291,18 +286,17 @@ 	buffering := broadcast.NewRelay[bool]()
+ 
+ 	// sessionReady is closed once the p2panda session is Opened and publishing
+ 	// is safe. On the host path we open asynchronously so the GTK main loop
+-	// keeps running — the iroh node spawn relies on it. On the joiner path the
+-	// MainWindow already opened the session, so we can close the signal eagerly.
++	// keeps running — iroh's node spawn relies on it. On the joiner path the
++	// MainWindow already opened the session, so we close the signal eagerly.
+ 	sessionReady := make(chan struct{})
+ 
++	// isHost distinguishes a fresh-session creator from a joiner. The joiner
++	// must not announce initial Magnet/Pause/Position — it would overwrite the
++	// host's authoritative state (especially Position=0 while its player is
++	// still loading).
++	isHost := controlsW.session == nil
++
+ 	if controlsW.session == nil {
+-		log.Info().
+-			Str("relay", controlsW.settings.GetString(resources.SchemaP2pandaRelayKey)).
+-			Str("network", controlsW.settings.GetString(resources.SchemaP2pandaNetworkKey)).
+-			Str("bootstrap", controlsW.settings.GetString(resources.SchemaP2pandaBootstrapKey)).
+-			Str("topic", controlsW.topicHex).
+-			Msg("Creating new p2panda session (host path)")
+-
+ 		controlsW.sessionCtx, controlsW.cancelSessionCtx = context.WithCancel(context.Background())
+ 
+ 		controlsW.session = p2panda.NewSession(
+@@ -313,9 +307,8 @@ 			controlsW.settings.GetString(resources.SchemaP2pandaBootstrapKey),
+ 		)
+ 
+ 		go func() {
+-			log.Info().Msg("Calling session.Open (host, background)")
+ 			if err := controlsW.session.Open(controlsW.sessionCtx); err != nil {
+-				log.Error().Err(err).Msg("session.Open failed")
++				log.Error().Err(err).Msg("Could not open p2panda session")
+ 				var showErr glib.SourceFunc = func(uintptr) bool {
+ 					OpenErrorDialog(controlsW.ctx, &controlsW.ApplicationWindow, err)
+ 					return false
+@@ -324,16 +317,13 @@ 				glib.IdleAdd(&showErr, 0)
+ 				controlsW.cancelSessionCtx()
+ 				return
+ 			}
+-			log.Info().Str("pubkey", controlsW.session.NodeIDHex()).Msg("session.Open returned successfully")
+ 			close(sessionReady)
+ 		}()
+ 	} else {
+-		log.Info().Str("pubkey", controlsW.session.NodeIDHex()).Msg("Reusing session from MainWindow (joiner path)")
+ 		close(sessionReady)
+ 	}
+ 
+ 	controlsW.streamCodeInput.SetText(controlsW.topicHex)
+-	log.Info().Msg("ControlsWindow.setup: stream code set")
+ 
+ 	connectedPeers := new(int32)
+ 	syncWatchingWithLabel := func(connected bool) {
+@@ -601,6 +591,7 @@ 				buffering,
+ 				syncWatchingWithLabel,
+ 				preparingDialog,
+ 				sessionReady,
++				isHost,
+ 			)
+ 		}()
+ 	}
+@@ -618,6 +609,7 @@ 	buffering *broadcast.Relay[bool],
+ 	syncWatchingWithLabel func(bool),
+ 	preparingDialog *PreparingDialog,
+ 	sessionReady <-chan struct{},
++	isHost bool,
+ ) {
+ 	controlsW := (*ControlsWindow)(unsafe.Pointer(c.Widget.GetData(dataKeyGoInstance)))
+ 
+@@ -785,7 +777,6 @@ 		case <-sessionReady:
+ 		case <-controlsW.ctx.Done():
+ 			return
+ 		}
+-		log.Info().Msg("Outbound publisher: session ready, starting")
+ 
+ 		pl := pauses.Listener(0)
+ 		defer pl.Close()
+@@ -840,33 +831,39 @@ 			case ev, ok := <-controlsW.session.Peers():
+ 				if !ok {
+ 					return
+ 				}
+-				log.Info().Str("peer", ev.Pubkey).Msg("Peer joined")
+-				syncWatchingWithLabel(true)
++				if ev.Joined {
++					log.Info().Str("peer", ev.Pubkey).Msg("Peer joined")
++				} else {
++					log.Info().Str("peer", ev.Pubkey).Msg("Peer left")
++				}
++				syncWatchingWithLabel(ev.Joined)
+ 			}
+ 		}
+ 	}()
+ 
+-	// Announce the current magnet and paused state once the session is ready.
+-	go func() {
+-		select {
+-		case <-sessionReady:
+-		case <-controlsW.ctx.Done():
+-			return
+-		}
+-		log.Info().Msg("Session ready, publishing initial Magnet + Pause")
++	// Host-only: announce the current magnet + paused state once the session
++	// is ready. Joiners must not do this — they'd overwrite host state.
++	if isHost {
++		go func() {
++			select {
++			case <-sessionReady:
++			case <-controlsW.ctx.Done():
++				return
++			}
+ 
+-		subs := []api.Subtitle{}
+-		for _, subtitle := range controlsW.subtitles {
+-			subs = append(subs, api.Subtitle{Name: subtitle.name, Size: subtitle.size})
+-		}
+-		if err := publish(api.NewMagnetLink(controlsW.magnetLink, controlsW.selectedTorrentMedia, controlsW.torrentTitle, controlsW.torrentReadme, subs), false); err != nil {
+-			log.Debug().Err(err).Msg("Could not publish magnet link")
+-		}
+-		if err := publish(api.NewPause(true), true); err != nil {
+-			log.Debug().Err(err).Msg("Could not publish initial pause")
+-		}
+-		positions.Broadcast(float64(controlsW.player.Position().Nanoseconds()))
+-	}()
++			subs := []api.Subtitle{}
++			for _, subtitle := range controlsW.subtitles {
++				subs = append(subs, api.Subtitle{Name: subtitle.name, Size: subtitle.size})
++			}
++			if err := publish(api.NewMagnetLink(controlsW.magnetLink, controlsW.selectedTorrentMedia, controlsW.torrentTitle, controlsW.torrentReadme, subs), false); err != nil {
++				log.Debug().Err(err).Msg("Could not publish magnet link")
++			}
++			if err := publish(api.NewPause(true), true); err != nil {
++				log.Debug().Err(err).Msg("Could not publish initial pause")
++			}
++			positions.Broadcast(float64(controlsW.player.Position().Nanoseconds()))
++		}()
++	}
+ 
+ 	// Drain messages buffered during the MainWindow join handshake first, then
+ 	// consume live messages from the session.
+diff --git a/internal/p2panda/session.go b/internal/p2panda/session.go
+index 510b17247b990c356986cbe36afacc9bfd9a6040..2653233c0f4a0ae220f4d98a95ab0774a332671e 100644
+--- a/internal/p2panda/session.go
++++ b/internal/p2panda/session.go
+@@ -27,11 +27,11 @@ 	Data      []byte
+ 	Ephemeral bool
+ }
+ 
+-// PeerEvent signals when a previously-unseen peer sent their first message
+-// (Joined=true) or — currently — is just a new observation. The underlying
+-// p2panda library does not expose reliable disconnect events without using the
+-// sync-started/sync-ended signals, so Joined=false is unused for now but kept
+-// for API symmetry.
++// PeerEvent reports that a remote peer has just joined the topic
++// (Joined=true) or just left it (Joined=false). Joins are emitted when the
++// first sync session with a given remote opens; leaves when the last one
++// closes. A single node can have multiple concurrent sync sessions; the
++// Session coalesces them so PeerEvent reflects presence, not session churn.
+ type PeerEvent struct {
+ 	Pubkey string
+ 	Joined bool
+@@ -55,14 +55,19 @@ 	topic      *p2panda.Topic
+ 
+ 	// Keep the signal callbacks alive for the lifetime of the session so GC
+ 	// doesn't collect them while p2panda still holds the references.
+-	onMsgCB *func(p2panda.Topic, uintptr, uintptr, uintptr) bool
+-	onEphCB *func(p2panda.Topic, uintptr, uintptr, uintptr)
++	onMsgCB       *func(p2panda.Topic, uintptr, uintptr, uintptr) bool
++	onEphCB       *func(p2panda.Topic, uintptr, uintptr, uintptr)
++	onSyncStartCB *func(p2panda.Topic, uintptr, uint64, uint64, uint64, uint64, uint64)
++	onSyncEndCB   *func(p2panda.Topic, uintptr, uint64)
+ 
+ 	messages chan Message
+ 	peers    chan PeerEvent
+ 
+-	mu       sync.Mutex
+-	seenPeer map[string]struct{}
++	mu sync.Mutex
++	// peerSessions counts active sync sessions per remote pubkey. A peer is
++	// considered joined once it has at least one session and left when the
++	// last one closes.
++	peerSessions map[string]int
+ 
+ 	closeOnce sync.Once
+ 	closed    chan struct{}
+@@ -91,14 +96,14 @@ // NewSession prepares a session descriptor. It does not open the underlying
+ // node or topic — call Open for that.
+ func NewSession(relayURL, networkHex, topicHex, bootstrapHex string) *Session {
+ 	return &Session{
+-		relayURL:   relayURL,
+-		networkHex: networkHex,
+-		topicHex:   topicHex,
+-		bootstrap:  bootstrapHex,
+-		messages:   make(chan Message, 64),
+-		peers:     make(chan PeerEvent, 16),
+-		seenPeer:   map[string]struct{}{},
+-		closed:     make(chan struct{}),
++		relayURL:     relayURL,
++		networkHex:   networkHex,
++		topicHex:     topicHex,
++		bootstrap:    bootstrapHex,
++		messages:     make(chan Message, 64),
++		peers:        make(chan PeerEvent, 16),
++		peerSessions: map[string]int{},
++		closed:       make(chan struct{}),
+ 	}
+ }
+ 
+@@ -121,38 +126,33 @@ func (s *Session) Done() <-chan struct{} { return s.closed }
+ 
+ // Open spawns the node and topic. It blocks until both are ready or ctx is
+ // cancelled. Must be called from outside the GLib main thread — it uses
+-// glib.IdleAdd internally to marshal work onto the main loop.
++// glib.IdleAdd internally to marshal work onto the main loop, so calling from
++// the main thread would deadlock.
+ func (s *Session) Open(ctx context.Context) error {
+-	log.Info().Str("relay", s.relayURL).Msg("Session.Open: parsing relay URL")
+ 	relayURI, err := glib.UriParse(s.relayURL, glib.GUriFlagsNoneValue)
+ 	if err != nil {
+ 		return fmt.Errorf("parse relay URL: %w", err)
+ 	}
+ 	s.relayURI = relayURI
+ 
+-	log.Info().Str("network", s.networkHex).Msg("Session.Open: decoding network id")
+ 	networkBytes, err := hexTo32(s.networkHex)
+ 	if err != nil {
+ 		return fmt.Errorf("network id: %w", err)
+ 	}
+ 	s.networkID = p2panda.NewNetworkIdFromData(networkBytes)
+ 
+-	log.Info().Str("topic", s.topicHex).Msg("Session.Open: decoding topic id")
+ 	topicBytes, err := hexTo32(s.topicHex)
+ 	if err != nil {
+ 		return fmt.Errorf("topic id: %w", err)
+ 	}
+ 	s.topicID = p2panda.NewTopicIdFromData(topicBytes)
+ 
+-	log.Info().Msg("Session.Open: generating private key")
+ 	s.privateKey = p2panda.NewPrivateKey()
+ 	ownPub := s.privateKey.GetPublicKey()
+ 	s.ownPubHex = ptrHex(ownPub.GetData(), PubkeySize)
+ 	ownPub.Free()
+-	log.Info().Str("pubkey", s.ownPubHex).Msg("Session.Open: generated key pair")
+ 
+ 	if s.bootstrap != "" {
+-		log.Info().Str("bootstrap", s.bootstrap).Msg("Session.Open: configuring bootstrap")
+ 		bootBytes, err := hexTo32(s.bootstrap)
+ 		if err != nil {
+ 			return fmt.Errorf("bootstrap node id: %w", err)
+@@ -162,11 +162,8 @@ 		if err != nil {
+ 			return fmt.Errorf("construct bootstrap node id: %w", err)
+ 		}
+ 		s.bootstrapN = b
+-	} else {
+-		log.Info().Msg("Session.Open: no bootstrap configured, relying on relay and mDNS")
+ 	}
+ 
+-	log.Info().Msg("Session.Open: creating Node")
+ 	s.node = p2panda.NewNode(
+ 		s.privateKey,
+ 		"sqlite::memory:",
+@@ -179,17 +176,20 @@ 	if s.node == nil {
+ 		return errors.New("p2panda.NewNode returned nil")
+ 	}
+ 
++	log.Info().
++		Str("pubkey", s.ownPubHex).
++		Str("topic", s.topicHex).
++		Str("relay", s.relayURL).
++		Msg("Spawning p2panda node")
++
+ 	nodeReady := make(chan error, 1)
+ 	topicReady := make(chan error, 1)
+ 
+ 	var onNodeSpawn gio.AsyncReadyCallback = func(_, resultPtr, _ uintptr) {
+-		log.Info().Msg("Session.Open: onNodeSpawn callback fired")
+ 		if _, err := s.node.SpawnFinish(&gio.AsyncResultBase{Ptr: resultPtr}); err != nil {
+-			log.Error().Err(err).Msg("Session.Open: SpawnFinish(node) failed")
+ 			nodeReady <- err
+ 			return
+ 		}
+-		log.Info().Msg("Session.Open: node spawned, creating topic")
+ 
+ 		s.topic = p2panda.NewTopic(
+ 			s.node,
+@@ -197,7 +197,6 @@ 			s.topicID,
+ 			uint32(p2panda.TopicEphemeralValue|p2panda.TopicPersistentValue),
+ 		)
+ 		if s.topic == nil {
+-			log.Error().Msg("Session.Open: p2panda.NewTopic returned nil")
+ 			nodeReady <- errors.New("NewTopic returned nil")
+ 			return
+ 		}
+@@ -205,60 +204,48 @@
+ 		s.connectSignals()
+ 
+ 		var onTopicSpawn gio.AsyncReadyCallback = func(_, tpResultPtr, _ uintptr) {
+-			log.Info().Msg("Session.Open: onTopicSpawn callback fired")
+ 			if _, err := s.topic.SpawnFinish(&gio.AsyncResultBase{Ptr: tpResultPtr}); err != nil {
+-				log.Error().Err(err).Msg("Session.Open: SpawnFinish(topic) failed")
+ 				topicReady <- err
+ 				return
+ 			}
+-			log.Info().Msg("Session.Open: topic spawned successfully")
+ 			topicReady <- nil
+ 		}
+ 
+-		log.Info().Msg("Session.Open: calling topic.SpawnAsync")
+ 		s.topic.SpawnAsync(nil, &onTopicSpawn, 0)
+ 		nodeReady <- nil
+ 	}
+ 
+-	log.Info().Msg("Session.Open: scheduling node.SpawnAsync on main loop")
+ 	var kick glib.SourceFunc = func(uintptr) bool {
+-		log.Info().Msg("Session.Open: kick fired on main loop, calling node.SpawnAsync")
+ 		s.node.SpawnAsync(nil, &onNodeSpawn, 0)
+ 		return false
+ 	}
+ 	glib.IdleAdd(&kick, 0)
+ 
+-	log.Info().Msg("Session.Open: waiting for nodeReady")
+ 	select {
+ 	case err := <-nodeReady:
+ 		if err != nil {
+ 			return fmt.Errorf("spawn node: %w", err)
+ 		}
+-		log.Info().Msg("Session.Open: nodeReady received")
+ 	case <-ctx.Done():
+-		log.Warn().Msg("Session.Open: ctx cancelled while waiting for node")
+ 		return ctx.Err()
+ 	}
+ 
+-	log.Info().Msg("Session.Open: waiting for topicReady")
+ 	select {
+ 	case err := <-topicReady:
+ 		if err != nil {
+ 			return fmt.Errorf("spawn topic: %w", err)
+ 		}
+-		log.Info().Msg("Session.Open: topicReady received")
+ 	case <-ctx.Done():
+-		log.Warn().Msg("Session.Open: ctx cancelled while waiting for topic")
+ 		return ctx.Err()
+ 	}
+ 
+-	log.Info().Msg("Session.Open: complete")
++	log.Info().Str("pubkey", s.ownPubHex).Msg("p2panda topic ready")
+ 	return nil
+ }
+ 
+-// connectSignals wires the topic's message/ephemeral-message signals into the
+-// Session's channels. Callbacks are closed over `s`, filter self-sent messages,
+-// and drop events if the consumer isn't keeping up (preferring recent state).
++// connectSignals wires the topic's signals into the Session's channels.
++// Callbacks are closed over `s`, filter self-sent messages, and drop events if
++// the consumer isn't keeping up (preferring recent state).
+ func (s *Session) connectSignals() {
+ 	deliver := func(pkPtr, bPtr uintptr, ephemeral bool) {
+ 		from := ptrHex((*p2panda.PublicKey)(unsafe.Pointer(pkPtr)).GetData(), PubkeySize)
+@@ -272,20 +259,6 @@ 		raw := unsafe.Slice((*byte)(unsafe.Pointer(msg.GetData(&sz))), sz)
+ 		data := make([]byte, len(raw))
+ 		copy(data, raw)
+ 
+-		s.mu.Lock()
+-		_, seen := s.seenPeer[from]
+-		if !seen {
+-			s.seenPeer[from] = struct{}{}
+-		}
+-		s.mu.Unlock()
+-
+-		if !seen {
+-			select {
+-			case s.peers <- PeerEvent{Pubkey: from, Joined: true}:
+-			default:
+-			}
+-		}
+-
+ 		select {
+ 		case s.messages <- Message{From: from, Data: data, Ephemeral: ephemeral}:
+ 		case <-s.closed:
+@@ -304,6 +277,56 @@ 		deliver(pkPtr, bPtr, true)
+ 	}
+ 	s.onEphCB = &onEph
+ 	s.topic.ConnectEphemeralMessage(s.onEphCB)
++
++	// Presence: increment active-session count per remote on sync-started,
++	// decrement on sync-ended. Emit PeerEvent on the 0→1 and 1→0 transitions
++	// so the consumer only sees presence changes.
++	onSyncStart := func(_ p2panda.Topic, remoteNodeIDPtr uintptr, _, _, _, _, _ uint64) {
++		remote := ptrHex((*p2panda.NodeId)(unsafe.Pointer(remoteNodeIDPtr)).GetData(), PubkeySize)
++		if remote == s.ownPubHex {
++			return
++		}
++
++		s.mu.Lock()
++		prev := s.peerSessions[remote]
++		s.peerSessions[remote] = prev + 1
++		s.mu.Unlock()
++
++		if prev == 0 {
++			select {
++			case s.peers <- PeerEvent{Pubkey: remote, Joined: true}:
++			case <-s.closed:
++			}
++		}
++	}
++	s.onSyncStartCB = &onSyncStart
++	s.topic.ConnectSyncStarted(s.onSyncStartCB)
++
++	onSyncEnd := func(_ p2panda.Topic, remoteNodeIDPtr uintptr, _ uint64) {
++		remote := ptrHex((*p2panda.NodeId)(unsafe.Pointer(remoteNodeIDPtr)).GetData(), PubkeySize)
++		if remote == s.ownPubHex {
++			return
++		}
++
++		s.mu.Lock()
++		prev := s.peerSessions[remote]
++		next := prev - 1
++		if next <= 0 {
++			delete(s.peerSessions, remote)
++		} else {
++			s.peerSessions[remote] = next
++		}
++		s.mu.Unlock()
++
++		if prev == 1 {
++			select {
++			case s.peers <- PeerEvent{Pubkey: remote, Joined: false}:
++			case <-s.closed:
++			}
++		}
++	}
++	s.onSyncEndCB = &onSyncEnd
++	s.topic.ConnectSyncEnded(s.onSyncEndCB)
+ }
+ 
+ // Publish enqueues a publish on the main loop and returns once the call
+diff --git a/po/de.po b/po/de.po
+index c8fd09503e98d96cd30b3f5374192dda072ad76e..b0392bddd30bcd83a816011a6f590c8551634d3c 100644
+--- a/po/de.po
++++ b/po/de.po
+@@ -145,7 +145,7 @@ msgid "Toggle Fullscreen"
+ msgstr "Vollbild umschalten"
+ 
+ #: ../assets/resources/controls.blp:230
+-#: ../internal/components/controls_window.go:353
++#: ../internal/components/controls_window.go:343
+ #: ../assets/resources/controls.ui:256
+ msgid "You're currently watching alone."
+ msgstr "Sie schauen derzeit alleine zu."
+@@ -378,72 +378,72 @@ #: ../internal/components/shortcuts_dialog.go:26
+ msgid "Quit"
+ msgstr "Beenden"
+ 
+-#: ../internal/components/controls_window.go:343
++#: ../internal/components/controls_window.go:333
+ msgid "Someone joined the session."
+ msgstr "Jemand ist der Sitzung beigetreten."
+ 
+-#: ../internal/components/controls_window.go:348
++#: ../internal/components/controls_window.go:338
+ msgid "Someone left the session."
+ msgstr "Jemand hat die Sitzung verlassen."
+ 
+-#: ../internal/components/controls_window.go:358
++#: ../internal/components/controls_window.go:348
+ msgid "You're currently watching with %v other person."
+ msgstr "Sie schauen derzeit mit %v weiterer Person."
+ 
+-#: ../internal/components/controls_window.go:362
++#: ../internal/components/controls_window.go:352
+ msgid "You're currently watching with %v other people."
+ msgstr "Sie schauen derzeit mit %v weiteren Personen."
+ 
+-#: ../internal/components/controls_window.go:396
+-#: ../internal/components/controls_window.go:449
++#: ../internal/components/controls_window.go:386
++#: ../internal/components/controls_window.go:439
+ msgid "%v MB/%v MB (%v peers)"
+ msgstr "%v MB/%v MB (%v Knoten)"
+ 
+-#: ../internal/components/controls_window.go:401
+-#: ../internal/components/controls_window.go:451
++#: ../internal/components/controls_window.go:391
++#: ../internal/components/controls_window.go:441
+ msgid "Searching for peers"
+ msgstr "Suche nach Knoten"
+ 
+-#: ../internal/components/controls_window.go:646
+-#: ../internal/components/controls_window.go:1312
++#: ../internal/components/controls_window.go:638
++#: ../internal/components/controls_window.go:1309
+ msgid "Track %v"
+ msgstr "Spur %v"
+ 
+-#: ../internal/components/controls_window.go:654
++#: ../internal/components/controls_window.go:646
+ #, fuzzy
+ msgid "Embedded subtitle %v"
+ msgstr "Integrierter Untertitel"
+ 
+-#: ../internal/components/controls_window.go:1091
+-#: ../internal/components/controls_window.go:1265
++#: ../internal/components/controls_window.go:1088
++#: ../internal/components/controls_window.go:1262
+ msgid "None"
+ msgstr "Keine"
+ 
+-#: ../internal/components/controls_window.go:1195
++#: ../internal/components/controls_window.go:1192
+ msgid "Disable subtitles"
+ msgstr "Untertitel deaktivieren"
+ 
+-#: ../internal/components/controls_window.go:1198
++#: ../internal/components/controls_window.go:1195
+ msgid "Integrated subtitle"
+ msgstr "Integrierter Untertitel"
+ 
+-#: ../internal/components/controls_window.go:1201
++#: ../internal/components/controls_window.go:1198
+ msgid "Subtitle from torrent"
+ msgstr "Untertitel aus Torrent"
+ 
+-#: ../internal/components/controls_window.go:1204
++#: ../internal/components/controls_window.go:1201
+ msgid "Manually added"
+ msgstr "Manuell hinzugefügt"
+ 
+-#: ../internal/components/controls_window.go:1216
++#: ../internal/components/controls_window.go:1213
+ msgid "Select subtitle file"
+ msgstr "Untertitel-Datei auswählen"
+ 
+-#: ../internal/components/controls_window.go:1310
++#: ../internal/components/controls_window.go:1307
+ msgid "Disable audio"
+ msgstr "Audio deaktivieren"
+ 
+-#: ../internal/components/controls_window.go:1316
++#: ../internal/components/controls_window.go:1313
+ msgid "Untitled Track"
+ msgstr "Unbenannte Spur"
+ 
+diff --git a/po/en_GB.po b/po/en_GB.po
+index aafa9cc34dcd0d8170d519dff6ba15fa6142da88..9159234e02b11a1c518fc6e7986e9be7716af5db 100644
+--- a/po/en_GB.po
++++ b/po/en_GB.po
+@@ -144,7 +144,7 @@ msgid "Toggle Fullscreen"
+ msgstr "Toggle Fullscreen"
+ 
+ #: ../assets/resources/controls.blp:230
+-#: ../internal/components/controls_window.go:353
++#: ../internal/components/controls_window.go:343
+ #: ../assets/resources/controls.ui:256
+ msgid "You're currently watching alone."
+ msgstr "You're currently watching alone."
+@@ -374,72 +374,72 @@ #: ../internal/components/shortcuts_dialog.go:26
+ msgid "Quit"
+ msgstr "Quit"
+ 
+-#: ../internal/components/controls_window.go:343
++#: ../internal/components/controls_window.go:333
+ msgid "Someone joined the session."
+ msgstr "Someone joined the session."
+ 
+-#: ../internal/components/controls_window.go:348
++#: ../internal/components/controls_window.go:338
+ msgid "Someone left the session."
+ msgstr "Someone left the session."
+ 
+-#: ../internal/components/controls_window.go:358
++#: ../internal/components/controls_window.go:348
+ msgid "You're currently watching with %v other person."
+ msgstr "You're currently watching with %v other person."
+ 
+-#: ../internal/components/controls_window.go:362
++#: ../internal/components/controls_window.go:352
+ msgid "You're currently watching with %v other people."
+ msgstr "You're currently watching with %v other people."
+ 
+-#: ../internal/components/controls_window.go:396
+-#: ../internal/components/controls_window.go:449
++#: ../internal/components/controls_window.go:386
++#: ../internal/components/controls_window.go:439
+ msgid "%v MB/%v MB (%v peers)"
+ msgstr "%v MB/%v MB (%v peers)"
+ 
+-#: ../internal/components/controls_window.go:401
+-#: ../internal/components/controls_window.go:451
++#: ../internal/components/controls_window.go:391
++#: ../internal/components/controls_window.go:441
+ msgid "Searching for peers"
+ msgstr "Searching for peers"
+ 
+-#: ../internal/components/controls_window.go:646
+-#: ../internal/components/controls_window.go:1312
++#: ../internal/components/controls_window.go:638
++#: ../internal/components/controls_window.go:1309
+ msgid "Track %v"
+ msgstr "Track %v"
+ 
+-#: ../internal/components/controls_window.go:654
++#: ../internal/components/controls_window.go:646
+ #, fuzzy
+ msgid "Embedded subtitle %v"
+ msgstr "Integrated subtitle"
+ 
+-#: ../internal/components/controls_window.go:1091
+-#: ../internal/components/controls_window.go:1265
++#: ../internal/components/controls_window.go:1088
++#: ../internal/components/controls_window.go:1262
+ msgid "None"
+ msgstr "None"
+ 
+-#: ../internal/components/controls_window.go:1195
++#: ../internal/components/controls_window.go:1192
+ msgid "Disable subtitles"
+ msgstr "Disable subtitles"
+ 
+-#: ../internal/components/controls_window.go:1198
++#: ../internal/components/controls_window.go:1195
+ msgid "Integrated subtitle"
+ msgstr "Integrated subtitle"
+ 
+-#: ../internal/components/controls_window.go:1201
++#: ../internal/components/controls_window.go:1198
+ msgid "Subtitle from torrent"
+ msgstr "Subtitle from torrent"
+ 
+-#: ../internal/components/controls_window.go:1204
++#: ../internal/components/controls_window.go:1201
+ msgid "Manually added"
+ msgstr "Manually added"
+ 
+-#: ../internal/components/controls_window.go:1216
++#: ../internal/components/controls_window.go:1213
+ msgid "Select subtitle file"
+ msgstr "Select subtitle file"
+ 
+-#: ../internal/components/controls_window.go:1310
++#: ../internal/components/controls_window.go:1307
+ msgid "Disable audio"
+ msgstr "Disable audio"
+ 
+-#: ../internal/components/controls_window.go:1316
++#: ../internal/components/controls_window.go:1313
+ msgid "Untitled Track"
+ msgstr "Untitled Track"
+ 
+diff --git a/po/en_US.po b/po/en_US.po
+index f903fde54eefb40abdee82f73d38001aa27b1900..c178ae5e0b6e67638180fea7f031ff422d192c49 100644
+--- a/po/en_US.po
++++ b/po/en_US.po
+@@ -144,7 +144,7 @@ msgid "Toggle Fullscreen"
+ msgstr "Toggle Fullscreen"
+ 
+ #: ../assets/resources/controls.blp:230
+-#: ../internal/components/controls_window.go:353
++#: ../internal/components/controls_window.go:343
+ #: ../assets/resources/controls.ui:256
+ msgid "You're currently watching alone."
+ msgstr "You're currently watching alone."
+@@ -374,72 +374,72 @@ #: ../internal/components/shortcuts_dialog.go:26
+ msgid "Quit"
+ msgstr "Quit"
+ 
+-#: ../internal/components/controls_window.go:343
++#: ../internal/components/controls_window.go:333
+ msgid "Someone joined the session."
+ msgstr "Someone joined the session."
+ 
+-#: ../internal/components/controls_window.go:348
++#: ../internal/components/controls_window.go:338
+ msgid "Someone left the session."
+ msgstr "Someone left the session."
+ 
+-#: ../internal/components/controls_window.go:358
++#: ../internal/components/controls_window.go:348
+ msgid "You're currently watching with %v other person."
+ msgstr "You're currently watching with %v other person."
+ 
+-#: ../internal/components/controls_window.go:362
++#: ../internal/components/controls_window.go:352
+ msgid "You're currently watching with %v other people."
+ msgstr "You're currently watching with %v other people."
+ 
+-#: ../internal/components/controls_window.go:396
+-#: ../internal/components/controls_window.go:449
++#: ../internal/components/controls_window.go:386
++#: ../internal/components/controls_window.go:439
+ msgid "%v MB/%v MB (%v peers)"
+ msgstr "%v MB/%v MB (%v peers)"
+ 
+-#: ../internal/components/controls_window.go:401
+-#: ../internal/components/controls_window.go:451
++#: ../internal/components/controls_window.go:391
++#: ../internal/components/controls_window.go:441
+ msgid "Searching for peers"
+ msgstr "Searching for peers"
+ 
+-#: ../internal/components/controls_window.go:646
+-#: ../internal/components/controls_window.go:1312
++#: ../internal/components/controls_window.go:638
++#: ../internal/components/controls_window.go:1309
+ msgid "Track %v"
+ msgstr "Track %v"
+ 
+-#: ../internal/components/controls_window.go:654
++#: ../internal/components/controls_window.go:646
+ #, fuzzy
+ msgid "Embedded subtitle %v"
+ msgstr "Integrated subtitle"
+ 
+-#: ../internal/components/controls_window.go:1091
+-#: ../internal/components/controls_window.go:1265
++#: ../internal/components/controls_window.go:1088
++#: ../internal/components/controls_window.go:1262
+ msgid "None"
+ msgstr "None"
+ 
+-#: ../internal/components/controls_window.go:1195
++#: ../internal/components/controls_window.go:1192
+ msgid "Disable subtitles"
+ msgstr "Disable subtitles"
+ 
+-#: ../internal/components/controls_window.go:1198
++#: ../internal/components/controls_window.go:1195
+ msgid "Integrated subtitle"
+ msgstr "Integrated subtitle"
+ 
+-#: ../internal/components/controls_window.go:1201
++#: ../internal/components/controls_window.go:1198
+ msgid "Subtitle from torrent"
+ msgstr "Subtitle from torrent"
+ 
+-#: ../internal/components/controls_window.go:1204
++#: ../internal/components/controls_window.go:1201
+ msgid "Manually added"
+ msgstr "Manually added"
+ 
+-#: ../internal/components/controls_window.go:1216
++#: ../internal/components/controls_window.go:1213
+ msgid "Select subtitle file"
+ msgstr "Select subtitle file"
+ 
+-#: ../internal/components/controls_window.go:1310
++#: ../internal/components/controls_window.go:1307
+ msgid "Disable audio"
+ msgstr "Disable audio"
+ 
+-#: ../internal/components/controls_window.go:1316
++#: ../internal/components/controls_window.go:1313
+ msgid "Untitled Track"
+ msgstr "Untitled Track"
+ 
+diff --git a/po/fr.po b/po/fr.po
+index 6f87f04af44d37444da9af3b2e6e3177535f7784..8a6bb01475bf1946dbc9950c53815becf3aec0af 100644
+--- a/po/fr.po
++++ b/po/fr.po
+@@ -144,7 +144,7 @@ msgid "Toggle Fullscreen"
+ msgstr "Basculer en plein écran"
+ 
+ #: ../assets/resources/controls.blp:230
+-#: ../internal/components/controls_window.go:353
++#: ../internal/components/controls_window.go:343
+ #: ../assets/resources/controls.ui:256
+ msgid "You're currently watching alone."
+ msgstr "Vous regardez actuellement seul."
+@@ -376,72 +376,72 @@ #: ../internal/components/shortcuts_dialog.go:26
+ msgid "Quit"
+ msgstr "Quitter"
+ 
+-#: ../internal/components/controls_window.go:343
++#: ../internal/components/controls_window.go:333
+ msgid "Someone joined the session."
+ msgstr "Quelqu'un a rejoint la session."
+ 
+-#: ../internal/components/controls_window.go:348
++#: ../internal/components/controls_window.go:338
+ msgid "Someone left the session."
+ msgstr "Quelqu'un a quitté la session."
+ 
+-#: ../internal/components/controls_window.go:358
++#: ../internal/components/controls_window.go:348
+ msgid "You're currently watching with %v other person."
+ msgstr "Vous regardez actuellement avec %v autre personne."
+ 
+-#: ../internal/components/controls_window.go:362
++#: ../internal/components/controls_window.go:352
+ msgid "You're currently watching with %v other people."
+ msgstr "Vous regardez actuellement avec %v autres personnes."
+ 
+-#: ../internal/components/controls_window.go:396
+-#: ../internal/components/controls_window.go:449
++#: ../internal/components/controls_window.go:386
++#: ../internal/components/controls_window.go:439
+ msgid "%v MB/%v MB (%v peers)"
+ msgstr "%v Mo/%v Mo (%v pairs)"
+ 
+-#: ../internal/components/controls_window.go:401
+-#: ../internal/components/controls_window.go:451
++#: ../internal/components/controls_window.go:391
++#: ../internal/components/controls_window.go:441
+ msgid "Searching for peers"
+ msgstr "Recherche de pairs"
+ 
+-#: ../internal/components/controls_window.go:646
+-#: ../internal/components/controls_window.go:1312
++#: ../internal/components/controls_window.go:638
++#: ../internal/components/controls_window.go:1309
+ msgid "Track %v"
+ msgstr "Piste %v"
+ 
+-#: ../internal/components/controls_window.go:654
++#: ../internal/components/controls_window.go:646
+ #, fuzzy
+ msgid "Embedded subtitle %v"
+ msgstr "Sous-titre intégré"
+ 
+-#: ../internal/components/controls_window.go:1091
+-#: ../internal/components/controls_window.go:1265
++#: ../internal/components/controls_window.go:1088
++#: ../internal/components/controls_window.go:1262
+ msgid "None"
+ msgstr "Aucun"
+ 
+-#: ../internal/components/controls_window.go:1195
++#: ../internal/components/controls_window.go:1192
+ msgid "Disable subtitles"
+ msgstr "Désactiver les sous-titres"
+ 
+-#: ../internal/components/controls_window.go:1198
++#: ../internal/components/controls_window.go:1195
+ msgid "Integrated subtitle"
+ msgstr "Sous-titre intégré"
+ 
+-#: ../internal/components/controls_window.go:1201
++#: ../internal/components/controls_window.go:1198
+ msgid "Subtitle from torrent"
+ msgstr "Sous-titre du torrent"
+ 
+-#: ../internal/components/controls_window.go:1204
++#: ../internal/components/controls_window.go:1201
+ msgid "Manually added"
+ msgstr "Ajouté manuellement"
+ 
+-#: ../internal/components/controls_window.go:1216
++#: ../internal/components/controls_window.go:1213
+ msgid "Select subtitle file"
+ msgstr "Sélectionner le fichier de sous-titres"
+ 
+-#: ../internal/components/controls_window.go:1310
++#: ../internal/components/controls_window.go:1307
+ msgid "Disable audio"
+ msgstr "Désactiver l'audio"
+ 
+-#: ../internal/components/controls_window.go:1316
++#: ../internal/components/controls_window.go:1313
+ msgid "Untitled Track"
+ msgstr "Piste sans titre"
+ 
+diff --git a/po/fr_CA.po b/po/fr_CA.po
+index 6f87f04af44d37444da9af3b2e6e3177535f7784..8a6bb01475bf1946dbc9950c53815becf3aec0af 100644
+--- a/po/fr_CA.po
++++ b/po/fr_CA.po
+@@ -144,7 +144,7 @@ msgid "Toggle Fullscreen"
+ msgstr "Basculer en plein écran"
+ 
+ #: ../assets/resources/controls.blp:230
+-#: ../internal/components/controls_window.go:353
++#: ../internal/components/controls_window.go:343
+ #: ../assets/resources/controls.ui:256
+ msgid "You're currently watching alone."
+ msgstr "Vous regardez actuellement seul."
+@@ -376,72 +376,72 @@ #: ../internal/components/shortcuts_dialog.go:26
+ msgid "Quit"
+ msgstr "Quitter"
+ 
+-#: ../internal/components/controls_window.go:343
++#: ../internal/components/controls_window.go:333
+ msgid "Someone joined the session."
+ msgstr "Quelqu'un a rejoint la session."
+ 
+-#: ../internal/components/controls_window.go:348
++#: ../internal/components/controls_window.go:338
+ msgid "Someone left the session."
+ msgstr "Quelqu'un a quitté la session."
+ 
+-#: ../internal/components/controls_window.go:358
++#: ../internal/components/controls_window.go:348
+ msgid "You're currently watching with %v other person."
+ msgstr "Vous regardez actuellement avec %v autre personne."
+ 
+-#: ../internal/components/controls_window.go:362
++#: ../internal/components/controls_window.go:352
+ msgid "You're currently watching with %v other people."
+ msgstr "Vous regardez actuellement avec %v autres personnes."
+ 
+-#: ../internal/components/controls_window.go:396
+-#: ../internal/components/controls_window.go:449
++#: ../internal/components/controls_window.go:386
++#: ../internal/components/controls_window.go:439
+ msgid "%v MB/%v MB (%v peers)"
+ msgstr "%v Mo/%v Mo (%v pairs)"
+ 
+-#: ../internal/components/controls_window.go:401
+-#: ../internal/components/controls_window.go:451
++#: ../internal/components/controls_window.go:391
++#: ../internal/components/controls_window.go:441
+ msgid "Searching for peers"
+ msgstr "Recherche de pairs"
+ 
+-#: ../internal/components/controls_window.go:646
+-#: ../internal/components/controls_window.go:1312
++#: ../internal/components/controls_window.go:638
++#: ../internal/components/controls_window.go:1309
+ msgid "Track %v"
+ msgstr "Piste %v"
+ 
+-#: ../internal/components/controls_window.go:654
++#: ../internal/components/controls_window.go:646
+ #, fuzzy
+ msgid "Embedded subtitle %v"
+ msgstr "Sous-titre intégré"
+ 
+-#: ../internal/components/controls_window.go:1091
+-#: ../internal/components/controls_window.go:1265
++#: ../internal/components/controls_window.go:1088
++#: ../internal/components/controls_window.go:1262
+ msgid "None"
+ msgstr "Aucun"
+ 
+-#: ../internal/components/controls_window.go:1195
++#: ../internal/components/controls_window.go:1192
+ msgid "Disable subtitles"
+ msgstr "Désactiver les sous-titres"
+ 
+-#: ../internal/components/controls_window.go:1198
++#: ../internal/components/controls_window.go:1195
+ msgid "Integrated subtitle"
+ msgstr "Sous-titre intégré"
+ 
+-#: ../internal/components/controls_window.go:1201
++#: ../internal/components/controls_window.go:1198
+ msgid "Subtitle from torrent"
+ msgstr "Sous-titre du torrent"
+ 
+-#: ../internal/components/controls_window.go:1204
++#: ../internal/components/controls_window.go:1201
+ msgid "Manually added"
+ msgstr "Ajouté manuellement"
+ 
+-#: ../internal/components/controls_window.go:1216
++#: ../internal/components/controls_window.go:1213
+ msgid "Select subtitle file"
+ msgstr "Sélectionner le fichier de sous-titres"
+ 
+-#: ../internal/components/controls_window.go:1310
++#: ../internal/components/controls_window.go:1307
+ msgid "Disable audio"
+ msgstr "Désactiver l'audio"
+ 
+-#: ../internal/components/controls_window.go:1316
++#: ../internal/components/controls_window.go:1313
+ msgid "Untitled Track"
+ msgstr "Piste sans titre"
+ 
+diff --git a/po/multiplex.pot b/po/multiplex.pot
+index a1eadbd464c3d64b4ab4822e4ee46bf30024ea5b..b71c211ee0dfa178e4da16ae24078c84b661c29e 100644
+--- a/po/multiplex.pot
++++ b/po/multiplex.pot
+@@ -135,7 +135,7 @@ msgid "Toggle Fullscreen"
+ msgstr ""
+ 
+ #: ../assets/resources/controls.blp:230
+-#: ../internal/components/controls_window.go:353
++#: ../internal/components/controls_window.go:343
+ #: ../assets/resources/controls.ui:256
+ msgid "You're currently watching alone."
+ msgstr ""
+@@ -361,71 +361,71 @@ #: ../internal/components/shortcuts_dialog.go:26
+ msgid "Quit"
+ msgstr ""
+ 
+-#: ../internal/components/controls_window.go:343
++#: ../internal/components/controls_window.go:333
+ msgid "Someone joined the session."
+ msgstr ""
+ 
+-#: ../internal/components/controls_window.go:348
++#: ../internal/components/controls_window.go:338
+ msgid "Someone left the session."
+ msgstr ""
+ 
+-#: ../internal/components/controls_window.go:358
++#: ../internal/components/controls_window.go:348
+ msgid "You're currently watching with %v other person."
+ msgstr ""
+ 
+-#: ../internal/components/controls_window.go:362
++#: ../internal/components/controls_window.go:352
+ msgid "You're currently watching with %v other people."
+ msgstr ""
+ 
+-#: ../internal/components/controls_window.go:396
+-#: ../internal/components/controls_window.go:449
++#: ../internal/components/controls_window.go:386
++#: ../internal/components/controls_window.go:439
+ msgid "%v MB/%v MB (%v peers)"
+ msgstr ""
+ 
+-#: ../internal/components/controls_window.go:401
+-#: ../internal/components/controls_window.go:451
++#: ../internal/components/controls_window.go:391
++#: ../internal/components/controls_window.go:441
+ msgid "Searching for peers"
+ msgstr ""
+ 
+-#: ../internal/components/controls_window.go:646
+-#: ../internal/components/controls_window.go:1312
++#: ../internal/components/controls_window.go:638
++#: ../internal/components/controls_window.go:1309
+ msgid "Track %v"
+ msgstr ""
+ 
+-#: ../internal/components/controls_window.go:654
++#: ../internal/components/controls_window.go:646
+ msgid "Embedded subtitle %v"
+ msgstr ""
+ 
+-#: ../internal/components/controls_window.go:1091
+-#: ../internal/components/controls_window.go:1265
++#: ../internal/components/controls_window.go:1088
++#: ../internal/components/controls_window.go:1262
+ msgid "None"
+ msgstr ""
+ 
+-#: ../internal/components/controls_window.go:1195
++#: ../internal/components/controls_window.go:1192
+ msgid "Disable subtitles"
+ msgstr ""
+ 
+-#: ../internal/components/controls_window.go:1198
++#: ../internal/components/controls_window.go:1195
+ msgid "Integrated subtitle"
+ msgstr ""
+ 
+-#: ../internal/components/controls_window.go:1201
++#: ../internal/components/controls_window.go:1198
+ msgid "Subtitle from torrent"
+ msgstr ""
+ 
+-#: ../internal/components/controls_window.go:1204
++#: ../internal/components/controls_window.go:1201
+ msgid "Manually added"
+ msgstr ""
+ 
+-#: ../internal/components/controls_window.go:1216
++#: ../internal/components/controls_window.go:1213
+ msgid "Select subtitle file"
+ msgstr ""
+ 
+-#: ../internal/components/controls_window.go:1310
++#: ../internal/components/controls_window.go:1307
+ msgid "Disable audio"
+ msgstr ""
+ 
+-#: ../internal/components/controls_window.go:1316
++#: ../internal/components/controls_window.go:1313
+ msgid "Untitled Track"
+ msgstr ""
+ 
+diff --git a/po/pl.po b/po/pl.po
+index 3b3848d838e7c40c5ceac80bd118e1ddfe726afb..459d31cab5c9334376b97abcf687db4d85505bab 100644
+--- a/po/pl.po
++++ b/po/pl.po
+@@ -155,7 +155,7 @@ msgid "Toggle Fullscreen"
+ msgstr "Przełącz Pelny Ekran"
+ 
+ #: ../assets/resources/controls.blp:230
+-#: ../internal/components/controls_window.go:353
++#: ../internal/components/controls_window.go:343
+ #: ../assets/resources/controls.ui:256
+ msgid "You're currently watching alone."
+ msgstr "Aktualnie oglądasz sam."
+@@ -388,72 +388,72 @@ #: ../internal/components/shortcuts_dialog.go:26
+ msgid "Quit"
+ msgstr "Wyjdź"
+ 
+-#: ../internal/components/controls_window.go:343
++#: ../internal/components/controls_window.go:333
+ msgid "Someone joined the session."
+ msgstr "Ktoś dołączył do sesji."
+ 
+-#: ../internal/components/controls_window.go:348
++#: ../internal/components/controls_window.go:338
+ msgid "Someone left the session."
+ msgstr "Ktoś opuścił sesje."
+ 
+-#: ../internal/components/controls_window.go:358
++#: ../internal/components/controls_window.go:348
+ msgid "You're currently watching with %v other person."
+ msgstr "Aktualnie oglądasz z %v inną osobą."
+ 
+-#: ../internal/components/controls_window.go:362
++#: ../internal/components/controls_window.go:352
+ msgid "You're currently watching with %v other people."
+ msgstr "Aktualnie oglądasz z %v innymi osobami."
+ 
+-#: ../internal/components/controls_window.go:396
+-#: ../internal/components/controls_window.go:449
++#: ../internal/components/controls_window.go:386
++#: ../internal/components/controls_window.go:439
+ msgid "%v MB/%v MB (%v peers)"
+ msgstr "%v MB/%v MB (%v peerów)"
+ 
+-#: ../internal/components/controls_window.go:401
+-#: ../internal/components/controls_window.go:451
++#: ../internal/components/controls_window.go:391
++#: ../internal/components/controls_window.go:441
+ msgid "Searching for peers"
+ msgstr "Szukanie peerów"
+ 
+-#: ../internal/components/controls_window.go:646
+-#: ../internal/components/controls_window.go:1312
++#: ../internal/components/controls_window.go:638
++#: ../internal/components/controls_window.go:1309
+ msgid "Track %v"
+ msgstr "Ścieżka %v"
+ 
+-#: ../internal/components/controls_window.go:654
++#: ../internal/components/controls_window.go:646
+ #, fuzzy
+ msgid "Embedded subtitle %v"
+ msgstr "Zintegrowane napisy"
+ 
+-#: ../internal/components/controls_window.go:1091
+-#: ../internal/components/controls_window.go:1265
++#: ../internal/components/controls_window.go:1088
++#: ../internal/components/controls_window.go:1262
+ msgid "None"
+ msgstr "Żadna"
+ 
+-#: ../internal/components/controls_window.go:1195
++#: ../internal/components/controls_window.go:1192
+ msgid "Disable subtitles"
+ msgstr "Wyłącz napisy"
+ 
+-#: ../internal/components/controls_window.go:1198
++#: ../internal/components/controls_window.go:1195
+ msgid "Integrated subtitle"
+ msgstr "Zintegrowane napisy"
+ 
+-#: ../internal/components/controls_window.go:1201
++#: ../internal/components/controls_window.go:1198
+ msgid "Subtitle from torrent"
+ msgstr "Napisy z torrenta"
+ 
+-#: ../internal/components/controls_window.go:1204
++#: ../internal/components/controls_window.go:1201
+ msgid "Manually added"
+ msgstr "Manualnie dodano"
+ 
+-#: ../internal/components/controls_window.go:1216
++#: ../internal/components/controls_window.go:1213
+ msgid "Select subtitle file"
+ msgstr "Wybierz plik z napisami"
+ 
+-#: ../internal/components/controls_window.go:1310
++#: ../internal/components/controls_window.go:1307
+ msgid "Disable audio"
+ msgstr "Wyłącz audio"
+ 
+-#: ../internal/components/controls_window.go:1316
++#: ../internal/components/controls_window.go:1313
+ msgid "Untitled Track"
+ msgstr "Ścieżka bez tytulu"
+ 
+diff --git a/po/pt_BR.po b/po/pt_BR.po
+index 9d1a8b2d588fcb4efc0a74aed35dc2c2319330a1..2a4fc4b04234821fb7dcd5243ea281dba4d5f71e 100644
+--- a/po/pt_BR.po
++++ b/po/pt_BR.po
+@@ -154,7 +154,7 @@ msgid "Toggle Fullscreen"
+ msgstr "Alternar tela cheia"
+ 
+ #: ../assets/resources/controls.blp:230
+-#: ../internal/components/controls_window.go:353
++#: ../internal/components/controls_window.go:343
+ #: ../assets/resources/controls.ui:256
+ msgid "You're currently watching alone."
+ msgstr "Você está assistindo sozinho(a)."
+@@ -387,72 +387,72 @@ #: ../internal/components/shortcuts_dialog.go:26
+ msgid "Quit"
+ msgstr "Sair"
+ 
+-#: ../internal/components/controls_window.go:343
++#: ../internal/components/controls_window.go:333
+ msgid "Someone joined the session."
+ msgstr "Alguém entrou na sessão."
+ 
+-#: ../internal/components/controls_window.go:348
++#: ../internal/components/controls_window.go:338
+ msgid "Someone left the session."
+ msgstr "Alguém saiu da sessão."
+ 
+-#: ../internal/components/controls_window.go:358
++#: ../internal/components/controls_window.go:348
+ msgid "You're currently watching with %v other person."
+ msgstr "Você está assistindo a este vídeo com %v outra pessoa."
+ 
+-#: ../internal/components/controls_window.go:362
++#: ../internal/components/controls_window.go:352
+ msgid "You're currently watching with %v other people."
+ msgstr "Você está assistindo a esta transmissão com %v outras pessoas."
+ 
+-#: ../internal/components/controls_window.go:396
+-#: ../internal/components/controls_window.go:449
++#: ../internal/components/controls_window.go:386
++#: ../internal/components/controls_window.go:439
+ msgid "%v MB/%v MB (%v peers)"
+ msgstr "%v MB/%v MB (%v pares)"
+ 
+-#: ../internal/components/controls_window.go:401
+-#: ../internal/components/controls_window.go:451
++#: ../internal/components/controls_window.go:391
++#: ../internal/components/controls_window.go:441
+ msgid "Searching for peers"
+ msgstr "Em busca de colegas"
+ 
+-#: ../internal/components/controls_window.go:646
+-#: ../internal/components/controls_window.go:1312
++#: ../internal/components/controls_window.go:638
++#: ../internal/components/controls_window.go:1309
+ msgid "Track %v"
+ msgstr "Rastrear %v"
+ 
+-#: ../internal/components/controls_window.go:654
++#: ../internal/components/controls_window.go:646
+ #, fuzzy
+ msgid "Embedded subtitle %v"
+ msgstr "Legendas integradas"
+ 
+-#: ../internal/components/controls_window.go:1091
+-#: ../internal/components/controls_window.go:1265
++#: ../internal/components/controls_window.go:1088
++#: ../internal/components/controls_window.go:1262
+ msgid "None"
+ msgstr "Nenhum"
+ 
+-#: ../internal/components/controls_window.go:1195
++#: ../internal/components/controls_window.go:1192
+ msgid "Disable subtitles"
+ msgstr "Desativar legendas"
+ 
+-#: ../internal/components/controls_window.go:1198
++#: ../internal/components/controls_window.go:1195
+ msgid "Integrated subtitle"
+ msgstr "Legendas integradas"
+ 
+-#: ../internal/components/controls_window.go:1201
++#: ../internal/components/controls_window.go:1198
+ msgid "Subtitle from torrent"
+ msgstr "Legenda do torrent"
+ 
+-#: ../internal/components/controls_window.go:1204
++#: ../internal/components/controls_window.go:1201
+ msgid "Manually added"
+ msgstr "Adicionado manualmente"
+ 
+-#: ../internal/components/controls_window.go:1216
++#: ../internal/components/controls_window.go:1213
+ msgid "Select subtitle file"
+ msgstr "Selecione o arquivo de legenda"
+ 
+-#: ../internal/components/controls_window.go:1310
++#: ../internal/components/controls_window.go:1307
+ msgid "Disable audio"
+ msgstr "Desativar áudio"
+ 
+-#: ../internal/components/controls_window.go:1316
++#: ../internal/components/controls_window.go:1313
+ msgid "Untitled Track"
+ msgstr "Faixa sem título"
+ 
+diff --git a/po/tr.po b/po/tr.po
+index c03a571a933f9df0ccf812c2897d65423559d314..e3ae40aa34f45886434620e40cd47083210a5941 100644
+--- a/po/tr.po
++++ b/po/tr.po
+@@ -155,7 +155,7 @@ msgid "Toggle Fullscreen"
+ msgstr "Tam Ekran Yap"
+ 
+ #: ../assets/resources/controls.blp:230
+-#: ../internal/components/controls_window.go:353
++#: ../internal/components/controls_window.go:343
+ #: ../assets/resources/controls.ui:256
+ msgid "You're currently watching alone."
+ msgstr "Şu anda tek başınıza izliyorsunuz."
+@@ -387,71 +387,71 @@ #: ../internal/components/shortcuts_dialog.go:26
+ msgid "Quit"
+ msgstr ""
+ 
+-#: ../internal/components/controls_window.go:343
++#: ../internal/components/controls_window.go:333
+ msgid "Someone joined the session."
+ msgstr ""
+ 
+-#: ../internal/components/controls_window.go:348
++#: ../internal/components/controls_window.go:338
+ msgid "Someone left the session."
+ msgstr ""
+ 
+-#: ../internal/components/controls_window.go:358
++#: ../internal/components/controls_window.go:348
+ msgid "You're currently watching with %v other person."
+ msgstr ""
+ 
+-#: ../internal/components/controls_window.go:362
++#: ../internal/components/controls_window.go:352
+ msgid "You're currently watching with %v other people."
+ msgstr ""
+ 
+-#: ../internal/components/controls_window.go:396
+-#: ../internal/components/controls_window.go:449
++#: ../internal/components/controls_window.go:386
++#: ../internal/components/controls_window.go:439
+ msgid "%v MB/%v MB (%v peers)"
+ msgstr ""
+ 
+-#: ../internal/components/controls_window.go:401
+-#: ../internal/components/controls_window.go:451
++#: ../internal/components/controls_window.go:391
++#: ../internal/components/controls_window.go:441
+ msgid "Searching for peers"
+ msgstr ""
+ 
+-#: ../internal/components/controls_window.go:646
+-#: ../internal/components/controls_window.go:1312
++#: ../internal/components/controls_window.go:638
++#: ../internal/components/controls_window.go:1309
+ msgid "Track %v"
+ msgstr ""
+ 
+-#: ../internal/components/controls_window.go:654
++#: ../internal/components/controls_window.go:646
+ msgid "Embedded subtitle %v"
+ msgstr ""
+ 
+-#: ../internal/components/controls_window.go:1091
+-#: ../internal/components/controls_window.go:1265
++#: ../internal/components/controls_window.go:1088
++#: ../internal/components/controls_window.go:1262
+ msgid "None"
+ msgstr ""
+ 
+-#: ../internal/components/controls_window.go:1195
++#: ../internal/components/controls_window.go:1192
+ msgid "Disable subtitles"
+ msgstr ""
+ 
+-#: ../internal/components/controls_window.go:1198
++#: ../internal/components/controls_window.go:1195
+ msgid "Integrated subtitle"
+ msgstr ""
+ 
+-#: ../internal/components/controls_window.go:1201
++#: ../internal/components/controls_window.go:1198
+ msgid "Subtitle from torrent"
+ msgstr ""
+ 
+-#: ../internal/components/controls_window.go:1204
++#: ../internal/components/controls_window.go:1201
+ msgid "Manually added"
+ msgstr ""
+ 
+-#: ../internal/components/controls_window.go:1216
++#: ../internal/components/controls_window.go:1213
+ msgid "Select subtitle file"
+ msgstr ""
+ 
+-#: ../internal/components/controls_window.go:1310
++#: ../internal/components/controls_window.go:1307
+ msgid "Disable audio"
+ msgstr ""
+ 
+-#: ../internal/components/controls_window.go:1316
++#: ../internal/components/controls_window.go:1313
+ msgid "Untitled Track"
+ msgstr ""
+ 
+diff --git a/po/vi.po b/po/vi.po
+index 42caca6a4bf158714790eeb24e572db6c072f9e5..4cd40c67c5fca1dbe596ebeb46b29923e2f6250f 100644
+--- a/po/vi.po
++++ b/po/vi.po
+@@ -154,7 +154,7 @@ msgid "Toggle Fullscreen"
+ msgstr "Bật/tắt toàn màn hình"
+ 
+ #: ../assets/resources/controls.blp:230
+-#: ../internal/components/controls_window.go:353
++#: ../internal/components/controls_window.go:343
+ #: ../assets/resources/controls.ui:256
+ msgid "You're currently watching alone."
+ msgstr "Bạn hiện đang xem một mình."
+@@ -383,72 +383,72 @@ #: ../internal/components/shortcuts_dialog.go:26
+ msgid "Quit"
+ msgstr "Thoát"
+ 
+-#: ../internal/components/controls_window.go:343
++#: ../internal/components/controls_window.go:333
+ msgid "Someone joined the session."
+ msgstr "Có người đã tham gia phiên họp."
+ 
+-#: ../internal/components/controls_window.go:348
++#: ../internal/components/controls_window.go:338
+ msgid "Someone left the session."
+ msgstr "Ai đó đã rời khỏi phiên họp."
+ 
+-#: ../internal/components/controls_window.go:358
++#: ../internal/components/controls_window.go:348
+ msgid "You're currently watching with %v other person."
+ msgstr "Bạn hiện đang xem với %v người khác."
+ 
+-#: ../internal/components/controls_window.go:362
++#: ../internal/components/controls_window.go:352
+ msgid "You're currently watching with %v other people."
+ msgstr "Bạn hiện đang xem cùng %v người khác."
+ 
+-#: ../internal/components/controls_window.go:396
+-#: ../internal/components/controls_window.go:449
++#: ../internal/components/controls_window.go:386
++#: ../internal/components/controls_window.go:439
+ msgid "%v MB/%v MB (%v peers)"
+ msgstr "%v MB/%v MB (%v thiết bị)"
+ 
+-#: ../internal/components/controls_window.go:401
+-#: ../internal/components/controls_window.go:451
++#: ../internal/components/controls_window.go:391
++#: ../internal/components/controls_window.go:441
+ msgid "Searching for peers"
+ msgstr "Đang tìm kiếm thiết bị"
+ 
+-#: ../internal/components/controls_window.go:646
+-#: ../internal/components/controls_window.go:1312
++#: ../internal/components/controls_window.go:638
++#: ../internal/components/controls_window.go:1309
+ msgid "Track %v"
+ msgstr "Track %v"
+ 
+-#: ../internal/components/controls_window.go:654
++#: ../internal/components/controls_window.go:646
+ #, fuzzy
+ msgid "Embedded subtitle %v"
+ msgstr "Phụ đề tích hợp"
+ 
+-#: ../internal/components/controls_window.go:1091
+-#: ../internal/components/controls_window.go:1265
++#: ../internal/components/controls_window.go:1088
++#: ../internal/components/controls_window.go:1262
+ msgid "None"
+ msgstr "Không có"
+ 
+-#: ../internal/components/controls_window.go:1195
++#: ../internal/components/controls_window.go:1192
+ msgid "Disable subtitles"
+ msgstr "Tắt phụ đề"
+ 
+-#: ../internal/components/controls_window.go:1198
++#: ../internal/components/controls_window.go:1195
+ msgid "Integrated subtitle"
+ msgstr "Phụ đề tích hợp"
+ 
+-#: ../internal/components/controls_window.go:1201
++#: ../internal/components/controls_window.go:1198
+ msgid "Subtitle from torrent"
+ msgstr "Phụ đề từ torrent"
+ 
+-#: ../internal/components/controls_window.go:1204
++#: ../internal/components/controls_window.go:1201
+ msgid "Manually added"
+ msgstr "Đã thêm thủ công"
+ 
+-#: ../internal/components/controls_window.go:1216
++#: ../internal/components/controls_window.go:1213
+ msgid "Select subtitle file"
+ msgstr "Chọn tệp phụ đề"
+ 
+-#: ../internal/components/controls_window.go:1310
++#: ../internal/components/controls_window.go:1307
+ msgid "Disable audio"
+ msgstr "Tắt âm thanh"
+ 
+-#: ../internal/components/controls_window.go:1316
++#: ../internal/components/controls_window.go:1313
+ msgid "Untitled Track"
+ msgstr "Bản nhạc không có tiêu đề"
+ 
+diff --git a/po/zh_Hans.po b/po/zh_Hans.po
+index 8d3cc11fddb88c2d6323958e261c1ac7e6f29e59..c75de0df56055ce1d15754898db0e319b85d2b06 100644
+--- a/po/zh_Hans.po
++++ b/po/zh_Hans.po
+@@ -150,7 +150,7 @@ msgid "Toggle Fullscreen"
+ msgstr ""
+ 
+ #: ../assets/resources/controls.blp:230
+-#: ../internal/components/controls_window.go:353
++#: ../internal/components/controls_window.go:343
+ #: ../assets/resources/controls.ui:256
+ msgid "You're currently watching alone."
+ msgstr ""
+@@ -376,71 +376,71 @@ #: ../internal/components/shortcuts_dialog.go:26
+ msgid "Quit"
+ msgstr ""
+ 
+-#: ../internal/components/controls_window.go:343
++#: ../internal/components/controls_window.go:333
+ msgid "Someone joined the session."
+ msgstr ""
+ 
+-#: ../internal/components/controls_window.go:348
++#: ../internal/components/controls_window.go:338
+ msgid "Someone left the session."
+ msgstr ""
+ 
+-#: ../internal/components/controls_window.go:358
++#: ../internal/components/controls_window.go:348
+ msgid "You're currently watching with %v other person."
+ msgstr ""
+ 
+-#: ../internal/components/controls_window.go:362
++#: ../internal/components/controls_window.go:352
+ msgid "You're currently watching with %v other people."
+ msgstr ""
+ 
+-#: ../internal/components/controls_window.go:396
+-#: ../internal/components/controls_window.go:449
++#: ../internal/components/controls_window.go:386
++#: ../internal/components/controls_window.go:439
+ msgid "%v MB/%v MB (%v peers)"
+ msgstr ""
+ 
+-#: ../internal/components/controls_window.go:401
+-#: ../internal/components/controls_window.go:451
++#: ../internal/components/controls_window.go:391
++#: ../internal/components/controls_window.go:441
+ msgid "Searching for peers"
+ msgstr ""
+ 
+-#: ../internal/components/controls_window.go:646
+-#: ../internal/components/controls_window.go:1312
++#: ../internal/components/controls_window.go:638
++#: ../internal/components/controls_window.go:1309
+ msgid "Track %v"
+ msgstr ""
+ 
+-#: ../internal/components/controls_window.go:654
++#: ../internal/components/controls_window.go:646
+ msgid "Embedded subtitle %v"
+ msgstr ""
+ 
+-#: ../internal/components/controls_window.go:1091
+-#: ../internal/components/controls_window.go:1265
++#: ../internal/components/controls_window.go:1088
++#: ../internal/components/controls_window.go:1262
+ msgid "None"
+ msgstr ""
+ 
+-#: ../internal/components/controls_window.go:1195
++#: ../internal/components/controls_window.go:1192
+ msgid "Disable subtitles"
+ msgstr ""
+ 
+-#: ../internal/components/controls_window.go:1198
++#: ../internal/components/controls_window.go:1195
+ msgid "Integrated subtitle"
+ msgstr ""
+ 
+-#: ../internal/components/controls_window.go:1201
++#: ../internal/components/controls_window.go:1198
+ msgid "Subtitle from torrent"
+ msgstr ""
+ 
+-#: ../internal/components/controls_window.go:1204
++#: ../internal/components/controls_window.go:1201
+ msgid "Manually added"
+ msgstr ""
+ 
+-#: ../internal/components/controls_window.go:1216
++#: ../internal/components/controls_window.go:1213
+ msgid "Select subtitle file"
+ msgstr ""
+ 
+-#: ../internal/components/controls_window.go:1310
++#: ../internal/components/controls_window.go:1307
+ msgid "Disable audio"
+ msgstr ""
+ 
+-#: ../internal/components/controls_window.go:1316
++#: ../internal/components/controls_window.go:1313
+ msgid "Untitled Track"
+ msgstr ""
+ 
+
