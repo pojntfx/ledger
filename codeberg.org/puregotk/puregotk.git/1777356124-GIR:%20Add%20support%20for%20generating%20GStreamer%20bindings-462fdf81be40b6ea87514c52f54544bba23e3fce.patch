@@ -1,0 +1,341 @@
+From 462fdf81be40b6ea87514c52f54544bba23e3fce Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Mon, 27 Apr 2026 23:02:04 -0700
+Subject: [PATCH] GIR: Add support for generating GStreamer bindings
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/README.md b/README.md
+index 91a4d67b1ddb81d1633629481ba7dcc9020a1130..09671168606dce98017648795fa667d07d19fe06 100644
+--- a/README.md
++++ b/README.md
+@@ -25,6 +25,34 @@ * [GModule-2.0](./internal/gir/spec/GModule-2.0.gir)
+ * [GObject-2.0](./internal/gir/spec/GObject-2.0.gir)
+ * [Graphene-1.0](./internal/gir/spec/Graphene-1.0.gir)
+ * [Gsk-4.0](./internal/gir/spec/Gsk-4.0.gir)
++* GStreamer:
++  * [Gst-1.0](./internal/gir/spec/Gst-1.0.gir)
++  * [GstAllocators-1.0](./internal/gir/spec/GstAllocators-1.0.gir)
++  * [GstAnalytics-1.0](./internal/gir/spec/GstAnalytics-1.0.gir)
++  * [GstApp-1.0](./internal/gir/spec/GstApp-1.0.gir)
++  * [GstAudio-1.0](./internal/gir/spec/GstAudio-1.0.gir)
++  * [GstBase-1.0](./internal/gir/spec/GstBase-1.0.gir)
++  * [GstCheck-1.0](./internal/gir/spec/GstCheck-1.0.gir)
++  * [GstController-1.0](./internal/gir/spec/GstController-1.0.gir)
++  * [GstGL-1.0](./internal/gir/spec/GstGL-1.0.gir)
++  * [GstGLEGL-1.0](./internal/gir/spec/GstGLEGL-1.0.gir)
++  * [GstGLWayland-1.0](./internal/gir/spec/GstGLWayland-1.0.gir)
++  * [GstGLX11-1.0](./internal/gir/spec/GstGLX11-1.0.gir)
++  * [GstMpegts-1.0](./internal/gir/spec/GstMpegts-1.0.gir)
++  * [GstMse-1.0](./internal/gir/spec/GstMse-1.0.gir)
++  * [GstNet-1.0](./internal/gir/spec/GstNet-1.0.gir)
++  * [GstPbutils-1.0](./internal/gir/spec/GstPbutils-1.0.gir)
++  * [GstPlay-1.0](./internal/gir/spec/GstPlay-1.0.gir)
++  * [GstPlayer-1.0](./internal/gir/spec/GstPlayer-1.0.gir)
++  * [GstRtp-1.0](./internal/gir/spec/GstRtp-1.0.gir)
++  * [GstRtsp-1.0](./internal/gir/spec/GstRtsp-1.0.gir)
++  * [GstSdp-1.0](./internal/gir/spec/GstSdp-1.0.gir)
++  * [GstTag-1.0](./internal/gir/spec/GstTag-1.0.gir)
++  * [GstVideo-1.0](./internal/gir/spec/GstVideo-1.0.gir)
++  * [GstVulkan-1.0](./internal/gir/spec/GstVulkan-1.0.gir)
++  * [GstVulkanWayland-1.0](./internal/gir/spec/GstVulkanWayland-1.0.gir)
++  * [GstVulkanXCB-1.0](./internal/gir/spec/GstVulkanXCB-1.0.gir)
++  * [GstWebRTC-1.0](./internal/gir/spec/GstWebRTC-1.0.gir)
+ * [Gtk-4.0](./internal/gir/spec/Gtk-4.0.gir)
+ * [JavaScriptCore-6.0](./internal/gir/spec/JavaScriptCore-6.0.gir)
+ * [Pango-1.0](./internal/gir/spec/Pango-1.0.gir)
+diff --git a/copygir.sh b/copygir.sh
+index d7ccb4165bf8b8b9f5e0197b184978e25ad6df6a..827b78ef8b946f9b00fbab95f06cc6ca7579550d 100755
+--- a/copygir.sh
++++ b/copygir.sh
+@@ -3,3 +3,6 @@
+ set -e
+ 
+ for f in internal/gir/spec/*.gir; do flatpak run --filesystem="${PWD}" --command=sh org.gnome.Sdk -c "cp /usr/share/gir-1.0/$(basename ${f}) ${PWD}/${f}"; done
++
++# From https://gitlab.freedesktop.org/gstreamer/gir-files-rs/-/raw/main/fix.sh?ref_type=heads
++cd internal/gir/spec && ../../../fix.sh
+diff --git a/fix.sh b/fix.sh
+new file mode 100755
+index 0000000000000000000000000000000000000000..9e2004b37482f5268ceb9cdc1922bcdad4502c61
+--- /dev/null
++++ b/fix.sh
+@@ -0,0 +1,199 @@
++#!/bin/bash
++set -x -e
++
++# Change from upstream: Don't reformat because we derive output filenames from these attributes
++# # https://github.com/gtk-rs/gir-files/blob/master/reformat.sh
++# # `///` used as `//` not works in Windows in this case
++# for file in *.gir; do
++#     xmlstarlet ed -L \
++#         -d '//_:doc/@line' \
++#         -d '//_:doc/@filename' \
++#         -d '///_:source-position' \
++#         -d '//_:doc-version' \
++#         -d '//_:method-inline' \
++#         "$file"
++# done
++
++# replace wayland structures to gpointers
++xmlstarlet ed --inplace \
++    --update '//*[@c:type="wl_display*"]/@c:type' \
++    --value gpointer \
++    --update '//*[@c:type="wl_registry*"]/@c:type' \
++    --value gpointer \
++    --update '//*[@c:type="wl_compositor*"]/@c:type' \
++    --value gpointer \
++    --update '//*[@c:type="wl_subcompositor*"]/@c:type' \
++    --value gpointer \
++    --update '//*[@c:type="wl_shell*"]/@c:type' \
++    --value gpointer \
++    GstGLWayland-1.0.gir
++xmlstarlet ed --inplace \
++    --update '//*[@c:type="wl_display*"]/@c:type' \
++    --value gpointer \
++    --update '//*[@c:type="wl_registry*"]/@c:type' \
++    --value gpointer \
++    --update '//*[@c:type="wl_compositor*"]/@c:type' \
++    --value gpointer \
++    --update '//*[@c:type="wl_subcompositor*"]/@c:type' \
++    --value gpointer \
++    --update '//*[@c:type="wl_shell*"]/@c:type' \
++    --value gpointer \
++    GstVulkanWayland-1.0.gir
++
++# Change X11's Display* and xcb_connection_t* pointers to gpointer
++xmlstarlet ed --inplace \
++    --insert '//_:type[@c:type="Display*"]' \
++    --type attr --name 'name' --value 'gpointer' \
++    --insert '//_:type[@c:type="xcb_connection_t*"]' \
++    --type attr --name 'name' --value 'gpointer' \
++    --update '//*[@c:type="Display*"]/@c:type' \
++    --value gpointer \
++    --update '//*[@c:type="xcb_connection_t*"]/@c:type' \
++    --value gpointer \
++    GstGLX11-1.0.gir
++xmlstarlet ed --inplace \
++    --insert '//_:type[@c:type="xcb_connection_t*"]' \
++    --type attr --name 'name' --value 'gpointer' \
++    --update '//*[@c:type="xcb_connection_t*"]/@c:type' \
++    --value gpointer \
++    GstVulkanXCB-1.0.gir
++
++# Remove GstMemoryEGL and EGLImage
++xmlstarlet ed --inplace \
++    --delete '//_:record[@name="GLMemoryEGL"]' \
++    --delete '//_:record[@name="GLMemoryEGLAllocator"]' \
++    --delete '//_:record[@name="GLMemoryEGLAllocatorClass"]' \
++    --delete '//_:record[@name="EGLImage"]' \
++    --delete '//_:record[@name="GLDisplayEGLDeviceClass"]' \
++    --delete '//_:class[@name="GLMemoryEGLAllocator"]' \
++    --delete '//_:class[@name="GLDisplayEGLDevice"]' \
++    --delete '//_:callback[@name="EGLImageDestroyNotify"]' \
++    --delete '//_:constant[@name="GL_MEMORY_EGL_ALLOCATOR_NAME"]' \
++    --delete '//_:function[starts-with(@name, "egl")]' \
++    --delete '//_:function[starts-with(@name, "gl_memory_egl")]' \
++    --delete '//_:function[@name="is_gl_memory_egl"]' \
++    --delete '//_:function-macro[starts-with(@name, "egl")]' \
++    --delete '//_:function-macro[starts-with(@name, "EGL")]' \
++    --delete '//_:function-macro[starts-with(@name, "GL_MEMORY_EGL")]' \
++    --delete '//_:function-macro[starts-with(@name, "IS_EGL_IMAGE")]' \
++    --delete '//_:function-macro[starts-with(@name, "IS_GL_MEMORY_EGL")]' \
++    GstGLEGL-1.0.gir
++
++xmlstarlet ed --inplace \
++    --delete '//_:method[@c:identifier="gst_gl_display_egl_from_gl_display"]' \
++    --delete '//_:method[@c:identifier="egl_from_gl_display"]' \
++    GstGLEGL-1.0.gir
++
++# Remove all libcheck related API
++xmlstarlet ed --inplace \
++    --delete '//_:function[starts-with(@name, "check_")]' \
++    --delete '//_:function[starts-with(@name, "buffer_straw_")]' \
++    --delete '//_:callback[starts-with(@name, "Check")]' \
++    --delete '//_:record[starts-with(@name, "Check")]' \
++    GstCheck-1.0.gir
++# Change GstVideoAncillary.data to a fixed-size 256 byte array
++xmlstarlet ed --inplace \
++    --delete '//_:record[@name="VideoAncillary"]/_:field[@name="data"]/_:array/@length' \
++    --delete '//_:record[@name="VideoAncillary"]/_:field[@name="data"]/_:array/@fixed-size' \
++    --insert '//_:record[@name="VideoAncillary"]/_:field[@name="data"]/_:array' \
++    --type attr --name 'fixed-size' --value '256' \
++     GstVideo-1.0.gir
++
++xmlstarlet ed --inplace \
++    --delete "//_:member[@c:identifier=\"GST_VIDEO_BUFFER_FLAG_ONEFIELD\"][2]" \
++    --delete "//_:member[@c:identifier=\"GST_VIDEO_FRAME_FLAG_ONEFIELD\"][2]" \
++    --delete "//_:member[@c:identifier=\"GST_NAVIGATION_MODIFIER_META_MASK\"][2]" \
++    GstVideo-1.0.gir
++
++xmlstarlet ed --inplace \
++    --delete '//_:record[@name="ISO639LanguageDescriptor"]/_:field[@name="language"]/_:array/@c:type' \
++    --insert '//_:record[@name="ISO639LanguageDescriptor"]/_:field[@name="language"]/_:array' \
++    --type attr --name 'c:type' --value 'gchar' \
++     GstMpegts-1.0.gir
++
++xmlstarlet ed --inplace \
++    --delete '//_:record[@name="MIKEYPayloadKeyData"]/_:field[@name="kv_data"]/_:array/@c:type' \
++    --insert '//_:record[@name="MIKEYPayloadKeyData"]/_:field[@name="kv_data"]/_:array' \
++    --type attr --name 'c:type' --value 'guint8' \
++     GstSdp-1.0.gir
++
++# Change from upstream: The Flatpak SDK doesn't vendor GES-1.0.gir or GstD3D12-1.0.gir
++# # Remove duplicated enums
++# xmlstarlet ed --inplace \
++#     --delete '//_:enumeration[@name="EditMode"]/_:member[starts-with(@name, "edit_")]' \
++#     --delete '//_:enumeration[@name="Edge"]/_:member[starts-with(@name, "edge_")]' \
++#     GES-1.0.gir
++
++# # replace native D3D12 types
++# xmlstarlet ed -L \
++#     -i '///_:type[not(@name) and @c:type="ID3D12Resource*"]' -t 'attr' -n 'name' -v "gpointer" \
++#     -u '//_:type[@c:type="ID3D12Resource*"]/@c:type' -v "gpointer" \
++#     -i '///_:type[not(@name) and @c:type="ID3D12CommandAllocator*"]' -t 'attr' -n 'name' -v "gpointer" \
++#     -u '//_:type[@c:type="ID3D12CommandAllocator*"]/@c:type' -v "gpointer" \
++#     -i '///_:type[not(@name) and @c:type="ID3D12Device*"]' -t 'attr' -n 'name' -v "gpointer" \
++#     -u '//_:type[@c:type="ID3D12Device*"]/@c:type' -v "gpointer" \
++#     -i '///_:type[not(@name) and @c:type="ID3D12CommandList*"]' -t 'attr' -n 'name' -v "gpointer" \
++#     -u '//_:type[@c:type="ID3D12CommandList*"]/@c:type' -v "gpointer" \
++#     -i '///_:type[not(@name) and @c:type="ID3D12CommandList**"]' -t 'attr' -n 'name' -v "gpointer" \
++#     -u '//_:type[@c:type="ID3D12CommandList**"]/@c:type' -v "gpointer*" \
++#     -i '///_:type[not(@name) and @c:type="ID3D12Fence*"]' -t 'attr' -n 'name' -v "gpointer" \
++#     -u '//_:type[@c:type="ID3D12Fence*"]/@c:type' -v "gpointer" \
++#     -i '///_:type[not(@name) and @c:type="ID3D12Fence**"]' -t 'attr' -n 'name' -v "gpointer" \
++#     -u '//_:type[@c:type="ID3D12Fence**"]/@c:type' -v "gpointer*" \
++#     -i '///_:type[not(@name) and @c:type="ID3D12CommandQueue*"]' -t 'attr' -n 'name' -v "gpointer" \
++#     -u '//_:type[@c:type="ID3D12CommandQueue*"]/@c:type' -v "gpointer" \
++#     -i '///_:type[not(@name) and @c:type="ID3D12GraphicsCommandList*"]' -t 'attr' -n 'name' -v "gpointer" \
++#     -u '//_:type[@c:type="ID3D12GraphicsCommandList*"]/@c:type' -v "gpointer" \
++#     -i '///_:type[not(@name) and @c:type="ID3D12DescriptorHeap*"]' -t 'attr' -n 'name' -v "gpointer" \
++#     -u '//_:type[@c:type="ID3D12DescriptorHeap*"]/@c:type' -v "gpointer" \
++#     -i '///_:type[not(@name) and @c:type="ID3D11Texture2D*"]' -t 'attr' -n 'name' -v "gpointer" \
++#     -u '//_:type[@c:type="ID3D11Texture2D*"]/@c:type' -v "gpointer" \
++#     -i '///_:type[not(@name) and @c:type="ID3D11Device*"]' -t 'attr' -n 'name' -v "gpointer" \
++#     -u '//_:type[@c:type="ID3D11Device*"]/@c:type' -v "gpointer" \
++#     -i '///_:type[not(@name) and @c:type="IDXGIAdapter1*"]' -t 'attr' -n 'name' -v "gpointer" \
++#     -u '//_:type[@c:type="IDXGIAdapter1*"]/@c:type' -v "gpointer" \
++#     -i '///_:type[not(@name) and @c:type="IDXGIFactory2*"]' -t 'attr' -n 'name' -v "gpointer" \
++#     -u '//_:type[@c:type="IDXGIFactory2*"]/@c:type' -v "gpointer" \
++#     -i '///_:type[not(@name) and @c:type="HANDLE*"]' -t 'attr' -n 'name' -v "gpointer" \
++#     -u '//_:type[@c:type="HANDLE*"]/@c:type' -v "gpointer*" \
++#     -i '///_:type[not(@name) and @c:type="D3D12_RECT*"]' -t 'attr' -n 'name' -v "gpointer" \
++#     -u '//_:type[@c:type="D3D12_RECT*"]/@c:type' -v "gpointer" \
++#     -i '///_:type[not(@name) and @c:type="D3D12_PLACED_SUBRESOURCE_FOOTPRINT*"]' -t 'attr' -n 'name' -v "gpointer" \
++#     -u '//_:type[@c:type="D3D12_PLACED_SUBRESOURCE_FOOTPRINT*"]/@c:type' -v "gpointer" \
++#     -i '///_:type[not(@name) and @c:type="const LUID*"]' -t 'attr' -n 'name' -v "gconstpointer" \
++#     -u '//_:type[@c:type="const LUID*"]/@c:type' -v "gconstpointer" \
++#     -i '///_:type[not(@name) and @c:type="D3D12_RESOURCE_FLAGS"]' -t 'attr' -n 'name' -v "gint" \
++#     -u '//_:type[@c:type="D3D12_RESOURCE_FLAGS"]/@c:type' -v "gint" \
++#     -i '///_:type[not(@name) and @c:type="D3D12_HEAP_FLAGS"]' -t 'attr' -n 'name' -v "gint" \
++#     -u '//_:type[@c:type="D3D12_HEAP_FLAGS"]/@c:type' -v "gint" \
++#     -i '///_:type[not(@name) and @c:type="D3D12_FENCE_FLAGS"]' -t 'attr' -n 'name' -v "gint" \
++#     -u '//_:type[@c:type="D3D12_FENCE_FLAGS"]/@c:type' -v "gint" \
++#     -i '///_:type[not(@name) and @c:type="D3D12_RESOURCE_STATES"]' -t 'attr' -n 'name' -v "gint" \
++#     -u '//_:type[@c:type="D3D12_RESOURCE_STATES"]/@c:type' -v "gint" \
++#     -i '///_:type[not(@name) and @c:type="D3D12_COMMAND_LIST_TYPE"]' -t 'attr' -n 'name' -v "gint" \
++#     -u '//_:type[@c:type="D3D12_COMMAND_LIST_TYPE"]/@c:type' -v "gint" \
++#     -i '///_:type[not(@name) and @c:type="D3D12_RESOURCE_DIMENSION"]' -t 'attr' -n 'name' -v "gint" \
++#     -u '//_:type[@c:type="D3D12_RESOURCE_DIMENSION"]/@c:type' -v "gint" \
++#     -i '///_:type[not(@name) and @c:type="DXGI_FORMAT"]' -t 'attr' -n 'name' -v "gint" \
++#     -u '//_:type[@c:type="DXGI_FORMAT"]/@c:type' -v "gint" \
++#     -i '///_:type[not(@name) and @c:type="D3D12_FORMAT_SUPPORT1"]' -t 'attr' -n 'name' -v "gint" \
++#     -u '//_:type[@c:type="D3D12_FORMAT_SUPPORT1"]/@c:type' -v "gint" \
++#     -i '///_:type[not(@name) and @c:type="D3D12_FORMAT_SUPPORT2"]' -t 'attr' -n 'name' -v "gint" \
++#     -u '//_:type[@c:type="D3D12_FORMAT_SUPPORT2"]/@c:type' -v "gint" \
++#     -i '///_:type[not(@name) and @c:type="const D3D12_RESOURCE_DESC*"]' -t 'attr' -n 'name' -v "gconstpointer" \
++#     -u '//_:type[@c:type="const D3D12_RESOURCE_DESC*"]/@c:type' -v "gconstpointer" \
++#     -i '///_:type[not(@name) and @c:type="const D3D12_DESCRIPTOR_HEAP_DESC*"]' -t 'attr' -n 'name' -v "gconstpointer" \
++#     -u '//_:type[@c:type="const D3D12_DESCRIPTOR_HEAP_DESC*"]/@c:type' -v "gconstpointer" \
++#     -i '///_:type[not(@name) and @c:type="const D3D12_CLEAR_VALUE*"]' -t 'attr' -n 'name' -v "gconstpointer" \
++#     -u '//_:type[@c:type="const D3D12_CLEAR_VALUE*"]/@c:type' -v "gconstpointer" \
++#     -i '///_:type[not(@name) and @c:type="const D3D12_HEAP_PROPERTIES*"]' -t 'attr' -n 'name' -v "gconstpointer" \
++#     -u '//_:type[@c:type="const D3D12_HEAP_PROPERTIES*"]/@c:type' -v "gconstpointer" \
++#     -i '///_:type[not(@name) and @c:type="const D3D12_COMMAND_QUEUE_DESC*"]' -t 'attr' -n 'name' -v "gconstpointer" \
++#     -u '//_:type[@c:type="const D3D12_COMMAND_QUEUE_DESC*"]/@c:type' -v "gconstpointer" \
++#     -i '///_:type[not(@name) and @c:type="const D3D12_BLEND_DESC*"]' -t 'attr' -n 'name' -v "gconstpointer" \
++#     -u '//_:type[@c:type="const D3D12_BLEND_DESC*"]/@c:type' -v "gconstpointer" \
++#     -i '///_:type[not(@name) and @c:type="HRESULT"]' -t 'attr' -n 'name' -v "gint" \
++#     -u '//_:type[@c:type="HRESULT"]/@c:type' -v "gint" \
++#     -d '//_:record[@name="D3D12Frame"]' \
++#     -d '//_:function[starts-with(@name, "d3d12_frame")]' \
++#     GstD3D12-1.0.gir
+diff --git a/internal/gir/pass/pass.go b/internal/gir/pass/pass.go
+index 270117cf2050e8a7c8d97a0e7640bf32922d4122..d8130717715872e4b41edb02a1303c95d863384e 100644
+--- a/internal/gir/pass/pass.go
++++ b/internal/gir/pass/pass.go
+@@ -302,10 +302,8 @@ 				if _type == "string" {
+ 					_type = "uintptr"
+ 				}
+ 
+-				// HACK: Special handling for parent_class field - it should be embedded as a full struct
+-				// to match C's memory layout, not converted to uintptr
+-				// See https://docs.gtk.org/gobject/tutorial.html
+-				if f.Name == "parent_class" && f.AnyType.Type != nil {
++				// Embed all other non-array types in record
++				if f.AnyType.Type != nil {
+ 					// Check if this is a Record type with no pointers (embedded struct)
+ 					typeName := util.NormalizeNamespace(ns.Name, f.AnyType.Type.Name, true)
+ 					kind := p.Types.Kind(ns.Name, typeName)
+diff --git a/internal/gir/types/template.go b/internal/gir/types/template.go
+index 91dede9e5c2c12178234f2fab7de67f39932fc43..ff8690f742e6589e4faca22577a5690b49fd9ecb 100644
+--- a/internal/gir/types/template.go
++++ b/internal/gir/types/template.go
+@@ -172,14 +172,19 @@ 		return r == '*' || r == '[' || r == ']' || (r >= '0' && r <= '9')
+ 	})
+ }
+ 
+-// isGoPrimitive checks if a scalar or vector type name is a Go primitive type
+-func isGoPrimitive(typeName string) bool {
++// isGoBuiltin checks if a scalar or vector type name is a Go built-in type
++func isGoBuiltin(typeName string) bool {
+ 	baseType := baseTypeName(typeName)
+ 
+ 	for _, goType := range convList {
+ 		if goType == baseType {
+ 			return true
+ 		}
++	}
++
++	// interface{} is also a built-in type
++	if strings.Contains(typeName, "interface{}") {
++		return true
+ 	}
+ 
+ 	return false
+@@ -199,7 +204,7 @@
+ 	stars := strings.Count(goType, "*")
+ 	goType = util.NormalizeNamespace(ns, goType, true)
+ 
+-	if kind != OtherType && kind != UnknownType && !isGoPrimitive(goType) { // Only add namespace for non-primitive types
++	if kind != OtherType && kind != UnknownType && !isGoBuiltin(goType) { // Only add namespace for non-built in types
+ 		goType = util.AddNamespace(goType, ins)
+ 	}
+ 	if stars > 0 {
+diff --git a/internal/gir/util/util.go b/internal/gir/util/util.go
+index d460a1811c9e8e83ad025bd49e619d2f0e338292..4b4fc3ea09458f597ad8689fc9e160f0149181f9 100644
+--- a/internal/gir/util/util.go
++++ b/internal/gir/util/util.go
+@@ -7,6 +7,7 @@
+ import (
+ 	"path/filepath"
+ 	"strings"
++	"unicode"
+ )
+ 
+ var (
+@@ -28,7 +29,12 @@ 	words := strings.Split(s, delim)
+ 	for _, w := range words {
+ 		sb.WriteString(strings.Title(w))
+ 	}
+-	return sb.String()
++	// If an identifier starts with a digit, prefix it with `X`
++	result := sb.String()
++	if len(result) > 0 && unicode.IsDigit(rune(result[0])) {
++		result = "X" + result
++	}
++	return result
+ }
+ 
+ // StarsInFront adds pointer characters (*, stars) in front of the type
+
