@@ -1,0 +1,468 @@
+From b997a45312d6ff2b31f30d72a44eb9e6701f4742 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Tue, 28 Apr 2026 22:47:20 -0700
+Subject: [PATCH] Examples: Add GStreamer example based on `gst-plugins-rs` with documentation and Flatpak packaging
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/README.md b/README.md
+index 09671168606dce98017648795fa667d07d19fe06..126b1de2c5069ebf4a1343f8a96819cb5ea05fba 100644
+--- a/README.md
++++ b/README.md
+@@ -83,7 +83,7 @@ * Architectures other than AMD64/ARM64
+ 
+ # Basic example
+ 
+-> You can find more examples for advanced features, such as GObject subclassing for custom widgets, writing GObject GTK libraries in Go, generating bindings from external GIR files, using Meson and Flatpak, Blueprint files and more in [examples](./examples)
++> You can find more examples for advanced features, such as GObject subclassing for custom widgets, writing GObject GTK libraries in Go, generating bindings from external GIR files, using Meson and Flatpak, Blueprint files, GStreamer and more in [examples](./examples)
+ 
+ ```go
+ package main
+diff --git a/docs/screenshot-myapp-gstreamer-meson.png b/docs/screenshot-myapp-gstreamer-meson.png
+new file mode 100644
+index 0000000000000000000000000000000000000000..156d064148f684faa557bd89bc05b499aa38b9f2
+Binary files /dev/null and b/docs/screenshot-myapp-gstreamer-meson.png differ
+diff --git a/examples/myapp-gstreamer-meson/.gitignore b/examples/myapp-gstreamer-meson/.gitignore
+new file mode 100644
+index 0000000000000000000000000000000000000000..7e69e3ebe204ee28e2d026f2e9f0369a0dd2a296
+--- /dev/null
++++ b/examples/myapp-gstreamer-meson/.gitignore
+@@ -0,0 +1,8 @@
++*.gresource
++*.ui
++*.mo
++LINGUAS
++.flatpak-builder
++builddir
++repo
++vendor
+diff --git a/examples/myapp-gstreamer-meson/README.md b/examples/myapp-gstreamer-meson/README.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..dce5a1ad723349ac6838ebeaa602cc2527ee6f8a
+--- /dev/null
++++ b/examples/myapp-gstreamer-meson/README.md
+@@ -0,0 +1,37 @@
++# myapp-gstreamer-meson
++
++This example implements a GStreamer GNOME application using puregotk with the [Meson build system](https://mesonbuild.com/), which is the default build system for GTK applications. It shows how to use [GStreamer](https://gstreamer.freedesktop.org/), specifically [`gtk4paintablesink`](https://gstreamer.freedesktop.org/documentation/gtk4/index.html?gi-language=c) in puregotk-based applications. The example is based on the [Python example](https://gitlab.freedesktop.org/gstreamer/gst-plugins-rs/-/blob/main/video/gtk4/examples/gtksink.py?ref_type=heads) and [Rust example](https://gitlab.freedesktop.org/gstreamer/gst-plugins-rs/-/blob/main/video/gtk4/examples/gtksink.rs?ref_type=heads) from [`gst-plugins-rs`](https://gitlab.freedesktop.org/gstreamer/gst-plugins-rs/-/tree/main?ref_type=heads).
++
++First, make sure GStreamer and its plugins are installed on your system.
++
++To then build and install the application using Meson, run:
++
++```shell
++sudo ninja -C _build uninstall || true
++
++meson setup _build --prefix=/usr --wipe && meson compile -C _build && sudo meson install -C _build
++
++myapp-gstreamer-meson
++```
++
++<details>
++    <summary>Expand macOS instructions</summary>
++
++On macOS, `--prefix` depends on your package manager and architecture. Homebrew on macOS uses `/opt/homebrew` for `arm64` and `/usr/local` for `amd64`, MacPorts uses `/opt/local`.
++
++</details>
++
++You can also open the project in [GNOME Builder](https://flathub.org/apps/org.gnome.Builder) and run it by clicking the play button in the header bar.
++
++Alternatively you can use [flatpak-builder](https://docs.flathub.org/docs/for-app-authors/submission#before-submission) directly:
++
++```shell
++$ flatpak run --command=flatpak-builder org.flatpak.Builder --verbose --force-clean --keep-build-dirs --user --ccache --compose-url-policy=full --repo=repo builddir --install page.codeberg.puregotk.MyAppGstreamerMeson.json
++$ flatpak run --command=flatpak-builder-lint org.flatpak.Builder manifest page.codeberg.puregotk.MyAppGstreamerMeson.json
++$ flatpak run --command=flatpak-builder-lint org.flatpak.Builder repo repo
++$ flatpak run page.codeberg.puregotk.MyAppGstreamerMeson
++```
++
++We're disabling the sandbox here because otherwise we can't access the Go cache on the system.
++
++![Screenshot of myapp-gstreamer-meson showing the main application window](../../docs/screenshot-myapp-gstreamer-meson.png)
+diff --git a/examples/myapp-gstreamer-meson/go.mod b/examples/myapp-gstreamer-meson/go.mod
+new file mode 100644
+index 0000000000000000000000000000000000000000..7e81ead6fb030808632c68544636b0d04ecef80f
+--- /dev/null
++++ b/examples/myapp-gstreamer-meson/go.mod
+@@ -0,0 +1,16 @@
++module codeberg.org/puregotk/puregotk/examples/myapp-gstreamer-meson
++
++go 1.25.0
++
++tool github.com/dennwc/flatpak-go-mod
++
++require codeberg.org/puregotk/puregotk v0.0.0-00010101000000-000000000000
++
++require (
++	codeberg.org/puregotk/purego v0.0.0-20260224095105-2513c838cb80 // indirect
++	github.com/dennwc/flatpak-go-mod v0.1.1-0.20251220152743-1642390bc050 // indirect
++	github.com/goccy/go-yaml v1.18.0 // indirect
++	golang.org/x/mod v0.31.0 // indirect
++)
++
++replace codeberg.org/puregotk/puregotk v0.0.0-00010101000000-000000000000 => ../..
+diff --git a/examples/myapp-gstreamer-meson/go.mod.json b/examples/myapp-gstreamer-meson/go.mod.json
+new file mode 100644
+index 0000000000000000000000000000000000000000..9612b3653b0fd73c01c8bf562ac4f72601ffa744
+--- /dev/null
++++ b/examples/myapp-gstreamer-meson/go.mod.json
+@@ -0,0 +1,35 @@
++[
++  {
++    "dest": "vendor",
++    "path": "modules.txt",
++    "type": "file"
++  },
++  {
++    "dest": "vendor/codeberg.org/puregotk/purego",
++    "sha256": "0d5fb9e11934b151ac357a9c0660e4dcd287d2f93db0829356415f6e6a8ef84b",
++    "strip-components": 3,
++    "type": "archive",
++    "url": "https://proxy.golang.org/codeberg.org/puregotk/purego/@v/v0.0.0-20260224095105-2513c838cb80.zip"
++  },
++  {
++    "dest": "vendor/github.com/dennwc/flatpak-go-mod",
++    "sha256": "f512c383d8067eca3bdb44999eb0e1ac60f59f63118793f4267517d1cce0c37d",
++    "strip-components": 3,
++    "type": "archive",
++    "url": "https://proxy.golang.org/github.com/dennwc/flatpak-go-mod/@v/v0.1.1-0.20251220152743-1642390bc050.zip"
++  },
++  {
++    "dest": "vendor/github.com/goccy/go-yaml",
++    "sha256": "51bf59a85a7e3e2b8e83e5f376a3229b01b673a39601c99e3a2c05931cc3e339",
++    "strip-components": 3,
++    "type": "archive",
++    "url": "https://proxy.golang.org/github.com/goccy/go-yaml/@v/v1.18.0.zip"
++  },
++  {
++    "dest": "vendor/golang.org/x/mod",
++    "sha256": "9b43daca51525bd50289c742999fe66336a653c90a23d2c55561b6fffd656e46",
++    "strip-components": 3,
++    "type": "archive",
++    "url": "https://proxy.golang.org/golang.org/x/mod/@v/v0.31.0.zip"
++  }
++]
+diff --git a/examples/myapp-gstreamer-meson/go.sum b/examples/myapp-gstreamer-meson/go.sum
+new file mode 100644
+index 0000000000000000000000000000000000000000..1d2fa471e9a63e29928e316476b793f3bd672f38
+--- /dev/null
++++ b/examples/myapp-gstreamer-meson/go.sum
+@@ -0,0 +1,8 @@
++codeberg.org/puregotk/purego v0.0.0-20260224095105-2513c838cb80 h1:y5ZxMLLOjl4xc2tBl02olxZQ06xbbKiR+2ipBfDrVcs=
++codeberg.org/puregotk/purego v0.0.0-20260224095105-2513c838cb80/go.mod h1:hVVM4ddvYRlc3IcK3CXJPlMwd/vaLj7gdDBZ6oPgT8w=
++github.com/dennwc/flatpak-go-mod v0.1.1-0.20251220152743-1642390bc050 h1:muRW0tgYbXMfg8XjDGrv3TfWLEj3osTP4MPDGqlslbc=
++github.com/dennwc/flatpak-go-mod v0.1.1-0.20251220152743-1642390bc050/go.mod h1:wpz1r09m7dCJS2rTFe5x95DdtjP97osxkPJkdHptFYI=
++github.com/goccy/go-yaml v1.18.0 h1:8W7wMFS12Pcas7KU+VVkaiCng+kG8QiFeFwzFb+rwuw=
++github.com/goccy/go-yaml v1.18.0/go.mod h1:XBurs7gK8ATbW4ZPGKgcbrY1Br56PdM69F7LkFRi1kA=
++golang.org/x/mod v0.31.0 h1:HaW9xtz0+kOcWKwli0ZXy79Ix+UW/vOfmWI5QVd2tgI=
++golang.org/x/mod v0.31.0/go.mod h1:43JraMp9cGx1Rx3AqioxrbrhNsLl2l/iNAvuBkrezpg=
+diff --git a/examples/myapp-gstreamer-meson/meson.build b/examples/myapp-gstreamer-meson/meson.build
+new file mode 100644
+index 0000000000000000000000000000000000000000..59c066535a1c374ecec50252ac125fa3bebc8a97
+--- /dev/null
++++ b/examples/myapp-gstreamer-meson/meson.build
+@@ -0,0 +1,10 @@
++project(
++    'myapp-gstreamer-meson',
++    'c',
++    version: '0.1.0',
++    meson_version: '>= 1.0.0',
++    default_options: [],
++)
++add_project_arguments(['-I' + meson.project_build_root()], language: 'c')
++
++subdir('src')
+diff --git a/examples/myapp-gstreamer-meson/modules.txt b/examples/myapp-gstreamer-meson/modules.txt
+new file mode 100644
+index 0000000000000000000000000000000000000000..a653dbaebd9da14c080d0916b2037d83d70ef71f
+--- /dev/null
++++ b/examples/myapp-gstreamer-meson/modules.txt
+@@ -0,0 +1,44 @@
++# codeberg.org/puregotk/purego v0.0.0-20260224095105-2513c838cb80
++## explicit; go 1.18
++codeberg.org/puregotk/purego
++codeberg.org/puregotk/purego/internal/cgo
++codeberg.org/puregotk/purego/internal/fakecgo
++codeberg.org/puregotk/purego/internal/strings
++codeberg.org/puregotk/purego/internal/xreflect
++# codeberg.org/puregotk/puregotk v0.0.0-00010101000000-000000000000 => ../..
++## explicit; go 1.24.0
++codeberg.org/puregotk/puregotk/internal/core
++codeberg.org/puregotk/puregotk/pkg/core
++codeberg.org/puregotk/puregotk/v4/cairo
++codeberg.org/puregotk/puregotk/v4/gdk
++codeberg.org/puregotk/puregotk/v4/gdkpixbuf
++codeberg.org/puregotk/puregotk/v4/gio
++codeberg.org/puregotk/puregotk/v4/glib
++codeberg.org/puregotk/puregotk/v4/gmodule
++codeberg.org/puregotk/puregotk/v4/gobject
++codeberg.org/puregotk/puregotk/v4/gobject/types
++codeberg.org/puregotk/puregotk/v4/graphene
++codeberg.org/puregotk/puregotk/v4/gsk
++codeberg.org/puregotk/puregotk/v4/gst
++codeberg.org/puregotk/puregotk/v4/gtk
++codeberg.org/puregotk/puregotk/v4/pango
++# github.com/dennwc/flatpak-go-mod v0.1.1-0.20251220152743-1642390bc050
++## explicit; go 1.24.4
++github.com/dennwc/flatpak-go-mod
++# github.com/goccy/go-yaml v1.18.0
++## explicit; go 1.21.0
++github.com/goccy/go-yaml
++github.com/goccy/go-yaml/ast
++github.com/goccy/go-yaml/internal/errors
++github.com/goccy/go-yaml/internal/format
++github.com/goccy/go-yaml/lexer
++github.com/goccy/go-yaml/parser
++github.com/goccy/go-yaml/printer
++github.com/goccy/go-yaml/scanner
++github.com/goccy/go-yaml/token
++# golang.org/x/mod v0.31.0
++## explicit; go 1.24.0
++golang.org/x/mod/internal/lazyregexp
++golang.org/x/mod/modfile
++golang.org/x/mod/module
++golang.org/x/mod/semver
+diff --git a/examples/myapp-gstreamer-meson/page.codeberg.puregotk.MyAppGstreamerMeson.json b/examples/myapp-gstreamer-meson/page.codeberg.puregotk.MyAppGstreamerMeson.json
+new file mode 100644
+index 0000000000000000000000000000000000000000..d17916af614a743f44176b24d22c207986ed2874
+--- /dev/null
++++ b/examples/myapp-gstreamer-meson/page.codeberg.puregotk.MyAppGstreamerMeson.json
+@@ -0,0 +1,38 @@
++{
++  "id": "page.codeberg.puregotk.MyAppGstreamerMeson",
++  "runtime": "org.gnome.Platform",
++  "runtime-version": "50",
++  "sdk": "org.gnome.Sdk",
++  "sdk-extensions": ["org.freedesktop.Sdk.Extension.golang"],
++  "command": "myapp-gstreamer-meson",
++  "finish-args": [
++    "--socket=wayland",
++    "--socket=fallback-x11",
++    "--share=ipc",
++    "--device=dri",
++    "--socket=pulseaudio"
++  ],
++  "modules": [
++    {
++      "name": "myapp-gstreamer-meson",
++      "buildsystem": "meson",
++      "build-options": {
++        "prepend-path": "/usr/lib/sdk/golang/bin",
++        "build-args": ["--filesystem=home"],
++        "env": {
++          "GOROOT": "/usr/lib/sdk/golang",
++          "GOPATH": "/run/build/myapp-gstreamer-meson/go"
++        }
++      },
++      "sources": [
++        { "type": "dir", "path": "." },
++        {
++          "type": "dir",
++          "path": "../..",
++          "dest": "vendor/codeberg.org/puregotk/puregotk"
++        },
++        "go.mod.json"
++      ]
++    }
++  ]
++}
+diff --git a/examples/myapp-gstreamer-meson/src/main.go b/examples/myapp-gstreamer-meson/src/main.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..d41714719a627af39350449acf73fa2d7b627344
+--- /dev/null
++++ b/examples/myapp-gstreamer-meson/src/main.go
+@@ -0,0 +1,162 @@
++// Ported to Go from https://gitlab.freedesktop.org/gstreamer/gst-plugins-rs/-/blob/main/video/gtk4/examples/gtksink.py?ref_type=heads and https://gitlab.freedesktop.org/gstreamer/gst-plugins-rs/-/blob/main/video/gtk4/examples/gtksink.rs?ref_type=heads
++package main
++
++import (
++	"fmt"
++	"log"
++	"os"
++	"unsafe"
++
++	"codeberg.org/puregotk/puregotk/v4/gdk"
++	"codeberg.org/puregotk/puregotk/v4/gio"
++	"codeberg.org/puregotk/puregotk/v4/glib"
++	"codeberg.org/puregotk/puregotk/v4/gst"
++	"codeberg.org/puregotk/puregotk/v4/gtk"
++)
++
++//go:generate sh -c "if [ -z \"$FLATPAK_ID\" ]; then cd .. && GOWORK=off go tool github.com/dennwc/flatpak-go-mod --json .; fi"
++
++var createUI = func(app *gtk.Application) {
++	pipeline := gst.NewPipeline("")
++
++	overlay := gst.ElementFactoryMake("clockoverlay", "")
++	overlay.Set("font-desc", "Monospace 42")
++
++	gtksink := gst.ElementFactoryMake("gtk4paintablesink", "")
++
++	var paintablePtr uintptr
++	gtksink.Get("paintable", &paintablePtr)
++
++	paintable := &gdk.PaintableBase{
++		Ptr: paintablePtr,
++	}
++
++	var glContextPtr uintptr
++	gtksink.Get("gl-context", &glContextPtr)
++
++	var src, sink *gst.Element
++	if glContextPtr != 0 {
++		log.Println("Using GL")
++
++		src = gst.ElementFactoryMake("gltestsrc", "src")
++
++		sink = gst.ElementFactoryMake("glsinkbin", "sinkbin")
++		sink.Set("sink", gtksink)
++	} else {
++		log.Println("Not using GL")
++
++		src = gst.ElementFactoryMake("videotestsrc", "src")
++
++		bin := gst.NewBin("sinkbin")
++		convert := gst.ElementFactoryMake("videoconvert", "convert")
++
++		if !bin.Add(convert) {
++			panic("could not add videoconvert to bin")
++		}
++
++		if !bin.Add(gtksink) {
++			panic("could not add gtk4paintablesink to bin")
++		}
++
++		if !convert.Link(gtksink) {
++			panic("could not link videoconvert to gtk4paintablesink")
++		}
++
++		ghost := gst.NewGhostPad("sink", convert.GetStaticPad("sink"))
++		bin.AddPad(&ghost.Pad)
++
++		sink = &bin.Element
++	}
++
++	pipeline.Add(src)
++	pipeline.Add(overlay)
++	pipeline.Add(sink)
++
++	src.LinkFiltered(overlay, gst.CapsFromString("video/x-raw(ANY), width=640, height=480"))
++	overlay.Link(sink)
++
++	window := gtk.NewApplicationWindow(app)
++	window.SetDefaultSize(640, 480)
++
++	vbox := gtk.NewBox(gtk.OrientationVerticalValue, 0)
++
++	picture := gtk.NewPicture()
++	picture.SetPaintable(paintable)
++
++	vbox.Append(&picture.Widget)
++
++	label := gtk.NewLabel("Position: 00:00:00")
++	vbox.Append(&label.Widget)
++
++	window.SetChild(&vbox.Widget)
++	window.Present()
++
++	app.AddWindow(&window.Window)
++
++	var onTimeout glib.SourceFunc = func(u uintptr) bool {
++		var position int64
++		res := pipeline.QueryPosition(gst.FormatTimeValue, &position)
++		if !res || position == -1 {
++			label.SetText("Position: 00:00:00")
++		} else {
++			totalSeconds := int(position / 1000000000)
++			hours := totalSeconds / 3600
++			minutes := (totalSeconds / 60) % 60
++			seconds := totalSeconds % 60
++			label.SetText(fmt.Sprintf("Position: %02d:%02d:%02d", hours, minutes, seconds))
++		}
++
++		return true
++	}
++	glib.TimeoutAdd(500, &onTimeout, 0)
++
++	pipeline.SetState(gst.StatePlayingValue)
++
++	bus := pipeline.GetBus()
++	bus.AddSignalWatch()
++
++	onMessage := func(_ gst.Bus, msgPtr uintptr) {
++		msg := (*gst.Message)(unsafe.Pointer(msgPtr))
++		switch msg.Type {
++		case gst.MessageEosValue:
++			app.Quit()
++
++		case gst.MessageErrorValue:
++			var (
++				gerr  *glib.Error
++				debug string
++			)
++			msg.ParseError(&gerr, &debug)
++			defer gerr.Free()
++
++			srcPath := "<unknown>"
++			if msg.Src != nil {
++				srcPath = msg.Src.GetPathString()
++			}
++			log.Printf("Error from %s: %s (%s)", srcPath, gerr.MessageGo(), debug)
++
++			app.Quit()
++		}
++	}
++	bus.ConnectMessage(&onMessage)
++
++	onShutdown := func(gio.Application) {
++		window.Close()
++		pipeline.SetState(gst.StateNullValue)
++	}
++	app.ConnectShutdown(&onShutdown)
++}
++
++func main() {
++	gst.Init(0, nil)
++
++	app := gtk.NewApplication("page.codeberg.puregotk.MyAppGstreamerMeson", gio.GApplicationDefaultFlagsValue)
++	onActivate := func(gio.Application) {
++		createUI(app)
++	}
++	app.ConnectActivate(&onActivate)
++
++	defer gst.Deinit()
++
++	os.Exit(int(app.Run(int32(len(os.Args)), os.Args)))
++}
+diff --git a/examples/myapp-gstreamer-meson/src/meson.build b/examples/myapp-gstreamer-meson/src/meson.build
+new file mode 100644
+index 0000000000000000000000000000000000000000..52d2956fd115f218a05cba1925ee0b6cf3ac0b05
+--- /dev/null
++++ b/examples/myapp-gstreamer-meson/src/meson.build
+@@ -0,0 +1,25 @@
++myapp_gstreamer_meson_source_dir = meson.current_source_dir()
++
++myapp_gstreamer_meson_source_go_files = files('main.go')
++
++myapp_gstreamer_meson_deps = [
++    dependency('gtk4'),
++    dependency('gstreamer-1.0'),
++]
++
++custom_target(
++    'myapp-gstreamer-meson',
++    build_always_stale: true,  # Go caches internally
++    input: myapp_gstreamer_meson_source_go_files,
++    output: 'myapp-gstreamer-meson',
++    command: [
++        find_program('go').full_path(),
++        'build',
++        '-x',
++        '-o',
++        '@OUTPUT@',
++        myapp_gstreamer_meson_source_dir,
++    ],
++    install: true,
++    install_dir: get_option('prefix') / get_option('bindir'),
++)
+
