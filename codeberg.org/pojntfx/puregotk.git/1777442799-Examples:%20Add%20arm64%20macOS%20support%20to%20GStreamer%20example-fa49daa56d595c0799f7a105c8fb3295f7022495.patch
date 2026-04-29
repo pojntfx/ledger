@@ -1,0 +1,65 @@
+From fa49daa56d595c0799f7a105c8fb3295f7022495 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Tue, 28 Apr 2026 23:06:39 -0700
+Subject: [PATCH] Examples: Add arm64 macOS support to GStreamer example
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/examples/myapp-gstreamer-meson/src/main.go b/examples/myapp-gstreamer-meson/src/main.go
+index d41714719a627af39350449acf73fa2d7b627344..04ed92fb20d040868da8e5573df9b1fb59baafc0 100644
+--- a/examples/myapp-gstreamer-meson/src/main.go
++++ b/examples/myapp-gstreamer-meson/src/main.go
+@@ -10,6 +10,7 @@
+ 	"codeberg.org/puregotk/puregotk/v4/gdk"
+ 	"codeberg.org/puregotk/puregotk/v4/gio"
+ 	"codeberg.org/puregotk/puregotk/v4/glib"
++	"codeberg.org/puregotk/puregotk/v4/gobject"
+ 	"codeberg.org/puregotk/puregotk/v4/gst"
+ 	"codeberg.org/puregotk/puregotk/v4/gtk"
+ )
+@@ -20,19 +21,25 @@ var createUI = func(app *gtk.Application) {
+ 	pipeline := gst.NewPipeline("")
+ 
+ 	overlay := gst.ElementFactoryMake("clockoverlay", "")
+-	overlay.Set("font-desc", "Monospace 42")
++
++	var fontDescVal gobject.Value
++	fontDescVal.Init(gobject.TypeStringVal)
++	fontDescVal.SetString("Monospace 42")
++	overlay.SetProperty("font-desc", &fontDescVal)
+ 
+ 	gtksink := gst.ElementFactoryMake("gtk4paintablesink", "")
+ 
+-	var paintablePtr uintptr
+-	gtksink.Get("paintable", &paintablePtr)
+-
++	var paintableVal gobject.Value
++	paintableVal.Init(gobject.ObjectGLibType())
++	gtksink.GetProperty("paintable", &paintableVal)
+ 	paintable := &gdk.PaintableBase{
+-		Ptr: paintablePtr,
++		Ptr: paintableVal.GetObject().GoPointer(),
+ 	}
+ 
+-	var glContextPtr uintptr
+-	gtksink.Get("gl-context", &glContextPtr)
++	var glVal gobject.Value
++	glVal.Init(gobject.ObjectGLibType())
++	gtksink.GetProperty("gl-context", &glVal)
++	glContextPtr := glVal.GetObject().GoPointer()
+ 
+ 	var src, sink *gst.Element
+ 	if glContextPtr != 0 {
+@@ -41,7 +48,10 @@
+ 		src = gst.ElementFactoryMake("gltestsrc", "src")
+ 
+ 		sink = gst.ElementFactoryMake("glsinkbin", "sinkbin")
+-		sink.Set("sink", gtksink)
++		var sinkVal gobject.Value
++		sinkVal.Init(gobject.ObjectGLibType())
++		sinkVal.SetObject(&gobject.Object{Ptr: gtksink.GoPointer()})
++		sink.SetProperty("sink", &sinkVal)
+ 	} else {
+ 		log.Println("Not using GL")
+ 
+
