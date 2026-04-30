@@ -1,0 +1,1598 @@
+From 5250d74305d8d43134c5e6bb07c780d106b07089 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Thu, 30 Apr 2026 15:50:10 -0700
+Subject: [PATCH] Add initial hacky prototype of feature for MacBook 12 out-of-tree drivers and speed up sysupdate repo rebuilds by removing versions from cache keys
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/elements/gnomeos-deps/apple-macbook12-drivers-modules.bst b/elements/gnomeos-deps/apple-macbook12-drivers-modules.bst
+new file mode 100644
+index 0000000000000000000000000000000000000000..7abfeee99c75a859bb282d7642b4c253927cf759
+--- /dev/null
++++ b/elements/gnomeos-deps/apple-macbook12-drivers-modules.bst
+@@ -0,0 +1,9 @@
++kind: filter
++
++build-depends:
++- gnomeos-deps/apple-macbook12-drivers.bst
++
++config:
++  include:
++  - modules
++  include-orphans: false
+diff --git a/elements/gnomeos-deps/apple-macbook12-drivers.bst b/elements/gnomeos-deps/apple-macbook12-drivers.bst
+new file mode 100644
+index 0000000000000000000000000000000000000000..7282d0b898246fde8f30c6e71a48457c97994d7c
+--- /dev/null
++++ b/elements/gnomeos-deps/apple-macbook12-drivers.bst
+@@ -0,0 +1,96 @@
++kind: manual
++
++sources:
++- kind: tar
++  url: kernel_org:v7.x/linux-7.0.1.tar.xz
++  ref: b2c935a36d24980e11e59bed3ca558ea6d67619ec0065faa335cdc0b64d887bf
++  base-dir: linux-7.0.1
++  directory: linux-src
++- kind: tar
++  url: github_files:juicecultus/macbook12-audio-driver/archive/75884e2b685c8c4ca249f66e23b921d8f69a98f9.tar.gz
++  ref: 441fb51589b365d9d75ce18851e6beb53443df678d1d4fbdc072d99fd56d4e57
++  base-dir: macbook12-audio-driver-75884e2b685c8c4ca249f66e23b921d8f69a98f9
++  directory: macbook12-audio-driver
++- kind: local
++  path: files/apple-macbook12-config/modprobe.conf
++  directory: local-config
++- kind: local
++  path: files/apple-macbook12-config/modules-load.conf
++  directory: local-config
++- kind: local
++  path: files/apple-macbook12-config/apple-macbook12-hda-rebind.service
++  directory: local-config
++
++build-depends:
++- freedesktop-sdk.bst:public-stacks/buildsystem-make.bst
++- filename: freedesktop-sdk.bst:components/linux.bst
++  strict: true
++
++variables:
++  strip-binaries: ''
++
++environment-nocache:
++- MAKEFLAGS
++
++environment:
++  MAKEFLAGS: -j%{max-jobs}
++
++config:
++  build-commands:
++  # Stage patched cs420x sources from the audio-driver repo into the kernel
++  # source tree, then build snd-hda-codec-cs420x out-of-tree against the
++  # installed kernel build directory.
++  - |
++    cd macbook12-audio-driver
++    hda_dir="../linux-src/sound/hda/codecs/cirrus"
++    mv "${hda_dir}/Makefile" "${hda_dir}/Makefile.orig"
++    mv "${hda_dir}/cs420x.c" "${hda_dir}/cs420x.c.orig"
++    cp patch_cirrus/cs420x.c \
++       patch_cirrus/patch_cirrus_a1534_setup.h \
++       patch_cirrus/patch_cirrus_a1534_pcm.h \
++       "${hda_dir}/"
++    cp patch_cirrus/Makefile_cs420x "${hda_dir}/Makefile"
++    sed -i 's/\.free/.remove/' "${hda_dir}/patch_cirrus_a1534_pcm.h"
++    printf '\nccflags-y += -Wno-error=missing-prototypes\n' >>"${hda_dir}/Makefile"
++
++  - |
++    kernel_version=$(basename /usr/lib/modules/*)
++    cd linux-src/sound/hda/codecs/cirrus
++    make -C "/usr/lib/modules/${kernel_version}/build" M="$(pwd)" modules
++
++  install-commands:
++  # Install snd-hda-codec-cs420x into /usr/lib/modules/<ver>/extra
++  - |
++    kernel_version=$(basename /usr/lib/modules/*)
++    install -Dm644 \
++      linux-src/sound/hda/codecs/cirrus/snd-hda-codec-cs420x.ko \
++      "%{install-root}%{indep-libdir}/modules/${kernel_version}/extra/snd-hda-codec-cs420x.ko"
++
++  # modprobe + modules-load configs
++  - |
++    install -Dm644 local-config/modprobe.conf "%{install-root}%{indep-libdir}/modprobe.d/apple-macbook12.conf"
++    install -Dm644 local-config/modules-load.conf "%{install-root}%{indep-libdir}/modules-load.d/apple-macbook12.conf"
++
++  # Rebind service: forces HDA controller to re-resolve codecs after cs420x
++  # is loaded. The kernel auto-binds the codec at PCI probe time before
++  # systemd-modules-load runs, so we unbind/rebind once the patched module
++  # is available. Symlink into sound.target.wants so it auto-starts.
++  - |
++    install -Dm644 local-config/apple-macbook12-hda-rebind.service \
++      "%{install-root}%{indep-libdir}/systemd/system/apple-macbook12-hda-rebind.service"
++    install -d -m755 "%{install-root}%{indep-libdir}/systemd/system/multi-user.target.wants"
++    ln -sr "%{install-root}%{indep-libdir}/systemd/system/apple-macbook12-hda-rebind.service" \
++           "%{install-root}%{indep-libdir}/systemd/system/multi-user.target.wants/apple-macbook12-hda-rebind.service"
++
++  - |
++    %{install-extra}
++
++public:
++  bst:
++    split-rules:
++      modules:
++      - '%{indep-libdir}/modules/**'
++      - '%{indep-libdir}/modprobe.d/**'
++      - '%{indep-libdir}/modules-load.d/**'
++      - '%{indep-libdir}/systemd/system/apple-macbook12-hda-rebind.service'
++      - '%{indep-libdir}/systemd/system/multi-user.target.wants/apple-macbook12-hda-rebind.service'
+diff --git a/elements/gnomeos/apple-macbook12-modules/image.bst b/elements/gnomeos/apple-macbook12-modules/image.bst
+new file mode 100644
+index 0000000000000000000000000000000000000000..568f956801620903810ffedeb5b61e34671829f6
+--- /dev/null
++++ b/elements/gnomeos/apple-macbook12-modules/image.bst
+@@ -0,0 +1,64 @@
++kind: manual
++
++build-depends:
++- gnomeos/save-perms.bst
++- freedesktop-sdk.bst:components/fakecap.bst
++- freedesktop-sdk.bst:components/systemd.bst
++- freedesktop-sdk.bst:components/erofs-utils.bst
++- gnomeos/os-release-base.bst
++- filename: gnomeos/apple-macbook12-modules/layer.bst
++  config:
++    location: '/sysroot'
++
++sources:
++- kind: local
++  path: files/boot-keys/SYSEXT.key
++- kind: local
++  path: files/boot-keys/SYSEXT.crt
++
++variables:
++  repart-seed: b3f81dc6-746f-43a3-ac1e-2e4e02002fca
++  strip-binaries: ''
++
++environment:
++  EROFS_OPTIONS: -z zstd --all-time -T %{filesystem-time} -E fragments,fragdedupe=inode
++  EROFS_WORKERS: --workers=%{max-jobs}
++  LD_PRELOAD: /usr/libexec/fakecap/fakecap.so
++  FAKECAP_DB: '%{build-root}/fakecap'
++
++environment-nocache:
++- EROFS_WORKERS
++
++config:
++  build-commands:
++  - mkdir fakecap
++  - cp -a /sysroot sysroot
++  - save-perms.py --restore sysroot/perms-usr.json sysroot/usr
++
++  - |
++    mkdir -p tmp
++
++  - |
++    TMPDIR='%{build-root}/tmp' \
++    SYSTEMD_LOG_LEVEL=debug \
++    SYSTEMD_REPART_MKFS_OPTIONS_EROFS="${EROFS_OPTIONS} ${EROFS_WORKERS}" \
++      systemd-repart \
++        --make-ddi=sysext \
++        --empty=create \
++        --size=auto \
++        --dry-run=no \
++        --discard=no \
++        --offline=true \
++        --no-pager \
++        --private-key=SYSEXT.key \
++        --certificate=SYSEXT.crt \
++        --seed %{repart-seed} \
++        --copy-source=sysroot \
++        apple-macbook12-modules-%{systemd-arch}.raw
++
++  install-commands:
++  - |
++    # Output filename is version-independent so the expensive erofs+zstd
++    # build caches across image-version bumps. The version is stamped into
++    # the filename by update-images-slim.bst / update-images.bst.
++    mv apple-macbook12-modules-%{systemd-arch}.raw %{install-root}
+diff --git a/elements/gnomeos/apple-macbook12-modules/layer.bst b/elements/gnomeos/apple-macbook12-modules/layer.bst
+new file mode 100644
+index 0000000000000000000000000000000000000000..cd966eb3cd71a2670db7a0280f1699b154135a31
+--- /dev/null
++++ b/elements/gnomeos/apple-macbook12-modules/layer.bst
+@@ -0,0 +1,36 @@
++kind: script
++
++build-depends:
++- gnomeos/save-perms.bst
++- freedesktop-sdk.bst:components/fakecap.bst
++- freedesktop-sdk.bst:components/systemd.bst
++- freedesktop-sdk.bst:components/erofs-utils.bst
++- gnomeos/os-release-base.bst
++- filename: gnomeos/initramfs/signed-apple-macbook12-modules.bst
++  config:
++    location: '/sysroot-apple-macbook12-modules'
++
++variables:
++  install-root: '/sysroot-apple-macbook12-modules'
++
++environment:
++  LD_PRELOAD: /usr/libexec/fakecap/fakecap.so
++  FAKECAP_DB: '/fakecap'
++
++config:
++  commands:
++  - mkdir /fakecap
++  - |
++    # ID=_any (systemd 252+) makes the sysext load on any host without the
++    # extension-release file embedding a specific version. This keeps the
++    # sysext content (and the expensive image.bst that consumes it) cache-
++    # stable across image-version bumps. The version is stamped into the
++    # output filename by a downstream rename step in update-images-slim.bst
++    # / update-images.bst, which is what sysupdate's MatchPattern keys off.
++    mkdir -p /sysroot-apple-macbook12-modules/usr/lib/extension-release.d
++    cat <<EOF >/sysroot-apple-macbook12-modules/usr/lib/extension-release.d/extension-release.apple-macbook12-modules
++    ID=_any
++    SYSEXT_SCOPE=initrd system
++    EOF
++
++  - save-perms.py /sysroot-apple-macbook12-modules/perms-usr.json /sysroot-apple-macbook12-modules/usr
+diff --git a/elements/gnomeos/codecs-extra/image.bst b/elements/gnomeos/codecs-extra/image.bst
+index fa8f314bd0d7e51600877f31fe0216bdafb9e698..5d879ca9d45829db97252907d8d7f22e6675a210 100644
+--- a/elements/gnomeos/codecs-extra/image.bst
++++ b/elements/gnomeos/codecs-extra/image.bst
+@@ -5,7 +5,7 @@ - gnomeos/save-perms.bst
+ - freedesktop-sdk.bst:components/fakecap.bst
+ - freedesktop-sdk.bst:components/erofs-utils.bst
+ - freedesktop-sdk.bst:components/systemd.bst
+-- gnomeos/os-release.bst
++- gnomeos/os-release-base.bst
+ - filename: gnomeos/codecs-extra/layer.bst
+   config:
+     location: '/sysroot'
+@@ -55,7 +55,7 @@         --private-key=SYSEXT.key \
+         --certificate=SYSEXT.crt \
+         --seed %{repart-seed} \
+         --copy-source=sysroot \
+-        codecs-extra-%{systemd-arch}_%{image-version}.raw
++        codecs-extra-%{systemd-arch}.raw
+ 
+   - |
+     TMPDIR='%{build-root}/tmp' \
+@@ -73,9 +73,9 @@         --private-key=SYSEXT.key \
+         --certificate=SYSEXT.crt \
+         --seed %{repart-seed} \
+         --copy-source=sysroot \
+-        codecs-extra-confext-%{systemd-arch}_%{image-version}.raw
++        codecs-extra-confext-%{systemd-arch}.raw
+ 
+   install-commands:
+   - |
+-    mv codecs-extra-%{systemd-arch}_%{image-version}.raw %{install-root}
+-    mv codecs-extra-confext-%{systemd-arch}_%{image-version}.raw %{install-root}
++    mv codecs-extra-%{systemd-arch}.raw %{install-root}
++    mv codecs-extra-confext-%{systemd-arch}.raw %{install-root}
+diff --git a/elements/gnomeos/codecs-extra/layer.bst b/elements/gnomeos/codecs-extra/layer.bst
+index b99324ed76b7cf618600a5ec52dc3700312622ca..6d351d77b9497da7c61cbfb3ce36f118fe3e5e96 100644
+--- a/elements/gnomeos/codecs-extra/layer.bst
++++ b/elements/gnomeos/codecs-extra/layer.bst
+@@ -5,7 +5,7 @@ - gnomeos/save-perms.bst
+ - freedesktop-sdk.bst:components/fakecap.bst
+ - freedesktop-sdk.bst:components/erofs-utils.bst
+ - freedesktop-sdk.bst:vm/prepare-image.bst
+-- gnomeos/os-release.bst
++- gnomeos/os-release-base.bst
+ - gnomeos/codecs-extra/initial-scripts.bst
+ - filename: gnomeos/codecs-extra/filesystem.bst
+   config:
+@@ -29,46 +29,19 @@        --initscripts /etc/fdsdk/initial_scripts-codecs-extra \
+        --seed "%{sysroot-seed}" \
+        --noroot --noboot --nodepmod >/dev/null
+ 
++  # Extension-release content is version-stable (ID=_any). The version is
++  # stamped into the .raw filename by update-images-slim.bst /
++  # update-images.bst so sysupdate's MatchPattern still matches.
+   - |
+-    case "%{branch}" in
+-      master)
+-        version_id=Nightly
+-        ;;
+-      *)
+-        version_id="%{branch}"
+-        ;;
+-    esac
+-
+     mkdir -p /output/usr/lib/extension-release.d
+-    commits_url="https://gitlab.gnome.org/GNOME/gnome-build-meta/-/commits/%{commit}"
+-    cat <<EOF >/output/usr/lib/extension-release.d/extension-release.codecs-extra_%{image-version}
+-    ID="org.gnome.os"
+-    VERSION_ID="${version_id}"
+-    SYSEXT_LEVEL="%{image-version}"
+-    GNOMEOS_COMMIT="%{commit}"
+-    GNOMEOS_COMMIT_DATE="%{commit-date-pretty}"
+-    GNOMEOS_COMMITS_URL="${commits_url}"
++    cat <<EOF >/output/usr/lib/extension-release.d/extension-release.codecs-extra
++    ID="_any"
+     EOF
+ 
+   - |
+-    case "%{branch}" in
+-      master)
+-        version_id=Nightly
+-        ;;
+-      *)
+-        version_id="%{branch}"
+-        ;;
+-    esac
+-
+     mkdir -p /output/etc/extension-release.d
+-    commits_url="https://gitlab.gnome.org/GNOME/gnome-build-meta/-/commits/%{commit}"
+-    cat <<EOF >/output/etc/extension-release.d/extension-release.codecs-extra_%{image-version}
+-    ID="org.gnome.os"
+-    VERSION_ID="${version_id}"
+-    CONFEXT_LEVEL="%{image-version}"
+-    GNOMEOS_COMMIT="%{commit}"
+-    GNOMEOS_COMMIT_DATE="%{commit-date-pretty}"
+-    GNOMEOS_COMMITS_URL="${commits_url}"
++    cat <<EOF >/output/etc/extension-release.d/extension-release.codecs-extra
++    ID="_any"
+     EOF
+ 
+   - |
+diff --git a/elements/gnomeos/debug/image.bst b/elements/gnomeos/debug/image.bst
+index 144e995987e090b302cf2892b0f7c3e2f7d94ee5..866b7bfdb24e7db03017c56f6d67b8667db64cfe 100644
+--- a/elements/gnomeos/debug/image.bst
++++ b/elements/gnomeos/debug/image.bst
+@@ -5,7 +5,7 @@ - gnomeos/save-perms.bst
+ - freedesktop-sdk.bst:components/fakecap.bst
+ - freedesktop-sdk.bst:components/systemd.bst
+ - freedesktop-sdk.bst:components/erofs-utils.bst
+-- gnomeos/os-release.bst
++- gnomeos/os-release-base.bst
+ - filename: gnomeos/debug/layer.bst
+   config:
+     location: '/sysroot'
+@@ -54,8 +54,8 @@         --private-key=SYSEXT.key \
+         --certificate=SYSEXT.crt \
+         --seed %{repart-seed} \
+         --copy-source=sysroot \
+-        debug-%{systemd-arch}_%{image-version}.raw
++        debug-%{systemd-arch}.raw
+ 
+   install-commands:
+   - |
+-    mv debug-%{systemd-arch}_%{image-version}.raw %{install-root}/
++    mv debug-%{systemd-arch}.raw %{install-root}/
+diff --git a/elements/gnomeos/debug/layer-tar.bst b/elements/gnomeos/debug/layer-tar.bst
+index bf7c6cee333f0e47c1a2e393d8a0455e41aae6cb..7c30458442ad4fbdf9d4f5f7d238ef8ef6713725 100644
+--- a/elements/gnomeos/debug/layer-tar.bst
++++ b/elements/gnomeos/debug/layer-tar.bst
+@@ -15,4 +15,4 @@
+ config:
+   commands:
+   - |
+-    tar -c --zstd -f '%{install-root}/debug-%{systemd-arch}_%{image-version}.tar.zst' -C %{debugdir} .
++    tar -c --zstd -f '%{install-root}/debug-%{systemd-arch}.tar.zst' -C %{debugdir} .
+diff --git a/elements/gnomeos/debug/layer.bst b/elements/gnomeos/debug/layer.bst
+index 39ffd6a80f1827c68bcd5129b10a4154f13ecd33..458092dff483daf632421ad743f87ab044aeee4c 100644
+--- a/elements/gnomeos/debug/layer.bst
++++ b/elements/gnomeos/debug/layer.bst
+@@ -4,7 +4,7 @@ build-depends:
+ - gnomeos/save-perms.bst
+ - freedesktop-sdk.bst:components/fakecap.bst
+ - freedesktop-sdk.bst:components/systemd.bst
+-- gnomeos/os-release.bst
++- gnomeos/os-release-base.bst
+ - filename: gnomeos/debug/filesystem.bst
+   config:
+     location: '/sysroot'
+@@ -19,25 +19,13 @@
+ config:
+   commands:
+   - mkdir fakecap
++  # Extension-release content is version-stable (ID=_any). The version is
++  # stamped into the .raw filename by update-images.bst so sysupdate's
++  # MatchPattern still matches.
+   - |
+     mkdir -p /sysroot/usr/lib/extension-release.d
+-    case "%{branch}" in
+-      master)
+-        version_id=Nightly
+-        ;;
+-      *)
+-        version_id="%{branch}"
+-        ;;
+-    esac
+-
+-    commits_url="https://gitlab.gnome.org/GNOME/gnome-build-meta/-/commits/%{commit}"
+     cat <<EOF >/sysroot/usr/lib/extension-release.d/extension-release.debug
+-    ID="org.gnome.os"
+-    VERSION_ID="${version_id}"
+-    SYSEXT_LEVEL="%{image-version}"
+-    GNOMEOS_COMMIT="%{commit}"
+-    GNOMEOS_COMMIT_DATE="%{commit-date-pretty}"
+-    GNOMEOS_COMMITS_URL="${commits_url}"
++    ID="_any"
+     EOF
+ 
+   - save-perms.py /sysroot/perms-usr.json /sysroot/usr
+diff --git a/elements/gnomeos/devel/image.bst b/elements/gnomeos/devel/image.bst
+index aa88e8a89132784b5e99510b524b99861748cdc9..a0de1209d57123d7a8073baca4e5fcb9192f6da0 100644
+--- a/elements/gnomeos/devel/image.bst
++++ b/elements/gnomeos/devel/image.bst
+@@ -55,7 +55,7 @@         --private-key=SYSEXT.key \
+         --certificate=SYSEXT.crt \
+         --seed %{repart-seed} \
+         --copy-source=sysroot \
+-        devel-%{systemd-arch}_%{image-version}.raw
++        devel-%{systemd-arch}.raw
+ 
+   - |
+     TMPDIR='%{build-root}/tmp' \
+@@ -73,9 +73,9 @@         --private-key=SYSEXT.key \
+         --certificate=SYSEXT.crt \
+         --seed %{repart-seed} \
+         --copy-source=sysroot \
+-        devel-confext-%{systemd-arch}_%{image-version}.raw
++        devel-confext-%{systemd-arch}.raw
+ 
+   install-commands:
+   - |
+-    mv devel-%{systemd-arch}_%{image-version}.raw %{install-root}
+-    mv devel-confext-%{systemd-arch}_%{image-version}.raw %{install-root}
++    mv devel-%{systemd-arch}.raw %{install-root}
++    mv devel-confext-%{systemd-arch}.raw %{install-root}
+diff --git a/elements/gnomeos/devel/layer.bst b/elements/gnomeos/devel/layer.bst
+index fba949bdd89d0de1aa4a572e99b4e58b596092ac..8a055dbe101804bae84afe2194f34745b8bb8aae 100644
+--- a/elements/gnomeos/devel/layer.bst
++++ b/elements/gnomeos/devel/layer.bst
+@@ -40,25 +40,13 @@        --initscripts /etc/fdsdk/initial_scripts-devel \
+        --seed "%{sysroot-seed}" \
+        --noroot --noboot --nodepmod >/dev/null
+ 
++  # Extension-release content is version-stable (ID=_any). The version is
++  # stamped into the .raw filename by update-images-slim.bst /
++  # update-images.bst so sysupdate's MatchPattern still matches.
+   - |
+     mkdir -p /sysroot-devel/etc/extension-release.d
+-    case "%{branch}" in
+-      master)
+-        version_id=Nightly
+-        ;;
+-      *)
+-        version_id="%{branch}"
+-        ;;
+-    esac
+-
+-    commits_url="https://gitlab.gnome.org/GNOME/gnome-build-meta/-/commits/%{commit}"
+-    cat <<EOF >/sysroot-devel/etc/extension-release.d/extension-release.devel_%{image-version}
+-    ID="org.gnome.os"
+-    VERSION_ID="${version_id}"
+-    CONFEXT_LEVEL="%{image-version}"
+-    GNOMEOS_COMMIT="%{commit}"
+-    GNOMEOS_COMMIT_DATE="%{commit-date-pretty}"
+-    GNOMEOS_COMMITS_URL="${commits_url}"
++    cat <<EOF >/sysroot-devel/etc/extension-release.d/extension-release.devel
++    ID="_any"
+     EOF
+ 
+   - |
+@@ -67,23 +55,8 @@     make-layer /sysroot/etc /sysroot-devel/etc /output/etc
+ 
+   - |
+     mkdir -p /sysroot-devel/usr/lib/extension-release.d
+-    case "%{branch}" in
+-      master)
+-        version_id=Nightly
+-        ;;
+-      *)
+-        version_id="%{branch}"
+-        ;;
+-    esac
+-
+-    commits_url="https://gitlab.gnome.org/GNOME/gnome-build-meta/-/commits/%{commit}"
+-    cat <<EOF >/sysroot-devel/usr/lib/extension-release.d/extension-release.devel_%{image-version}
+-    ID="org.gnome.os"
+-    VERSION_ID="${version_id}"
+-    SYSEXT_LEVEL="%{image-version}"
+-    GNOMEOS_COMMIT="%{commit}"
+-    GNOMEOS_COMMIT_DATE="%{commit-date-pretty}"
+-    GNOMEOS_COMMITS_URL="${commits_url}"
++    cat <<EOF >/sysroot-devel/usr/lib/extension-release.d/extension-release.devel
++    ID="_any"
+     EOF
+ 
+   - |
+diff --git a/elements/gnomeos/initramfs/deps.bst b/elements/gnomeos/initramfs/deps.bst
+index 826063df05857bf2b3ac0b3aa1d3b83d827a82d9..9257e003fd1515fbb9f3e8aad53265609c6492c1 100644
+--- a/elements/gnomeos/initramfs/deps.bst
++++ b/elements/gnomeos/initramfs/deps.bst
+@@ -18,7 +18,12 @@ - gnomeos-deps/udev-hide-usr.bst
+ - gnomeos-deps/zram-generator.bst
+ - gnomeos/initramfs/signed-modules.bst
+ - gnomeos/reload-sysext.bst
+-- gnomeos/os-release.bst
++# Use os-release-base.bst (placeholder content) to keep initramfs.bst
++# cache-stable across image-version bumps. The initrd doesn't have a
++# confext mount path, so this initrd will run with placeholder version
++# strings, but the post-pivot system gets the real version via the
++# os-release-confext sysupdate transfer.
++- gnomeos/os-release-base.bst
+ - gnomeos/live.bst
+ - gnomeos/confext.bst
+ 
+@@ -27,3 +32,4 @@ - arch in ["x86_64"]:
+     depends:
+       (>):
+       - gnomeos/initramfs/signed-nvidia-modules.bst
++      - gnomeos/initramfs/signed-apple-macbook12-modules.bst
+diff --git a/elements/gnomeos/initramfs/signed-apple-macbook12-modules.bst b/elements/gnomeos/initramfs/signed-apple-macbook12-modules.bst
+new file mode 100644
+index 0000000000000000000000000000000000000000..a3966afe3f4f0cde4bb3cf4df1032f3285fb0a83
+--- /dev/null
++++ b/elements/gnomeos/initramfs/signed-apple-macbook12-modules.bst
+@@ -0,0 +1,48 @@
++kind: manual
++
++build-depends:
++- filename: gnomeos-deps/apple-macbook12-drivers-modules.bst
++  strict: true
++- freedesktop-sdk.bst:components/findutils.bst
++- freedesktop-sdk.bst:components/sign-file.bst
++- freedesktop-sdk.bst:components/zstd.bst
++
++variables:
++  strip-binaries: ''
++
++config:
++  install-commands:
++  - |
++    mkdir -p "%{install-root}/usr/lib"
++    cp -rT /usr/lib/modules "%{install-root}/usr/lib/modules"
++
++  - |
++    openssl x509 -inform PEM -outform DER -in "linux-module-cert.crt" -out "linux-module-cert.cer"
++
++  - |
++    find '%{install-root}/usr/lib/modules' -type f -name "*.ko.zst" -exec unzstd --rm {} ';'
++
++  - |
++    find '%{install-root}/usr/lib/modules' -type f -name "*.ko" -exec sign-file sha512 MODULES.key linux-module-cert.cer {} ';' -exec zstd --rm {} ';'
++
++  - |
++    install -Dm644 -t '%{install-root}%{indep-libdir}/modprobe.d' '%{indep-libdir}/modprobe.d/apple-macbook12.conf'
++    install -Dm644 -t '%{install-root}%{indep-libdir}/modules-load.d' '%{indep-libdir}/modules-load.d/apple-macbook12.conf'
++
++  # Ship the rebind service into the sysext so it's installed and
++  # auto-starts at boot via multi-user.target.wants. We can't use
++  # sound.target.wants because sound.target has StopWhenUnneeded=yes and
++  # only activates when pulled in by an audio consumer — by then the codec
++  # has long since bound to the generic codec module.
++  - |
++    install -Dm644 -t '%{install-root}%{indep-libdir}/systemd/system' \
++      '%{indep-libdir}/systemd/system/apple-macbook12-hda-rebind.service'
++    install -d -m755 '%{install-root}%{indep-libdir}/systemd/system/multi-user.target.wants'
++    ln -sr '%{install-root}%{indep-libdir}/systemd/system/apple-macbook12-hda-rebind.service' \
++           '%{install-root}%{indep-libdir}/systemd/system/multi-user.target.wants/apple-macbook12-hda-rebind.service'
++
++sources:
++- kind: local
++  path: files/boot-keys/MODULES.key
++- kind: local
++  path: files/boot-keys/modules/linux-module-cert.crt
+diff --git a/elements/gnomeos/nvidia-modules/image.bst b/elements/gnomeos/nvidia-modules/image.bst
+index 5a430c0a55bf9d2e65b2b006c3d52d9fecf709dd..b6055a937b877316add428a0889f00fd13bbca16 100644
+--- a/elements/gnomeos/nvidia-modules/image.bst
++++ b/elements/gnomeos/nvidia-modules/image.bst
+@@ -5,7 +5,7 @@ - gnomeos/save-perms.bst
+ - freedesktop-sdk.bst:components/fakecap.bst
+ - freedesktop-sdk.bst:components/systemd.bst
+ - freedesktop-sdk.bst:components/erofs-utils.bst
+-- gnomeos/os-release.bst
++- gnomeos/os-release-base.bst
+ - filename: gnomeos/nvidia-modules/layer.bst
+   config:
+     location: '/sysroot'
+@@ -54,8 +54,8 @@         --private-key=SYSEXT.key \
+         --certificate=SYSEXT.crt \
+         --seed %{repart-seed} \
+         --copy-source=sysroot \
+-        nvidia-modules-%{systemd-arch}_%{image-version}.raw
++        nvidia-modules-%{systemd-arch}.raw
+ 
+   install-commands:
+   - |
+-    mv nvidia-modules-%{systemd-arch}_%{image-version}.raw %{install-root}
++    mv nvidia-modules-%{systemd-arch}.raw %{install-root}
+diff --git a/elements/gnomeos/nvidia-modules/layer.bst b/elements/gnomeos/nvidia-modules/layer.bst
+index 8ec904fd84c7e4e52f5f4c6ad0fa3a3423512623..5e81905756b435bd66122678e4f5f6e103560b76 100644
+--- a/elements/gnomeos/nvidia-modules/layer.bst
++++ b/elements/gnomeos/nvidia-modules/layer.bst
+@@ -5,7 +5,7 @@ - gnomeos/save-perms.bst
+ - freedesktop-sdk.bst:components/fakecap.bst
+ - freedesktop-sdk.bst:components/systemd.bst
+ - freedesktop-sdk.bst:components/erofs-utils.bst
+-- gnomeos/os-release.bst
++- gnomeos/os-release-base.bst
+ - filename: gnomeos/initramfs/signed-nvidia-modules.bst
+   config:
+     location: '/sysroot-nvidia-modules'
+@@ -20,23 +20,14 @@
+ config:
+   commands:
+   - mkdir /fakecap
++  # Extension-release content is version-stable (ID=_any). The version is
++  # stamped into the .raw filename by update-images.bst so sysupdate's
++  # MatchPattern still matches.
+   - |
+     mkdir -p /sysroot-nvidia-modules/usr/lib/extension-release.d
+-    case "%{branch}" in
+-      master)
+-        version_id=Nightly
+-        ;;
+-      *)
+-        version_id="%{branch}"
+-        ;;
+-    esac
+-    cat <<EOF >sysroot-nvidia-modules/usr/lib/extension-release.d/extension-release.nvidia-modules_%{image-version}
+-    ID=org.gnome.os
+-    VERSION_ID=${version_id}
+-    SYSEXT_LEVEL=%{image-version}
++    cat <<EOF >/sysroot-nvidia-modules/usr/lib/extension-release.d/extension-release.nvidia-modules
++    ID=_any
+     SYSEXT_SCOPE=initrd system
+     EOF
+-    cp /sysroot-nvidia-modules/usr/lib/extension-release.d/extension-release.nvidia-modules_%{image-version} \
+-       /sysroot-nvidia-modules/usr/lib/extension-release.d/extension-release.nvidia-modules
+ 
+   - save-perms.py /sysroot-nvidia-modules/perms-usr.json /sysroot-nvidia-modules/usr
+diff --git a/elements/gnomeos/nvidia-runtime/image.bst b/elements/gnomeos/nvidia-runtime/image.bst
+index 179a293603126423a5ced5c986779dca890dec95..fbfd8ce8d21035a20b91def6fe48fae85bb8bfe7 100644
+--- a/elements/gnomeos/nvidia-runtime/image.bst
++++ b/elements/gnomeos/nvidia-runtime/image.bst
+@@ -54,8 +54,8 @@         --private-key=SYSEXT.key \
+         --certificate=SYSEXT.crt \
+         --seed %{repart-seed} \
+         --copy-source=sysroot \
+-        nvidia-runtime-%{systemd-arch}_%{image-version}.raw
++        nvidia-runtime-%{systemd-arch}.raw
+ 
+   install-commands:
+   - |
+-    mv nvidia-runtime-%{systemd-arch}_%{image-version}.raw %{install-root}
++    mv nvidia-runtime-%{systemd-arch}.raw %{install-root}
+diff --git a/elements/gnomeos/nvidia-runtime/layer.bst b/elements/gnomeos/nvidia-runtime/layer.bst
+index b8f1f50f48f074a530a28d8370811a96a436ea90..e37539d3bc055e28f3de51ffabcfce2e379d7b3c 100644
+--- a/elements/gnomeos/nvidia-runtime/layer.bst
++++ b/elements/gnomeos/nvidia-runtime/layer.bst
+@@ -43,25 +43,13 @@
+   - |
+     chmod 0711 '/sysroot-nvidia-runtime/bin/nvidia-sleep.sh' '/sysroot-nvidia-runtime/lib/systemd/system-sleep/nvidia'
+ 
++  # Extension-release content is version-stable (ID=_any). The version is
++  # stamped into the .raw filename by update-images.bst so sysupdate's
++  # MatchPattern still matches.
+   - |
+     mkdir -p /sysroot-nvidia-runtime/usr/lib/extension-release.d
+-    case "%{branch}" in
+-      master)
+-        version_id=Nightly
+-        ;;
+-      *)
+-        version_id="%{branch}"
+-        ;;
+-    esac
+-
+-    commits_url="https://gitlab.gnome.org/GNOME/gnome-build-meta/-/commits/%{commit}"
+-    cat <<EOF >/sysroot-nvidia-runtime/usr/lib/extension-release.d/extension-release.nvidia-runtime_%{image-version}
+-    ID="org.gnome.os"
+-    VERSION_ID="${version_id}"
+-    SYSEXT_LEVEL="%{image-version}"
+-    GNOMEOS_COMMIT="%{commit}"
+-    GNOMEOS_COMMIT_DATE="%{commit-date-pretty}"
+-    GNOMEOS_COMMITS_URL="${commits_url}"
++    cat <<EOF >/sysroot-nvidia-runtime/usr/lib/extension-release.d/extension-release.nvidia-runtime
++    ID="_any"
+     EOF
+ 
+   - |
+diff --git a/elements/gnomeos/os-release-base.bst b/elements/gnomeos/os-release-base.bst
+new file mode 100644
+index 0000000000000000000000000000000000000000..053ea668c015568d94685dee6f81333bc2b7b9b0
+--- /dev/null
++++ b/elements/gnomeos/os-release-base.bst
+@@ -0,0 +1,29 @@
++kind: meson
++description: |
++  Cache-stable os-release content. Same source as os-release.bst, but version
++  and commit fields are baked as placeholder strings. The os-release.bst
++  element overlays this with a thin sed step that injects the real values.
++  Downstream consumers that don't read version/commit content (e.g. layer.bst
++  / image.bst elements that only need the file present in the sandbox) should
++  build-depend on this element directly so their cache keys stay stable
++  across image-version bumps.
++
++sources:
++- kind: local
++  path: files/os-release
++
++build-depends:
++- freedesktop-sdk.bst:public-stacks/buildsystem-meson.bst
++- freedesktop-sdk.bst:components/appstream-minimal.bst
++
++depends:
++- freedesktop-sdk.bst:public-stacks/runtime-minimal.bst
++
++variables:
++  meson-local: >-
++    -Dbranch=%{branch}
++    -Dcommit-date='__BST_GNOMEOS_COMMIT_DATE__'
++    -Dcommit=__BST_GNOMEOS_COMMIT__
++    -Dimage-version=__BST_IMAGE_VERSION__
++    -Dmode=sysupdate
++    -Dvariant=user
+diff --git a/elements/gnomeos/os-release-confext/image.bst b/elements/gnomeos/os-release-confext/image.bst
+new file mode 100644
+index 0000000000000000000000000000000000000000..7ab7c105865faf249b725bc32bcaa1c26c7ec3e2
+--- /dev/null
++++ b/elements/gnomeos/os-release-confext/image.bst
+@@ -0,0 +1,68 @@
++kind: manual
++description: |
++  Confext .raw containing the version-stamped /etc/os-release. Delivered via
++  sysupdate alongside the rest of the image. The base usr image's
++  /etc/os-release symlink points at /usr/lib/os-release (which has
++  placeholders); this confext shadows that symlink with a real file
++  containing the actual version.
++
++build-depends:
++- gnomeos/save-perms.bst
++- freedesktop-sdk.bst:components/fakecap.bst
++- freedesktop-sdk.bst:components/erofs-utils.bst
++- freedesktop-sdk.bst:components/systemd.bst
++- filename: gnomeos/os-release-confext/layer.bst
++  config:
++    location: '/sysroot'
++
++sources:
++- kind: local
++  path: files/boot-keys/SYSEXT.key
++- kind: local
++  path: files/boot-keys/SYSEXT.crt
++
++variables:
++  repart-seed: 1b565ff4-62f6-4748-87b0-0da5c8b7e2ca
++  strip-binaries: ''
++
++environment:
++  EROFS_OPTIONS: -z zstd --all-time -T %{filesystem-time} -E fragments,fragdedupe=inode
++  EROFS_WORKERS: --workers=%{max-jobs}
++  LD_PRELOAD: /usr/libexec/fakecap/fakecap.so
++  FAKECAP_DB: '%{build-root}/fakecap'
++
++environment-nocache:
++- EROFS_WORKERS
++
++config:
++  build-commands:
++  - mkdir fakecap
++  - cp -a /sysroot sysroot
++
++  - |
++    mkdir -p tmp
++
++  - |
++    TMPDIR='%{build-root}/tmp' \
++    SYSTEMD_LOG_LEVEL=debug \
++    SYSTEMD_REPART_MKFS_OPTIONS_EROFS="${EROFS_OPTIONS} ${EROFS_WORKERS}" \
++      systemd-repart \
++        --make-ddi=confext \
++        --empty=create \
++        --size=auto \
++        --dry-run=no \
++        --discard=no \
++        --offline=true \
++        --no-pager \
++        --private-key=SYSEXT.key \
++        --certificate=SYSEXT.crt \
++        --seed %{repart-seed} \
++        --copy-source=sysroot \
++        os-release-confext-%{systemd-arch}.raw
++
++  install-commands:
++  - |
++    # Output filename is version-independent. The aggregator
++    # update-images-slim.bst / update-images.bst stamps the version into the
++    # filename for sysupdate to match.
++    mv os-release-confext-%{systemd-arch}.raw %{install-root}
+diff --git a/elements/gnomeos/os-release-confext/layer.bst b/elements/gnomeos/os-release-confext/layer.bst
+new file mode 100644
+index 0000000000000000000000000000000000000000..0c26c87d3d3f96a2170a4c54391a0b1704236ed5
+--- /dev/null
++++ b/elements/gnomeos/os-release-confext/layer.bst
+@@ -0,0 +1,48 @@
++kind: manual
++description: |
++  Layer for the version-stamped /etc/os-release confext. Ships a single file
++  at /etc/os-release (overrides the symlink in the base usr image, which
++  points at the placeholder /usr/lib/os-release) plus the confext
++  extension-release. Cheap to rebuild: only sed steps, no compression.
++
++build-depends:
++- freedesktop-sdk.bst:public-stacks/buildsystem-make.bst
++- freedesktop-sdk.bst:components/sed.bst
++- freedesktop-sdk.bst:components/grep.bst
++- gnomeos/os-release-base.bst
++
++variables:
++  strip-binaries: ''
++  # image-version, commit, commit-date-pretty are pulled from
++  # include/image-version.yml as element-local variables (not project-wide)
++  # so their values only contribute to this element's cache key.
++  (@):
++  - include/image-version.yml
++
++config:
++  install-commands:
++  - |
++    set -e
++    mkdir -p "%{install-root}/etc"
++    mkdir -p "%{install-root}/etc/extension-release.d"
++
++    # Take the placeholder os-release and stamp the version into it.
++    cp /usr/lib/os-release "%{install-root}/etc/os-release"
++    sed -i \
++      -e "s|__BST_IMAGE_VERSION__|%{image-version}|g" \
++      -e "s|__BST_GNOMEOS_COMMIT__|%{commit}|g" \
++      -e "s|__BST_GNOMEOS_COMMIT_DATE__|%{commit-date-pretty}|g" \
++      "%{install-root}/etc/os-release"
++
++    if grep -q "__BST_" "%{install-root}/etc/os-release"; then
++      echo "ERROR: leftover placeholders in os-release confext:" >&2
++      grep "__BST_" "%{install-root}/etc/os-release" >&2
++      exit 1
++    fi
++
++    # Confext extension-release with ID=_any so the confext loads on any
++    # host. The version match is enforced by sysupdate's MatchPattern on
++    # the .raw filename, not by extension-release content.
++    cat <<EOF >"%{install-root}/etc/extension-release.d/extension-release.os-release"
++    ID="_any"
++    EOF
+diff --git a/elements/gnomeos/os-release.bst b/elements/gnomeos/os-release.bst
+index ff653103df675f8b4e74d37e378e265a07c34de5..62395f96ec4b2a490c08d7b40be08b290dff4818 100644
+--- a/elements/gnomeos/os-release.bst
++++ b/elements/gnomeos/os-release.bst
+@@ -1,17 +1,57 @@
+-kind: meson
+-sources:
+-- kind: local
+-  path: files/os-release
++kind: manual
++description: |
++  Final os-release content. Stamps the cache-stable os-release-base artifact
++  with the current image-version and commit metadata via a cheap sed step.
++  This element is the only one that references %{image-version}, %{commit},
++  %{commit-date-pretty}, so it is the only one whose cache key changes on
++  bump. Consumers that need version-stamped /usr/lib/os-release should
++  build-depend on this element. Consumers that only need the file present
++  (without reading version content) should build-depend on os-release-base.bst
++  to keep their cache keys stable across bumps.
++
+ build-depends:
+-- freedesktop-sdk.bst:public-stacks/buildsystem-meson.bst
+-- freedesktop-sdk.bst:components/appstream-minimal.bst
+-depends:
+-- freedesktop-sdk.bst:public-stacks/runtime-minimal.bst
++- freedesktop-sdk.bst:public-stacks/buildsystem-make.bst
++- freedesktop-sdk.bst:components/sed.bst
++- freedesktop-sdk.bst:components/grep.bst
++- gnomeos/os-release-base.bst
++
+ variables:
+-  meson-local: >-
+-    -Dbranch=%{branch}
+-    -Dcommit-date='%{commit-date-pretty}'
+-    -Dcommit='%{commit}'
+-    -Dimage-version=%{image-version}
+-    -Dmode=sysupdate
+-    -Dvariant=user
++  strip-binaries: ''
++  # image-version, commit, commit-date-pretty are intentionally pulled from
++  # include/image-version.yml here (instead of being project-wide variables)
++  # so their values only contribute to this element's cache key, not to
++  # every element's. See project.conf for the rationale.
++  (@):
++  - include/image-version.yml
++
++config:
++  install-commands:
++  # Copy only the os-release-base outputs into our install-root, then sed-
++  # replace placeholders with real values. This avoids harvesting the entire
++  # build sandbox (which would include runtime-minimal staging) into our
++  # artifact and causing overlap conflicts in downstream consumers.
++  - |
++    set -e
++    mkdir -p "%{install-root}/usr/lib"
++    mkdir -p "%{install-root}/etc"
++
++    # Copy only the files produced by the os-release-base meson build.
++    cp /usr/lib/os-release "%{install-root}/usr/lib/os-release"
++    cp /etc/issue "%{install-root}/etc/issue"
++    cp /etc/issue.net "%{install-root}/etc/issue.net"
++
++    # Re-create the /etc/os-release symlink (relative to /etc).
++    ln -s ../usr/lib/os-release "%{install-root}/etc/os-release"
++
++    # Stamp the version-dependent placeholders.
++    sed -i \
++      -e "s|__BST_IMAGE_VERSION__|%{image-version}|g" \
++      -e "s|__BST_GNOMEOS_COMMIT__|%{commit}|g" \
++      -e "s|__BST_GNOMEOS_COMMIT_DATE__|%{commit-date-pretty}|g" \
++      "%{install-root}/usr/lib/os-release"
++
++    if grep -q "__BST_" "%{install-root}/usr/lib/os-release"; then
++      echo "ERROR: leftover placeholders in os-release:" >&2
++      grep "__BST_" "%{install-root}/usr/lib/os-release" >&2
++      exit 1
++    fi
+diff --git a/elements/gnomeos/signed-boot.bst b/elements/gnomeos/signed-boot.bst
+index 67767cc3703f97fd36ebfa3416c614536e25748c..19e2713c397d97babaa0ed5cf3fb0c2abffedb36 100644
+--- a/elements/gnomeos/signed-boot.bst
++++ b/elements/gnomeos/signed-boot.bst
+@@ -1,7 +1,12 @@
+ kind: manual
+ 
+ build-depends:
+-- gnomeos/os-release.bst
++# Use os-release-base.bst (placeholder content) so the UKI is cache-stable
++# across image-version bumps. The UKI's embedded /etc/os-release will show
++# placeholder version strings — this only affects sd-boot menu titles. The
++# pivoted root reads the real version from /etc/os-release supplied by the
++# os-release-confext sysupdate transfer.
++- gnomeos/os-release-base.bst
+ - filename: freedesktop-sdk.bst:components/linux.bst
+   strict: true
+ - filename: gnomeos/initramfs.bst
+@@ -43,7 +48,7 @@     roothash=$(jq -r '(.[] | select(.type | match("^usr-.*-verity$"))).roothash' /usr-image/mini.repart.json)
+ 
+     version="$(ls -1 /usr/lib/modules | head -n1)"
+ 
+-    mkdir -p "%{install-root}/efi/EFI/Linux/gnomeos_%{image-version}.efi.extra.d"
++    mkdir -p "%{install-root}/efi/EFI/Linux/gnomeos.efi.extra.d"
+ 
+     cat <<EOF >sbat.txt
+     sbat,1,SBAT Version,sbat,1,https://github.com/rhboot/shim/blob/main/SBAT.md
+@@ -55,21 +60,21 @@       --secureboot-private-key=VENDOR.key \
+       --secureboot-certificate=VENDOR.crt \
+       --cmdline='security=apparmor' \
+       --sbat=@sbat.txt \
+-      --output="%{install-root}/efi/EFI/Linux/gnomeos_%{image-version}.efi.extra.d/apparmor.addon.efi"
++      --output="%{install-root}/efi/EFI/Linux/gnomeos.efi.extra.d/apparmor.addon.efi"
+ 
+     ukify build \
+       --secureboot-private-key=VENDOR.key \
+       --secureboot-certificate=VENDOR.crt \
+       --cmdline="root=live:gnomeos" \
+       --sbat=@sbat.txt \
+-      --output="%{install-root}/efi/EFI/Linux/gnomeos_%{image-version}.efi.extra.d/live.addon.efi"
++      --output="%{install-root}/efi/EFI/Linux/gnomeos.efi.extra.d/live.addon.efi"
+ 
+     ukify build \
+       --secureboot-private-key=VENDOR.key \
+       --secureboot-certificate=VENDOR.crt \
+       --cmdline='gnomeos.nvidia-mode=1' \
+       --sbat=@sbat.txt \
+-      --output="%{install-root}/efi/EFI/Linux/gnomeos_%{image-version}.efi.extra.d/nvidia.addon.efi"
++      --output="%{install-root}/efi/EFI/Linux/gnomeos.efi.extra.d/nvidia.addon.efi"
+ 
+     case '%{arch}' in
+       x86_64)
+@@ -107,7 +112,7 @@     # It is important that --pcrpkey points the the initrd-only
+     # key. Not the fstab key. This is the key that will be
+     # automatically used to enroll /.
+     ukify build \
+-      --output "%{install-root}/efi/EFI/Linux/gnomeos_%{image-version}.efi" \
++      --output "%{install-root}/efi/EFI/Linux/gnomeos.efi" \
+       --os-release=@/etc/os-release \
+       --cmdline="%{kcmdline} usrhash=${roothash}" \
+       --uname="${version}" \
+diff --git a/elements/gnomeos/snapd/image.bst b/elements/gnomeos/snapd/image.bst
+index 5efc1cb9d752e6ad57885432ba677b3382904e17..9a140c38634d15cfa6b4b667477da48e5ff4bf4e 100644
+--- a/elements/gnomeos/snapd/image.bst
++++ b/elements/gnomeos/snapd/image.bst
+@@ -55,7 +55,7 @@         --private-key=SYSEXT.key \
+         --certificate=SYSEXT.crt \
+         --seed %{repart-seed} \
+         --copy-source=sysroot \
+-        snapd-%{systemd-arch}_%{image-version}.raw
++        snapd-%{systemd-arch}.raw
+ 
+   - |
+     TMPDIR='%{build-root}/tmp' \
+@@ -73,9 +73,9 @@         --private-key=SYSEXT.key \
+         --certificate=SYSEXT.crt \
+         --seed %{repart-seed} \
+         --copy-source=sysroot \
+-        snapd-confext-%{systemd-arch}_%{image-version}.raw
++        snapd-confext-%{systemd-arch}.raw
+ 
+   install-commands:
+   - |
+-    mv snapd-%{systemd-arch}_%{image-version}.raw %{install-root}
+-    mv snapd-confext-%{systemd-arch}_%{image-version}.raw %{install-root}
++    mv snapd-%{systemd-arch}.raw %{install-root}
++    mv snapd-confext-%{systemd-arch}.raw %{install-root}
+diff --git a/elements/gnomeos/snapd/layer.bst b/elements/gnomeos/snapd/layer.bst
+index 7fab2f6b46a2e76bb909209574fabd48fa8ac7c9..abace7fb365efc9a3d7133a9beb0b8b5a36c22c3 100644
+--- a/elements/gnomeos/snapd/layer.bst
++++ b/elements/gnomeos/snapd/layer.bst
+@@ -40,46 +40,19 @@        --initscripts /etc/fdsdk/initial_scripts-snapd \
+        --seed "%{sysroot-seed}" \
+        --noroot --noboot --nodepmod >/dev/null
+ 
++  # Extension-release content is version-stable (ID=_any). The version is
++  # stamped into the .raw filename by update-images.bst so sysupdate's
++  # MatchPattern still matches.
+   - |
+     mkdir -p /sysroot-snapd/usr/lib/extension-release.d
+-    case "%{branch}" in
+-      master)
+-        version_id=Nightly
+-        ;;
+-      *)
+-        version_id="%{branch}"
+-        ;;
+-    esac
+-
+-    commits_url="https://gitlab.gnome.org/GNOME/gnome-build-meta/-/commits/%{commit}"
+-    cat <<EOF >/sysroot-snapd/usr/lib/extension-release.d/extension-release.snapd_%{image-version}
+-    ID="org.gnome.os"
+-    VERSION_ID="${version_id}"
+-    SYSEXT_LEVEL="%{image-version}"
+-    GNOMEOS_COMMIT="%{commit}"
+-    GNOMEOS_COMMIT_DATE="%{commit-date-pretty}"
+-    GNOMEOS_COMMITS_URL="${commits_url}"
++    cat <<EOF >/sysroot-snapd/usr/lib/extension-release.d/extension-release.snapd
++    ID="_any"
+     EOF
+ 
+   - |
+     mkdir -p sysroot-snapd/etc/extension-release.d
+-    case "%{branch}" in
+-      master)
+-        version_id=Nightly
+-        ;;
+-      *)
+-        version_id="%{branch}"
+-        ;;
+-    esac
+-
+-    commits_url="https://gitlab.gnome.org/GNOME/gnome-build-meta/-/commits/%{commit}"
+-    cat <<EOF >/sysroot-snapd/etc/extension-release.d/extension-release.snapd_%{image-version}
+-    ID="org.gnome.os"
+-    VERSION_ID="${version_id}"
+-    CONFEXT_LEVEL="%{image-version}"
+-    GNOMEOS_COMMIT="%{commit}"
+-    GNOMEOS_COMMIT_DATE="%{commit-date-pretty}"
+-    GNOMEOS_COMMITS_URL="${commits_url}"
++    cat <<EOF >/sysroot-snapd/etc/extension-release.d/extension-release.snapd
++    ID="_any"
+     EOF
+ 
+   - |
+diff --git a/elements/gnomeos/sysupdate-apple-macbook12-config.bst b/elements/gnomeos/sysupdate-apple-macbook12-config.bst
+new file mode 100644
+index 0000000000000000000000000000000000000000..66915af910fbd2be6091d2aac81fa86aba8a2277
+--- /dev/null
++++ b/elements/gnomeos/sysupdate-apple-macbook12-config.bst
+@@ -0,0 +1,8 @@
++kind: import
++
++sources:
++- kind: local
++  path: files/sysupdate-apple-macbook12
++
++config:
++  target: '%{indep-libdir}/sysupdate.d'
+diff --git a/elements/gnomeos/update-images-slim.bst b/elements/gnomeos/update-images-slim.bst
+new file mode 100644
+index 0000000000000000000000000000000000000000..8a56d5c81ab8fdde1c267bd3a884708808371053
+--- /dev/null
++++ b/elements/gnomeos/update-images-slim.bst
+@@ -0,0 +1,83 @@
++kind: script
++
++build-depends:
++- filename: gnomeos/update-images-user-only.bst
++  strict: true
++  config:
++    location: "%{install-root}"
++- filename: gnomeos/devel/image.bst
++  strict: true
++  config:
++    location: "%{install-root}"
++- filename: gnomeos/os-release-confext/image.bst
++  strict: true
++  config:
++    location: "%{install-root}"
++- freedesktop-sdk.bst:public-stacks/runtime-minimal.bst
++
++(?):
++- arch in ["x86_64"]:
++    build-depends:
++      (>):
++      - filename: gnomeos/apple-macbook12-modules/image.bst
++        strict: true
++        config:
++          location: "%{install-root}"
++
++variables:
++  # image-version is pulled in here as element-local (not project-wide) so
++  # only this element's cache key bumps on a version change.
++  (@):
++  - include/image-version.yml
++
++config:
++  commands:
++  # Version-stamp all artifact filenames produced by the now version-stable
++  # upstream elements. This is the only place where %{image-version} is
++  # referenced for slim builds, so this element re-runs cheaply on bump while
++  # the rest of the chain stays cached.
++  #
++  # Patterns covered (post-rename used by sysupdate's MatchPattern):
++  #   usr-<arch>_<uuid>.raw         -> usr-<arch>_<ver>_<uuid>.raw
++  #   usr-<arch>_<uuid>.verity      -> usr-<arch>_<ver>_<uuid>.verity
++  #   gnomeos-<arch>.efi            -> gnomeos-<arch>_<ver>.efi
++  #   gnomeos-apparmor-<arch>.efi   -> gnomeos-apparmor-<arch>_<ver>.efi
++  #   <name>-<arch>.raw             -> <name>-<arch>_<ver>.raw
++  #   <name>-confext-<arch>.raw     -> <name>-confext-<arch>_<ver>.raw
++  #   gnomeos-nvidia-<arch>.addon.efi -> gnomeos-nvidia-<arch>_<ver>.addon.efi
++  - |
++    cd "%{install-root}"
++    arch='%{systemd-arch}'
++    ver='%{image-version}'
++
++    # usr_*: keep UUID suffix, inject version between arch and UUID
++    for f in usr-${arch}_*.raw usr-${arch}_*.verity; do
++      [ -f "$f" ] || continue
++      uuid_and_ext="${f#usr-${arch}_}"   # <uuid>.raw or <uuid>.verity
++      mv "$f" "usr-${arch}_${ver}_${uuid_and_ext}"
++    done
++
++    # gnomeos main UKI + apparmor addon (sibling .efi files)
++    for f in gnomeos-${arch}.efi gnomeos-apparmor-${arch}.efi; do
++      [ -f "$f" ] || continue
++      base="${f%.efi}"   # gnomeos-<arch> or gnomeos-apparmor-<arch>
++      mv "$f" "${base}_${ver}.efi"
++    done
++
++    # nvidia EFI addon (different suffix)
++    for f in gnomeos-nvidia-${arch}.addon.efi; do
++      [ -f "$f" ] || continue
++      mv "$f" "gnomeos-nvidia-${arch}_${ver}.addon.efi"
++    done
++
++    # Generic <name>-<arch>.raw and <name>-confext-<arch>.raw
++    for f in *-${arch}.raw; do
++      [ -f "$f" ] || continue
++      base="${f%-${arch}.raw}"
++      mv "$f" "${base}-${arch}_${ver}.raw"
++    done
++
++  - |
++    cd "%{install-root}"
++    rm SHA256SUMS
++    sha256sum * | tee SHA256SUMS
+diff --git a/elements/gnomeos/update-images-user-only.bst b/elements/gnomeos/update-images-user-only.bst
+index 744d7673e6d9fdb7a1dac38c021055b781ab5a3a..ce5d0fe157783122807d766930fa68b1838cf276 100644
+--- a/elements/gnomeos/update-images-user-only.bst
++++ b/elements/gnomeos/update-images-user-only.bst
+@@ -12,23 +12,27 @@ - freedesktop-sdk.bst:public-stacks/runtime-minimal.bst
+ 
+ config:
+   commands:
++  # Filenames are version-independent here so this element caches across
++  # image-version bumps. Embedded UUIDs are baked into the verity/usr names
++  # because sysupdate's MatchPattern keys off them. Version stamping is
++  # done in update-images-slim.bst / update-images.bst, which is cheap.
+   - |
+     set -x
+ 
+     usr_part_uuid="$(jq -r '(.[] | select(.file | match("/10-usr.conf$"))).uuid' /usr-image/mini.repart.json)"
+     usr_verity_part_uuid=$(jq -r '(.[] | select(.type | match("^usr-.*-verity$"))).uuid' /usr-image/mini.repart.json)
+ 
+-    mv /usr-image/mini.usr-verity.raw "%{install-root}/usr-%{systemd-arch}_%{image-version}_${usr_verity_part_uuid}.verity"
+-    mv /usr-image/mini.usr.raw "%{install-root}/usr-%{systemd-arch}_%{image-version}_${usr_part_uuid}.raw"
++    mv /usr-image/mini.usr-verity.raw "%{install-root}/usr-%{systemd-arch}_${usr_verity_part_uuid}.verity"
++    mv /usr-image/mini.usr.raw "%{install-root}/usr-%{systemd-arch}_${usr_part_uuid}.raw"
+ 
+   - |
+     set -x
+ 
+-    cp "/signed-boot/efi/EFI/Linux/gnomeos_%{image-version}.efi" "%{install-root}/gnomeos-%{systemd-arch}_%{image-version}.efi"
+-    cp "/signed-boot/efi/EFI/Linux/gnomeos_%{image-version}.efi.extra.d/apparmor.addon.efi" "%{install-root}/gnomeos-apparmor-%{systemd-arch}_%{image-version}.efi"
++    cp "/signed-boot/efi/EFI/Linux/gnomeos.efi" "%{install-root}/gnomeos-%{systemd-arch}.efi"
++    cp "/signed-boot/efi/EFI/Linux/gnomeos.efi.extra.d/apparmor.addon.efi" "%{install-root}/gnomeos-apparmor-%{systemd-arch}.efi"
+     case '%{arch}' in
+       x86_64)
+-        cp "/signed-boot/efi/EFI/Linux/gnomeos_%{image-version}.efi.extra.d/nvidia.addon.efi" "%{install-root}/gnomeos-nvidia-%{systemd-arch}_%{image-version}.addon.efi"
++        cp "/signed-boot/efi/EFI/Linux/gnomeos.efi.extra.d/nvidia.addon.efi" "%{install-root}/gnomeos-nvidia-%{systemd-arch}.addon.efi"
+       ;;
+     esac
+ 
+diff --git a/elements/gnomeos/update-images.bst b/elements/gnomeos/update-images.bst
+index f3d9fbaf0eeaf0f1e378177f867566b4383fe6f3..5edd4a87a23edb31d1e7a12c1ee5ffbb2ec36c4d 100644
+--- a/elements/gnomeos/update-images.bst
++++ b/elements/gnomeos/update-images.bst
+@@ -23,6 +23,10 @@     location: "%{install-root}"
+ - filename: gnomeos/codecs-extra/image.bst
+   config:
+     location: "%{install-root}"
++- filename: gnomeos/os-release-confext/image.bst
++  strict: true
++  config:
++    location: "%{install-root}"
+ - freedesktop-sdk.bst:public-stacks/runtime-minimal.bst
+ 
+ (?):
+@@ -37,9 +41,59 @@       - filename: gnomeos/nvidia-runtime/image.bst
+         strict: true
+         config:
+           location: "%{install-root}"
++      - filename: gnomeos/apple-macbook12-modules/image.bst
++        strict: true
++        config:
++          location: "%{install-root}"
++
++variables:
++  # image-version is pulled in here as element-local (not project-wide) so
++  # only this element's cache key bumps on a version change.
++  (@):
++  - include/image-version.yml
+ 
+ config:
+   commands:
++  # Version-stamp all artifact filenames produced by the now version-stable
++  # upstream elements. This is the only place where %{image-version} is
++  # referenced for full builds, so this element re-runs cheaply on bump while
++  # the rest of the chain stays cached. See update-images-slim.bst for the
++  # equivalent slim aggregator and a description of the rename patterns.
++  - |
++    cd "%{install-root}"
++    arch='%{systemd-arch}'
++    ver='%{image-version}'
++
++    for f in usr-${arch}_*.raw usr-${arch}_*.verity; do
++      [ -f "$f" ] || continue
++      uuid_and_ext="${f#usr-${arch}_}"
++      mv "$f" "usr-${arch}_${ver}_${uuid_and_ext}"
++    done
++
++    for f in gnomeos-${arch}.efi gnomeos-apparmor-${arch}.efi; do
++      [ -f "$f" ] || continue
++      base="${f%.efi}"
++      mv "$f" "${base}_${ver}.efi"
++    done
++
++    for f in gnomeos-nvidia-${arch}.addon.efi; do
++      [ -f "$f" ] || continue
++      mv "$f" "gnomeos-nvidia-${arch}_${ver}.addon.efi"
++    done
++
++    for f in *-${arch}.raw; do
++      [ -f "$f" ] || continue
++      base="${f%-${arch}.raw}"
++      mv "$f" "${base}-${arch}_${ver}.raw"
++    done
++
++    # debug tarball (only present in full update-images.bst)
++    for f in *-${arch}.tar.zst; do
++      [ -f "$f" ] || continue
++      base="${f%-${arch}.tar.zst}"
++      mv "$f" "${base}-${arch}_${ver}.tar.zst"
++    done
++
+   - |
+     cd "%{install-root}"
+     rm SHA256SUMS
+diff --git a/elements/gnomeos/usr/deps.bst b/elements/gnomeos/usr/deps.bst
+index dc4a850ddc9b1e5705991f8f8f8593f903f0b234..8bd2347ed0fe2f7317ceb1bc8e04ee75ecee661d 100644
+--- a/elements/gnomeos/usr/deps.bst
++++ b/elements/gnomeos/usr/deps.bst
+@@ -7,7 +7,12 @@ - gnomeos/repart-config.bst
+ - gnomeos/initramfs/signed-modules.bst
+ - gnomeos/sysupdate-config.bst
+ - gnomeos/import-deployment-pub-key.bst
+-- gnomeos/os-release.bst
++# Use os-release-base.bst (placeholder content) to keep the usr image
++# cache-stable across image-version bumps. The version-stamped
++# /etc/os-release is delivered at runtime via the os-release-confext
++# sysupdate transfer; systemd reads /etc/os-release in preference to
++# /usr/lib/os-release, so the running OS sees the correct version.
++- gnomeos/os-release-base.bst
+ - gnomeos/fwupd-efi-signed-maybe.bst
+ - gnomeos/replace-signed-systemd-boot.bst
+ - gnomeos/reload-sysext.bst
+@@ -24,3 +29,4 @@ - arch in ["x86_64"]:
+     depends:
+       (>):
+       - gnomeos/sysupdate-nvidia-config.bst
++      - gnomeos/sysupdate-apple-macbook12-config.bst
+diff --git a/elements/gnomeos/usr/layer.bst b/elements/gnomeos/usr/layer.bst
+index 21fb88af914dc3d4d7ccc94b97fefc6b01594023..3126add6096559bddf7ec6189e5f59c04b7a87ed 100644
+--- a/elements/gnomeos/usr/layer.bst
++++ b/elements/gnomeos/usr/layer.bst
+@@ -15,6 +15,7 @@ - arch in ["x86_64"]:
+     build-depends:
+       (>):
+       - gnomeos/initramfs/signed-nvidia-modules.bst
++      - gnomeos/initramfs/signed-apple-macbook12-modules.bst
+ 
+ variables:
+   sysroot-seed: df2427db-01ec-4c99-96b1-be3edb3cd9f6
+@@ -43,8 +44,15 @@       x86_64)
+         version="$(ls -1 /lib/modules | head -n1)"
+         mkdir -p /sysroot/usr/lib/modules/"${version}"/kernel/drivers/video
+         cp /usr/lib/modules/"${version}"/kernel/drivers/video/nvidia*.ko* /sysroot/usr/lib/modules/"${version}"/kernel/drivers/video/
++        mkdir -p /sysroot/usr/lib/modules/"${version}"/extra
++        cp /usr/lib/modules/"${version}"/extra/snd-hda-codec-cs420x.ko.zst /sysroot/usr/lib/modules/"${version}"/extra/
++        # Remove the in-tree cs420x so depmod only sees the patched one
++        # under extra/. Without this, the in-tree path wins and our patched
++        # module never gets resolved by modprobe.
++        rm -f /sysroot/usr/lib/modules/"${version}"/kernel/sound/hda/codecs/cirrus/snd-hda-codec-cs420x.ko*
+         depmod -a -b /sysroot/usr "${version}"
+         rm -rf /sysroot/usr/lib/modules/"${version}"/kernel/drivers/video/nvidia*.ko*
++        rm -f /sysroot/usr/lib/modules/"${version}"/extra/snd-hda-codec-cs420x.ko.zst
+         ;;
+     esac
+ 
+@@ -79,12 +87,15 @@   - |
+     mv -T /sysroot/efi /sysroot/usr/share/factory/efi
+ 
+   - |
++    # Extension-release content is version-stable (ID=_any). Without this,
++    # the image-version variable would propagate up through usr/layer.bst
++    # to usr/image.bst, forcing the expensive verity+erofs build to re-run
++    # on every bump.
+     mkdir -p /sysroot/usr/lib/confexts/gnomeos-base-config
+     mv -T /sysroot/etc /sysroot/usr/lib/confexts/gnomeos-base-config/etc
+     mkdir -p /sysroot/usr/lib/confexts/gnomeos-base-config/etc/extension-release.d
+     cat <<EOF >/sysroot/usr/lib/confexts/gnomeos-base-config/etc/extension-release.d/extension-release.gnomeos-base-config
+-    ID="org.gnome.os"
+-    CONFEXT_LEVEL="%{image-version}"
++    ID="_any"
+     EOF
+ 
+   - |
+diff --git a/elements/oci/integration/os-release.bst b/elements/oci/integration/os-release.bst
+index 5bb77841a2af76265308189ce352894d40668641..6abb65d59c08ec02803c75eab2c98adc4d50dd1e 100644
+--- a/elements/oci/integration/os-release.bst
++++ b/elements/oci/integration/os-release.bst
+@@ -12,6 +12,11 @@ depends:
+ - freedesktop-sdk.bst:public-stacks/runtime-minimal.bst
+ 
+ variables:
++  # image-version, commit, commit-date-pretty are pulled from
++  # include/image-version.yml as element-local variables (not project-wide)
++  # so their values only contribute to this element's cache key.
++  (@):
++  - include/image-version.yml
+   meson-local: >-
+     -Dbranch=%{branch}
+     -Dcommit-date='%{commit-date-pretty}'
+diff --git a/files/apple-macbook12-config/apple-macbook12-hda-rebind.service b/files/apple-macbook12-config/apple-macbook12-hda-rebind.service
+new file mode 100644
+index 0000000000000000000000000000000000000000..7a683259fef3768ab9e6217ebe5caac2a2f1425c
+--- /dev/null
++++ b/files/apple-macbook12-config/apple-macbook12-hda-rebind.service
+@@ -0,0 +1,35 @@
++[Unit]
++Description=Rebind Apple MacBook 12" HDA controller to use the patched cs420x codec
++Documentation=https://github.com/juicecultus/macbook12-audio-driver
++# The kernel binds the HDA codec at PCI probe time, before our patched
++# cs420x module is loaded. This service unbinds the HDA controller and
++# rebinds it so the codec subsystem re-resolves and picks the patched
++# module.
++After=systemd-modules-load.service
++Requires=systemd-modules-load.service
++
++[Service]
++Type=oneshot
++RemainAfterExit=yes
++# Briefly stop user-space audio so it doesn't hold the device open
++# (otherwise the unbind below fails with EBUSY).
++ExecStartPre=-/usr/bin/systemctl --no-block stop pipewire.service pipewire.socket pipewire-pulse.service pipewire-pulse.socket wireplumber.service
++ExecStartPre=-/usr/bin/sh -c 'for u in $(systemctl list-units --all --type=service --no-legend "user@*.service" 2>/dev/null | awk "{print \$1}"); do systemctl --no-block stop "$u" 2>/dev/null || true; done'
++# Make sure our patched module is loaded.
++ExecStartPre=/usr/bin/modprobe snd-hda-codec-cs420x
++# Wait up to 10s for the PCI device, then rebind.
++ExecStart=/bin/sh -c ' \
++    for i in $(seq 1 50); do \
++        if [ -e /sys/bus/pci/drivers/snd_hda_intel/0000:00:1f.3 ]; then \
++            echo 0000:00:1f.3 > /sys/bus/pci/drivers/snd_hda_intel/unbind || exit 0; \
++            sleep 0.2; \
++            echo 0000:00:1f.3 > /sys/bus/pci/drivers/snd_hda_intel/bind || exit 0; \
++            exit 0; \
++        fi; \
++        sleep 0.2; \
++    done; \
++    echo "snd_hda_intel PCI device 0000:00:1f.3 never appeared, skipping rebind" >&2; \
++    exit 0'
++
++[Install]
++WantedBy=multi-user.target
+diff --git a/files/apple-macbook12-config/modprobe.conf b/files/apple-macbook12-config/modprobe.conf
+new file mode 100644
+index 0000000000000000000000000000000000000000..56271d24a1b14f6463f4b4eb7b10e48dfbb55d58
+--- /dev/null
++++ b/files/apple-macbook12-config/modprobe.conf
+@@ -0,0 +1,8 @@
++# Apple MacBook 12" audio driver
++#
++# Without this softdep, the kernel's HDA driver (snd_hda_intel) probes the
++# codec at PCI bind time and auto-binds it to the in-tree generic codec
++# (snd_hda_codec_generic) before our patched cs420x module gets loaded by
++# systemd-modules-load. The softdep makes modprobe load cs420x as a
++# pre-dependency of snd_hda_intel so the codec resolves correctly.
++softdep snd_hda_intel pre: snd_hda_codec_cs420x
+diff --git a/files/apple-macbook12-config/modules-load.conf b/files/apple-macbook12-config/modules-load.conf
+new file mode 100644
+index 0000000000000000000000000000000000000000..ec30f777cbb2621fef1ea81cf112d18e5cc09f2f
+--- /dev/null
++++ b/files/apple-macbook12-config/modules-load.conf
+@@ -0,0 +1 @@
++snd-hda-codec-cs420x
+diff --git a/files/sysupdate-apple-macbook12/40-gnomeos-apple-macbook12-initrd-modules.transfer b/files/sysupdate-apple-macbook12/40-gnomeos-apple-macbook12-initrd-modules.transfer
+new file mode 100644
+index 0000000000000000000000000000000000000000..0c84779fed19f3ce4b95a904be996b48a6852981
+--- /dev/null
++++ b/files/sysupdate-apple-macbook12/40-gnomeos-apple-macbook12-initrd-modules.transfer
+@@ -0,0 +1,18 @@
++[Transfer]
++ProtectVersion=%A
++Features=apple-macbook12-driver
++
++[Source]
++Type=url-file
++Path=https://1270333429.rsc.cdn77.org/nightly/sysupdate/
++MatchPattern=apple-macbook12-modules-%a_@v.raw \
++             apple-macbook12-modules-%a_@v.raw.xz \
++             apple-macbook12-modules-%a_@v.raw.zst
++
++[Target]
++Type=regular-file
++Path=/EFI/Linux
++PathRelativeTo=boot
++MatchPattern=gnomeos_@v.efi.extra.d/apple-macbook12-modules.raw
++Mode=0444
++InstancesMax=2
+diff --git a/files/sysupdate-apple-macbook12/40-gnomeos-apple-macbook12-modules.transfer b/files/sysupdate-apple-macbook12/40-gnomeos-apple-macbook12-modules.transfer
+new file mode 100644
+index 0000000000000000000000000000000000000000..8cbba1e910ca9e0087329ef6600430057b4b508b
+--- /dev/null
++++ b/files/sysupdate-apple-macbook12/40-gnomeos-apple-macbook12-modules.transfer
+@@ -0,0 +1,16 @@
++[Transfer]
++ProtectVersion=%A
++Features=apple-macbook12-driver
++
++[Source]
++Type=url-file
++Path=https://1270333429.rsc.cdn77.org/nightly/sysupdate/
++MatchPattern=apple-macbook12-modules-%a_@v.raw \
++             apple-macbook12-modules-%a_@v.raw.xz \
++             apple-macbook12-modules-%a_@v.raw.zst
++
++[Target]
++Type=regular-file
++Path=/var/lib/extensions/
++MatchPattern=apple-macbook12-modules_@v.raw
++InstancesMax=2
+diff --git a/files/sysupdate-apple-macbook12/apple-macbook12-driver.feature b/files/sysupdate-apple-macbook12/apple-macbook12-driver.feature
+new file mode 100644
+index 0000000000000000000000000000000000000000..06b276da57a950acdfcd16bfcd5b2a41882ea705
+--- /dev/null
++++ b/files/sysupdate-apple-macbook12/apple-macbook12-driver.feature
+@@ -0,0 +1,2 @@
++[Feature]
++Description=Apple MacBook 12" (MacBook9,1/MacBook10,1) Driver
+diff --git a/files/sysupdate/40-gnomeos-os-release-confext.transfer b/files/sysupdate/40-gnomeos-os-release-confext.transfer
+new file mode 100644
+index 0000000000000000000000000000000000000000..cdb7a6c4d585d9fc3cf51df857c3ceeed6daf75c
+--- /dev/null
++++ b/files/sysupdate/40-gnomeos-os-release-confext.transfer
+@@ -0,0 +1,15 @@
++[Transfer]
++ProtectVersion=%A
++
++[Source]
++Type=url-file
++Path=https://1270333429.rsc.cdn77.org/nightly/sysupdate/
++MatchPattern=os-release-confext-%a_@v.raw \
++             os-release-confext-%a_@v.raw.xz \
++             os-release-confext-%a_@v.raw.zst
++
++[Target]
++Type=regular-file
++Path=/var/lib/confexts/
++MatchPattern=os-release_@v.raw
++InstancesMax=2
+diff --git a/include/aliases.yml b/include/aliases.yml
+index 0bcc1f791c627e8db982bcd85eae5a6b9874dd63..e48621fd9e4a6399b2a99b990d924fbba38183f9 100644
+--- a/include/aliases.yml
++++ b/include/aliases.yml
+@@ -25,6 +25,7 @@   gnupg_ftp: https://www.gnupg.org/ftp/
+   gstreamer: https://gstreamer.freedesktop.org/
+   infradead: https://www.infradead.org/
+   kerberos: https://kerberos.org/
++  kernel_org: https://cdn.kernel.org/pub/linux/kernel/
+   kldp: https://kldp.net/
+   launchpad: https://launchpad.net/
+   mozilla: https://ftp.mozilla.org/pub/
+diff --git a/include/image-version.yml b/include/image-version.yml
+index 76669cdd7d5ff6fa4dd8de3accd992f38547df45..27789c9d73431c9a1765f62392a383f915a1aa15 100644
+--- a/include/image-version.yml
++++ b/include/image-version.yml
+@@ -1,5 +1,5 @@
+ # l for local
+-image-version: 'l.1'
++image-version: 'l.11'
+ filesystem-time: 1321009871
+ # These get replaced in CI.
+ # We should also set them for local builds, but that's for later
+diff --git a/project.conf b/project.conf
+index 319d841c7ffec2885ed3bcfcf9cdcfd76873a767..4f0e5260aabbeccd312f020dd972129bbfc99ac8 100644
+--- a/project.conf
++++ b/project.conf
+@@ -192,8 +192,14 @@       go-arch: "riscv64"
+       systemd-arch: "riscv64"
+       efi-arch: riscv64
+ 
+-  (@):
+-  - include/image-version.yml
++  # filesystem-time is a constant; image-version, commit, commit-date-pretty
++  # are NOT included project-wide on purpose: they used to be project
++  # variables, which caused every element's weak cache key to change on
++  # every version bump (because resolved variables are part of the weak
++  # key, even when the element doesn't reference them). The version-
++  # touching elements now declare their own local variables that pull
++  # from include/image-version.yml.
++  filesystem-time: 1321009871
+ 
+ plugins:
+ - origin: junction
+diff --git a/utils/run-sysupdate-repo.sh b/utils/run-sysupdate-repo.sh
+index 8832068ae831f42ee47584c98709b80d881b0ad6..3f5f5e2e2b0b4097a07988183992c05683b866fb 100755
+--- a/utils/run-sysupdate-repo.sh
++++ b/utils/run-sysupdate-repo.sh
+@@ -35,6 +35,9 @@   --same-version             Do not bump the version of the image.
+ 
+   --devel                    Build and serve all images including extensions.
+ 
++  --slim                     Build only kernel/usr, devel, and apple-macbook12.
++                             Skips nvidia, debug, snapd, codecs-extra. Implies --devel.
++
+   --no-strict                Use --no-strict on BuildStream
+ 
+   --interactive              Run BuildStream in interactive mode
+@@ -51,6 +54,10 @@         --same-version)
+             same_version=1
+             ;;
+         --devel)
++            devel=1
++            ;;
++        --slim)
++            slim=1
+             devel=1
+             ;;
+         --no-strict)
+@@ -130,7 +137,9 @@
+ checkout="$(mktemp -d --tmpdir="${REPO_STATE}" checkout.XXXXXXXXXX)"
+ cleanup_dirs+=("${checkout}")
+ 
+-if [ "${devel+set}" = set ]; then
++if [ "${slim+set}" = set ]; then
++    image=(gnomeos/update-images-slim.bst)
++elif [ "${devel+set}" = set ]; then
+     image=(gnomeos/update-images.bst)
+ else
+     image=(gnomeos/update-images-user-only.bst)
+
