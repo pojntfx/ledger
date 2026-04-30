@@ -1,0 +1,1146 @@
+From d27e4bde60d59b7844c0e59ce541a940678890d5 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Wed, 29 Apr 2026 22:59:30 -0700
+Subject: [PATCH] GIR: Initial prototype of comments describing GObject memory semantics, warnings for `Unref`, and GStreamer `MiniObject` hacks
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/internal/gir/pass/pass.go b/internal/gir/pass/pass.go
+index d8130717715872e4b41edb02a1303c95d863384e..139e3c0522d905beaf476b159bfc0654a6a6c76b 100644
+--- a/internal/gir/pass/pass.go
++++ b/internal/gir/pass/pass.go
+@@ -26,6 +26,28 @@ type Pass struct {
+ 	Parsed []types.Repository
+ 	Types  types.KindMap
+ 
++	// MiniObjectDerived holds records that derive from Gst.MiniObject
++	// (transitively). Keys are lowercase "namespace.name" (e.g.
++	// "gst.buffer"). Values are the Go (CamelCase) field name of the
++	// embedded miniobject parent on that record — varies per record
++	// because GIR uses "mini_object" on Buffer/Caps but "parent" on
++	// Promise/Event/Message. MiniObject itself is also keyed here with
++	// an empty value so the lookup map covers the whole hierarchy.
++	// The detection rule is structural: a record's first concrete field
++	// is embedded by value (not as a pointer) and has type Gst.MiniObject
++	// or another miniobject-derived record.
++	MiniObjectDerived map[string]string
++
++	// FloatingRef holds the set of classes that derive (transitively)
++	// from GObject.InitiallyUnowned. Keys are lowercase "namespace.name".
++	// Membership means instances of the type are created with a floating
++	// reference: passing one to a "container" function (Box.Append,
++	// Window.SetChild, Bin.Add, …) sinks the floating ref instead of
++	// borrowing it, even though GIR labels the parameter
++	// transfer-ownership="none". The doc-comment generator uses this
++	// map to swap the generic borrow note for a sink-aware one.
++	FloatingRef map[string]bool
++
+ 	impModule         string
+ 	impPackageImports map[string]string
+ }
+@@ -44,8 +66,10 @@ 		}
+ 		allFiles = append(allFiles, d.Files...)
+ 	}
+ 	p := Pass{
+-		Parsed: make([]types.Repository, len(allFiles)),
+-		Types:  make(types.KindMap),
++		Parsed:            make([]types.Repository, len(allFiles)),
++		Types:             make(types.KindMap),
++		MiniObjectDerived: make(map[string]string),
++		FloatingRef:       make(map[string]bool),
+ 
+ 		impModule:         module,
+ 		impPackageImports: make(map[string]string),
+@@ -116,6 +140,130 @@ func (p *Pass) First() {
+ 	for _, r := range p.Parsed {
+ 		p.collectTypes(r)
+ 	}
++	p.detectMiniObjectDerived()
++	p.detectFloatingRef()
++}
++
++// classKey is the lowercase "ns.name" key used by FloatingRef. It matches
++// the convention used by MiniObjectDerived so callers can compose the same
++// namespace-resolution rules.
++func classKey(ns, name string) string {
++	return strings.ToLower(ns) + "." + name
++}
++
++// detectFloatingRef walks every class in every parsed namespace and
++// classifies it as floating-ref if its parent chain reaches
++// GObject.InitiallyUnowned. We iterate to a fixpoint because parents are
++// expressed as bare names (when they live in the same namespace) or
++// "Other.Name" (when they cross namespaces) — reaching a transitive
++// answer means each pass propagates one inheritance step.
++func (p *Pass) detectFloatingRef() {
++	root := classKey("GObject", "InitiallyUnowned")
++	p.FloatingRef[root] = true
++
++	resolveParent := func(ns, parent string) string {
++		if parent == "" {
++			return ""
++		}
++		parts := strings.SplitN(parent, ".", 2)
++		if len(parts) == 2 {
++			return strings.ToLower(parts[0]) + "." + parts[1]
++		}
++		return strings.ToLower(ns) + "." + parent
++	}
++
++	for {
++		changed := false
++		for _, r := range p.Parsed {
++			ns := r.Namespaces[0].Name
++			for _, cls := range r.Namespaces[0].Classes {
++				key := classKey(ns, cls.Name)
++				if p.FloatingRef[key] {
++					continue
++				}
++				if p.FloatingRef[resolveParent(ns, cls.Parent)] {
++					p.FloatingRef[key] = true
++					changed = true
++				}
++			}
++		}
++		if !changed {
++			break
++		}
++	}
++}
++
++// recordKey builds the canonical lowercase "ns.name" key used by MiniObjectDerived.
++func recordKey(ns, name string) string {
++	return strings.ToLower(ns) + "." + name
++}
++
++// detectMiniObjectDerived walks every record in every parsed namespace and
++// classifies it as miniobject-derived if its first non-private field is (or
++// transitively derives from) Gst.MiniObject. GIR doesn't carry inheritance
++// for records, so we rely on the GStreamer convention that a subclass
++// embeds its parent miniobject as the first field. We iterate to a fixpoint
++// to handle multi-level chains (e.g. records that embed another
++// miniobject-derived record before MiniObject itself is reached).
++func (p *Pass) detectMiniObjectDerived() {
++	// Direct base case: Gst.MiniObject itself. The empty value just marks
++	// presence; MiniObject doesn't have its own embedded parent so there
++	// is no field name to record.
++	root := recordKey("Gst", "MiniObject")
++	p.MiniObjectDerived[root] = ""
++
++	// firstField inspects rec and returns the GIR field name and the
++	// lowercase "ns.name" of the first field's type, or ("", "") if none
++	// is suitable. We require an embedded-by-value field (no pointer in
++	// the C type) — pointer fields like StaticCaps.caps (*Caps) hold a
++	// reference but don't structurally inherit, so they must not count.
++	// Private fields count: GIR sometimes marks the embedded miniobject
++	// parent as private (e.g. GstSdp.MIKEYMessage), but the C struct still
++	// embeds it at offset 0, which is what miniobject derivation requires.
++	firstField := func(ns string, rec types.Record) (fieldName, refKey string) {
++		for _, f := range rec.Fields {
++			if f.Callback != nil || f.AnyType.Type == nil {
++				continue
++			}
++			if strings.Contains(f.AnyType.Type.CType, "*") {
++				return "", ""
++			}
++			refName := f.AnyType.Type.Name
++			if refName == "" {
++				continue
++			}
++			parts := strings.SplitN(refName, ".", 2)
++			if len(parts) == 2 {
++				return f.Name, strings.ToLower(parts[0]) + "." + parts[1]
++			}
++			return f.Name, strings.ToLower(ns) + "." + refName
++		}
++		return "", ""
++	}
++
++	for {
++		changed := false
++		for _, r := range p.Parsed {
++			ns := r.Namespaces[0].Name
++			for _, rec := range r.Namespaces[0].Records {
++				key := recordKey(ns, rec.Name)
++				if _, ok := p.MiniObjectDerived[key]; ok {
++					continue
++				}
++				fname, ref := firstField(ns, rec)
++				if ref == "" {
++					continue
++				}
++				if _, ok := p.MiniObjectDerived[ref]; ok {
++					p.MiniObjectDerived[key] = util.SnakeToCamel(fname)
++					changed = true
++				}
++			}
++		}
++		if !changed {
++			break
++		}
++	}
+ }
+ 
+ type file struct {
+@@ -240,9 +388,9 @@ 		for i, c := range rec.Constructors {
+ 			constructors[i] = types.FuncTemplate{
+ 				Name:  util.ConstructorName(c.Name, rec.Name),
+ 				CName: c.CIdentifier,
+-				Doc:   c.Doc.StringSafe(),
++				Doc:   c.CallableAttrs.AugmentDoc(c.Doc.StringSafe(), ns.Name, p.Types, p.MiniObjectDerived, p.FloatingRef),
+ 				Args:  c.Parameters.Template(ns.Name, "", p.Types, c.Throws, false, imps),
+-				Ret:   c.ReturnValue.Template(ns.Name, "", p.Types, c.Throws, imps),
++				Ret:   c.ReturnValue.TemplateForMethod(ns.Name, "", p.Types, p.MiniObjectDerived, c.Name, c.Throws, imps),
+ 			}
+ 		}
+ 		for _, f := range rec.Fields {
+@@ -256,7 +404,7 @@ 				fieldName = "x" + util.SnakeToCamel(f.Name) // Prefix callback pointer fields with `x` to make them private
+ 
+ 				callbackName := util.SnakeToCamel(f.Name)
+ 				args := f.Callback.Parameters.Template(ns.Name, "", p.Types, f.Callback.Throws, true, imps)
+-				ret := f.Callback.ReturnValue.Template(ns.Name, "", p.Types, f.Callback.Throws, imps)
++				ret := f.Callback.ReturnValue.TemplateForMethod(ns.Name, "", p.Types, p.MiniObjectDerived, f.Callback.Name, f.Callback.Throws, imps)
+ 
+ 				apiTypes := args.API.Types
+ 
+@@ -334,13 +482,26 @@ 					break
+ 				}
+ 			}
+ 			receivers = append(receivers, types.FuncTemplate{
+-				Doc:   f.Doc.StringSafe(),
++				Doc:   f.CallableAttrs.AugmentDoc(f.Doc.StringSafe(), ns.Name, p.Types, p.MiniObjectDerived, p.FloatingRef),
+ 				Name:  name,
+ 				CName: f.CIdentifier,
+ 				Args:  f.Parameters.Template(ns.Name, "", p.Types, f.Throws, false, imps),
+-				Ret:   f.ReturnValue.Template(ns.Name, "", p.Types, f.Throws, imps),
++				Ret:   f.ReturnValue.TemplateForMethod(ns.Name, "", p.Types, p.MiniObjectDerived, f.Name, f.Throws, imps),
+ 			})
+ 		}
++		recKey := recordKey(ns.Name, rec.Name)
++		// MiniObject itself owns the canonical Ref/Unref/IsWritable/
++		// MakeWritable surface; only synthesize on derived records.
++		miniObjField, isMiniObj := p.MiniObjectDerived[recKey]
++		if recKey == recordKey("Gst", "MiniObject") {
++			isMiniObj = false
++		}
++		if isMiniObj {
++			imps.AddUnsafe()
++			if pkgName != "gst" {
++				imps.AddPkg("gst")
++			}
++		}
+ 		pf.records = append(pf.records, types.RecordTemplate{
+ 			Name:              name,
+ 			Doc:               rec.Doc.StringSafe(),
+@@ -349,6 +510,8 @@ 			Receivers:         receivers,
+ 			Fields:            fields,
+ 			CallbackAccessors: callbackAccessors,
+ 			TypeGetter:        rec.GLibGetType,
++			IsMiniObject:      isMiniObj,
++			MiniObjectField:   miniObjField,
+ 		})
+ 		recordLookup[name] = true
+ 	}
+@@ -358,10 +521,10 @@ 	for _, cb := range ns.Callbacks {
+ 		pf := getFile(cb.FilenameSafe())
+ 		cbImps := types.NewImportSet(pkgName, p.impModule, p.impPackageImports)
+ 		cbT := types.CallbackTemplate{
+-			Doc:  cb.Doc.StringSafe(),
++			Doc:  cb.CallableAttrs.AugmentDoc(cb.Doc.StringSafe(), ns.Name, p.Types, p.MiniObjectDerived, p.FloatingRef),
+ 			Name: cb.Name,
+ 			Args: cb.Parameters.Template(ns.Name, "", p.Types, cb.Throws, true, cbImps),
+-			Ret:  cb.ReturnValue.Template(ns.Name, "", p.Types, cb.Throws, cbImps),
++			Ret:  cb.ReturnValue.TemplateForMethod(ns.Name, "", p.Types, p.MiniObjectDerived, cb.Name, cb.Throws, cbImps),
+ 		}
+ 		for _, t := range cbT.Args.Pure.Types {
+ 			pf.imps.TrackGoType(t)
+@@ -372,7 +535,7 @@ 	}
+ 
+ 	for _, inter := range ns.Interfaces {
+ 		pf := getFile(inter.FilenameSafe())
+-		pf.interfaces = append(pf.interfaces, types.ConvertInterface(ns.Name, "", inter, nil, p.Types, pf.imps))
++		pf.interfaces = append(pf.interfaces, types.ConvertInterface(ns.Name, "", inter, nil, p.Types, p.MiniObjectDerived, p.FloatingRef, pf.imps))
+ 	}
+ 
+ 	for _, union := range ns.Unions {
+@@ -412,9 +575,9 @@ 		pf := getFile(f.FilenameSafe())
+ 		pf.functions = append(pf.functions, types.FuncTemplate{
+ 			Name:  name,
+ 			CName: f.CIdentifier,
+-			Doc:   f.Doc.StringSafe(),
++			Doc:   f.CallableAttrs.AugmentDoc(f.Doc.StringSafe(), ns.Name, p.Types, p.MiniObjectDerived, p.FloatingRef),
+ 			Args:  f.Parameters.Template(ns.Name, "", p.Types, f.Throws, false, pf.imps),
+-			Ret:   f.ReturnValue.Template(ns.Name, "", p.Types, f.Throws, pf.imps),
++			Ret:   f.ReturnValue.TemplateForMethod(ns.Name, "", p.Types, p.MiniObjectDerived, f.Name, f.Throws, pf.imps),
+ 		})
+ 	}
+ 
+@@ -434,9 +597,9 @@ 			c.ReturnValue.AnyType.Type.Name = cls.Name
+ 			constructors[i] = types.FuncTemplate{
+ 				Name:  util.ConstructorName(c.Name, cls.Name),
+ 				CName: c.CIdentifier,
+-				Doc:   c.Doc.StringSafe(),
++				Doc:   c.CallableAttrs.AugmentDoc(c.Doc.StringSafe(), ns.Name, p.Types, p.MiniObjectDerived, p.FloatingRef),
+ 				Args:  c.Parameters.Template(ns.Name, "", p.Types, c.Throws, false, imps),
+-				Ret:   c.ReturnValue.Template(ns.Name, "", p.Types, c.Throws, imps),
++				Ret:   c.ReturnValue.TemplateForMethod(ns.Name, "", p.Types, p.MiniObjectDerived, c.Name, c.Throws, imps),
+ 			}
+ 		}
+ 		signals := make([]types.SignalsTemplate, len(cls.Signals))
+@@ -451,7 +614,7 @@ 				Doc:   s.Doc.StringSafe(),
+ 				Name:  util.DashToCamel(s.Name),
+ 				CName: s.Name,
+ 				Args:  s.Parameters.Template(ns.Name, "", p.Types, false, true, imps),
+-				Ret:   s.ReturnValue.Template(ns.Name, "", p.Types, false, imps),
++				Ret:   s.ReturnValue.Template(ns.Name, "", p.Types, p.MiniObjectDerived,false, imps),
+ 			}
+ 		}
+ 		receivers := make([]types.FuncTemplate, len(cls.Methods))
+@@ -459,11 +622,11 @@ 		for i, f := range cls.Methods {
+ 			name := util.SnakeToCamel(f.Name)
+ 			implemented[name] = true
+ 			receivers[i] = types.FuncTemplate{
+-				Doc:   f.Doc.StringSafe(),
++				Doc:   f.CallableAttrs.AugmentDoc(f.Doc.StringSafe(), ns.Name, p.Types, p.MiniObjectDerived, p.FloatingRef),
+ 				Name:  name,
+ 				CName: f.CIdentifier,
+ 				Args:  f.Parameters.Template(ns.Name, "", p.Types, f.Throws, false, imps),
+-				Ret:   f.ReturnValue.Template(ns.Name, "", p.Types, f.Throws, imps),
++				Ret:   f.ReturnValue.TemplateForMethod(ns.Name, "", p.Types, p.MiniObjectDerived, f.Name, f.Throws, imps),
+ 			}
+ 		}
+ 		var interfaces []types.InterfaceTemplate
+@@ -472,13 +635,13 @@ 			name := fmt.Sprintf("%s%s", util.SnakeToCamel(cls.Name), util.SnakeToCamel(f.Name))
+ 			functions[i] = types.FuncTemplate{
+ 				Name:  name,
+ 				CName: f.CIdentifier,
+-				Doc:   f.Doc.StringSafe(),
++				Doc:   f.CallableAttrs.AugmentDoc(f.Doc.StringSafe(), ns.Name, p.Types, p.MiniObjectDerived, p.FloatingRef),
+ 				Args:  f.Parameters.Template(ns.Name, "", p.Types, f.Throws, false, imps),
+-				Ret:   f.ReturnValue.Template(ns.Name, "", p.Types, f.Throws, imps),
++				Ret:   f.ReturnValue.TemplateForMethod(ns.Name, "", p.Types, p.MiniObjectDerived, f.Name, f.Throws, imps),
+ 			}
+ 		}
+ 		for _, impl := range cls.Implements {
+-			interfaces = append(interfaces, types.GetInterfaceFuncs(ns.Name, impl.Name, implemented, p.Types, imps))
++			interfaces = append(interfaces, types.GetInterfaceFuncs(ns.Name, impl.Name, implemented, p.Types, p.MiniObjectDerived, p.FloatingRef, imps))
+ 		}
+ 		properties := make([]types.PropertyTemplate, 0, len(cls.Properties))
+ 		for _, prop := range cls.Properties {
+diff --git a/internal/gir/types/interface.go b/internal/gir/types/interface.go
+index d482f44951fc41db08578c1551ea9a52836a9825..ec9ecd510da0c9942e381df1d00f79b06a8d028d 100644
+--- a/internal/gir/types/interface.go
++++ b/internal/gir/types/interface.go
+@@ -6,7 +6,7 @@
+ 	"codeberg.org/puregotk/puregotk/internal/gir/util"
+ )
+ 
+-func ConvertInterface(currns string, ins string, inter Interface, implemented map[string]bool, kinds KindMap, imps *ImportSet) InterfaceTemplate {
++func ConvertInterface(currns string, ins string, inter Interface, implemented map[string]bool, kinds KindMap, miniObjs map[string]string, floats map[string]bool, imps *ImportSet) InterfaceTemplate {
+ 	var methods []InterfaceFuncTemplate
+ 
+ 	if inter.GLibGetType != "" {
+@@ -30,11 +30,11 @@ 		methods = append(methods, InterfaceFuncTemplate{
+ 			Namespace: newns,
+ 			FullName:  util.SnakeToCamel(m.CIdentifier),
+ 			FuncTemplate: FuncTemplate{
+-				Doc:   m.Doc.StringSafe(),
++				Doc:   m.CallableAttrs.AugmentDoc(m.Doc.StringSafe(), currns, kinds, miniObjs, floats),
+ 				CName: m.CIdentifier,
+ 				Name:  name,
+ 				Args:  m.Parameters.Template(currns, ins, kinds, m.Throws, false, imps),
+-				Ret:   m.ReturnValue.Template(currns, ins, kinds, m.Throws, imps),
++				Ret:   m.ReturnValue.TemplateForMethod(currns, ins, kinds, miniObjs, m.Name, m.Throws, imps),
+ 			},
+ 		})
+ 	}
+@@ -59,12 +59,12 @@ 		TypeGetter: inter.GLibGetType,
+ 	}
+ }
+ 
+-func GetInterfaceFuncs(ns string, name string, implemented map[string]bool, kinds KindMap, imps *ImportSet) InterfaceTemplate {
++func GetInterfaceFuncs(ns string, name string, implemented map[string]bool, kinds KindMap, miniObjs map[string]string, floats map[string]bool, imps *ImportSet) InterfaceTemplate {
+ 	inter := kinds.MustInterface(ns, name)
+ 	parts := strings.Split(name, ".")
+ 	var ins string
+ 	if len(parts) > 1 {
+ 		ins = strings.ToLower(parts[0])
+ 	}
+-	return ConvertInterface(ns, ins, inter, implemented, kinds, imps)
++	return ConvertInterface(ns, ins, inter, implemented, kinds, miniObjs, floats, imps)
+ }
+diff --git a/internal/gir/types/template.go b/internal/gir/types/template.go
+index ff8690f742e6589e4faca22577a5690b49fd9ecb..5f42012a19487bc365dfbac57038e75032a5ba5f 100644
+--- a/internal/gir/types/template.go
++++ b/internal/gir/types/template.go
+@@ -300,6 +300,19 @@ 	CallbackAccessors []CallbackAccessor
+ 
+ 	// TypeGetter is the function to get the GLib type
+ 	TypeGetter string
++
++	// IsMiniObject is true when the record derives from Gst.MiniObject and
++	// is not MiniObject itself. The template uses this to synthesize the
++	// IsWritable() and MakeWritable() helpers, which would otherwise be
++	// missing because GStreamer exposes them as C-only macros for derived
++	// types.
++	IsMiniObject bool
++
++	// MiniObjectField is the Go (CamelCase) field name of the embedded
++	// miniobject parent. It varies across records — Buffer/Caps embed
++	// "mini_object" (→ MiniObject) while Event/Message/Promise embed
++	// "parent" (→ Parent). Only meaningful when IsMiniObject is set.
++	MiniObjectField string
+ }
+ 
+ type enumValues struct {
+@@ -340,8 +353,37 @@ 	// Value is the underlying return value as a Go type
+ 	Value string
+ 	// Class indicates whether or not the return value is a class
+ 	Class bool
+-	// RefSink indicates whether or not we should increase the reference count using obj.RefSink()
+-	RefSink bool
++	// RefSink, when non-empty, names the auto-Ref strategy applied
++	// after wrapper construction. Possible values:
++	//   "IncreaseRef" — call gobject.IncreaseRef(cret), used for
++	//     GObject interfaces (XBase wrappers don't carry a RefSink
++	//     method). Equivalent to g_object_ref_sink for floating
++	//     objects, plain ref for non-floating.
++	//   "RefSink"     — call cls.RefSink(), used for GObject classes
++	//     and other types whose wrapper exposes a RefSink method.
++	//   "Ref"         — call cls.Ref(), used for fundamental types
++	//     that aren't floating (Gsk.RenderNode, Gdk.Event,
++	//     Gtk.Expression). Their wrappers don't have RefSink.
++	//   ""            — no auto-Ref; the caller already owns the ref
++	//     (transfer="full") or there's nothing to ref (boxed types
++	//     without a generated Ref method).
++	// Picking the right strategy at generation time avoids calling
++	// g_object_ref_sink on non-GObject types like RenderNode, which
++	// the previous generic IncreaseRef path did incorrectly.
++	RefSink string
++	// RecordRef, when non-empty, is a Go expression appended after
++	// "cret." to ref a record return whose transfer="none" gives the
++	// caller a borrowed reference the binding wants to upgrade to a
++	// strong one. It covers two patterns:
++	//   - miniobject-derived records: the field+method path through
++	//     the embedded parent, e.g. "MiniObject.Ref()" or
++	//     "Parent.Ref()". Working through the parent handles records
++	//     like GstSdp.MIKEYPayload that don't surface their own ref
++	//     method in GIR.
++	//   - other refcounted records (Variant, etc.): a direct method
++	//     call like "RefSink()" or "Ref()" on the wrapper itself.
++	// The template emits `if cret != nil { cret.<RecordRef> }`.
++	RecordRef string
+ 	// Throws indicates whether or not this function throws
+ 	Throws bool
+ }
+@@ -405,7 +447,10 @@         return nil
+     }
+ `)
+ 		}
+-		if fr.RefSink {
++		// "IncreaseRef" must fire before wrapper construction because
++		// the global helper takes a uintptr; the per-type RefSink/Ref
++		// methods fire after, since they need cls to dispatch on.
++		if fr.RefSink == "IncreaseRef" {
+ 			if ngo {
+ 				after.WriteString("gobject.")
+ 			}
+@@ -415,7 +460,22 @@ 		after.WriteString("cls = ")
+ 		after.WriteString(fr.Instance())
+ 		after.WriteString("\n")
+ 		after.WriteString("cls.Ptr = cret\n")
++		if fr.RefSink == "RefSink" || fr.RefSink == "Ref" {
++			after.WriteString("cls.")
++			after.WriteString(fr.RefSink)
++			after.WriteString("()\n")
++		}
+ 		val = "cls"
++	} else if fr.RecordRef != "" {
++		// Record return with transfer-ownership="none": caller does not
++		// own a reference, so we ref it before returning. RecordRef is
++		// the Go expression appended after "cret." — for miniobject
++		// records that's "MiniObject.Ref()" / "Parent.Ref()" through
++		// the embedded parent; for other refcounted records like
++		// Variant it's "RefSink()" directly on the wrapper.
++		after.WriteString("if cret != nil {\ncret.")
++		after.WriteString(fr.RecordRef)
++		after.WriteString("\n}\n")
+ 	}
+ 	if fr.Throws {
+ 		after.WriteString("if cerr == nil {\n")
+diff --git a/internal/gir/types/types.go b/internal/gir/types/types.go
+index a2472c868a978acbbe4cc7065178d719945acb4d..540d408e90a893144267d812c19336b66eeb8ced 100644
+--- a/internal/gir/types/types.go
++++ b/internal/gir/types/types.go
+@@ -359,12 +359,494 @@ 	ShadowedBy  string       `xml:"shadowed-by,attr"`
+ 	Shadows     string       `xml:"shadows,attr"`
+ 	Throws      bool         `xml:"throws,attr"`
+ 	MovedTo     string       `xml:"moved-to,attr"`
+-	Parameters  *Parameters  `xml:"http://www.gtk.org/introspection/core/1.0 parameters"`
+-	ReturnValue *ReturnValue `xml:"http://www.gtk.org/introspection/core/1.0 return-value"`
++	// GLibSetProperty, when non-empty, names the GObject property this
++	// method is the setter for (the "glib:set-property" attribute on
++	// <method>). It pairs methods like gtk_window_set_child with the
++	// <property name="child"> declaration on the class. Used as a
++	// structural marker for parenting calls — when the property type
++	// is a floating-ref class, the method sinks the floating ref.
++	GLibSetProperty string       `xml:"http://www.gtk.org/introspection/glib/1.0 set-property,attr"`
++	Parameters      *Parameters  `xml:"http://www.gtk.org/introspection/core/1.0 parameters"`
++	ReturnValue     *ReturnValue `xml:"http://www.gtk.org/introspection/core/1.0 return-value"`
+ 	InfoAttrs
+ 	InfoElements
+ }
+ 
++// refSinkMethod returns the auto-Ref strategy to apply to a returned
++// value of (kind, typeName) at namespace ns. The result is one of
++// "IncreaseRef", "RefSink", "Ref", or "" (no ref). It exists so that
++// types like Gsk.RenderNode (a fundamental, but not a GObject) get a
++// type-correct ref instead of going through gobject.IncreaseRef
++// (which calls g_object_ref_sink and is undefined behavior on a
++// non-GObject pointer).
++//
++// Strategy:
++//   - Interfaces always go through IncreaseRef — XBase wrappers don't
++//     carry generated Ref/RefSink methods.
++//   - Records and classes prefer RefSink when GIR exposes a
++//     <method name="ref_sink">; otherwise fall back to Ref when
++//     <method name="ref"> exists. RefSink is preferred because for
++//     floating-ref types (GObject, ParamSpec, Variant) it's the
++//     correct primitive, and on already-sunk objects it degenerates
++//     to a plain ref.
++//   - When neither method exists we return ""; the value isn't
++//     refcounted in a way the wrapper can name.
++func (km KindMap) refSinkMethod(ns, typeName string) string {
++	if typeName == "" {
++		return ""
++	}
++	pair, ok := km[km.key(ns, typeName)]
++	if !ok {
++		return ""
++	}
++	switch pair.K {
++	case InterfacesType:
++		return "IncreaseRef"
++	case ClassesType:
++		cls, ok := pair.Value.(Class)
++		if !ok {
++			return "IncreaseRef"
++		}
++		hasRefSink, hasRef := false, false
++		for _, m := range cls.Methods {
++			switch m.Name {
++			case "ref_sink":
++				hasRefSink = true
++			case "ref":
++				hasRef = true
++			}
++		}
++		if hasRefSink {
++			return "RefSink"
++		}
++		if hasRef {
++			return "Ref"
++		}
++		// Some classes inherit Ref/RefSink from a parent. Walk up the
++		// parent chain — Object has both, so any GObject descendant
++		// reaches "RefSink" eventually. Use IncreaseRef as a safe
++		// fallback for the rare class with no ref methods declared.
++		// Track curNs so unqualified parent names ("Object" inside
++		// GObject) resolve in the right namespace as we ascend.
++		parent := cls.Parent
++		curNs := ns
++		for parent != "" {
++			pNs := curNs
++			pName := parent
++			if parts := strings.SplitN(parent, ".", 2); len(parts) == 2 {
++				pNs = parts[0]
++				pName = parts[1]
++			}
++			parentPair, ok := km[km.key(pNs, pName)]
++			if !ok {
++				break
++			}
++			parentCls, ok := parentPair.Value.(Class)
++			if !ok {
++				break
++			}
++			for _, m := range parentCls.Methods {
++				switch m.Name {
++				case "ref_sink":
++					hasRefSink = true
++				case "ref":
++					hasRef = true
++				}
++			}
++			if hasRefSink {
++				return "RefSink"
++			}
++			if hasRef {
++				return "Ref"
++			}
++			parent = parentCls.Parent
++			curNs = pNs
++		}
++		return "IncreaseRef"
++	case RecordsType:
++		rec, ok := pair.Value.(Record)
++		if !ok {
++			return ""
++		}
++		hasRefSink, hasRef := false, false
++		for _, m := range rec.Methods {
++			switch m.Name {
++			case "ref_sink":
++				hasRefSink = true
++			case "ref":
++				hasRef = true
++			}
++		}
++		if hasRefSink {
++			return "RefSink"
++		}
++		if hasRef {
++			return "Ref"
++		}
++		return ""
++	default:
++		return ""
++	}
++}
++
++// releaseVerb returns the Go method name a caller should invoke to
++// release a value of (kind, typeName) at the given namespace, or "" if
++// no release call is appropriate (primitives, strings, slices, raw
++// uintptr returns where the wrapper carries no release method).
++//
++// Class/interface returns are wrapped as GObject subclasses, which
++// always expose an Unref() method via the gobject.Object base. Record
++// returns vary: miniobject-derived records have generated Unref()
++// methods; boxed types like glib.Error expose Free(); GValue uses
++// Unset() to clear its content; others (e.g. Caps, Variant) expose
++// Unref() through a GIR-declared method named "unref". Preference
++// order: Unref > Free > Unset (Unref is the canonical refcounted
++// release; Free is for owned-allocation boxed types; Unset is the
++// odd-one-out for GValue's "clear contents" semantics). When none
++// exists in the GIR we return "" so the generator stays silent
++// rather than telling users to call a method that doesn't exist.
++func (km KindMap) releaseVerb(ns, typeName string) string {
++	if typeName == "" {
++		return ""
++	}
++	pair, ok := km[km.key(ns, typeName)]
++	if !ok {
++		return ""
++	}
++	switch pair.K {
++	case ClassesType, InterfacesType:
++		return "Unref"
++	case RecordsType:
++		rec, ok := pair.Value.(Record)
++		if !ok {
++			return ""
++		}
++		hasUnref, hasFree, hasUnset := false, false, false
++		for _, m := range rec.Methods {
++			switch m.Name {
++			case "unref":
++				hasUnref = true
++			case "free":
++				hasFree = true
++			case "unset":
++				hasUnset = true
++			}
++		}
++		if hasUnref {
++			return "Unref"
++		}
++		if hasFree {
++			return "Free"
++		}
++		if hasUnset {
++			return "Unset"
++		}
++		return ""
++	default:
++		return ""
++	}
++}
++
++// verbOr returns verb when non-empty, fallback otherwise. Used by
++// the doc generator when a release-method lookup might come back
++// empty (e.g. for cross-namespace types whose definition we couldn't
++// inspect) but the surrounding sentence still needs a verb to read.
++func verbOr(verb, fallback string) string {
++	if verb == "" {
++		return fallback
++	}
++	return verb
++}
++
++// docTextSinks returns true when the callable's doc text says the C
++// function takes ownership of (or sinks the floating ref of) the named
++// parameter. GIR carries no structural marker for "container takes a
++// long-term ref via g_object_ref_sink" parenting calls like
++// gtk_box_append or gst_bin_add, but the C-author-written prose in
++// the <doc> element often says "takes ownership of @element" or
++// "sinks the floating reference of @child". When that phrase is
++// present we can sharpen the doc note from the generic hedge.
++//
++// The match anchors on either the @<paramname> form (when the C
++// author bothered with GIR cross-references) or "the <paramname>"
++// (the more common natural-prose form, e.g. gst_bin_add says "takes
++// ownership of the element"). Anchoring keeps the false-positive
++// rate low — a method whose doc happens to contain "takes ownership"
++// in some unrelated sentence won't trigger unless the @paramname or
++// "the paramname" is also present.
++func (c *CallableAttrs) docTextSinks(paramName string) bool {
++	if c.Doc == nil || paramName == "" {
++		return false
++	}
++	doc := strings.ToLower(c.Doc.String)
++	at := "@" + strings.ToLower(paramName)
++	the := "the " + strings.ToLower(paramName)
++	for _, anchor := range []string{at, the} {
++		// Phrasings observed across GLib/GObject/GTK/GStreamer GIRs.
++		for _, phrase := range []string{
++			"takes ownership of " + anchor,
++			"sinks the floating reference of " + anchor,
++			"sinks " + anchor + "'s floating reference",
++			"sinks " + anchor + "'s floating ref",
++			"acquires ownership of " + anchor,
++			anchor + " is consumed by",
++			"consumes " + anchor,
++			anchor + " is now owned by",
++		} {
++			if strings.Contains(doc, phrase) {
++				return true
++			}
++		}
++	}
++	return false
++}
++
++// classIsFloating resolves typeName (which may be bare like "Widget"
++// or namespaced like "GObject.InitiallyUnowned") into the lowercase
++// "ns.name" key used by Pass.FloatingRef and reports whether it's a
++// known floating-ref class. Bare names default to currentNs.
++func classIsFloating(currentNs, typeName string, floats map[string]bool) bool {
++	if typeName == "" || floats == nil {
++		return false
++	}
++	parts := strings.SplitN(typeName, ".", 2)
++	var key string
++	if len(parts) == 2 {
++		key = strings.ToLower(parts[0]) + "." + parts[1]
++	} else {
++		key = strings.ToLower(currentNs) + "." + parts[0]
++	}
++	return floats[key]
++}
++
++// OwnershipNote returns Go doc-comment lines (each prefixed with "// ")
++// describing transfer-ownership semantics callers need to know about,
++// or "" when nothing is notable. The return-side note is driven by
++// the precomputed ret (which captures whether the generator will
++// inject an auto-Ref), so the doc and the emitted code can't drift
++// apart — if the binding refs the return, the note says "auto-Ref'd";
++// if it doesn't, the note matches the actual contract. Pass nil for
++// ret when the return-side note should be skipped entirely (e.g.
++// signal handlers, where return semantics differ).
++//
++// kinds/miniObjs/floats are still threaded for the input-parameter
++// branch, which doesn't have a precomputed analogue.
++func (c *CallableAttrs) OwnershipNote(ns string, kinds KindMap, miniObjs map[string]string, floats map[string]bool, ret *funcRetTemplate) string {
++	var lines []string
++	if c.Parameters != nil {
++		// The receiver (instance parameter) can also be marked transfer="full",
++		// e.g. gst_buffer_append consumes its first buffer. Surface that
++		// because the receiver looks innocuous in Go syntax (x.Append(...))
++		// but the underlying ref is gone after the call.
++		if ip := c.Parameters.InstanceParameter; ip != nil {
++			if ip.TransferOwnership.TransferOwnership == "full" {
++				lines = append(lines, "// The receiver's reference is consumed by this call; do not release it afterwards (the underlying object's ref is gone, so a follow-up Unref/Free would underflow the refcount).")
++			}
++		}
++		for _, p := range c.Parameters.Parameters {
++			t := p.TransferOwnership.TransferOwnership
++			name := p.Name
++			if name == "" {
++				name = "argument"
++			}
++			// Resolve the per-type release verb (Unref/Free/"") so notes
++			// can name the actual method instead of always saying Unref.
++			var verb, paramTypeName string
++			refable := false
++			if p.AnyType.Type != nil {
++				paramTypeName = p.AnyType.Type.Name
++				pNs := ns
++				if parts := strings.SplitN(paramTypeName, ".", 2); len(parts) == 2 {
++					pNs = parts[0]
++					paramTypeName = parts[1]
++				}
++				verb = kinds.releaseVerb(pNs, paramTypeName)
++				k := kinds.Kind(ns, p.AnyType.Type.Name)
++				if k == ClassesType || k == InterfacesType || k == RecordsType {
++					refable = true
++				}
++			}
++			if p.Direction == "out" || p.Direction == "inout" {
++				// For out-parameters the transfer attribute describes the
++				// data the slot is pointing at, not the slot itself. The
++				// generator doesn't auto-Ref out-parameter borrows the
++				// way it does for return values (the parameter is an
++				// opaque slot from the binding's perspective), so callers
++				// who need to outlive the source must Ref or copy themselves.
++				// Phrase the advice differently for refcounted types
++				// (class/record) versus value types (string/primitive)
++				// because Ref doesn't apply to the latter.
++				switch t {
++				case "full":
++					if verb != "" {
++						lines = append(lines, "// The caller owns @"+name+" after this call; release it with "+verb+" when no longer needed.")
++					}
++					// verb=="" → primitive/string out-param; Go GC handles it.
++				case "container":
++					lines = append(lines, "// The caller owns @"+name+" as a container after this call but not its elements; the elements remain owned by their source.")
++				case "none":
++					if refable {
++						lines = append(lines, "// @"+name+" is borrowed from the receiver and only valid while it remains alive; Ref it yourself if you need to outlive that scope.")
++					} else {
++						lines = append(lines, "// @"+name+" is borrowed from the receiver and only valid while it remains alive; copy it yourself if you need to outlive that scope.")
++					}
++				}
++				continue
++			}
++			switch t {
++			case "full":
++				if verb != "" {
++					lines = append(lines, "// This call consumes @"+name+"'s reference; do not "+verb+" it afterwards (the underlying object's ref is gone, so a follow-up "+verb+" would underflow the refcount).")
++				}
++				// verb=="" → primitive/string transferred; nothing to track.
++			case "container":
++				lines = append(lines, "// This call takes ownership of the container @"+name+" but not of its elements; do not free the container after this call, but element refs remain yours.")
++			case "none":
++				// transfer="none" is the GObject default. For
++				// refcounted types it's structurally ambiguous: GIR
++				// uses the same "none" annotation for true borrows
++				// (Element.Link), parenting calls that the C side
++				// actually sinks (Box.Append, Bin.Add), and property
++				// setters (Window.SetChild). The one structurally
++				// reliable marker for the parenting case is
++				// glib:set-property on the <method> — that pairs the
++				// method with a class-level <property> declaration,
++				// so when the parameter is a floating-ref class we
++				// know the call hands the ref to the parent. For the
++				// add/append-style parenting (no property) and for
++				// real borrows we can't tell them apart, so we use a
++				// generic note. Primitives stay silent.
++				kind := UnknownType
++				typeName := ""
++				if p.AnyType.Type != nil {
++					typeName = p.AnyType.Type.Name
++					kind = kinds.Kind(ns, typeName)
++				}
++				switch kind {
++				case ClassesType, InterfacesType:
++					switch {
++					case c.GLibSetProperty != "" && classIsFloating(ns, typeName, floats):
++						lines = append(lines, "// This call assigns @"+name+" to the receiver's "+c.GLibSetProperty+" property; the receiver takes its own reference and your reference from construction is unaffected. Release it with Unref once you no longer need it locally.")
++					case c.docTextSinks(p.Name):
++						lines = append(lines, "// This call takes a long-term reference on @"+name+" (the receiver becomes its parent and refs it for you); your reference from construction is unaffected. Release it with Unref once you no longer need it locally.")
++					default:
++						lines = append(lines, "// The binding borrows @"+name+" for the duration of this call; your reference is unaffected. If the underlying C function takes a long-term reference (parenting calls like Append, AddPad, …) it does so by calling g_object_ref or g_object_ref_sink internally — your wrapper still owns its own ref and is responsible for Unref.")
++					}
++				case RecordsType:
++					v := verbOr(verb, "Unref")
++					if c.docTextSinks(p.Name) {
++						lines = append(lines, "// This call takes a long-term reference on @"+name+"; your reference is unaffected. Release it with "+v+" once you no longer need it locally.")
++					} else {
++						lines = append(lines, "// The binding borrows @"+name+" for the duration of this call; your reference is unaffected. If the underlying C function takes a long-term reference it does so internally — your wrapper still owns its own ref and is responsible for "+v+".")
++					}
++				}
++			}
++		}
++	}
++	if c.ReturnValue != nil && ret != nil {
++		t := c.ReturnValue.TransferOwnership.TransferOwnership
++		// Resolve the right release verb (Unref / Free / Unset / "")
++		// for the return type. retNs distinguishes this-namespace
++		// types from cross-namespace ones like "Gst.MiniObject".
++		var verb, retNs, retName string
++		if c.ReturnValue.AnyType.Type != nil {
++			retName = c.ReturnValue.AnyType.Type.Name
++			retNs = ns
++			if parts := strings.SplitN(retName, ".", 2); len(parts) == 2 {
++				retNs = parts[0]
++				retName = parts[1]
++			}
++			verb = kinds.releaseVerb(retNs, retName)
++		}
++		// The funcRetTemplate is the single source of truth for what
++		// the binding will actually emit. RefSink and RecordRef both
++		// being non-empty means the generator is injecting a ref —
++		// the doc must say "auto-Ref'd". When both are empty for a
++		// transfer="none" return, either it's a borrow (no auto-Ref
++		// applies) or this is itself a ref-primitive method whose
++		// auto-Ref was suppressed by TemplateForMethod to avoid
++		// infinite recursion. Distinguishing those two requires
++		// knowing whether suppression fired, which we can derive from
++		// c.Name (the names match the suppression list in
++		// TemplateForMethod).
++		autoRefd := ret.RefSink != "" || ret.RecordRef != ""
++		isRefPrimitive := false
++		switch c.Name {
++		case "ref", "ref_sink", "take_ref", "sink":
++			isRefPrimitive = true
++		}
++		switch t {
++		case "full":
++			if verb != "" {
++				lines = append(lines, "// The caller owns the returned reference; release it with "+verb+" when no longer needed (the binding has no Go finalizer, so dropping the wrapper without "+verb+" leaks the C-side allocation).")
++			}
++			// verb=="" means the return is a value type (string, int,
++			// []byte, plain uintptr, …) where Go GC handles it. Stay
++			// silent rather than telling users to call a non-existent
++			// method.
++		case "container":
++			lines = append(lines, "// The caller owns the returned container (the C-side list/array allocation) but not its elements. The Go binding doesn't currently surface a way to free the container directly, so this is mainly informational — the elements you read from it are borrowed and shouldn't be released.")
++		case "none":
++			// Three cases for a transfer="none" return, all driven by
++			// the precomputed ret rather than recomputed predicates:
++			//   - autoRefd: generator injected a ref (RefSink or
++			//     RecordRef set). Tell the caller they own a strong ref
++			//     and must release it.
++			//   - !autoRefd && isRefPrimitive: this method is itself
++			//     ref/ref_sink/take_ref/sink, and TemplateForMethod
++			//     suppressed the auto-Ref to avoid infinite recursion.
++			//     The C function itself bumped/sunk the ref, so the
++			//     caller still owns a fresh strong ref.
++			//   - !autoRefd && refcounted record: truly borrowed (e.g.
++			//     *Structure on a Caps). Explicit borrow note so users
++			//     don't try to release it.
++			// The classic GObject class/interface borrow path always
++			// goes through autoRefd because IncreaseRef is the
++			// fallback strategy in refSinkMethod; if a class somehow
++			// has no ref method anywhere in its parent chain, ret
++			// stays empty and we silently skip rather than emit a
++			// release line that names no method.
++			retKind := UnknownType
++			if retName != "" {
++				retKind = kinds.Kind(retNs, retName)
++			}
++			switch {
++			case autoRefd && verb != "":
++				lines = append(lines, "// The returned reference is auto-Ref'd by the binding; release it with "+verb+" when no longer needed (the binding has no Go finalizer, so dropping the wrapper without "+verb+" leaks the C-side ref).")
++			case isRefPrimitive && verb != "":
++				lines = append(lines, "// The C function returns a fresh strong reference (it ref'd or sunk the floating ref before returning); the caller owns it and should release it with "+verb+" when no longer needed.")
++			case retKind == RecordsType:
++				if verb != "" {
++					lines = append(lines, "// The returned reference is borrowed from the source object and only valid while it remains alive; do not "+verb+" it. If you need to outlive that scope, copy it (e.g. via the type's Copy method when available).")
++				} else {
++					lines = append(lines, "// The returned reference is borrowed from the source object and only valid while it remains alive; do not release it. If you need to outlive that scope, copy it (e.g. via the type's Copy method when available).")
++				}
++			}
++		}
++	}
++	if len(lines) == 0 {
++		return ""
++	}
++	return strings.Join(lines, "\n")
++}
++
++// AugmentDoc returns docStr with an OwnershipNote appended (separated
++// by an empty doc-comment line) when one applies, or docStr unchanged
++// otherwise. ret should be the funcRetTemplate the caller already
++// computed for this callable; OwnershipNote uses it to pick the right
++// return-side phrasing without recomputing the same predicate (which
++// is how earlier drift between the doc and the emitted code crept in).
++func (c *CallableAttrs) AugmentDoc(docStr string, ns string, kinds KindMap, miniObjs map[string]string, floats map[string]bool, ret *funcRetTemplate) string {
++	note := c.OwnershipNote(ns, kinds, miniObjs, floats, ret)
++	if note == "" {
++		return docStr
++	}
++	if docStr == "" {
++		return note
++	}
++	return docStr + "\n//\n" + note
++}
++
+ type Callback struct {
+ 	XMLName xml.Name `xml:"http://www.gtk.org/introspection/core/1.0 callback"`
+ 	CallableAttrs
+@@ -851,10 +1333,24 @@ 	DocElements
+ 	AnyType
+ }
+ 
+-func (r *ReturnValue) Template(ns string, ins string, kinds KindMap, throws bool, imps *ImportSet) funcRetTemplate {
++func (r *ReturnValue) Template(ns string, ins string, kinds KindMap, miniObjs map[string]string, throws bool, imps *ImportSet) funcRetTemplate {
++	return r.TemplateForMethod(ns, ins, kinds, miniObjs, "", throws, imps)
++}
++
++// TemplateForMethod is like Template but takes the callable's GIR method
++// name so it can suppress auto-Ref behavior when the method itself is the
++// ref-sink/ref function. Without this, the generator would emit
++// `cret.RefSink()` inside the body of `RefSink()` (and similarly for
++// `Ref()`), causing infinite recursion at runtime. Names recognized as
++// "this is the ref method, don't ref its return" are: ref, ref_sink,
++// take_ref, sink — they map to the GIR <method name="…"> values used
++// by GObject, GVariant, GstMiniObject and other refcounted types.
++func (r *ReturnValue) TemplateForMethod(ns string, ins string, kinds KindMap, miniObjs map[string]string, methodName string, throws bool, imps *ImportSet) funcRetTemplate {
+ 	val := r.AnyType.Translate(ns, kinds)
+ 	raw := val
+ 	class := false
++	recordRef := ""
++	refSink := ""
+ 	lns := ns
+ 	if ins != "" {
+ 		lns = ins
+@@ -868,6 +1364,23 @@ 	}
+ 	if stars > 0 {
+ 		val = util.StarsInFront(strings.ReplaceAll(val, "*", ""), stars)
+ 	}
++	// Resolve the type's own ns/name (the wrapper might be in a
++	// different namespace than the call site). Needed for both
++	// refSinkMethod and miniObjs lookups. AnyType.Type is nil for
++	// void / array returns, so guard.
++	retNs := ns
++	if ins != "" {
++		retNs = ins
++	}
++	retName := ""
++	if r.AnyType.Type != nil {
++		retName = r.AnyType.Type.Name
++		if parts := strings.SplitN(retName, ".", 2); len(parts) == 2 {
++			retNs = parts[0]
++			retName = parts[1]
++		}
++	}
++
+ 	switch kind {
+ 	case ClassesType:
+ 		raw = "uintptr"
+@@ -879,15 +1392,38 @@ 			val = "uintptr"
+ 		}
+ 		imps.AddPkg(ins)
+ 		if r.TransferOwnership.TransferOwnership == "none" {
+-			imps.AddPkg("gobject")
++			refSink = kinds.refSinkMethod(retNs, retName)
++			if refSink == "IncreaseRef" {
++				imps.AddPkg("gobject")
++			}
+ 		}
+ 	case InterfacesType:
+ 		raw = "uintptr"
+ 		val += "Base"
+ 		class = true
+ 		if r.TransferOwnership.TransferOwnership == "none" {
++			refSink = "IncreaseRef"
+ 			imps.AddPkg("gobject")
+ 		}
++	case RecordsType:
++		// Record returns may be borrowed (transfer="none"). To upgrade
++		// to a strong reference we either go through the embedded
++		// miniobject parent (Buffer/Caps/Event/Promise/...) or call a
++		// type-specific method directly on the wrapper (Variant has
++		// RefSink). Anything that has neither stays silent — the
++		// return is genuinely borrowed and the user shouldn't Unref.
++		if r.TransferOwnership.TransferOwnership == "none" {
++			if miniObjs != nil {
++				if fname, ok := miniObjs[strings.ToLower(retNs)+"."+retName]; ok && fname != "" {
++					recordRef = fname + ".Ref()"
++				}
++			}
++			if recordRef == "" {
++				if m := kinds.refSinkMethod(retNs, retName); m == "RefSink" || m == "Ref" {
++					recordRef = m + "()"
++				}
++			}
++		}
+ 	// callback returns should always be uintptr
+ 	// I needed this for glib.LogSetDefaultHandler
+ 	// Otherwise I got 'panic: reflect.MakeFunc: value of type *glib.LogFunc is not assignable to type glib.LogFunc'
+@@ -903,11 +1439,21 @@ 		}
+ 	}
+ 	imps.TrackGoType(val)
+ 	imps.TrackGoType(raw)
++	// Suppress auto-Ref when the method itself is the ref/ref-sink
++	// primitive — otherwise we'd emit `cret.RefSink()` inside RefSink
++	// and infinite-recurse. The names listed here are the GIR <method
++	// name="…"> values used by GObject/GVariant/GstMiniObject/etc.
++	switch methodName {
++	case "ref", "ref_sink", "take_ref", "sink":
++		refSink = ""
++		recordRef = ""
++	}
+ 	return funcRetTemplate{
+-		Raw:     raw,
+-		Value:   val,
+-		Class:   class,
+-		RefSink: r.TransferOwnership.TransferOwnership == "none",
+-		Throws:  throws,
++		Raw:       raw,
++		Value:     val,
++		Class:     class,
++		RefSink:   refSink,
++		RecordRef: recordRef,
++		Throws:    throws,
+ 	}
+ }
+diff --git a/templates/go b/templates/go
+index f90951c7e292c64cec1714ad8ced0f1a2be0295a..c36eff7cc83ad4ee64ff3bc2d2991892e54bd507 100644
+--- a/templates/go
++++ b/templates/go
+@@ -72,6 +72,30 @@      {{.Ret.Fmt $NotGObject}}
+ }
+ {{end}}
+ 
++{{if $outer.IsMiniObject}}
++// IsWritable reports whether @x is writable (refcount is exactly 1 and
++// no parent — or a single writable parent — is held). Synthesized for
++// the miniobject parent because GStreamer exposes the per-type form
++// (e.g. gst_buffer_is_writable) as a C macro that doesn't appear in
++// GObject Introspection.
++func (x *{{$outer.Name}}) IsWritable() bool {
++     return x.{{$outer.MiniObjectField}}.IsWritable()
++}
++
++// MakeWritable returns a writable version of @x — possibly a copy when
++// the existing object isn't writable. The caller's reference is
++// consumed; use the returned value afterwards. Synthesized to fill in
++// the C-macro counterpart (e.g. gst_buffer_make_writable) that GIR
++// doesn't surface.
++func (x *{{$outer.Name}}) MakeWritable() *{{$outer.Name}} {
++     m := x.{{$outer.MiniObjectField}}.MakeWritable()
++     if m == nil {
++          return nil
++     }
++     return (*{{$outer.Name}})(unsafe.Pointer(m))
++}
++{{end}}
++
+ {{range .CallbackAccessors -}}
+ // Override{{.Name}} sets the "{{.CName}}" callback function.
+ {{if .Doc}}{{.Doc}}
+@@ -316,6 +340,21 @@
+ {{range .Signals -}}
+ 
+ {{.Doc}}
++//
++// @cb must point to an addressable function variable that outlives the
++// connection — the binding keys its callback registry by &cb's address
++// and dereferences @cb on every emission, so a stack-allocated literal
++// would use-after-free once its scope returns. Callback arguments
++// (including the receiver) are borrowed for the call; copy or Ref what
++// you need to keep.
++//
++// The returned uint32 is a g_signal handler id. Use
++// (gobject.Object).DisconnectSignal to detach early; otherwise GObject
++// frees its closures when the emitting object is finalized. The Go-side
++// callback slot stays pinned until you call glib.UnrefCallback(@cb),
++// which is only worth doing when you connect-and-tear-down repeatedly
++// in a long-lived process (and is a no-op on Windows). For a typical
++// connect-once-at-startup pattern you don't need to clean up at all.
+ func (x *{{$outer.Name}}) Connect{{.Name}}(cb *func({{$outer.Name}} {{convc .Args.API.Types}}) {{.Ret.Value}}) uint32 {
+      cbPtr := uintptr(unsafe.Pointer(cb))
+      if cbRefPtr, ok := {{if $NotGLib}}glib.{{end}}GetCallback(cbPtr); ok {
+
