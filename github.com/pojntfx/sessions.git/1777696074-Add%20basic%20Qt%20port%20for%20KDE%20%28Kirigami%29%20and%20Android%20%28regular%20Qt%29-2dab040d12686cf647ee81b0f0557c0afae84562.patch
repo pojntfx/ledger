@@ -1,0 +1,1141 @@
+From 2dab040d12686cf647ee81b0f0557c0afae84562 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Fri, 01 May 2026 21:27:54 -0700
+Subject: [PATCH] Add basic Qt port for KDE (Kirigami) and Android (regular Qt)
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/.gitignore b/.gitignore
+index 672f66f9f6d076333cab41df991b5b268161d233..0ac2e2a552922c751aebabd9b7359b7473627563 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -10,3 +10,4 @@ builddir
+ repo
+ .foundry
+ vendor
++android-build
+diff --git a/go.mod b/go.mod
+index f9bfe9edfec43e3a1a5ebc8af304c3a002e0e541..df72a2bba9fc0a008f813f6b7fa75a276e621fcf 100644
+--- a/go.mod
++++ b/go.mod
+@@ -6,6 +6,7 @@ tool github.com/dennwc/flatpak-go-mod
+ 
+ require (
+ 	codeberg.org/puregotk/puregotk v0.0.0-20260420231554-98419d54d2d2
++	github.com/mappu/miqt v0.13.0
+ 	github.com/pojntfx/go-gettext v0.4.2
+ 	github.com/rymdport/portal v0.4.3-0.20260225172009-01112360d2cb
+ )
+diff --git a/go.sum b/go.sum
+index 3ed30ba026c63458f2043318902e6033dcc80a13..814904107b4583eba97653c2844ca118b66bb8fc 100644
+--- a/go.sum
++++ b/go.sum
+@@ -10,6 +10,8 @@ github.com/goccy/go-yaml v1.18.0 h1:8W7wMFS12Pcas7KU+VVkaiCng+kG8QiFeFwzFb+rwuw=
+ github.com/goccy/go-yaml v1.18.0/go.mod h1:XBurs7gK8ATbW4ZPGKgcbrY1Br56PdM69F7LkFRi1kA=
+ github.com/godbus/dbus/v5 v5.2.2 h1:TUR3TgtSVDmjiXOgAAyaZbYmIeP3DPkld3jgKGV8mXQ=
+ github.com/godbus/dbus/v5 v5.2.2/go.mod h1:3AAv2+hPq5rdnr5txxxRwiGjPXamgoIHgz9FPBfOp3c=
++github.com/mappu/miqt v0.13.0 h1:Dzvclso1BwAUVNem7giSYCmh4Rx08j2gqt6j4SCy098=
++github.com/mappu/miqt v0.13.0/go.mod h1:xFg7ADaO1QSkmXPsPODoKe/bydJpRG9fgCYyIDl/h1U=
+ github.com/pmezard/go-difflib v1.0.0 h1:4DBwDE0NGyQoBHbLQYPwSUPoCMWR5BEzIk/f1lZbAQM=
+ github.com/pmezard/go-difflib v1.0.0/go.mod h1:iKH77koFhYxTK1pcRnkKkqfTogsbg7gZNVY4sRDYZ/4=
+ github.com/pojntfx/go-gettext v0.4.2 h1:mYWcztN4idj11/GCNg+N2zNyJSpFKnIAr5ilksyIMtU=
+diff --git a/qt/alarm-clock-elapsed.oga b/qt/alarm-clock-elapsed.oga
+new file mode 100644
+index 0000000000000000000000000000000000000000..a253702a5f65c375457b5d7fb08a4ec06476b9d0
+Binary files /dev/null and b/qt/alarm-clock-elapsed.oga differ
+diff --git a/qt/main.go b/qt/main.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..454c234ebeecfce44659a63fb86dd47bb77f0744
+--- /dev/null
++++ b/qt/main.go
+@@ -0,0 +1,105 @@
++package main
++
++import (
++	_ "embed"
++	"os"
++	"path/filepath"
++	"runtime"
++
++	qt "github.com/mappu/miqt/qt6"
++	"github.com/mappu/miqt/qt6/qml"
++)
++
++//go:embed alarm-clock-elapsed.oga
++var alarmSound []byte
++
++const (
++	appID            = "com.pojtinger.felicitas.Sessions"
++	appName          = "Sessions"
++	appOrganization  = "pojtinger.felicitas"
++	appVersion       = "0.1.17"
++	appDescription   = "Focus with timed work intervals."
++	appHomepageURL   = "https://github.com/pojntfx/sessions"
++	appCopyrightYear = "2026"
++)
++
++func writableTempDir() (string, error) {
++	base := qt.QStandardPaths_WritableLocation(qt.QStandardPaths__CacheLocation)
++	if base == "" {
++		base = os.TempDir()
++	}
++	dir := filepath.Join(base, "sessions-runtime")
++	if err := os.MkdirAll(dir, 0o755); err != nil {
++		return "", err
++	}
++	return dir, nil
++}
++
++func main() {
++	if os.Getenv("QT_QUICK_CONTROLS_STYLE") == "" && runtime.GOOS != "android" {
++		os.Setenv("QT_QUICK_CONTROLS_STYLE", "org.kde.desktop")
++	}
++
++	app := qt.NewQApplication(os.Args)
++	defer app.Delete()
++
++	qt.QCoreApplication_SetApplicationName(appName)
++	qt.QCoreApplication_SetOrganizationName(appOrganization)
++	qt.QCoreApplication_SetApplicationVersion(appVersion)
++	qt.QGuiApplication_SetApplicationDisplayName(appName)
++	qt.QGuiApplication_SetDesktopFileName(appID)
++	if runtime.GOOS != "android" {
++		qt.QIcon_SetThemeName("breeze")
++	}
++
++	tmpDir, err := writableTempDir()
++	if err != nil {
++		panic(err)
++	}
++
++	alarmPath := filepath.Join(tmpDir, "alarm.oga")
++	if err := os.WriteFile(alarmPath, alarmSound, 0o644); err != nil {
++		panic(err)
++	}
++
++	mainQmlPath := filepath.Join(tmpDir, "main.qml")
++	if err := os.WriteFile(mainQmlPath, mainQml, 0o644); err != nil {
++		panic(err)
++	}
++	if err := os.WriteFile(filepath.Join(tmpDir, "Dial.qml"), dialQml, 0o644); err != nil {
++		panic(err)
++	}
++
++	var trayIconObj *qt.QObject
++	if qt.QSystemTrayIcon_IsSystemTrayAvailable() && qt.QSystemTrayIcon_SupportsMessages() {
++		trayIcon := qt.NewQSystemTrayIcon()
++		trayIcon.SetIcon(qt.QIcon_FromTheme("clock"))
++		trayIcon.SetToolTip(appName)
++		trayIcon.SetVisible(true)
++		trayIconObj = trayIcon.QObject
++	}
++
++	engine := qml.NewQQmlApplicationEngine()
++	defer engine.Delete()
++
++	rootCtx := engine.RootContext()
++	if trayIconObj != nil {
++		rootCtx.SetContextProperty("trayIcon", trayIconObj)
++	}
++	rootCtx.SetContextProperty2("hasTrayIcon", qt.NewQVariant8(trayIconObj != nil))
++	rootCtx.SetContextProperty2("alarmSourceUrl", qt.NewQVariant14(qt.QUrl_FromLocalFile(alarmPath).ToString()))
++	rootCtx.SetContextProperty2("appID", qt.NewQVariant14(appID))
++	rootCtx.SetContextProperty2("appName", qt.NewQVariant14(appName))
++	rootCtx.SetContextProperty2("appVersion", qt.NewQVariant14(appVersion))
++	rootCtx.SetContextProperty2("appDescription", qt.NewQVariant14(appDescription))
++	rootCtx.SetContextProperty2("appHomepageURL", qt.NewQVariant14(appHomepageURL))
++	rootCtx.SetContextProperty2("appCopyrightYear", qt.NewQVariant14(appCopyrightYear))
++
++	engine.Load(qt.QUrl_FromLocalFile(mainQmlPath))
++
++	if len(engine.RootObjects()) == 0 {
++		os.Exit(1)
++	}
++
++	os.Exit(qt.QApplication_Exec())
++}
+diff --git a/qt/qml/Dial.qml b/qt/qml/Dial.qml
+new file mode 100644
+index 0000000000000000000000000000000000000000..c8617bdcd64a38738d96ffd079e0bfcc0aae03a3
+--- /dev/null
++++ b/qt/qml/Dial.qml
+@@ -0,0 +1,176 @@
++import QtQuick
++import QtQuick.Shapes
++
++Item {
++    id: root
++
++    property int totalSec: 300
++    property int maxSec: 3600
++    property bool running: false
++    property real remainSec: 0
++
++    property color accentColorOverride: "#3daee9"
++    property color errorColorOverride: "#da4453"
++
++    signal dialed(int totalSec)
++    signal dialReleased
++
++    readonly property real progress: maxSec > 0 ? totalSec / maxSec : 0
++    readonly property real remainRatio: (running && totalSec > 0) ? remainSec / totalSec : 1
++    readonly property real angle: -Math.PI / 2 + 2 * Math.PI * progress * remainRatio
++
++    readonly property real cx: width / 2
++    readonly property real cy: height / 2
++    readonly property real r: Math.min(cx, cy) - 15
++
++    readonly property real handleX: cx + r * Math.cos(angle)
++    readonly property real handleY: cy + r * Math.sin(angle)
++
++    readonly property color trackColor: "#b3b3b3"
++    readonly property color activeColor: running ? errorColorOverride : accentColorOverride
++    readonly property color fillColor: running
++        ? Qt.rgba(errorColorOverride.r, errorColorOverride.g, errorColorOverride.b, 0.3)
++        : Qt.rgba(0.6, 0.6, 0.6, 0.2)
++
++    Shape {
++        anchors.fill: parent
++        antialiasing: true
++        smooth: true
++
++        ShapePath {
++            strokeWidth: 10
++            strokeColor: root.trackColor
++            fillColor: "transparent"
++            capStyle: ShapePath.RoundCap
++            startX: root.cx + root.r
++            startY: root.cy
++
++            PathArc {
++                x: root.cx + root.r
++                y: root.cy - 0.001
++                radiusX: root.r
++                radiusY: root.r
++                useLargeArc: true
++                direction: PathArc.Clockwise
++            }
++        }
++    }
++
++    Shape {
++        anchors.fill: parent
++        antialiasing: true
++        smooth: true
++        visible: root.totalSec > 0
++
++        ShapePath {
++            strokeColor: "transparent"
++            fillColor: root.fillColor
++
++            startX: root.cx
++            startY: root.cy
++
++            PathLine {
++                x: root.cx
++                y: root.cy - root.r
++            }
++
++            PathArc {
++                x: root.handleX
++                y: root.handleY
++                radiusX: root.r
++                radiusY: root.r
++                useLargeArc: (root.angle + Math.PI / 2) > Math.PI
++                direction: PathArc.Clockwise
++            }
++
++            PathLine {
++                x: root.cx
++                y: root.cy
++            }
++        }
++    }
++
++    Shape {
++        anchors.fill: parent
++        antialiasing: true
++        smooth: true
++        visible: root.totalSec > 0
++
++        ShapePath {
++            strokeWidth: 10
++            strokeColor: root.activeColor
++            fillColor: "transparent"
++            capStyle: ShapePath.RoundCap
++
++            startX: root.cx
++            startY: root.cy - root.r
++
++            PathArc {
++                x: root.handleX
++                y: root.handleY
++                radiusX: root.r
++                radiusY: root.r
++                useLargeArc: (root.angle + Math.PI / 2) > Math.PI
++                direction: PathArc.Clockwise
++            }
++        }
++    }
++
++    Rectangle {
++        visible: root.totalSec > 0
++        x: root.handleX - 8
++        y: root.handleY - 8
++        width: 16
++        height: 16
++        radius: 8
++        color: root.activeColor
++        antialiasing: true
++    }
++
++    MouseArea {
++        id: mouseArea
++        anchors.fill: parent
++
++        property bool dialing: false
++
++        function processPoint(px, py) {
++            const dx = px - root.cx
++            const dy = py - root.cy
++
++            if (Math.sqrt(dx * dx + dy * dy) < 15) {
++                return
++            }
++
++            let a = Math.atan2(dy, dx) + Math.PI / 2
++            if (a < 0) {
++                a += 2 * Math.PI
++            }
++
++            let intervals = Math.floor((a / (2 * Math.PI)) * 120)
++            if (intervals === 0) {
++                intervals = 120
++            }
++
++            const newTotal = intervals * 30
++            root.dialed(newTotal)
++        }
++
++        onPressed: function (mouse) {
++            dialing = true
++            processPoint(mouse.x, mouse.y)
++        }
++
++        onPositionChanged: function (mouse) {
++            if (dialing) {
++                processPoint(mouse.x, mouse.y)
++            }
++        }
++
++        onReleased: {
++            if (dialing) {
++                dialing = false
++                root.dialReleased()
++            }
++        }
++    }
++}
+diff --git a/qt/qml/android/Dial.qml b/qt/qml/android/Dial.qml
+new file mode 100644
+index 0000000000000000000000000000000000000000..c8617bdcd64a38738d96ffd079e0bfcc0aae03a3
+--- /dev/null
++++ b/qt/qml/android/Dial.qml
+@@ -0,0 +1,176 @@
++import QtQuick
++import QtQuick.Shapes
++
++Item {
++    id: root
++
++    property int totalSec: 300
++    property int maxSec: 3600
++    property bool running: false
++    property real remainSec: 0
++
++    property color accentColorOverride: "#3daee9"
++    property color errorColorOverride: "#da4453"
++
++    signal dialed(int totalSec)
++    signal dialReleased
++
++    readonly property real progress: maxSec > 0 ? totalSec / maxSec : 0
++    readonly property real remainRatio: (running && totalSec > 0) ? remainSec / totalSec : 1
++    readonly property real angle: -Math.PI / 2 + 2 * Math.PI * progress * remainRatio
++
++    readonly property real cx: width / 2
++    readonly property real cy: height / 2
++    readonly property real r: Math.min(cx, cy) - 15
++
++    readonly property real handleX: cx + r * Math.cos(angle)
++    readonly property real handleY: cy + r * Math.sin(angle)
++
++    readonly property color trackColor: "#b3b3b3"
++    readonly property color activeColor: running ? errorColorOverride : accentColorOverride
++    readonly property color fillColor: running
++        ? Qt.rgba(errorColorOverride.r, errorColorOverride.g, errorColorOverride.b, 0.3)
++        : Qt.rgba(0.6, 0.6, 0.6, 0.2)
++
++    Shape {
++        anchors.fill: parent
++        antialiasing: true
++        smooth: true
++
++        ShapePath {
++            strokeWidth: 10
++            strokeColor: root.trackColor
++            fillColor: "transparent"
++            capStyle: ShapePath.RoundCap
++            startX: root.cx + root.r
++            startY: root.cy
++
++            PathArc {
++                x: root.cx + root.r
++                y: root.cy - 0.001
++                radiusX: root.r
++                radiusY: root.r
++                useLargeArc: true
++                direction: PathArc.Clockwise
++            }
++        }
++    }
++
++    Shape {
++        anchors.fill: parent
++        antialiasing: true
++        smooth: true
++        visible: root.totalSec > 0
++
++        ShapePath {
++            strokeColor: "transparent"
++            fillColor: root.fillColor
++
++            startX: root.cx
++            startY: root.cy
++
++            PathLine {
++                x: root.cx
++                y: root.cy - root.r
++            }
++
++            PathArc {
++                x: root.handleX
++                y: root.handleY
++                radiusX: root.r
++                radiusY: root.r
++                useLargeArc: (root.angle + Math.PI / 2) > Math.PI
++                direction: PathArc.Clockwise
++            }
++
++            PathLine {
++                x: root.cx
++                y: root.cy
++            }
++        }
++    }
++
++    Shape {
++        anchors.fill: parent
++        antialiasing: true
++        smooth: true
++        visible: root.totalSec > 0
++
++        ShapePath {
++            strokeWidth: 10
++            strokeColor: root.activeColor
++            fillColor: "transparent"
++            capStyle: ShapePath.RoundCap
++
++            startX: root.cx
++            startY: root.cy - root.r
++
++            PathArc {
++                x: root.handleX
++                y: root.handleY
++                radiusX: root.r
++                radiusY: root.r
++                useLargeArc: (root.angle + Math.PI / 2) > Math.PI
++                direction: PathArc.Clockwise
++            }
++        }
++    }
++
++    Rectangle {
++        visible: root.totalSec > 0
++        x: root.handleX - 8
++        y: root.handleY - 8
++        width: 16
++        height: 16
++        radius: 8
++        color: root.activeColor
++        antialiasing: true
++    }
++
++    MouseArea {
++        id: mouseArea
++        anchors.fill: parent
++
++        property bool dialing: false
++
++        function processPoint(px, py) {
++            const dx = px - root.cx
++            const dy = py - root.cy
++
++            if (Math.sqrt(dx * dx + dy * dy) < 15) {
++                return
++            }
++
++            let a = Math.atan2(dy, dx) + Math.PI / 2
++            if (a < 0) {
++                a += 2 * Math.PI
++            }
++
++            let intervals = Math.floor((a / (2 * Math.PI)) * 120)
++            if (intervals === 0) {
++                intervals = 120
++            }
++
++            const newTotal = intervals * 30
++            root.dialed(newTotal)
++        }
++
++        onPressed: function (mouse) {
++            dialing = true
++            processPoint(mouse.x, mouse.y)
++        }
++
++        onPositionChanged: function (mouse) {
++            if (dialing) {
++                processPoint(mouse.x, mouse.y)
++            }
++        }
++
++        onReleased: {
++            if (dialing) {
++                dialing = false
++                root.dialReleased()
++            }
++        }
++    }
++}
+diff --git a/qt/qml/android/main.qml b/qt/qml/android/main.qml
+new file mode 100644
+index 0000000000000000000000000000000000000000..b84ad12b35ee28eef0683f1d8291e2ccfaf65e7d
+--- /dev/null
++++ b/qt/qml/android/main.qml
+@@ -0,0 +1,256 @@
++import QtQuick
++import QtCore
++import QtQuick.Controls as QQC2
++import QtQuick.Window
++import QtQuick.Layouts
++
++QQC2.ApplicationWindow {
++    id: root
++
++    visible: true
++    title: "Sessions"
++
++    width: 420
++    height: 640
++
++    readonly property int minDialValue: 30
++    readonly property int maxDialValue: 3600
++
++    property int totalSec: 300
++    property bool running: false
++    property real remainSec: 0
++    property bool paused: false
++
++    Settings {
++        id: settings
++        property int lastPosition: 300
++    }
++
++    Component.onCompleted: {
++        const v = settings.lastPosition
++        if (v >= minDialValue && v <= maxDialValue) {
++            totalSec = v
++        }
++    }
++
++    function saveLastPosition() {
++        settings.lastPosition = totalSec
++    }
++
++    // Audio playback is intentionally omitted on Android: the Qt for
++    // Android distribution shipped by the upstream miqt docker image does
++    // not include QtMultimedia, so we cannot use MediaPlayer or
++    // SoundEffect here. The system notification (showMessage) provides
++    // its own sound and vibration, which is sufficient on mobile.
++    function playAlarm() {}
++    function stopAlarm() {}
++
++    Timer {
++        id: countdown
++        interval: 1000
++        repeat: true
++        onTriggered: {
++            remainSec -= 1
++            if (remainSec <= 0) {
++                running = false
++                stop()
++                playAlarm()
++                if (hasTrayIcon) {
++                    trayIcon.showMessage("Session finished", "Time to take a break", 1, 5000)
++                }
++            }
++        }
++    }
++
++    function startTimer() {
++        stopAlarm()
++        running = true
++        remainSec = totalSec
++        countdown.start()
++    }
++
++    function stopTimer() {
++        running = false
++        countdown.stop()
++        stopAlarm()
++    }
++
++    function toggleTimer() {
++        if (running) {
++            stopTimer()
++        } else if (totalSec > 0) {
++            startTimer()
++        }
++    }
++
++    function addTime() {
++        if (totalSec < maxDialValue) {
++            totalSec += minDialValue
++            if (running) {
++                remainSec = totalSec
++            }
++            saveLastPosition()
++        }
++    }
++
++    function removeTime() {
++        if (totalSec > minDialValue) {
++            totalSec -= minDialValue
++            if (running) {
++                remainSec = totalSec
++            }
++            saveLastPosition()
++        }
++    }
++
++    function formatTime(seconds) {
++        const m = Math.floor(seconds / 60)
++        const s = Math.floor(seconds % 60)
++        return (m < 10 ? "0" + m : m) + ":" + (s < 10 ? "0" + s : s)
++    }
++
++    header: QQC2.ToolBar {
++        RowLayout {
++            anchors.fill: parent
++            QQC2.Label {
++                text: "Sessions"
++                Layout.leftMargin: 16
++                font.pixelSize: 20
++                font.bold: true
++                Layout.fillWidth: true
++            }
++            QQC2.ToolButton {
++                text: "About"
++                onClicked: aboutDialog.open()
++            }
++        }
++    }
++
++    QQC2.Dialog {
++        id: aboutDialog
++        modal: true
++        anchors.centerIn: parent
++        width: Math.min(parent.width - 40, 400)
++        title: "About " + appName
++
++        ColumnLayout {
++            spacing: 12
++            anchors.fill: parent
++
++            QQC2.Label {
++                text: appName
++                font.pixelSize: 22
++                font.bold: true
++                Layout.alignment: Qt.AlignHCenter
++            }
++            QQC2.Label {
++                text: "Version " + appVersion
++                Layout.alignment: Qt.AlignHCenter
++            }
++            QQC2.Label {
++                text: appDescription
++                wrapMode: Text.WordWrap
++                Layout.fillWidth: true
++                horizontalAlignment: Text.AlignHCenter
++            }
++            QQC2.Label {
++                text: "© " + appCopyrightYear + " Felicitas Pojtinger"
++                Layout.alignment: Qt.AlignHCenter
++            }
++            QQC2.Label {
++                text: '<a href="' + appHomepageURL + '">' + appHomepageURL + '</a>'
++                onLinkActivated: link => Qt.openUrlExternally(link)
++                Layout.alignment: Qt.AlignHCenter
++            }
++            QQC2.Label {
++                text: "Licensed under AGPL-3.0-or-later"
++                Layout.alignment: Qt.AlignHCenter
++            }
++        }
++
++        standardButtons: QQC2.Dialog.Close
++    }
++
++    ColumnLayout {
++        anchors.fill: parent
++        anchors.margins: 16
++        spacing: 16
++
++        Item {
++            Layout.fillWidth: true
++            Layout.fillHeight: true
++
++            Dial {
++                id: dialItem
++                anchors.centerIn: parent
++
++                readonly property real maxSize: Math.min(parent.width, parent.height)
++                width: maxSize
++                height: maxSize
++
++                totalSec: root.totalSec
++                maxSec: root.maxDialValue
++                running: root.running
++                remainSec: root.remainSec
++
++                accentColorOverride: "#3daee9"
++                errorColorOverride: "#da4453"
++
++                onDialed: function (newTotal) {
++                    if (root.running && !paused) {
++                        paused = true
++                        countdown.stop()
++                    }
++                    root.totalSec = newTotal
++                    if (paused) {
++                        root.remainSec = newTotal
++                    }
++                    saveLastPosition()
++                }
++
++                onDialReleased: {
++                    if (paused) {
++                        paused = false
++                        if (root.remainSec > 0) {
++                            countdown.start()
++                        }
++                    } else if (!root.running && root.totalSec > 0) {
++                        startTimer()
++                    }
++                }
++            }
++
++            QQC2.Label {
++                anchors.centerIn: parent
++                text: root.running ? formatTime(root.remainSec) : formatTime(root.totalSec)
++                font.pixelSize: 48
++                font.bold: true
++            }
++        }
++
++        RowLayout {
++            Layout.alignment: Qt.AlignHCenter
++            spacing: 16
++
++            QQC2.RoundButton {
++                text: "−"
++                font.pixelSize: 24
++                enabled: root.totalSec > minDialValue
++                onClicked: removeTime()
++            }
++
++            QQC2.Button {
++                text: root.running ? "Stop" : "Start Timer"
++                highlighted: true
++                onClicked: toggleTimer()
++            }
++
++            QQC2.RoundButton {
++                text: "+"
++                font.pixelSize: 24
++                enabled: root.totalSec < maxDialValue
++                onClicked: addTime()
++            }
++        }
++    }
++}
+diff --git a/qt/qml/main.qml b/qt/qml/main.qml
+new file mode 100644
+index 0000000000000000000000000000000000000000..fb1e426e5ecc3f80891e8c6bfb4a7c3bd7e03c79
+--- /dev/null
++++ b/qt/qml/main.qml
+@@ -0,0 +1,318 @@
++import QtQuick
++import QtCore
++import QtQuick.Controls as QQC2
++import QtQuick.Layouts
++import QtMultimedia
++import org.kde.kirigami as Kirigami
++import org.kde.kirigamiaddons.formcard as FormCard
++
++Kirigami.ApplicationWindow {
++    id: root
++
++    title: "Sessions"
++
++    minimumWidth: 360
++    minimumHeight: 460
++    width: 420
++    height: 520
++
++    readonly property int minDialValue: 30
++    readonly property int maxDialValue: 3600
++
++    property int totalSec: 300
++    property bool running: false
++    property real remainSec: 0
++    property bool paused: false
++
++    Settings {
++        id: settings
++        property int lastPosition: 300
++    }
++
++    Component.onCompleted: {
++        const v = settings.lastPosition
++        if (v >= minDialValue && v <= maxDialValue) {
++            totalSec = v
++        }
++    }
++
++    function saveLastPosition() {
++        settings.lastPosition = totalSec
++    }
++
++    MediaPlayer {
++        id: alarm
++        source: alarmSourceUrl
++        audioOutput: AudioOutput {}
++    }
++
++    function playAlarm() {
++        alarm.position = 0
++        alarm.play()
++    }
++
++    function stopAlarm() {
++        alarm.stop()
++    }
++
++    Timer {
++        id: countdown
++        interval: 1000
++        repeat: true
++        onTriggered: {
++            remainSec -= 1
++            if (remainSec <= 0) {
++                running = false
++                stop()
++                playAlarm()
++                trayIcon.showMessage("Session finished", "Time to take a break", 1, 5000)
++            }
++        }
++    }
++
++    Connections {
++        target: trayIcon
++        function onMessageClicked() {
++            stopAlarm()
++            root.show()
++            root.raise()
++            root.requestActivate()
++        }
++    }
++
++    function startTimer() {
++        stopAlarm()
++        running = true
++        remainSec = totalSec
++        countdown.start()
++    }
++
++    function stopTimer() {
++        running = false
++        countdown.stop()
++        stopAlarm()
++    }
++
++    function toggleTimer() {
++        if (running) {
++            stopTimer()
++        } else if (totalSec > 0) {
++            startTimer()
++        }
++    }
++
++    function addTime() {
++        if (totalSec < maxDialValue) {
++            totalSec += minDialValue
++            if (running) {
++                remainSec = totalSec
++            }
++            saveLastPosition()
++        }
++    }
++
++    function removeTime() {
++        if (totalSec > minDialValue) {
++            totalSec -= minDialValue
++            if (running) {
++                remainSec = totalSec
++            }
++            saveLastPosition()
++        }
++    }
++
++    function formatTime(seconds) {
++        const m = Math.floor(seconds / 60)
++        const s = Math.floor(seconds % 60)
++        return (m < 10 ? "0" + m : m) + ":" + (s < 10 ? "0" + s : s)
++    }
++
++    globalDrawer: Kirigami.GlobalDrawer {
++        isMenu: true
++        actions: [
++            Kirigami.Action {
++                text: "About Sessions"
++                icon.name: "help-about"
++                onTriggered: pageStack.layers.push(aboutPage)
++            },
++            Kirigami.Action {
++                text: "Quit"
++                icon.name: "application-exit"
++                shortcut: "Ctrl+Q"
++                onTriggered: Qt.quit()
++            }
++        ]
++    }
++
++    QQC2.Action {
++        shortcut: "Space"
++        onTriggered: toggleTimer()
++    }
++    QQC2.Action {
++        shortcut: "Ctrl+Space"
++        onTriggered: toggleTimer()
++    }
++    QQC2.Action {
++        shortcut: "Ctrl++"
++        onTriggered: addTime()
++    }
++    QQC2.Action {
++        shortcut: "Ctrl+="
++        onTriggered: addTime()
++    }
++    QQC2.Action {
++        shortcut: "Ctrl+-"
++        onTriggered: removeTime()
++    }
++    QQC2.Action {
++        shortcut: "Ctrl+W"
++        onTriggered: root.close()
++    }
++
++    pageStack.initialPage: Kirigami.Page {
++        id: timerPage
++        title: "Sessions"
++        padding: Kirigami.Units.largeSpacing
++
++        ColumnLayout {
++            anchors.fill: parent
++            spacing: Kirigami.Units.largeSpacing
++
++            Item {
++                Layout.fillWidth: true
++                Layout.fillHeight: true
++
++                Dial {
++                    id: dialItem
++                    anchors.centerIn: parent
++
++                    readonly property real maxSize: Math.min(parent.width, parent.height)
++                    width: maxSize
++                    height: maxSize
++
++                    totalSec: root.totalSec
++                    maxSec: root.maxDialValue
++                    running: root.running
++                    remainSec: root.remainSec
++
++                    accentColorOverride: Kirigami.Theme.highlightColor
++                    errorColorOverride: Kirigami.Theme.negativeTextColor
++
++                    onDialed: function (newTotal) {
++                        if (root.running && !paused) {
++                            paused = true
++                            countdown.stop()
++                        }
++                        root.totalSec = newTotal
++                        if (paused) {
++                            root.remainSec = newTotal
++                        }
++                        saveLastPosition()
++                    }
++
++                    onDialReleased: {
++                        if (paused) {
++                            paused = false
++                            if (root.remainSec > 0) {
++                                countdown.start()
++                            }
++                        } else if (!root.running && root.totalSec > 0) {
++                            startTimer()
++                        }
++                    }
++                }
++
++                Kirigami.Heading {
++                    anchors.centerIn: parent
++                    level: 1
++                    text: root.running ? formatTime(root.remainSec) : formatTime(root.totalSec)
++
++                    Accessible.name: "Remaining time"
++                }
++            }
++
++            RowLayout {
++                Layout.alignment: Qt.AlignHCenter
++                spacing: Kirigami.Units.largeSpacing
++
++                QQC2.RoundButton {
++                    icon.name: "value-decrease-symbolic"
++                    enabled: root.totalSec > minDialValue
++                    QQC2.ToolTip.visible: hovered
++                    QQC2.ToolTip.text: "Remove 30 seconds"
++                    onClicked: removeTime()
++                }
++
++                QQC2.Button {
++                    text: root.running ? "Stop" : "Start Timer"
++                    icon.name: root.running ? "media-playback-stop-symbolic" : "media-playback-start-symbolic"
++                    highlighted: true
++                    QQC2.ToolTip.visible: hovered
++                    QQC2.ToolTip.text: root.running ? "Stop the timer" : "Start the timer"
++                    onClicked: toggleTimer()
++
++                    palette.button: root.running ? Kirigami.Theme.negativeBackgroundColor : Kirigami.Theme.highlightColor
++                }
++
++                QQC2.RoundButton {
++                    icon.name: "value-increase-symbolic"
++                    enabled: root.totalSec < maxDialValue
++                    QQC2.ToolTip.visible: hovered
++                    QQC2.ToolTip.text: "Add 30 seconds"
++                    onClicked: addTime()
++                }
++            }
++        }
++    }
++
++    Component {
++        id: aboutPage
++
++        FormCard.AboutPage {
++            aboutData: ({
++                "displayName": appName,
++                "productName": appName,
++                "componentName": appName.toLowerCase(),
++                "version": appVersion,
++                "shortDescription": appDescription,
++                "homepage": appHomepageURL,
++                "bugAddress": "https://github.com/pojntfx/sessions/issues",
++                "copyrightStatement": "© " + appCopyrightYear + " Felicitas Pojtinger",
++                "desktopFileName": appID,
++                "licenses": [
++                    {
++                        "name": "AGPL-3.0-or-later",
++                        "spdx": "AGPL-3.0-or-later"
++                    }
++                ],
++                "authors": [
++                    {
++                        "name": "Felicitas Pojtinger",
++                        "task": "Maintainer",
++                        "emailAddress": "",
++                        "webAddress": "https://github.com/pojntfx",
++                        "ocsUsername": ""
++                    },
++                    {
++                        "name": "Guido Günther",
++                        "task": "Developer",
++                        "emailAddress": "",
++                        "webAddress": "",
++                        "ocsUsername": ""
++                    }
++                ],
++                "credits": [
++                    {
++                        "name": "Mirabelle Salles",
++                        "task": "Icon design",
++                        "emailAddress": "",
++                        "webAddress": "",
++                        "ocsUsername": ""
++                    }
++                ],
++                "translators": [],
++                "otherText": ""
++            })
++        }
++    }
++}
+diff --git a/qt/qml_android.go b/qt/qml_android.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..4f1c297cca18d22f4028d1c3a5c68ef1e5909dd8
+--- /dev/null
++++ b/qt/qml_android.go
+@@ -0,0 +1,9 @@
++package main
++
++import _ "embed"
++
++//go:embed qml/android/main.qml
++var mainQml []byte
++
++//go:embed qml/android/Dial.qml
++var dialQml []byte
+diff --git a/qt/qml_desktop.go b/qt/qml_desktop.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..98dd1d527ba33fd3d14ae4868812e1cfaecd75b3
+--- /dev/null
++++ b/qt/qml_desktop.go
+@@ -0,0 +1,13 @@
++//go:build !android
++
++package main
++
++import (
++	_ "embed"
++)
++
++//go:embed qml/main.qml
++var mainQml []byte
++
++//go:embed qml/Dial.qml
++var dialQml []byte
+
