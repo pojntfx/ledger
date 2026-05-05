@@ -1,0 +1,60 @@
+From e01fd40ad05b4145353fcbd381d998a3487bbc83 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Mon, 04 May 2026 23:40:31 -0700
+Subject: [PATCH] test: Start adding unit tests to state machine
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/cmd/sessions-fsm/main_test.go b/cmd/sessions-fsm/main_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..8285aecbaf1cc849af9150c0b016daaf7c651655
+--- /dev/null
++++ b/cmd/sessions-fsm/main_test.go
+@@ -0,0 +1,46 @@
++package main
++
++import (
++	"fmt"
++	"testing"
++	"time"
++)
++
++func TestPlusTimer(t *testing.T) {
++	var plusTimerTests = []struct {
++		initial   time.Duration
++		plusTimes int
++		expectErr bool
++	}{
++		{
++			initial:   time.Duration(0),
++			plusTimes: 1,
++			expectErr: false,
++		},
++		{
++			initial:   maxRemainingTime - remainingTimerAdjustmentInterval,
++			plusTimes: 1,
++			expectErr: false,
++		},
++		{
++			initial:   maxRemainingTime - remainingTimerAdjustmentInterval,
++			plusTimes: 2,
++			expectErr: true,
++		},
++	}
++	for _, tt := range plusTimerTests {
++		t.Run(
++			fmt.Sprintf("initial %v plusTimes %v", tt.initial, tt.plusTimes),
++			func(t *testing.T) {
++				s := newStateMachine(tt.initial)
++
++				for i := range tt.plusTimes {
++					err := s.PlusTimer(t.Context())
++					if err != nil && !tt.expectErr {
++						t.Errorf("i=%v got err=%v, want expectErr=%v", i, err, tt.expectErr)
++					}
++				}
++			},
++		)
++	}
++}
+
