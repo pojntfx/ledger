@@ -1,0 +1,302 @@
+From 9f3f0c3056f8de7790697d47e7abae6a42018561 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Tue, 05 May 2026 13:40:08 -0700
+Subject: [PATCH] feat: Add experiments for tracking remaining time outside of FSM
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/cmd/sessions-fsm/main.go b/cmd/sessions-fsm/main.go
+index 8cac8d221f2acfa182cf86c91f9a1f2536a8951d..7832ef5c022ef04284aac4cbe960fc1430b655bf 100644
+--- a/cmd/sessions-fsm/main.go
++++ b/cmd/sessions-fsm/main.go
+@@ -3,6 +3,7 @@
+ import (
+ 	"context"
+ 	"fmt"
++	"log"
+ 	"reflect"
+ 	"time"
+ 
+@@ -36,17 +37,28 @@ 	initialRemainingTime             = time.Minute * 5
+ 	minRemainingTime                 = time.Duration(0)
+ 	maxRemainingTime                 = time.Hour
+ 	remainingTimerAdjustmentInterval = time.Second * 30
++	tickLength                       = time.Second
+ )
++
++type hooks struct {
++	setRemainingTime func(ctx context.Context, remainingTime time.Duration) error
++	getRemainingTime func(ctx context.Context) (time.Duration, error)
++
++	onStopTimer,
++	onStartTimer func(ctx context.Context) error
++}
+ 
+ type stateMachine struct {
+-	currentRemainingTime time.Duration
+-	machine              *stateless.StateMachine
++	hooks *hooks
++
++	machine *stateless.StateMachine
+ }
+ 
+-func newStateMachine(remainingTime time.Duration) *stateMachine {
++func newStateMachine(hooks *hooks) *stateMachine {
+ 	s := &stateMachine{
+-		currentRemainingTime: remainingTime,
+-		machine:              stateless.NewStateMachine(statePaused),
++		hooks: hooks,
++
++		machine: stateless.NewStateMachine(statePaused),
+ 	}
+ 
+ 	s.machine.
+@@ -66,17 +78,32 @@ 	s.machine.
+ 		Configure(stateDragging).
+ 		Permit(triggerStopDragging, stateCountingDown, s.validRemainingTime)
+ 
++	s.machine.Configure(stateCountingDown).Permit(triggerStartDragging, stateDragging)
++	s.machine.Configure(stateDragging).OnEntryFrom(triggerStartDragging, s.stopTimer)
++
++	s.machine.Configure(stateCountingDown).OnEntry(s.startTimer)
++
+ 	return s
+ }
+ 
+ func (s *stateMachine) increaseRemainingTime(ctx context.Context, args ...any) error {
+-	s.currentRemainingTime += remainingTimerAdjustmentInterval
++	currentRemainingTime, err := s.hooks.getRemainingTime(ctx)
++	if err != nil {
++		return err
++	}
++
++	s.hooks.setRemainingTime(ctx, currentRemainingTime+remainingTimerAdjustmentInterval)
+ 
+ 	return nil
+ }
+ 
+ func (s *stateMachine) mustBeBelowMaxRemainingTime(ctx context.Context, args ...any) bool {
+-	newRemainingTime := s.currentRemainingTime + remainingTimerAdjustmentInterval
++	currentRemainingTime, err := s.hooks.getRemainingTime(ctx)
++	if err != nil {
++		return false
++	}
++
++	newRemainingTime := currentRemainingTime + remainingTimerAdjustmentInterval
+ 	if newRemainingTime > maxRemainingTime {
+ 		return false
+ 	}
+@@ -85,13 +112,23 @@ 	return true
+ }
+ 
+ func (s *stateMachine) decreaseRemainingTime(ctx context.Context, args ...any) error {
+-	s.currentRemainingTime -= remainingTimerAdjustmentInterval
++	currentRemainingTime, err := s.hooks.getRemainingTime(ctx)
++	if err != nil {
++		return err
++	}
++
++	s.hooks.setRemainingTime(ctx, currentRemainingTime-remainingTimerAdjustmentInterval)
+ 
+ 	return nil
+ }
+ 
+ func (s *stateMachine) mustBeAboveMinRemainingTime(ctx context.Context, args ...any) bool {
+-	newRemainingTime := s.currentRemainingTime - remainingTimerAdjustmentInterval
++	currentRemainingTime, err := s.hooks.getRemainingTime(ctx)
++	if err != nil {
++		return false
++	}
++
++	newRemainingTime := currentRemainingTime - remainingTimerAdjustmentInterval
+ 	if newRemainingTime < minRemainingTime {
+ 		return false
+ 	}
+@@ -110,6 +147,14 @@
+ 	return true
+ }
+ 
++func (s *stateMachine) stopTimer(ctx context.Context, args ...any) error {
++	return s.hooks.onStopTimer(ctx)
++}
++
++func (s *stateMachine) startTimer(ctx context.Context, args ...any) error {
++	return s.hooks.onStartTimer(ctx)
++}
++
+ func (s *stateMachine) PlusTimer(ctx context.Context) error {
+ 	return s.machine.FireCtx(ctx, triggerPlusTimer)
+ }
+@@ -130,27 +175,114 @@ func main() {
+ 	ctx, cancel := context.WithCancel(context.Background())
+ 	defer cancel()
+ 
+-	s := newStateMachine(initialRemainingTime)
++	var (
++		lastSetRemainingTime = initialRemainingTime
++		currentRemainingTime time.Duration
++
++		ticker = time.NewTicker(tickLength)
++	)
++	ticker.Stop()
++
++	go func() {
++		for {
++			select {
++			case <-ctx.Done():
++				return
++
++			case <-ticker.C:
++				currentRemainingTime -= tickLength
++
++				log.Println("Current remaining time", currentRemainingTime)
++			}
++		}
++	}()
++
++	s := newStateMachine(
++		&hooks{
++			setRemainingTime: func(ctx context.Context, remainingTime time.Duration) error {
++				lastSetRemainingTime = remainingTime
++
++				log.Println("Last set remaining time", lastSetRemainingTime)
++
++				return nil
++			},
++			getRemainingTime: func(ctx context.Context) (time.Duration, error) {
++				return lastSetRemainingTime, nil
++			},
++
++			onStopTimer: func(ctx context.Context) error {
++				log.Println("Stopping timer")
++
++				ticker.Stop()
++				currentRemainingTime = lastSetRemainingTime
++
++				return nil
++			},
++			onStartTimer: func(ctx context.Context) error {
++				log.Println("Starting timer")
++
++				ticker.Reset(tickLength)
++
++				return nil
++			},
++		},
++	)
+ 
+ 	fmt.Println(s.machine.ToGraph())
+ 
++	time.Sleep(time.Second * 5)
++
++	// Add 30s to the timer 50 times
+ 	for range 50 {
+ 		if err := s.PlusTimer(ctx); err != nil {
+ 			panic(err)
+ 		}
+ 	}
+ 
++	// Remove 30s from the timer 30 times
+ 	for range 30 {
+ 		if err := s.MinusTimer(ctx); err != nil {
+ 			panic(err)
+ 		}
+ 	}
+ 
++	// Start dragging the dial for the timer
+ 	if err := s.StartDragging(ctx); err != nil {
+ 		panic(err)
+ 	}
+ 
++	// Stop dragging the dial for the timer; we're counting down
+ 	if err := s.StopDragging(ctx, initialRemainingTime+remainingTimerAdjustmentInterval*3); err != nil {
+ 		panic(err)
+ 	}
++
++	time.Sleep(time.Second * 5)
++
++	// // Add 30s to the timer while it's counting down, which will round up
++	// // to the nearest higher adjustment interval when counting down and then
++	// // resume counting down
++	// if err := s.PlusTimer(ctx); err != nil {
++	// 	panic(err)
++	// }
++
++	// // Remove 30s from the timer while it's counting down, which will round down
++	// // to the nearest higher adjustment interval when counting down and then
++	// // resume counting down
++	// if err := s.MinusTimer(ctx); err != nil {
++	// 	panic(err)
++	// }
++
++	// Start dragging the dial for the timer, which stops the timer from counting down
++	if err := s.StartDragging(ctx); err != nil {
++		panic(err)
++	}
++
++	time.Sleep(time.Second * 2)
++
++	// Stop dragging the dial for the timer; we're counting down
++	if err := s.StopDragging(ctx, initialRemainingTime+remainingTimerAdjustmentInterval*3); err != nil {
++		panic(err)
++	}
++
++	time.Sleep(time.Second * 5)
+ }
+diff --git a/cmd/sessions-fsm/main_test.go b/cmd/sessions-fsm/main_test.go
+index 5807ac999d3e3edb4ba678a9779d63a5c2bc3e05..111562652216d10b3eebafc08618d638d9b6637a 100644
+--- a/cmd/sessions-fsm/main_test.go
++++ b/cmd/sessions-fsm/main_test.go
+@@ -34,7 +34,7 @@ 	for _, tt := range plusTimerTests {
+ 		t.Run(
+ 			fmt.Sprintf("initial %v plusTimes %v", tt.initial, tt.plusTimes),
+ 			func(t *testing.T) {
+-				s := newStateMachine(tt.initial)
++				s := newStateMachine(tt.initial, &hooks{})
+ 
+ 				for i := range tt.plusTimes {
+ 					err := s.PlusTimer(t.Context())
+@@ -75,7 +75,7 @@ 	for _, tt := range minusTimerTests {
+ 		t.Run(
+ 			fmt.Sprintf("initial %v plusTimes %v", tt.initial, tt.minusTimes),
+ 			func(t *testing.T) {
+-				s := newStateMachine(tt.initial)
++				s := newStateMachine(tt.initial, &hooks{})
+ 
+ 				for i := range tt.minusTimes {
+ 					err := s.MinusTimer(t.Context())
+@@ -110,12 +110,23 @@ 				return sm.StartDragging(t.Context())
+ 			},
+ 			expectErr: true,
+ 		},
++		{
++			name: "can transition from counting down state to dragging",
++			prepare: func(sm *stateMachine) error {
++				if err := sm.StartDragging(t.Context()); err != nil {
++					return err
++				}
++
++				return sm.StopDragging(t.Context(), initialRemainingTime)
++			},
++			expectErr: false,
++		},
+ 	}
+ 	for _, tt := range startDraggingTests {
+ 		t.Run(
+ 			tt.name,
+ 			func(t *testing.T) {
+-				s := newStateMachine(0)
++				s := newStateMachine(0, &hooks{})
+ 
+ 				require.NoError(t, tt.prepare(s))
+ 
+@@ -182,7 +193,7 @@ 	for _, tt := range stopDraggingTests {
+ 		t.Run(
+ 			tt.name,
+ 			func(t *testing.T) {
+-				s := newStateMachine(0)
++				s := newStateMachine(0, &hooks{})
+ 
+ 				require.NoError(t, tt.prepare(s))
+ 
+
