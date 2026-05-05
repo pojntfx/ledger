@@ -1,0 +1,110 @@
+From 033e7cd2400db6fa43c3fa5a4dc51255abcb1a56 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Tue, 05 May 2026 14:19:06 -0700
+Subject: [PATCH] feat: Allow transitioning from stopped state to counting down state
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/cmd/sessions-fsm/main.go b/cmd/sessions-fsm/main.go
+index 2e0a56d00263d5793e0b83db1c9c535a46fca23a..c03c668d663497d29feba23e22e7f173eb0a5609 100644
+--- a/cmd/sessions-fsm/main.go
++++ b/cmd/sessions-fsm/main.go
+@@ -77,6 +77,7 @@ 		PermitReentry(triggerMinusTimer, s.mustBeAboveMinRemainingTime).
+ 		OnEntryFrom(triggerMinusTimer, s.decreaseRemainingTime)
+ 
+ 	s.machine.Configure(stateCountingDown).Permit(triggerStopTimer, stateStopped)
++	s.machine.Configure(stateStopped).Permit(triggerStartTimer, stateCountingDown)
+ 
+ 	return s
+ }
+@@ -142,6 +143,10 @@ func (s *stateMachine) StopTimer(ctx context.Context) error {
+ 	return s.machine.FireCtx(ctx, triggerStopTimer)
+ }
+ 
++func (s *stateMachine) StartTimer(ctx context.Context) error {
++	return s.machine.FireCtx(ctx, triggerStartTimer)
++}
++
+ func main() {
+ 	ctx, cancel := context.WithCancel(context.Background())
+ 	defer cancel()
+@@ -191,6 +196,10 @@ 		}
+ 	}
+ 
+ 	if err := s.StopTimer(ctx); err != nil {
++		panic(err)
++	}
++
++	if err := s.StartTimer(ctx); err != nil {
+ 		panic(err)
+ 	}
+ }
+diff --git a/cmd/sessions-fsm/main_test.go b/cmd/sessions-fsm/main_test.go
+index 6daf65da6f73caa7dc374d53395cdaf97dfe2c63..3bb6a41be29a58918a34186cb487c61589e3700e 100644
+--- a/cmd/sessions-fsm/main_test.go
++++ b/cmd/sessions-fsm/main_test.go
+@@ -230,8 +230,7 @@ 		prepare       func(*stateMachine) error
+ 		expectErr     bool
+ 	}{
+ 		{
+-			name:          "can transition from counting down state to stopped state",
+-			remainingTime: initialRemainingTime,
++			name: "can transition from counting down state to stopped state",
+ 			prepare: func(sm *stateMachine) error {
+ 				if err := sm.StartDragging(t.Context()); err != nil {
+ 					return err
+@@ -242,8 +241,7 @@ 			},
+ 			expectErr: false,
+ 		},
+ 		{
+-			name:          "can not transition from dragging state to stopped state",
+-			remainingTime: initialRemainingTime,
++			name: "can not transition from dragging state to stopped state",
+ 			prepare: func(sm *stateMachine) error {
+ 				return sm.StartDragging(t.Context())
+ 			},
+@@ -268,3 +266,43 @@ 			},
+ 		)
+ 	}
+ }
++
++func TestStartTimer(t *testing.T) {
++	var startTimerTests = []struct {
++		name      string
++		prepare   func(*stateMachine) error
++		expectErr bool
++	}{
++		{
++			name: "can transition from stopped state to counting down state",
++			prepare: func(sm *stateMachine) error {
++				return nil
++			},
++			expectErr: false,
++		},
++		{
++			name: "can not transition from dragging state to counting down state",
++			prepare: func(sm *stateMachine) error {
++				return sm.StartDragging(t.Context())
++			},
++			expectErr: true,
++		},
++	}
++	for _, tt := range startTimerTests {
++		t.Run(
++			tt.name,
++			func(t *testing.T) {
++				s := newStateMachine(0)
++
++				require.NoError(t, tt.prepare(s))
++
++				err := s.StartTimer(t.Context())
++				if tt.expectErr {
++					require.Error(t, err)
++				} else {
++					require.NoError(t, err)
++				}
++			},
++		)
++	}
++}
+
