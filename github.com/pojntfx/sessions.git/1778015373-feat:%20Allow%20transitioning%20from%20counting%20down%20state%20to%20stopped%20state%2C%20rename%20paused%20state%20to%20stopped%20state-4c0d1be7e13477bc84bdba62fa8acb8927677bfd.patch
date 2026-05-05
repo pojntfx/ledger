@@ -1,0 +1,130 @@
+From 4c0d1be7e13477bc84bdba62fa8acb8927677bfd Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Tue, 05 May 2026 14:09:33 -0700
+Subject: [PATCH] feat: Allow transitioning from counting down state to stopped state, rename paused state to stopped state
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/cmd/sessions-fsm/main.go b/cmd/sessions-fsm/main.go
+index 0354f8984d7ae31075107f56043e8c13f32407f3..2e0a56d00263d5793e0b83db1c9c535a46fca23a 100644
+--- a/cmd/sessions-fsm/main.go
++++ b/cmd/sessions-fsm/main.go
+@@ -12,7 +12,7 @@
+ type state string
+ 
+ const (
+-	statePaused       state = "paused"
++	stateStopped      state = "stopped"
+ 	stateDragging     state = "dragging"
+ 	stateCountingDown state = "countingDown"
+ 	stateAlarming     state = "alarming"
+@@ -46,19 +46,19 @@
+ func newStateMachine(remainingTime time.Duration) *stateMachine {
+ 	s := &stateMachine{
+ 		currentRemainingTime: remainingTime,
+-		machine:              stateless.NewStateMachine(statePaused),
++		machine:              stateless.NewStateMachine(stateStopped),
+ 	}
+ 
+ 	s.machine.
+-		Configure(statePaused).
++		Configure(stateStopped).
+ 		PermitReentry(triggerPlusTimer, s.mustBeBelowMaxRemainingTime).
+ 		OnEntryFrom(triggerPlusTimer, s.increaseRemainingTime)
+ 	s.machine.
+-		Configure(statePaused).
++		Configure(stateStopped).
+ 		PermitReentry(triggerMinusTimer, s.mustBeAboveMinRemainingTime).
+ 		OnEntryFrom(triggerMinusTimer, s.decreaseRemainingTime)
+ 
+-	s.machine.Configure(statePaused).Permit(triggerStartDragging, stateDragging)
++	s.machine.Configure(stateStopped).Permit(triggerStartDragging, stateDragging)
+ 
+ 	s.machine.SetTriggerParameters(triggerStopDragging, reflect.TypeFor[time.Duration]())
+ 	s.machine.
+@@ -76,6 +76,8 @@ 		Configure(stateCountingDown).
+ 		PermitReentry(triggerMinusTimer, s.mustBeAboveMinRemainingTime).
+ 		OnEntryFrom(triggerMinusTimer, s.decreaseRemainingTime)
+ 
++	s.machine.Configure(stateCountingDown).Permit(triggerStopTimer, stateStopped)
++
+ 	return s
+ }
+ 
+@@ -136,6 +138,10 @@ func (s *stateMachine) StopDragging(ctx context.Context, remainingTime time.Duration) error {
+ 	return s.machine.FireCtx(ctx, triggerStopDragging, remainingTime)
+ }
+ 
++func (s *stateMachine) StopTimer(ctx context.Context) error {
++	return s.machine.FireCtx(ctx, triggerStopTimer)
++}
++
+ func main() {
+ 	ctx, cancel := context.WithCancel(context.Background())
+ 	defer cancel()
+@@ -182,5 +188,9 @@ 	for range 30 {
+ 		if err := s.MinusTimer(ctx); err != nil {
+ 			panic(err)
+ 		}
++	}
++
++	if err := s.StopTimer(ctx); err != nil {
++		panic(err)
+ 	}
+ }
+diff --git a/cmd/sessions-fsm/main_test.go b/cmd/sessions-fsm/main_test.go
+index f3e64b33b750f448b5074e86470eb049d2d6dbea..6daf65da6f73caa7dc374d53395cdaf97dfe2c63 100644
+--- a/cmd/sessions-fsm/main_test.go
++++ b/cmd/sessions-fsm/main_test.go
+@@ -221,3 +221,50 @@ 			},
+ 		)
+ 	}
+ }
++
++func TestStopTimer(t *testing.T) {
++	var stopTimerTests = []struct {
++		name          string
++		remainingTime time.Duration
++		prepare       func(*stateMachine) error
++		expectErr     bool
++	}{
++		{
++			name:          "can transition from counting down state to stopped state",
++			remainingTime: initialRemainingTime,
++			prepare: func(sm *stateMachine) error {
++				if err := sm.StartDragging(t.Context()); err != nil {
++					return err
++				}
++
++				return sm.StopDragging(t.Context(), initialRemainingTime)
++			},
++			expectErr: false,
++		},
++		{
++			name:          "can not transition from dragging state to stopped state",
++			remainingTime: initialRemainingTime,
++			prepare: func(sm *stateMachine) error {
++				return sm.StartDragging(t.Context())
++			},
++			expectErr: true,
++		},
++	}
++	for _, tt := range stopTimerTests {
++		t.Run(
++			tt.name,
++			func(t *testing.T) {
++				s := newStateMachine(0)
++
++				require.NoError(t, tt.prepare(s))
++
++				err := s.StopTimer(t.Context())
++				if tt.expectErr {
++					require.Error(t, err)
++				} else {
++					require.NoError(t, err)
++				}
++			},
++		)
++	}
++}
+
