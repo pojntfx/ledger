@@ -1,0 +1,284 @@
+From 38d9fcf0cb73876a71aac0abb2d6354a6ef38af6 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Wed, 06 May 2026 23:46:21 -0700
+Subject: [PATCH] feat: Add alarming state that flashes `00:00` and block controls
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/assets/resources/style.css b/assets/resources/style.css
+index a41ae4b164f2d0bffe350f2e5af39f39a00006cf..a86a767307bd275f93cf12be0bb04e97dbc2102e 100644
+--- a/assets/resources/style.css
++++ b/assets/resources/style.css
+@@ -6,3 +6,22 @@
+ .dial__display {
+   font-feature-settings: "tnum";
+ }
++
++@media (prefers-reduced-motion: no-preference) {
++  @keyframes dial-display-alarm-blink {
++    0%,
++    49% {
++      opacity: 1;
++    }
++    50%,
++    99% {
++      opacity: 0;
++    }
++    100% {
++      opacity: 1;
++    }
++  }
++  .dial__display--alarming {
++    animation: dial-display-alarm-blink 1s linear infinite;
++  }
++}
+diff --git a/internal/components/dial.go b/internal/components/dial.go
+index 906b2f6863ca646a631bee17f79cc45f18abee58..0fb37d03687543aedbbbf122db0dc73ad60593b0 100644
+--- a/internal/components/dial.go
++++ b/internal/components/dial.go
+@@ -156,12 +156,17 @@ 				end := -math.Pi/2 + 2*math.Pi*progress
+ 				var angle float64
+ 				var lineColor gdk.RGBA
+ 				var fillR, fillG, fillB, fillA float32
++				noFill := false
+ 
+ 				if dialW.running && dialW.remain > 0 {
+ 					ratio := dialW.remain.Seconds() / float64(dialW.totalSec)
+ 					angle = -math.Pi/2 + 2*math.Pi*progress*ratio
+ 					lineColor = errColor
+ 					fillR, fillG, fillB, fillA = errColor.Red, errColor.Green, errColor.Blue, 0.3
++				} else if dialW.running && dialW.remain == 0 {
++					angle = -math.Pi / 2
++					lineColor = errColor
++					noFill = true
+ 				} else {
+ 					angle = end
+ 					lineColor = accent
+@@ -180,16 +185,18 @@ 				startY := float32(cy - r)
+ 				endX := float32(cx + r*math.Sin(angle+math.Pi/2))
+ 				endY := float32(cy - r*math.Cos(angle+math.Pi/2))
+ 
+-				arcBuilder := gsk.NewPathBuilder()
+-				defer arcBuilder.Unref()
+-				arcBuilder.MoveTo(float32(cx), float32(cy))
+-				arcBuilder.LineTo(startX, startY)
+-				arcBuilder.SvgArcTo(float32(r), float32(r), 0, angle+math.Pi/2 > math.Pi, true, endX, endY)
+-				arcBuilder.LineTo(float32(cx), float32(cy))
+-				arcPath := arcBuilder.ToPath()
+-				defer arcPath.Unref()
+-				snapshot.AppendFill(arcPath, gsk.FillRuleWindingValue, &fillColor)
+-				strokeBorder(arcPath)
++				if !noFill {
++					arcBuilder := gsk.NewPathBuilder()
++					defer arcBuilder.Unref()
++					arcBuilder.MoveTo(float32(cx), float32(cy))
++					arcBuilder.LineTo(startX, startY)
++					arcBuilder.SvgArcTo(float32(r), float32(r), 0, angle+math.Pi/2 > math.Pi, true, endX, endY)
++					arcBuilder.LineTo(float32(cx), float32(cy))
++					arcPath := arcBuilder.ToPath()
++					defer arcPath.Unref()
++					snapshot.AppendFill(arcPath, gsk.FillRuleWindingValue, &fillColor)
++					strokeBorder(arcPath)
++				}
+ 
+ 				lineStrokeColor := gdk.RGBA{
+ 					Red:   lineColor.Red,
+diff --git a/internal/components/main_window.go b/internal/components/main_window.go
+index 4f650313e106285b72125e18eee1d76fdd52e681..5e95d4c05203faaa7582a952d2441613a77f9fa5 100644
+--- a/internal/components/main_window.go
++++ b/internal/components/main_window.go
+@@ -44,6 +44,7 @@ 	settings              *gio.Settings
+ 	log                   *slog.Logger
+ 	totalSec              int
+ 	running               bool
++	alarming              bool
+ 	remain                time.Duration
+ 	timer                 uint32
+ 	dragging              bool
+@@ -136,9 +137,13 @@ 	}
+ }
+ 
+ func (w *MainWindow) StartAlarmPlayback() {
++	w.alarming = true
+ 	w.alarmClockElapsedFile.Seek(0)
+ 	w.alarmClockElapsedFile.Play()
+ 
++	w.label.Announce(L("Session Finished"), gtk.AccessibleAnnouncementPriorityHighValue)
++
++	w.startFlash()
+ 	w.releaseApp()
+ }
+ 
+@@ -147,36 +152,73 @@ 	w.alarmClockElapsedFile.SetPlaying(false)
+ 	w.alarmClockElapsedFile.Seek(0)
+ 
+ 	w.app.WithdrawNotification(notificationIdVar)
++
++	if w.alarming {
++		w.stopAlarming()
++	}
++}
++
++func (w *MainWindow) stopAlarming() {
++	w.alarming = false
++	w.running = false
++	w.stopFlash()
++
++	w.UpdateButtons()
++	w.UpdateDial()
++
++	w.releaseApp()
++}
++
++func (w *MainWindow) startFlash() {
++	w.label.AddCssClass("dial__display--alarming")
++}
++
++func (w *MainWindow) stopFlash() {
++	w.label.RemoveCssClass("dial__display--alarming")
+ }
+ 
+ func (w *MainWindow) UpdateButtons() {
+-	if w.running {
++	if w.alarming {
+ 		w.actionButton.SetIconName("media-playback-stop-symbolic")
+ 		w.actionButton.SetLabel(L("_Stop"))
+ 		w.actionButton.RemoveCssClass("suggested-action")
+ 		w.actionButton.AddCssClass("destructive-action")
++
++		w.plusButton.SetSensitive(false)
++		w.minusButton.SetSensitive(false)
++	} else if w.running {
++		w.actionButton.SetIconName("media-playback-stop-symbolic")
++		w.actionButton.SetLabel(L("_Stop"))
++		w.actionButton.RemoveCssClass("suggested-action")
++		w.actionButton.AddCssClass("destructive-action")
++
++		w.plusButton.SetSensitive(w.totalSec < maxDialValue)
++		w.minusButton.SetSensitive(w.totalSec > minDialValue)
+ 	} else {
+ 		w.actionButton.SetIconName("media-playback-start-symbolic")
+ 		w.actionButton.SetLabel(L("_Start Timer"))
+ 		w.actionButton.RemoveCssClass("destructive-action")
+ 		w.actionButton.AddCssClass("suggested-action")
+-	}
+ 
+-	w.plusButton.SetSensitive(w.totalSec < maxDialValue)
+-	w.minusButton.SetSensitive(w.totalSec > minDialValue)
++		w.plusButton.SetSensitive(w.totalSec < maxDialValue)
++		w.minusButton.SetSensitive(w.totalSec > minDialValue)
++	}
+ }
+ 
+ func (w *MainWindow) UpdateDial() {
+ 	var m, s int
+-	if w.running {
++	if w.alarming {
++		m, s = 0, 0
++		w.dialWidget.SetTimer(w.totalSec, true, 0)
++	} else if w.running {
+ 		m, s = int(w.remain.Minutes()), int(w.remain.Seconds())%60
++		w.dialWidget.SetTimer(w.totalSec, w.running, w.remain)
+ 	} else {
+ 		m, s = w.totalSec/60, w.totalSec%60
++		w.dialWidget.SetTimer(w.totalSec, w.running, w.remain)
+ 	}
+ 
+ 	w.label.SetText(fmt.Sprintf("%02d:%02d", m, s))
+-
+-	w.dialWidget.SetTimer(w.totalSec, w.running, w.remain)
+ }
+ 
+ func (w *MainWindow) createSessionFinishedHandler() glib.SourceFunc {
+@@ -195,10 +237,10 @@ 				glib.SourceRemove(w.timer)
+ 				w.timer = 0
+ 			}
+ 
++			w.StartAlarmPlayback()
++
+ 			w.UpdateButtons()
+ 			w.UpdateDial()
+-
+-			w.StartAlarmPlayback()
+ 
+ 			n := gio.NewNotification(L("Session Finished"))
+ 			n.SetBody(L("Time to take a break"))
+@@ -252,6 +294,10 @@ 	}
+ }
+ 
+ func (w *MainWindow) handleDialing(x, y float64) {
++	if w.alarming {
++		return
++	}
++
+ 	if w.running && !w.dragging {
+ 		w.paused = true
+ 		if w.timer > 0 {
+@@ -291,6 +337,10 @@
+ func (w *MainWindow) setupDialGestures() {
+ 	drag := gtk.NewGestureDrag()
+ 	onDragBegin := func(_ gtk.GestureDrag, x float64, y float64) {
++		if w.alarming {
++			return
++		}
++
+ 		w.dragging = true
+ 		w.handleDialing(x, y)
+ 	}
+@@ -306,6 +356,10 @@ 	drag.ConnectDragUpdate(&onDragUpdate)
+ 	onDragEnd := func(_ gtk.GestureDrag, dx float64, dy float64) {
+ 		w.dragging = false
+ 
++		if w.alarming {
++			return
++		}
++
+ 		if w.paused {
+ 			w.paused = false
+ 			w.resumeTimer()
+@@ -317,6 +371,10 @@ 	drag.ConnectDragEnd(&onDragEnd)
+ 
+ 	click := gtk.NewGestureClick()
+ 	onPress := func(_ gtk.GestureClick, _ int32, x float64, y float64) {
++		if w.alarming {
++			return
++		}
++
+ 		w.handleDialing(x, y)
+ 	}
+ 	click.ConnectPressed(&onPress)
+@@ -326,7 +384,10 @@ 	w.dialWidget.Widget.AddController(&click.Gesture.EventController)
+ }
+ 
+ func (w *MainWindow) ToggleTimer() {
+-	if w.running {
++	if w.alarming {
++		w.stopAlarming()
++		w.StopAlarmPlayback()
++	} else if w.running {
+ 		w.StopTimer()
+ 	} else if w.totalSec > 0 {
+ 		w.StartTimer()
+@@ -334,6 +395,10 @@ 	}
+ }
+ 
+ func (w *MainWindow) AddTime() {
++	if w.alarming {
++		return
++	}
++
+ 	if w.totalSec < maxDialValue {
+ 		w.totalSec += minDialValue
+ 		if w.running {
+@@ -347,6 +412,10 @@ 	}
+ }
+ 
+ func (w *MainWindow) RemoveTime() {
++	if w.alarming {
++		return
++	}
++
+ 	if w.totalSec > minDialValue {
+ 		w.totalSec -= minDialValue
+ 		if w.running {
+
