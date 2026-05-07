@@ -1,0 +1,104 @@
+From 9c108692a0b2d94ddeed7f5fde0831e46b43898b Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Wed, 06 May 2026 22:24:50 -0700
+Subject: [PATCH] feat: Allow transitioning from counting down state to alarming state
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/cmd/sessions-fsm/main.go b/cmd/sessions-fsm/main.go
+index c03c668d663497d29feba23e22e7f173eb0a5609..c44e054ea6a5359be5e3ad07fe3fab55b80b197a 100644
+--- a/cmd/sessions-fsm/main.go
++++ b/cmd/sessions-fsm/main.go
+@@ -29,6 +29,8 @@ 	triggerStopDragging  trigger = "stopDragging"
+ 
+ 	triggerStartTimer trigger = "startTimer"
+ 	triggerStopTimer  trigger = "stopTimer"
++
++	triggerTimerFinished trigger = "timerFinished"
+ )
+ 
+ const (
+@@ -78,6 +80,8 @@ 		OnEntryFrom(triggerMinusTimer, s.decreaseRemainingTime)
+ 
+ 	s.machine.Configure(stateCountingDown).Permit(triggerStopTimer, stateStopped)
+ 	s.machine.Configure(stateStopped).Permit(triggerStartTimer, stateCountingDown)
++
++	s.machine.Configure(stateCountingDown).Permit(triggerTimerFinished, stateAlarming)
+ 
+ 	return s
+ }
+@@ -147,6 +151,10 @@ func (s *stateMachine) StartTimer(ctx context.Context) error {
+ 	return s.machine.FireCtx(ctx, triggerStartTimer)
+ }
+ 
++func (s *stateMachine) timerFinished(ctx context.Context) error {
++	return s.machine.FireCtx(ctx, triggerTimerFinished)
++}
++
+ func main() {
+ 	ctx, cancel := context.WithCancel(context.Background())
+ 	defer cancel()
+@@ -200,6 +208,10 @@ 		panic(err)
+ 	}
+ 
+ 	if err := s.StartTimer(ctx); err != nil {
++		panic(err)
++	}
++
++	if err := s.timerFinished(ctx); err != nil {
+ 		panic(err)
+ 	}
+ }
+diff --git a/cmd/sessions-fsm/main_test.go b/cmd/sessions-fsm/main_test.go
+index 3bb6a41be29a58918a34186cb487c61589e3700e..d040abe2e16a9ef88c0c08f5bf67b635aacc9dee 100644
+--- a/cmd/sessions-fsm/main_test.go
++++ b/cmd/sessions-fsm/main_test.go
+@@ -306,3 +306,47 @@ 			},
+ 		)
+ 	}
+ }
++
++func TestTimerFinished(t *testing.T) {
++	var alarmingTests = []struct {
++		name      string
++		prepare   func(*stateMachine) error
++		expectErr bool
++	}{
++		{
++			name: "can transition from counting down state to alarming state",
++			prepare: func(sm *stateMachine) error {
++				if err := sm.StartDragging(t.Context()); err != nil {
++					return err
++				}
++
++				return sm.StopDragging(t.Context(), initialRemainingTime)
++			},
++			expectErr: false,
++		},
++		{
++			name: "can not transition from dragging state to alarming state",
++			prepare: func(sm *stateMachine) error {
++				return sm.StartDragging(t.Context())
++			},
++			expectErr: true,
++		},
++	}
++	for _, tt := range alarmingTests {
++		t.Run(
++			tt.name,
++			func(t *testing.T) {
++				s := newStateMachine(0)
++
++				require.NoError(t, tt.prepare(s))
++
++				err := s.timerFinished(t.Context())
++				if tt.expectErr {
++					require.Error(t, err)
++				} else {
++					require.NoError(t, err)
++				}
++			},
++		)
++	}
++}
+
