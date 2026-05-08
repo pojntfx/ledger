@@ -1,0 +1,50 @@
+From 44b44190870daee068643576450804f35e31e840 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Fri, 08 May 2026 13:36:28 -0700
+Subject: [PATCH] feat: Add support for cancelling the ticker without cancelling the parent context
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/cmd/sessions-fsm/main.go b/cmd/sessions-fsm/main.go
+index 3bcb2096341f9d37e435ca664bffd9faa10a8b98..7f551fac42e4b11283e74611f8cb45c9faea7a4e 100644
+--- a/cmd/sessions-fsm/main.go
++++ b/cmd/sessions-fsm/main.go
+@@ -64,8 +64,9 @@ 	ctx   context.Context
+ 	log   *slog.Logger
+ 	hooks *hooks
+ 
+-	machine *stateless.StateMachine
+-	ticker  *time.Ticker
++	machine         *stateless.StateMachine
++	ticker          *time.Ticker
++	cancelTickerCtx context.CancelFunc
+ }
+ 
+ func newStateMachine(
+@@ -208,14 +209,14 @@ 	}
+ 
+ 	s.currentRemainingTime = s.initialRemainingTime
+ 	s.ticker = time.NewTicker(tickerInterval)
++	tickerCtx, cancelTickerCtx := context.WithCancel(s.ctx)
++	s.cancelTickerCtx = cancelTickerCtx
+ 
+ 	go func() {
+ 		for {
+ 			select {
+-			case <-s.ctx.Done():
++			case <-tickerCtx.Done(): // tickerCtx derives from s.ctx so this catches both
+ 				return
+-
+-			// TODO: Don't leak this goroutine by closing a goroutine or cancelling a context when the ticker has finished (see https://gobyexample.com/tickers)
+ 
+ 			case <-s.ticker.C:
+ 				s.currentRemainingTime -= tickerInterval
+@@ -252,6 +253,7 @@ 		return err
+ 	}
+ 
+ 	s.ticker.Stop()
++	s.cancelTickerCtx()
+ 
+ 	s.log.InfoContext(ctx, "Calling onAfterStoppingTimer hook")
+ 	if err := s.hooks.onAfterStoppingTimer(ctx); err != nil {
+
