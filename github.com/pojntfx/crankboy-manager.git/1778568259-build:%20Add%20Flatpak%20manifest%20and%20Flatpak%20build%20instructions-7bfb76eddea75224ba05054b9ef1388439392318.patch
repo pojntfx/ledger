@@ -1,0 +1,155 @@
+From 7bfb76eddea75224ba05054b9ef1388439392318 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Mon, 11 May 2026 23:44:19 -0700
+Subject: [PATCH] build: Add Flatpak manifest and Flatpak build instructions
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/.gitignore b/.gitignore
+index 73ff7d68d995b8add0220ad91a495e28069feff0..2eaa6342f86b3792185393cda6d6e54cd067df4a 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -6,7 +6,8 @@ # Thumbnails
+ ._*
+ 
+ # Custom folder icons
+-Icon
++Icon
++
+ 
+ # Volume root files
+ .DocumentRevisions-V100
+@@ -91,10 +92,10 @@ .coverage
+ .coverage.*
+ .pytest_cache/
+ 
+-# Type checkers
+-.mypy_cache/
+-
+-# Generated version module (created at build time)
++# Type checkers
++.mypy_cache/
++
++# Generated version module (created at build time)
+ src/_version_built.py
+ 
+ # Jupyter Notebook
+@@ -103,3 +104,8 @@
+ # pyenv
+ # .python-version
+ *.spec
++
++# Flatpak
++.flatpak-builder
++builddir
++repo
+diff --git a/README.md b/README.md
+index 90ecaff80bcb347bdbd10dd43f3a57f2e17dc42e..f91bd172abe5a352977c9132a74ac71174a8ade4 100644
+--- a/README.md
++++ b/README.md
+@@ -99,6 +99,16 @@ chmod +x build.sh
+ ./build.sh
+ ```
+ 
++#### Linux (Flatpak)
++
++```bash
++flatpak_pip_generator --requirements-file=requirements-flatpak.txt
++flatpak run --command=flathub-build org.flatpak.Builder --install io.github.crankboyhq.crankboy-manager.json
++flatpak run --command=flatpak-builder-lint org.flatpak.Builder manifest io.github.crankboyhq.crankboy-manager.json
++flatpak run --command=flatpak-builder-lint org.flatpak.Builder repo repo
++flatpak run io.github.crankboyhq.crankboy-manager
++```
++
+ ### Advanced Build Options
+ 
+ #### Python Build Script
+diff --git a/io.github.crankboyhq.crankboy-manager.json b/io.github.crankboyhq.crankboy-manager.json
+new file mode 100644
+index 0000000000000000000000000000000000000000..347c787aa2ad052563bfd94b2e880aa898303f66
+--- /dev/null
++++ b/io.github.crankboyhq.crankboy-manager.json
+@@ -0,0 +1,32 @@
++{
++  "id": "io.github.crankboyhq.crankboy-manager",
++  "runtime": "org.kde.Platform",
++  "runtime-version": "6.10",
++  "sdk": "org.kde.Sdk",
++  "base": "com.riverbankcomputing.PyQt.BaseApp",
++  "base-version": "6.10",
++  "cleanup-commands": ["/app/cleanup-BaseApp.sh"],
++  "command": "crankboy-manager",
++  "finish-args": [
++    "--socket=wayland",
++    "--socket=fallback-x11",
++    "--share=ipc",
++    "--device=dri",
++    "--share=network",
++    "--device=all"
++  ],
++  "build-options": {
++    "env": ["BASEAPP_REMOVE_WEBENGINE=1"]
++  },
++  "modules": [
++    "python3-requirements-flatpak.json",
++    {
++      "name": "crankboy-manager",
++      "buildsystem": "simple",
++      "build-commands": [
++        "python3 build.py --flatpak"
++      ],
++      "sources": [{ "type": "dir", "path": "." }]
++    }
++  ]
++}
+diff --git a/python3-requirements-flatpak.json b/python3-requirements-flatpak.json
+new file mode 100644
+index 0000000000000000000000000000000000000000..f2e77f05cd39281e508c547011a5b9e34b03b636
+--- /dev/null
++++ b/python3-requirements-flatpak.json
+@@ -0,0 +1,35 @@
++{
++    "name": "python3-requirements-flatpak",
++    "buildsystem": "simple",
++    "build-commands": [],
++    "modules": [
++        {
++            "name": "python3-pyserial",
++            "buildsystem": "simple",
++            "build-commands": [
++                "pip3 install --verbose --exists-action=i --no-index --find-links=\"file://${PWD}\" --prefix=${FLATPAK_DEST} \"pyserial>=3.5\" --no-build-isolation"
++            ],
++            "sources": [
++                {
++                    "type": "file",
++                    "url": "https://files.pythonhosted.org/packages/07/bc/587a445451b253b285629263eb51c2d8e9bcea4fc97826266d186f96f558/pyserial-3.5-py2.py3-none-any.whl",
++                    "sha256": "c4451db6ba391ca6ca299fb3ec7bae67a5c55dde170964c7a14ceefec02f2cf0"
++                }
++            ]
++        },
++        {
++            "name": "python3-certifi",
++            "buildsystem": "simple",
++            "build-commands": [
++                "pip3 install --verbose --exists-action=i --no-index --find-links=\"file://${PWD}\" --prefix=${FLATPAK_DEST} \"certifi>=2024.2.2\" --no-build-isolation"
++            ],
++            "sources": [
++                {
++                    "type": "file",
++                    "url": "https://files.pythonhosted.org/packages/22/30/7cd8fdcdfbc5b869528b079bfb76dcdf6056b1a2097a662e5e8c04f42965/certifi-2026.4.22-py3-none-any.whl",
++                    "sha256": "3cb2210c8f88ba2318d29b0388d1023c8492ff72ecdde4ebdaddbb13a31b1c4a"
++                }
++            ]
++        }
++    ]
++}
+diff --git a/requirements-flatpak.txt b/requirements-flatpak.txt
+new file mode 100644
+index 0000000000000000000000000000000000000000..71610b2fc4f64b291d0610359cb6fd672799be8f
+--- /dev/null
++++ b/requirements-flatpak.txt
+@@ -0,0 +1,2 @@
++pyserial>=3.5
++certifi>=2024.2.2
+\ No newline at end of file
+
