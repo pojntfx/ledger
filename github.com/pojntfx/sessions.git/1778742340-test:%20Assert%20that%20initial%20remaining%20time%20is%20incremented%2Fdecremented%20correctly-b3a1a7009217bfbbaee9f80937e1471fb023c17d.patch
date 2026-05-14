@@ -1,0 +1,52 @@
+From b3a1a7009217bfbbaee9f80937e1471fb023c17d Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Thu, 14 May 2026 00:05:40 -0700
+Subject: [PATCH] test: Assert that initial remaining time is incremented/decremented correctly
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/cmd/sessions-fsm/main_test.go b/cmd/sessions-fsm/main_test.go
+index 416d80998d3b39b4a7b1668e7761878ce206f00d..ba428d16d2de868cd6663625b4b5f163c9054d60 100644
+--- a/cmd/sessions-fsm/main_test.go
++++ b/cmd/sessions-fsm/main_test.go
+@@ -66,14 +66,19 @@ 						require.NoError(t, s.StartDragging(t.Context()))
+ 						require.NoError(t, s.StopDragging(t.Context(), tt.initial))
+ 					}
+ 
++					expectedInitialRemainingTime := tt.initial
+ 					for i := range tt.plusTimes {
+ 						err := s.PlusTimer(t.Context())
+ 						if i == tt.expectErrAt {
+ 							require.Error(t, err)
+ 						} else {
+ 							require.NoError(t, err)
++
++							expectedInitialRemainingTime += remainingTimerAdjustmentInterval
+ 						}
+ 					}
++
++					require.Equal(t, expectedInitialRemainingTime, s.initialRemainingTime)
+ 				},
+ 			)
+ 		}
+@@ -130,14 +135,19 @@ 						require.NoError(t, s.StartDragging(t.Context()))
+ 						require.NoError(t, s.StopDragging(t.Context(), tt.initial))
+ 					}
+ 
++					expectedInitialRemainingTime := tt.initial
+ 					for i := range tt.minusTimes {
+ 						err := s.MinusTimer(t.Context())
+ 						if i == tt.expectErrAt {
+ 							require.Error(t, err)
+ 						} else {
+ 							require.NoError(t, err)
++
++							expectedInitialRemainingTime -= remainingTimerAdjustmentInterval
+ 						}
+ 					}
++
++					require.Equal(t, expectedInitialRemainingTime, s.initialRemainingTime)
+ 				},
+ 			)
+ 		}
+
