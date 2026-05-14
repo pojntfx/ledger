@@ -1,0 +1,30 @@
+From ee6c453b0998366353c463a35b00826277834afd Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Thu, 14 May 2026 01:26:08 -0700
+Subject: [PATCH] feat: Call `stopTimer` hook automatically when entering the alarming state
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/cmd/sessions-fsm/main.go b/cmd/sessions-fsm/main.go
+index 794126da38b1065a83ce7e45ad9b22ee49ee8fea..2adf0fa209bd50620e25384fc94dbdca954dde82 100644
+--- a/cmd/sessions-fsm/main.go
++++ b/cmd/sessions-fsm/main.go
+@@ -139,11 +139,15 @@ 	s.machine.Configure(stateAlarming).Permit(triggerStopAlarming, stateStopped)
+ 
+ 	// When we enter the counting down state, we start the timer
+ 	s.machine.Configure(stateCountingDown).OnEntry(s.startTimer)
+-	// When we enter the alarming state, we start the alarm
+-	s.machine.Configure(stateAlarming).OnEntry(s.startAlarm)
++	// When we enter the alarming state, we stop the timer and start the alarm
++	s.machine.Configure(stateAlarming).
++		OnEntry(s.stopTimer).
++		OnEntry(s.startAlarm)
+ 	// When we enter the stopped state, we stop the alarm or timer
+ 	s.machine.
+ 		Configure(stateStopped).
++		// This won't fire when entering from alarming state since the trigger there is
++		// triggerStopAlarming, not triggerStopTimer
+ 		OnEntryFrom(triggerStopTimer, s.stopTimer).
+ 		OnEntryFrom(triggerStopAlarming, s.stopAlarm)
+ 
+
