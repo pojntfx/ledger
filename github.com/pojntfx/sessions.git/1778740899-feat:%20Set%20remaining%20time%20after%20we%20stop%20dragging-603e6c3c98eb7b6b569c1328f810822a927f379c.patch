@@ -1,0 +1,68 @@
+From 603e6c3c98eb7b6b569c1328f810822a927f379c Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Wed, 13 May 2026 23:41:39 -0700
+Subject: [PATCH] feat: Set remaining time after we stop dragging
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/cmd/sessions-fsm/main.go b/cmd/sessions-fsm/main.go
+index 2ddfc6a02b1accd822eb8248578bf843985612e6..f6cecbe6e7b2adb83674f2b7ca58bcf7adcdd7da 100644
+--- a/cmd/sessions-fsm/main.go
++++ b/cmd/sessions-fsm/main.go
+@@ -116,7 +116,8 @@ 	// is, we set it
+ 	s.machine.SetTriggerParameters(triggerStopDragging, reflect.TypeFor[time.Duration]())
+ 	s.machine.
+ 		Configure(stateDragging).
+-		Permit(triggerStopDragging, stateCountingDown, s.validInitialRemainingTime)
++		Permit(triggerStopDragging, stateCountingDown, s.validInitialRemainingTime).
++		OnExitWith(triggerStopDragging, s.setInitialRemainingTime)
+ 
+ 	// From counting down state, we can start dragging as well
+ 	s.machine.Configure(stateCountingDown).Permit(triggerStartDragging, stateDragging)
+@@ -183,6 +184,14 @@ 		return false
+ 	}
+ 
+ 	return true
++}
++
++func (s *stateMachine) setInitialRemainingTime(ctx context.Context, args ...any) error {
++	newInitialRemainingTime := args[0].(time.Duration)
++
++	s.initialRemainingTime = newInitialRemainingTime
++
++	return nil
+ }
+ 
+ func (s *stateMachine) PlusTimer(ctx context.Context) error {
+diff --git a/cmd/sessions-fsm/main_test.go b/cmd/sessions-fsm/main_test.go
+index 9020e872e989b65edea8e50837359703907cab66..416d80998d3b39b4a7b1668e7761878ce206f00d 100644
+--- a/cmd/sessions-fsm/main_test.go
++++ b/cmd/sessions-fsm/main_test.go
+@@ -63,7 +63,7 @@ 					)
+ 
+ 					if fromCountingDown {
+ 						require.NoError(t, s.StartDragging(t.Context()))
+-						require.NoError(t, s.StopDragging(t.Context(), initialRemainingTime))
++						require.NoError(t, s.StopDragging(t.Context(), tt.initial))
+ 					}
+ 
+ 					for i := range tt.plusTimes {
+@@ -127,7 +127,7 @@ 					)
+ 
+ 					if fromCountingDown {
+ 						require.NoError(t, s.StartDragging(t.Context()))
+-						require.NoError(t, s.StopDragging(t.Context(), initialRemainingTime))
++						require.NoError(t, s.StopDragging(t.Context(), tt.initial))
+ 					}
+ 
+ 					for i := range tt.minusTimes {
+@@ -315,6 +315,8 @@ 				if tt.expectErr {
+ 					require.Error(t, err)
+ 				} else {
+ 					require.NoError(t, err)
++
++					require.Equal(t, tt.remainingTime, s.initialRemainingTime)
+ 				}
+ 
+ 				require.Equal(t, tt.onBeforeStartingTimerCalled, onBeforeStartingTimerCalled)
+
