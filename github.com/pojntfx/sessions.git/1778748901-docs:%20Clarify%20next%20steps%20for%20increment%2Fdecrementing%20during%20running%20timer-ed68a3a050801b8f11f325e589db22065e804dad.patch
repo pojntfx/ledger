@@ -1,0 +1,35 @@
+From ed68a3a050801b8f11f325e589db22065e804dad Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Thu, 14 May 2026 01:55:01 -0700
+Subject: [PATCH] docs: Clarify next steps for increment/decrementing during running timer
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/cmd/sessions-fsm/main.go b/cmd/sessions-fsm/main.go
+index 2adf0fa209bd50620e25384fc94dbdca954dde82..4f658ca801634feccdcad4d5c37223ab7a6ba419 100644
+--- a/cmd/sessions-fsm/main.go
++++ b/cmd/sessions-fsm/main.go
+@@ -55,7 +55,7 @@ 	onAfterStoppingTimer  func(ctx context.Context) error
+ 
+ 	onStartAlarm func(ctx context.Context) error
+ 
+-	onStopAlarm func(ctx context.Context) error
++	// onStopAlarm func(ctx context.Context) error
+ }
+ 
+ type stateMachine struct {
+@@ -108,8 +108,11 @@ 		Configure(stateCountingDown).
+ 		PermitReentry(triggerMinusTimer, s.mustBeAboveMinInitialRemainingTime).
+ 		OnEntryFrom(triggerMinusTimer, s.decreaseInitialRemainingTime)
+ 
+-	// TODO: We need to change the initial remaining time to the last current time (rounded to nearest multiple
+-	// of remainingTimerAdjustmentInterval) and then restart the timer
++	// TODO: When incrementing/decrementing from the counting down state, we need to round the current remaining
++	// time down to the nearest lower multiple of remainingTimerAdjustmentInterval, increment from there, set that as the
++	// new initial time (& maybe call the onInitialRemainingTimeChange hook? Might not be necessary, we will update the UI with the onCurrentRemainingTimeTick),
++	// stop the _internal_ timer (without calling the hooks/changing state), manually call onCurrentRemainingTimeTick to reflect the new position, and
++	// restart the _internal_ timer (without calling the hooks/changing state)
+ 
+ 	// From stopped state, we can start dragging
+ 	s.machine.Configure(stateStopped).Permit(triggerStartDragging, stateDragging)
+
