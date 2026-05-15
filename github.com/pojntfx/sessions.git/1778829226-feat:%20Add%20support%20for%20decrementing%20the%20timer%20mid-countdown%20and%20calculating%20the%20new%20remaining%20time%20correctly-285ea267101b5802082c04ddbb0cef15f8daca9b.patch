@@ -1,0 +1,57 @@
+From 285ea267101b5802082c04ddbb0cef15f8daca9b Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Fri, 15 May 2026 00:13:46 -0700
+Subject: [PATCH] feat: Add support for decrementing the timer mid-countdown and calculating the new remaining time correctly
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/cmd/sessions-fsm/main.go b/cmd/sessions-fsm/main.go
+index 8cc65fe73c0e9686529ae02ae44773ad3c1c571e..4eb5052c7a6f364823df7c680ec2b663737cb755 100644
+--- a/cmd/sessions-fsm/main.go
++++ b/cmd/sessions-fsm/main.go
+@@ -108,11 +108,11 @@ 		Configure(stateCountingDown).
+ 		PermitReentry(triggerPlusTimer, s.mustBeBelowMaxCurrentRemainingTime).
+ 		OnExitWith(triggerPlusTimer, s.stopTimerWithoutHooks).
+ 		OnEntryFrom(triggerPlusTimer, s.increaseInitialRemainingTimeFromCurrentRemainingTime)
+-	// TODO: Apply same smart increment/decrement logic as above to the minus timer triggers
+ 	s.machine.
+ 		Configure(stateCountingDown).
+-		PermitReentry(triggerMinusTimer, s.mustBeAboveMinInitialRemainingTime).
+-		OnEntryFrom(triggerMinusTimer, s.decreaseInitialRemainingTime)
++		PermitReentry(triggerMinusTimer, s.mustBeAboveMinCurrentRemainingTime).
++		OnExitWith(triggerMinusTimer, s.stopTimerWithoutHooks).
++		OnEntryFrom(triggerMinusTimer, s.decreaseInitialRemainingTimeFromCurrentRemainingTime)
+ 
+ 	// From stopped state, we can start dragging
+ 	s.machine.Configure(stateStopped).Permit(triggerStartDragging, stateDragging)
+@@ -261,6 +261,29 @@
+ func (s *stateMachine) mustBeBelowMaxCurrentRemainingTime(ctx context.Context, args ...any) bool {
+ 	newInitialRemainingTime := getInitialRemainingTimeFromCurrentRemainingTime(s.currentRemainingTime, 1)
+ 	if newInitialRemainingTime > maxRemainingTime {
++		return false
++	}
++
++	return true
++}
++
++func (s *stateMachine) decreaseInitialRemainingTimeFromCurrentRemainingTime(ctx context.Context, args ...any) error {
++	s.initialRemainingTime = getInitialRemainingTimeFromCurrentRemainingTime(s.currentRemainingTime, -1)
++
++	s.log.InfoContext(
++		s.ctx, "Calling onInitialRemainingTimeChange hook",
++		"initialRemainingTime", s.initialRemainingTime,
++	)
++	if err := s.hooks.onInitialRemainingTimeChange(ctx, s.initialRemainingTime); err != nil {
++		return err
++	}
++
++	return nil
++}
++
++func (s *stateMachine) mustBeAboveMinCurrentRemainingTime(ctx context.Context, args ...any) bool {
++	newInitialRemainingTime := getInitialRemainingTimeFromCurrentRemainingTime(s.currentRemainingTime, -1)
++	if newInitialRemainingTime < minRemainingTime {
+ 		return false
+ 	}
+ 
+
