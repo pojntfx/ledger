@@ -1,0 +1,180 @@
+From 7ccb8f640b3b9c12f249c0f5327c936a0c1c59bb Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Thu, 14 May 2026 23:48:47 -0700
+Subject: [PATCH] feat: Add support for incrementing the timer mid-countdown and calculating the new remaining time correctly
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/cmd/sessions-fsm/main.go b/cmd/sessions-fsm/main.go
+index bd7bd680a3a08d2292a24996cb013a4552508d00..8cc65fe73c0e9686529ae02ae44773ad3c1c571e 100644
+--- a/cmd/sessions-fsm/main.go
++++ b/cmd/sessions-fsm/main.go
+@@ -4,6 +4,7 @@ import (
+ 	"context"
+ 	"fmt"
+ 	"log/slog"
++	"math"
+ 	"reflect"
+ 	"time"
+ 
+@@ -99,21 +100,19 @@ 		PermitReentry(triggerMinusTimer, s.mustBeAboveMinInitialRemainingTime).
+ 		OnEntryFrom(triggerMinusTimer, s.decreaseInitialRemainingTime)
+ 
+ 	// From counting down state, we can also increment and decrement the initial remaining
+-	// time, same as for the stopped state
++	// time, same as for the stopped state. When we increment while in counting down state, we
++	// stop the timer first; it will be restarted automatically again once we transition back into
++	// the counting down state with the new value
+ 	s.machine.
+ 		Configure(stateCountingDown).
+-		PermitReentry(triggerPlusTimer, s.mustBeBelowMaxInitialRemainingTime).
+-		OnEntryFrom(triggerPlusTimer, s.increaseInitialRemainingTime)
++		PermitReentry(triggerPlusTimer, s.mustBeBelowMaxCurrentRemainingTime).
++		OnExitWith(triggerPlusTimer, s.stopTimerWithoutHooks).
++		OnEntryFrom(triggerPlusTimer, s.increaseInitialRemainingTimeFromCurrentRemainingTime)
++	// TODO: Apply same smart increment/decrement logic as above to the minus timer triggers
+ 	s.machine.
+ 		Configure(stateCountingDown).
+ 		PermitReentry(triggerMinusTimer, s.mustBeAboveMinInitialRemainingTime).
+ 		OnEntryFrom(triggerMinusTimer, s.decreaseInitialRemainingTime)
+-
+-	// TODO: When incrementing/decrementing from the counting down state, we need to round the current remaining
+-	// time down to the nearest lower multiple of remainingTimerAdjustmentInterval, increment from there, set that as the
+-	// new initial time (& maybe call the onInitialRemainingTimeChange hook? Might not be necessary, we will update the UI with the onCurrentRemainingTimeTick),
+-	// stop the _internal_ timer (without calling the hooks/changing state), manually call onCurrentRemainingTimeTick to reflect the new position. We do not
+-	// need to manually re-start the internal timer, that should automatically happen when entering stateCountingDown already
+ 
+ 	// From stopped state, we can start dragging
+ 	s.machine.Configure(stateStopped).Permit(triggerStartDragging, stateDragging)
+@@ -233,6 +232,39 @@ 		return err
+ 	}
+ 
+ 	return nil
++}
++
++func getInitialRemainingTimeFromCurrentRemainingTime(currentRemainingTime time.Duration, intervalsToAdd int) time.Duration {
++	intervals := time.Duration(
++		math.Round(
++			float64(currentRemainingTime)/float64(remainingTimerAdjustmentInterval),
++		) + float64(intervalsToAdd),
++	)
++
++	return intervals * remainingTimerAdjustmentInterval
++}
++
++func (s *stateMachine) increaseInitialRemainingTimeFromCurrentRemainingTime(ctx context.Context, args ...any) error {
++	s.initialRemainingTime = getInitialRemainingTimeFromCurrentRemainingTime(s.currentRemainingTime, 1)
++
++	s.log.InfoContext(
++		s.ctx, "Calling onInitialRemainingTimeChange hook",
++		"initialRemainingTime", s.initialRemainingTime,
++	)
++	if err := s.hooks.onInitialRemainingTimeChange(ctx, s.initialRemainingTime); err != nil {
++		return err
++	}
++
++	return nil
++}
++
++func (s *stateMachine) mustBeBelowMaxCurrentRemainingTime(ctx context.Context, args ...any) bool {
++	newInitialRemainingTime := getInitialRemainingTimeFromCurrentRemainingTime(s.currentRemainingTime, 1)
++	if newInitialRemainingTime > maxRemainingTime {
++		return false
++	}
++
++	return true
+ }
+ 
+ func (s *stateMachine) PlusTimer(ctx context.Context) error {
+diff --git a/cmd/sessions-fsm/main_test.go b/cmd/sessions-fsm/main_test.go
+index 62609aa6ac78952627b6eaf3027dc13c1305ffc1..faa92463377dadd4dacdab6dc0ace150975c66ee 100644
+--- a/cmd/sessions-fsm/main_test.go
++++ b/cmd/sessions-fsm/main_test.go
+@@ -70,6 +70,10 @@
+ 					if fromCountingDown {
+ 						require.NoError(t, s.StartDragging(t.Context()))
+ 						require.NoError(t, s.StopDragging(t.Context(), tt.initial))
++
++						// After we stop dragging, the internal timer starts ticking, but since we
++						// only assert the initial remaining time and assert whether the timer starts running
++						// in TestEndToEnd, not here, this test does not have a race
+ 					}
+ 
+ 					expectedInitialRemainingTime := tt.initial
+@@ -145,6 +149,10 @@
+ 					if fromCountingDown {
+ 						require.NoError(t, s.StartDragging(t.Context()))
+ 						require.NoError(t, s.StopDragging(t.Context(), tt.initial))
++
++						// After we stop dragging, the internal timer starts ticking, but since we
++						// only assert the initial remaining time and assert whether the timer starts running
++						// in TestEndToEnd, not here, this test does not have a race
+ 					}
+ 
+ 					expectedInitialRemainingTime := tt.initial
+@@ -899,3 +907,64 @@ 			},
+ 		)
+ 	}
+ }
++
++func TestGetInitialRemainingTimeFromCurrentRemainingTime(t *testing.T) {
++	var getRemainingTimeTests = []struct {
++		name                 string
++		currentRemainingTime time.Duration
++		intervalsToAdd       int
++		newRemainingTime     time.Duration
++	}{
++		{
++			name:                 "0s plus 1 interval results in 30s",
++			currentRemainingTime: 0,
++			intervalsToAdd:       1,
++			newRemainingTime:     remainingTimerAdjustmentInterval,
++		},
++		{
++			name:                 "0s plus 2 intervals results in 60s",
++			currentRemainingTime: 0,
++			intervalsToAdd:       2,
++			newRemainingTime:     remainingTimerAdjustmentInterval * 2,
++		},
++		{
++			name:                 "5s plus 2 intervals results in 60s",
++			currentRemainingTime: time.Second * 5,
++			intervalsToAdd:       2,
++			newRemainingTime:     remainingTimerAdjustmentInterval * 2,
++		},
++		{
++			name:                 "14s plus 2 intervals results in 60s",
++			currentRemainingTime: time.Second * 14,
++			intervalsToAdd:       2,
++			newRemainingTime:     remainingTimerAdjustmentInterval * 2,
++		},
++		{
++			name:                 "15s plus 2 intervals results in 90s",
++			currentRemainingTime: time.Second * 15,
++			intervalsToAdd:       2,
++			newRemainingTime:     remainingTimerAdjustmentInterval * 3,
++		},
++		{
++			name:                 "30s plus 2 intervals results in 90s",
++			currentRemainingTime: remainingTimerAdjustmentInterval,
++			intervalsToAdd:       2,
++			newRemainingTime:     remainingTimerAdjustmentInterval * 3,
++		},
++	}
++	for _, tt := range getRemainingTimeTests {
++		t.Run(
++			tt.name,
++			func(t *testing.T) {
++				require.Equal(
++					t,
++					tt.newRemainingTime,
++					getInitialRemainingTimeFromCurrentRemainingTime(
++						tt.currentRemainingTime,
++						tt.intervalsToAdd,
++					),
++				)
++			},
++		)
++	}
++}
+
