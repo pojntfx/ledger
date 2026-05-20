@@ -1,0 +1,653 @@
+From c898138a6d315bbc1958f291af03ae226efb1baf Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Tue, 19 May 2026 23:53:37 -0700
+Subject: [PATCH] docs: Delete outdated pads
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/docs/obsolete/pads/hackfest-fosdem-2026.md b/docs/obsolete/pads/hackfest-fosdem-2026.md
+deleted file mode 100644
+index 785fe45772740ced2f61da9af055b0f15e77fe4b..0000000000000000000000000000000000000000
+--- a/docs/obsolete/pads/hackfest-fosdem-2026.md
++++ /dev/null
+@@ -1,193 +0,0 @@
+-GNOME OS Hackfest FOSDEM 2026
+-===
+-
+-Dates: Jan 28th - Jan 30th
+-Note: On 28th its from eveningish onwards.
+-
+-Location: Rue du Lombard 47 Lombard 3, Bruxelles, Bruxelles 1000, Belgium
+-
+-### Attendees:
+-* Sriram Ramkrishna
+-* Jordan Petridis (remote)
+-* Abderrahim Kitouni
+-* Ignacy Kuchciński
+-* Julian Sparber (conflict with Board hackfest)
+-* Tobias Bernard
+-* Adrian Vovk
+-* Ada Magicat (remote)
+-* Javier Jardon
+-* Lennart Poettering
+-
+-## Agenda/Outcomes:
+-* Figure out migration paths for /etc updates
+-* GNOME OS 50
+-    * homed (most likely)
+-    * what's the /etc merge plan
+-    * What are the blockers for stable gnomeos
+-        * Definition of 'stable' - arch set in stone, no data loss, users should not have to re-install the OS once it reaches stable.
+-        * homed migration
+-        * /etc merge (wait for jordan)
+-        * stable branch upgrades/switch
+-        * ~~installer / initial setup~~ Valentin does not believe that this should be a blocker
+-            * Discussion with lennart on sysext/ESP/re-part
+-    * stable branch upgrades/switch
+-    * Change the version number to be derivable from git?
+-    * Documentation/Quickstart (sri)
+-    * Extensions Q&A patterns (sri)
+-* test a branch built on CI using updatectl (ignapk)
+-* rewrite tooling for building OCI images (abderrahim)
+-* optimise build for sysexts (buildstream plugin?)
+-* properly integrate [fexwrap](https://codeberg.org/valpackett/fexwrap) with flatpak
+-* mkosi stuff?
+-* GNOME OS in mobile
+-* GNOME OS testing
+-* Documentation (website tooling, versioning, user friendliness, developer and user doc separation)
+-
+-## Notes:
+-
+-### Migration to /etc updates
+-
+-- Jordan's topic
+-
+-### Stable GNOME OS blockers
+-
+-- Two different things
+-    a) stable branches upgrade and switch (easier)
+-    b) everything we need for an end user stable OS (hard)
+-- Stable branches in sysupdate
+-    - Andy Holmes working on it on systemd STF
+-    - this is the only blocker for A
+-- homed
+-    - blocker for B, because migration
+-    - we want this by default for everyone
+-    - Abderrahim: homed with subvolumes short-term?
+-        - Adrian: not a fan, we should wait for the file system stuff
+-            - there's no way to migrate installations in the wild
+-            - if we declare it stable we can not ask people to reinstall
+-    - Jonas: can we do a reinstall on upgrade?
+-        - back up your data, apps, etc. and reinstall?
+-            - no, there's a lot more stuff
+-    - Adrian: theoretically we could migrate, as long as we delete bytes as we copy them over, but otherwise we're running into disk size constraints
+-        - needs to be done very carefully
+-    - Abderrahim: what about migrating from subvolume?
+-        - problem is there's no "send and destroy data at the source"
+-        - even then, this breaks when the power goes out
+-    - Adrian: homed has issues - resizing, multi-user, etc. don't work
+-    - OS Pool
+-        - the file system thing
+-        - needed 
+-        - btrfs on a sparse subvolume
+-        - os pool is the sparse volume underneath
+-        - Ada is working on this for STF
+-        - was coordinated with the file system people
+-        - need to change partitioning layout
+-        - Ada: issue with one of the ideas we had
+-            - need to look into scheduling/threading more
+-        - 2 ideas for implementing it
+-            - idea 1
+-                - sparse volume sends an event that some space was used up by someone else
+-                - there is a potential race associated with it
+-            - idea 2
+-                - file system asks to use some space, gets response
+-- homed timeline
+-    - if it takes 3 more years, we could message around this
+-        - for community members it's fine to say it's "Beta" / "Preview" for now
+-    - Adrian: "stable" means stable enough to give to OEMs
+-    - everyone would be on board with making a public release, as long as we say it's preview/beta and we explain that you need to reinstall
+-    - if we call it stable, we need to commit to it and support the configuration for a long time
+-    - can we just have a migration script?
+-        - hard, because we don't know how much free space there is, or how much we need
+-    - Abderrahim: supporting indefinitely is something we could consider for the subvolumes - can we just keep both forever?
+-        - Adrian: communication issue: we need to explain which one they're on, and why they're less secure
+-            - every claim we we make needs to be "if you installed before X date then..."
+-        - we could have a script/tool for experienced users, but there are a ton of edge cases
+-            - we need to take the user account, delete it, move it to a homed user, etc.
+-            - ask people to plug in an external drive to do it?
+-- UI stuff
+-    - New installer (includes new initial setup)?
+-        - probably a blocker, the temporary one is janky
+-        - Julian: simple version needs a few more months
+-            - Adrian: there are still pending discussions upstream in systemd
+-            - current version just uses repart directly
+-                - we need to do sysinstall
+-            - signed UKI?
+-            - can't do this with the ESP
+-            - background: Lennart implemented what we wanted already
+-                - sticking point is kernel install, how is that supposed to work?
+-                    - Lennart took kernel install and made a plugin that copies UKIs (??)
+-                    - there's an active discussion about how the plugin was implemented
+-                    - Adrian: there shouldn't be plugins in the first place
+-                    - Abderrahim: how is this gonna work if the installer is itself the final system?
+-                        - Adrian: works the same way, but repart will do the btrfs migration instead of copying the data
+-                            - no, currently we take the UKI from the installer ESP, not from the rootfs
+-                            - we don't know why you would do this with sysinstall
+-            - needs discussion with Lennart tomorrow
+-        - installer is blocked on the systemd sysinstall discussion...
+-            - we can't copy the ESP, we need to copy individual files
+-            - it's unsafe to ever overwrite an ESP - on some devices it bricks the firmware
+-        - Lennart wants to land sysinstall this cycle
+-        - Julian: please push Lennart to merge repart fixups
+-        - Valentin: is the intial setup stuff done?
+-            - no, only language is in there at the moment, nothing is done, everything is broken
+-    - Updates in Settings?
+-        - not a blocker
+-        - we want it, but Software works for now
+-- /etc merge
+-    - Adrian: it's complicated in systemd, the issue is that we need to set up a confext early, potenitally in initrd, so that we have a writeable etc, the issue is that it installs in /var
+-        - one of the maintainers has an installation when /var gets mounted on under boot for historical reasons,
+-        - Adrian talked to Lennart and reached a consensus to break that historical behaviour, and Lennart will be okay with merging
+-        - could convince Amutable to do it
+-        - Valentin: hack the /etc/overlayfs?
+-        - Adrian: confext takes /usr/share factory and /var and mounts them on top of each other
+-        - Adrian: one easy way is to run confext in initrd
+-        - Lennart proposed mounting /var in initrd
+-        - Valentin to open a PR for running confext early in initrd
+-
+-### fexwrap
+-
+-> A janky temporary setup to run x86_64 Flatpaks (namely Steam) with FEX-Emu on aarch64.
+-
+-- Adrian: flatpak needs to know that it needs to download 2 different runtimes, and mount, how?
+-  - Abderrahim: there is a script that exists - fexwrap https://codeberg.org/valpackett/fexwrap
+-  - fexwrap would need to be on the host system
+-  - it's a hack, but could have potential
+-  - from fexwrap's perspective the native runtime is the host
+-    - /app needs to be x86
+-    - /usr most would be arm
+-    - /usr/bin woudl be arm
+-    - libraries would need to be both
+-  - fex, thunk libraries, and the rest libs would be x86_64
+-  - https://github.com/FEX-Emu/FEX/tree/main/ThunkLibs
+-  - The extension could be:
+-    - libraries
+-    - fexwrap
+-    - script that replaces the libraries with thunks?
+-  - Flatpak would have to:
+-    - know you're downloading wrong architecture
+-    - use an extension then
+-    - the app would need to be invoked by fex
+-
+-### Test a branch built on CI using updatectl
+-
+-- Part of the artifacts could be a sysupade repo (or a snapshot), that could be used for a local update
+-
+-### mkosi
+-
+-- Move signing away from buildstream and rely on mkosi for that
+-
+-### Documentation
+-
+-- We have no reference documentation
+-- We should know our audience
+-- Ada: We should have a page up for people to read and collect feedback on what people have difficulty with
+-- Sri: buildstream is the tool most people are going to be less familiar with
+-    - idea: a showcase video
+-- buildstream documentation exists, but we should document the common commands we use
+-
+-## Actions:
+-- Adrian: Talk to Brauner about filesystem allocation bio
+-- Talk to Lennart about sysinstall's kernel-install
+-    - Adrian: Also talk to Lennart about Julian's repart fixups
+-- Adrian: Talk to Lennart to see if he'll do confext-in-initrd for us (because Amutable probably wants it too)
+-- Valentin: Open a PR for running confext early in initrd
+-- Someone: build FexEMU on Freedesktop SDK in BuildStream, using cross-compiler for thunk libs.
+\ No newline at end of file
+diff --git a/docs/obsolete/pads/os-bof-2023.md b/docs/obsolete/pads/os-bof-2023.md
+deleted file mode 100644
+index 83c15f0e03e448641d4d892dcd940c4e369d57fd..0000000000000000000000000000000000000000
+--- a/docs/obsolete/pads/os-bof-2023.md
++++ /dev/null
+@@ -1,144 +0,0 @@
+-# GNOME OS BoF - GUADEC 2023
+-
+-Presents:
+-- Abderrahim
+-- Javier
+-- Jordan
+-- Valentin
+-- Luna Jernberg
+-- Sonny Piers
+-- Julian Sparber
+-- Sam Thursfield
+-- Bartłomiej Piotrowski
+-
+-## Agenda / Notes
+-
+-* Faster testing with sysext
+-  * Problem : in GNOME OS you have immutable /usr; you want to hack on Shell, Mutter, etc. but you can't install into /usr. 
+-      * Ostree would let you add an overlay on top for testing. systemd-sysext does the same but better.
+-  * Jordan is writing a blogpost about that
+-  * Jordan will write docs/wiki page too
+-* Faster development with sysext :)
+-  * Buildstream + sysext + nspawn + ?
+-  * Focus on GNOME Shell use case first
+-      * Idea: use GNOME Builder to develop Shell extensions, by booting GNOME OS image inside Builder to test the extension
+-  * Accessibility team are excited about this as it solves some pain points they have
+-  * ACTION: Basically documentation
+-
+-
+-* CI testing with openQA at component level
+-  * Project must have access to Gitlab runners with KVM support - already solved
+-  * Non-core apps (install via Flatpak) and core components e.g. gnome-shell (install via sysext)
+-  * Component's sysext should be built against gnome-os container image in CI which means migrating whole CI to use gnome-os
+-      * Use ci-templates to build on top of gnome SDK container
+-          * gnome/citemplates not freedesktop/ci-templates
+-
+-* Testing and automatically promotion of VM images (and GNOME refs)
+-  * 1st step: add a 'publish' job that depends on test-s3-image to automatically publish after tests pass
+-      * https://gitlab.gnome.org/GNOME/gnome-build-meta/-/issues/701
+-  * pre-merge OpenQA testing: https://gitlab.gnome.org/GNOME/gnome-build-meta/-/issues/601
+-  * we were avoiding this because: by allowing any [Merge reuqest pipeline](https://docs.gitlab.com/ee/ci/pipelines/merge_request_pipelines.html) to push to s3, we would make the S3 private key accessible to all GNOME developers
+-      * Needs a merge request created to acces the secrets so maintainers will notice malicious ones
+-          * Jordan here, I lied, the secrets are only accessible on protected branches, not MRs
+-      * Bart says this is ok, GNOME developers can already push to any repo so the risk is the same
+-      * Alternative solutions:
+-          * S3 Keystore?
+-          * use a separate pipeline on a separate project to contain the s3 keys
+-              * GNOME developers can push to any Gitlab repo so this doesn't gain us anything, unless we can add extra restrictions to the 'privileged' project
+-
+-* Secure boot image
+-  * Where to deploy
+-    - S3 for now
+-    - Bart is ok with Valentin proposal
+-  * Key management
+-  * /etc files
+-  * sysupd
+-  * MR exists: https://gitlab.gnome.org/GNOME/gnome-build-meta/-/merge_requests/2220
+-    * ostree will still stay
+-    * We need migration plan in the future
+-
+-  * openqa, needs an UKI with `console=ttyS0 systemd.journald.forward_to_console=1`
+-      * https://gitlab.gnome.org/GNOME/openqa-tests/-/blob/master/tests/gnome_install.pm#L9
+-
+-
+-* Testing on hardware and testing mobile images
+-    * Plan for hardware testing: https://gitlab.gnome.org/GNOME/openqa-tests/-/issues/39 (AMD GPU Desktops + Laptops, Raspberry Pi, Pine64 ARM devices)
+-        * Who pays for hardware? Can Codethink donate some?
+-    * Mobile images: https://gitlab.gnome.org/GNOME/gnome-build-meta/-/issues/626
+-        * Start with a new openQA testsuite that changes virtual display size
+-        * postmarketOS are interested in testing on phone hardware (it's difficult); speak to Pablo
+-        * Finish oneplus6 port of GNOME OS?
+-
+-* Installing GNOME OS in Bart laptop
+-    * Already done! :-)
+-
+-* Quick overview of STF relevant topics GNOME OS
+-* #Deferred until next meeting
+-
+-* Boxes (if Felipe is present?)
+-  * Installer-less?
+-  * Support secure boot and swtpm? 
+-
+-## ACTIONS
+-- Jordan: Automate the updateof the gnome-build-meta refs
+-    - https://gitlab.gnome.org/GNOME/gnome-build-meta/-/merge_requests/1825
+-
+-### sysext:
+-  - Start for use only for development of system components
+-      - Jordan to write blog post / documentation about how to use sysext
+-    - Design / Document:
+-      - Developer workflow
+-      - "tester" workflow (specifically for mutter/gnome-shell)
+-    - Integration of this in gnome-builder?  
+-    - First target for this: gnome-shell/mutter. 
+-    - Maybe 2 modes:
+-      - Virtualization (in a VM)
+-      - Actual deployment (on real hardware)
+-        - Developer laptop itself
+-        - External target (mobile)
+-  - We then maybe we can use it to manage the complete OS updates
+-
+-### CI testing with openQA at component level
+-- We need runners with KVM
+-- Install app in GNOME OS:
+-  - sysext
+-  - flatpak
+-- CI template for components using a nighlty GNOME OS container?
+-  - update based on gnome releases? i.e. ci uses alpha tag, then beta tag, etc.
+-- CI templatest to use openQA in component level
+-- Again, target gnome-shell/mutter first
+-- ACTION: R-T will provide GNOMEOS contaner as part of the normal release process (alpha, rc, etc)
+-- Testing and automatically promotion of VM images (and GNOME refs)
+-  - ACTION: make the push happen after openQA
+-  - ACTION: pre-merge openQA tests: open ticket with Bart 
+-
+-### Secure boot image
+-- ACTION: merge Valentin branch
+-  - Valentin to update the MR to make the image pass openQA tests
+-- ACTION: homed integration
+-- ACTION: sysupdate integration with gnome-software
+-
+-### Testing on hardware and testing mobile images
+-- ACTION: Sonny to talk with KDE in Berlin
+-- ACTION: Codethink can host hardware
+-- ACTION: Sam to check QEMU config to run QEMU in phone format
+-
+-## Notes
+-
+-sysext
+-
+-immutable /usr
+-you want to work on system components
+-you can't install things striaght on the host 
+-ostree would allow you to write by mounting usr tree as an overlay and would allow you to write on that and test it
+-    * ostree admin unlock
+-    * not persist accross reboot
+-sysext does the same thing, more robust way where you just drop in a specific folder and with systemd-sysext merge, creates a new overlay and merge with system one
+-you can make it persist reboot and hack on daemons that start on the session
+-Javier asked what's the format, it can be anything; btrfs subvolume, disk image, tree of files, ...
+-buildstream generates whatever
+-GNOME Extensions testing?
+-
+-
+-
+-
+diff --git a/docs/obsolete/pads/os-bof-2025.md b/docs/obsolete/pads/os-bof-2025.md
+deleted file mode 100644
+index e69de29bb2d1d6434b8b29ae775ad8c2e48c5391..0000000000000000000000000000000000000000
+Binary files a/docs/obsolete/pads/os-bof-2025.md and /dev/null differ
+diff --git a/docs/obsolete/pads/release-bof-2023.md b/docs/obsolete/pads/release-bof-2023.md
+deleted file mode 100644
+index 97acfb23308e4f8e946a795a90a91991a2300201..0000000000000000000000000000000000000000
+--- a/docs/obsolete/pads/release-bof-2023.md
++++ /dev/null
+@@ -1,85 +0,0 @@
+-# Release Team BoF - GUADEC 2023
+-
+-https://meet.gnome.org/gua-sip-9zd-h3z
+-
+-Presents:
+-- ~~Abderrahim~~
+-- Javier
+-- Jeremy
+-- Jordan
+-- Matthias
+-- ~~Michael~~
+-- Luna (more a GNOME translator but interested in the release process)
+-- Cassidy (mostly for tech support)
+-
+-## Agenda / Notes
+-- For the curious, this is how GNOME releases are done atm: https://wiki.gnome.org/ReleasePlanning/MakingARelease 
+-  - cool will look at that when i have more time after GUADEC //luna
+-- Relocate the schedule from the wiki // Kill the wiki!
+-  - https://wiki.gnome.org/Schedule
+-  - https://wiki.gnome.org/FortyFive
+-  - JJ: Have a CI in the releng repo to generate page ?
+-  - Ask Michael as he is the schedule guy
+-  - Move releasing/mantainers guides into [Allan's proposed handbook](https://aday.pages.gitlab.gnome.org/gnome-handbook/)
+-  - Find out whatever else related is hosted in the wiki
+-  - See ACTI
+-- Build all external modules and use bst track for updating them
+-    - ie, getting rid of non-gnome tarballs in the releng update script
+-    - todo: figure out how to version limit components when branching
+-    - discuss when Abderahim is around
+-    - Debian and other distros still uses tarballs for their builds
+-      - Debian, Fedora and Alpine are ok to get the tarballs from gitlab artifacts (when it includes submodules)
+-- Onboarding Jeremy and how it goes so far ✔️
+-- Release schedule: https://gitlab.gnome.org/GNOME/releng/-/blob/master/tools/schedule/45.schedule
+-  - Number of releases ok?
+-  - Freezes ok?
+-  - Hard Code Freeze between .rc and .0 is lifted for 45. Will see how it goes. Assuming Michael is ok?
+-  - 1 year maintenance for GNOME runtime enough?
+-  - .1 release timing
+-    - 1 month difference
+-- Testing and promotion of VM images
+-    - -> GNOMEOS BoF
+-- Evince maintenance status
+-- GNOME Shell Freeze Exception
+-  - Seems this is causing problems with distros
+-- Other core app maintenance
+-- Packaging buildstream2 (RPM for Fedora and deb for Debian?)
+-
+-## Actions
+-- Move the new handbook
+-  - Schedule
+-  - Developer documentation
+-- Buildstream2 package (if it helps, It's already packaged )
+-  - Package for Debian (Jeremy)
+-  - Package for Fedora (Dave or Kalev?)
+-- Hard code freeze
+-  - Check if we need to disable notification email
+-  - Michael to make announcement
+-  - Publitice more prominently: https://wiki.gnome.org/Schedule
+-- GNOME Shell Freeze Exception
+-  - Problem is more user testing is necessary
+-    - Distros to packaging beta release to get more testing
+-    - Allan: Fedora tests day to try to test beta
+-    - Jeremy: try to get beta in the distro (Debian/Ubuntu)
+-    - Jeremy & David: try to coordinate a GNOME 45 test day after GNOME 45 Beta
+-    - Pable: maybe in the future, but pmOS do not package beta now
+-  - Try, if possible, to be more cautious of bug changes between beta and rc
+-  - Announcement for extension in beta time
+-- Increase maintenance for GNOME runtime to 1.5 (18 months) years
+-- .1 release timing
+-  - To fit Fedora & Ubuntu, move .0 one week earlier and .1 tarball deadline approx 2.5 weeks later
+-  - Defer decision to another IRC meeting TOPIC
+-- Remove the alpha
+-  - Defer to mext meeting TOPIC
+-- Evince maintenance status
+-  - Try to have a final F2F meeting with German
+-  - While we do not want to fork, maintainers need to understand we need a plan to keep up with GNOME technologies (GTK4, mobile support, etc)
+-- Other core apps:
+-  - Review what core apps are still using GTK+3
+-    - Javier to check GNOMEGoal and try to push a little from R-T perspective
+-  - Totem
+-    - Allan to speak with Bastien
+-    - Design team to review desirable video features
+-    - TOPIC for next RT meeting
+-- Yelp 
+-Still GTK3
+diff --git a/docs/obsolete/pads/release-bof-2025.md b/docs/obsolete/pads/release-bof-2025.md
+deleted file mode 100644
+index 38a743977c1a198300cc077951dba1def106a33a..0000000000000000000000000000000000000000
+--- a/docs/obsolete/pads/release-bof-2025.md
++++ /dev/null
+@@ -1,63 +0,0 @@
+-GUADEC 2025 Release Team BOF
+-===
+-
+-## Agenda
+-
+-
+-- Emanuelle's suggestions for governance
+-    - Emanuelle's presentation talked about getting rid of GNOME maintainers, but for now, a practical suggestion is for the Release Team to handle tagging and releasing modules. This needs time for the Release Team to take on and for maintainers to be willing to let this happen. 
+-    - Let's start with a small list of modules for GNOME 49 stable updates
+-    - Until we get automation going, this is slow and lots of work for the Release Team members
+-    - Concern about how updating NEWS & AppStream metadata would work.
+-        - Jeremy suggests that this may be less of a concern for stable updates since there shouldn't be new features for core GNOME things
+-        - Adrian suggested using Gitlab merge request titles, perhaps with a tag for whether the merge request should be included in the NEWS file
+-        - Another idea about NEWS files in a drop-in directory that could be gathered for a new release and deleted. This avoids the file conflict problem when merge requests are accepted in a different order. CI could ask in merge requests if there isn't a NEWS drop-in file.
+-        - gitlab gists? [Is this only in Github or also in Gitlab?]
+-        - Sophie has something used for loupe
+-        - 
+-    - 
+-- Alessandro's concerns about the freezes
+-    - Idea: MRs need to be tagged into which branches they should go to be merged. This would ensure, that people think about if they need to be backported. A bot could then automatically do the backport into the stable branches.
+-  - Distros can subscribe to https://gitlab.gnome.org/Teams/Releng/freeze-breaks
+-  - 
+-
+-- Things needed for GNOME 49
+-    - Sushi GTK 4 port?
+-        - This will drop support for previewing LibreOffice files
+-    - Release Notes
+-        - Has already been started since Allan may be out near release time
+-    - gnome-session
+-        - new gnome-session is prep work for session restore. Part of the cleanup is removing xmsp, the ancient session restore stuff that didn't work, and has systemd handle things, etc.
+-        - Is quite broken:
+-            - .desktop file are no longer loaded
+-            - ibus isn't running in gdm
+-        - Adrian asking for more time to land merge requests. Most merge requests may be ready by freeze day Saturday
+-        - gnome-software, orca, gnome-settings-daemon, at-spi, gnome-initial-setup, xdg-user-dirs-gtk, gnome-keyring [doesn't do so much], gnome-remote-desktop [needs testing], etc. need to get updates landed so that they can be launched by new gnome-session. gnome-shell's change already landed.
+-        - what if a distro stayed with gnome-session 48 while otherwise shipping GNOME 49? There is a gitlab issue discussing what would need to be reverted. An alternative is for third party projects to switch to cinnamon-session or mate-session.
+-    - Print preview
+-        - need to merge for gtk4, gtk3 & for portals
+-    - video thumbnailer?
+-        - Canonical might be working on a rust gstreamer project for this for GNOME 50. gstreamer would probably like to host this
+-    - GDM xorg support
+-        - Probably will be turned back on, but we are explicitly allowing this to delay until 49 RC
+-
+-- Welcome to Maximiliano
+-    - Matthias to update the Board for the addition of Adrian and Maximiliano
+-
+-- GNOME 50 planning
+-    - Ptyxis status update
+-        - Sophie concerned about whether we are following our removal policy by not being more specific about how Console doesn't meet what GNOME wants
+-        - Matthias to talk to Design team about what they want from a terminal
+-        - Sophie thinking about proposing again the removal of the Music app from Core
+-        - Having intents sounds really useful. For setting your default Terminal, but also lots of other things.
+-
+-
+-- GNOME release service
+-    - Stefan requests to know where to put ISO files to specific places on the server
+-    - gnome-build-meta
+-    - gpg sign the tarball releases: This isn't urgent, but would be nice to have
+-    - NEWS file generation for releases
+-
+-- GNOME OS
+-    - Moving app Buildstream elements out of gnome-build-meta and into the app's individual repos so that they can be published to Flathub and apps can update their metadata directly. More consistency between what is in Flathub and what is in GNOME OS. Also part of a goal for GNOME OS to ship Flatpaks.
+-    - Sophie: We should move away from building things for Flathub outside of Flathub build-servers instead of extending it. If we get more and more orgs to build on their CI, we have to trust more and more orgs on their CI not being compromised.
+diff --git a/docs/obsolete/pads/sysupdate-update.md b/docs/obsolete/pads/sysupdate-update.md
+deleted file mode 100644
+index 5d2b8fd726639d094cf5761ce1c2ee558fe73944..0000000000000000000000000000000000000000
+--- a/docs/obsolete/pads/sysupdate-update.md
++++ /dev/null
+@@ -1,124 +0,0 @@
+-GNOME OS Sysupdate Install Instructions
+-===
+-
+-
+-The new images will encrypt your drive by default if it finds a TPM (even with secure boot disabled). They will also use a tpm2 device for verified boot and have `dm_verity`. However messing around with secure boot can potentially soft-brick your computer if you remove the wrong keys or the auto-setup-mode goes wrong. In such case you will have to reset the UEFI by shorting the CMOS jumper in the motherboard or taking the battery out. (Or reflashing the UEFI while offline if that's an option). 
+-
+-
+-* Make sure to do this at your desktop first as it's generally easier to reset the UEFI settings/CMOS.
+-* If you can only try this in a laptop, be aware it might potentially get soft-bricked if things go wrong enough. 
+-* Double check if there's a way to reflash the firmware or reset it before hand.
+-
+-~~You can also avoid the secure-boot headache and install with secure-boot=disabled, however then you will have to encrypt your disk on your own. Easiest way though would be to setup systemd-homed in such case.~~ This is not true anymore. We always encrypt if we have a tpm2.
+-
+-## Download the installer from here:
+-
+-ISO: https://os.gnome.org/download/latest/gnome_os_installer.iso
+-
+-
+-## Install:
+-
+-* Write the install into a usb stick
+-    * If you want, you can also extract the disk.img and write that to a usb stick to avoid using a real harddrive for testingi
+-* disable secure boot and run the install
+-* Once install is done, go to the bios and enable secure-boot
+-    * If it's a VM sd-boot will install the keys automatically See loader.conf(5) manual page, option `secure-boot-enroll`. 
+-    * If there's a setup-mode set the bios to that, so sd-boot show an option int the boot menu to install the keys 
+-      * One called "auto", which we recommend and has the Microsoft keys, one called "private" which does not have the Microsoft keys.
+-      * :loudspeaker: ***Note from Valentin*** sometimes setup mode is just removing all keys)
+-    * If there isn't a setup mode, you will have to append the PK.auth, KEK.auth and DB.auth files found in `loader/keys/auto/` to the respective EFI key variables.
+-      Where you find the Secure Boot menu is in your BIOS, you usually have to go into "Custom/OtherOS" mode and then it should allow you to install your own keys.
+-   
+-* If you see a giant blue square saying stuff that's `Shim`, it's okay.
+-    * If it complains about `security_violation` or so, something went wrong with the singatures. ask in the chat/post a picture.
+-    
+-* Hopefully by now you booted into initial setup with secure boot
+-* Do normal initial setup.
+-
+-## Enable discard on the disks.
+-
+-There is no way currently to enable allow-disards on encrypted disks with systemd-gpt-auto-generator. There is also no way from systemd-repart to set it as default option on the volumes. So you will need to manually enable it.
+-    
+-```bash
+-    sudo cryptsetup refresh root --allow-discards --persistent
+-```
+-
+-## Build your own gnomeos update:
+-
+-  * :loudspeaker: ***Note from Valentin*** We need to add the notes from https://gitlab.gnome.org/GNOME/gnome-build-meta/-/merge_requests/2418
+-
+-  * Build
+-    ```bash
+-    git clone https://gitlab.gnome.org/GNOME/gnome-build-meta.git
+-    cd gnome-build-meta
+-    make KEY_ID="John Doe" IMPORT_MODE=local -C files/boot-keys
+-    ./utils/run-sysupdate-repo.sh --devel
+-    ```
+-
+-    Replace "John Doe" with the name you want.
+-    
+-    If you already created keys, maybe they are snake oil, you need to clean then before creating them again: `make clean -C files/boot-keys/`
+-    
+-    If you have several build directories, you should copy the keys, and at least `{VENDOR,SYSEXT}.{key,crt}`.
+-
+-  * Switch to another tty since we started a webserver in the above command
+-
+-  * Copy sysupdate files to `/etc`
+-    ```bash
+-    run0 cp -r /usr/lib/sysupdate*.d /etc/
+-    ```
+-  * Switch all the `Path=` in `/etc/sysupdate*/*.conf` files to `http://0.0.0.0:8080/``
+-    ```bash
+-    run0 sed -i 's,Path=https://.*,Path=http://0.0.0.0:8080/,' /etc/sysupdate*.d/*.conf
+-    ```
+-      * :loudspeaker: ***Note from Valentin*** Need to copy `/usr/lib/sysupdate*.d` first
+-      * :loudspeaker: ***Note from Valentin*** If served from host when running in a VM, it is `10.0.2.2`. We should note that.
+-  * Add verity certificates in `/etc` (only once):
+-    Not having sysext signing keys in the kernel will confuse systemd-sysext and not mount any sysext. To avoid this, you can prepare your system to allow both upstream an local keys. You only need to do it once. Look for an extension already downloaded. For example here we have: `/var/lib/extensions/devel_nightly.677514.raw`.
+-    ```bash
+-    $ run0 mkdir -p /etc/verity.d
+-    $ run0 cp files/boot-keys/SYSEXT.crt /etc/verity.d/mine.crt
+-    $ run0 losetup -f -P --show /var/lib/extensions/devel_nightly.677514.raw
+-    /dev/loop20
+-    $ run0 cat /dev/loop20p3 | jq .signature -r | base64 -d | openssl pkcs7 -inform der -print_certs | run0 tee /etc/verity.d/upstream.crt
+-    $ run0 losetup -d /dev/loop20
+-    ```
+-
+-  * Enroll your Machine Owner Key (MOK) (only once)
+-    ```bash
+-    run0 mokutil --import files/boot-keys/VENDOR.der
+-    ```
+-    Set a password, remember it until next boot.
+-    
+-  * Wait for the build to finish
+-
+-  * Check the version. It is likely to be `l.1` on first build, but will increment.
+-    ```
+-    run0 /usr/lib/systemd/systemd-sysupdate
+-    ```
+-
+-  * Update
+-    ```bash
+-    run0 /usr/lib/systemd/systemd-sysupdate update --verify=false l.1
+-    run0 /usr/lib/systemd/systemd-sysupdate update --component=devel --verify=false l.1
+-    ```
+-      * :loudspeaker: ***Note from Valentin*** Instead of using `--verify=false`, we should add the key in `/etc/systemd/import-pubring.gpg`
+-
+-  * Reboot
+-    On first reboot, you will be asked to enroll the Machine Owned Key (MOK). This is where you need to type the pasword.
+-
+-  * You will need to use recovery keys to unlock your disks. If you want to work with local builds for a longer time, you may re-enroll tpm2 keys. See section Re-enrolling the TPM2 if needed. But you will need to re-enroll again when switching back to upstream builds.
+-
+-  * FIXME: figure out how to update kek and db from userspace
+-      * :loudspeaker: ***Note from Valentin*** `efi-updatevar`, but this is only possible if you have the private key of the current PK. So in this case, setup-mode is needed.
+-  * FIXME: cyrpt-enroll the tpm in a new slot against the local build before rebooting
+-
+-
+-## Sync the sysupdate config files
+-
+-We have not settled yet on a version scheme and layout for the update repo and OS build. Every now and then, you might need to modify the repo config
+-according to the latest changes.
+-
+-Fetch all the files from `/files/sysupdate/*.conf` in gnome-build-meta and copy them into `/run/sysupdate.d/`
+-
+-Afterards run sysupdate and after you reboot, the configs in `/usr/lib/sysupdate.d*/*.conf` should be tracking again the updated builds
+\ No newline at end of file
+
