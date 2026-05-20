@@ -1,0 +1,183 @@
+From bd5e2ee5e1d4dd92b3306e606545b199e6295c2e Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Tue, 19 May 2026 23:52:03 -0700
+Subject: [PATCH] docs: Put manual dual boot instructions and UTM instructions into regular docs folder
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/docs/install.md b/docs/install.md
+index 8f8879570257e651de78df596a4c8a06ea609fd8..e3c431c344c3e2cc959ace6d61ac2c71314351c6 100644
+--- a/docs/install.md
++++ b/docs/install.md
+@@ -12,8 +12,8 @@ 1. Download the latest [GNOME OS ISO](https://os.gnome.org/)
+ 2. Plug in a USB drive and select it in GNOME Disks
+ 3. In the ⋮ menu select `Restore Disk Image…`, open the ISO and click `Start Restoring…`
+ 
+-    > [!warning]
+-    > This erases all data on the USB drive.
++   > [!warning]
++   > This erases all data on the USB drive.
+ 
+ ## Boot and install from USB
+ 
+@@ -25,8 +25,8 @@ 3. Choose `GNOME OS Nightly` in the menu
+ 4. Go through initial setup and create a user
+ 5. If your destination disk contains data, erase it in GNOME Disks using `Format disk…` and selecting `No Partitioning`
+ 
+-    > [!warning]
+-    > This erases all data on the disk.
++   > [!warning]
++   > This erases all data on the disk.
+ 
+ 6. Upon logging in, a window will have proposed to install GNOME OS. Choose `Install now`
+ 7. Select the disk to install to, and press `Install`
+@@ -34,6 +34,8 @@ 8. If the installer gives you a recovery key, your data is encrypted. Write the key down on a different device
+ 9. You can then continue using GNOME OS
+ 
+ Now you should have a working GNOME OS setup on real hardware. Since GNOME OS is quite different from other Linux operating systems you should take a look at the [user guide](./using.md).
++
++Dual-booting GNOME OS is not recommended, but if you need it, follow the [manual dual-boot instructions](./manual-dual-boot.md). To run GNOME OS in a virtual machine on Apple devices, see the [UTM setup guide](./utm.md).
+ 
+ ## Optional: Enabling Secure Boot
+ 
+diff --git a/docs/obsolete/pads/manual-dual-boot.md b/docs/manual-dual-boot.md
+rename from docs/obsolete/pads/manual-dual-boot.md
+rename to docs/manual-dual-boot.md
+diff --git a/docs/obsolete/pads/utm.md b/docs/utm.md
+rename from docs/obsolete/pads/utm.md
+rename to docs/utm.md
+index 9573ef56bb991214534636ea3791762e7b7495bf..49780f2c9a182a6ce7f3f60dc111329b46333e98 100644
+--- a/docs/obsolete/pads/utm.md
++++ b/docs/utm.md
+@@ -1,7 +1,7 @@
+-Ultimate gnomeos UTM setup
+-===
++# GNOME OS UTM setup
+ 
+ Qemu:
++
+ - More flexible
+ - Uses spice
+ - USB device redirect
+@@ -9,86 +9,90 @@ - Spice webdav works but has a magic address to connect to
+ - GPU accelerated with virtgl
+ - Plymouth and systemd console display no video output
+ - TPM2 and Balloon are disabled by default
+-    - TPM2 requires reseting the UEFI afterwards
++  - TPM2 requires reseting the UEFI afterwards
+ 
+ - Since we have no display output, its hard to debug unless you already added a serial console and are aware of what can go wrong and how to drop into a debug shell
+ 
+ - If you have an encrypted drive, the luks decryption prompt does not display, need to unlock from a tty/serial
+ 
+ Apple Virt:
++
+ - virtiofs is nice and works much better for sharing files
+ - plymouth and systemd console display with the video backend
+ - No way for gpu accelaration, stuck with llvmpipe
+-    - fixme github link
++  - fixme github link
+ - “simpler” setup, tpm2, balloon enabled by default
+ - Possibility to enable Rossetta and run x86 binaries
+ 
+-
+ Common:
+--  No touchpad gestures
+-    - They don’t get captured, we only pass a mouse as well
++
++- No touchpad gestures
++  - They don’t get captured, we only pass a mouse as well
+ - Apple Virt can be configured to display a touchapd, but it still shows up as a mouse
+ - Set display resolution to something more reasonable
+-    - The default looks tiny when its unscaled
+-    - tianocore also has its own setting which you’d want to change in order for sdboot to be readable
+-    - Dynamic resolution works nicely on qemu, a bit buggy on applevirt (or llvmpiple)
+-    - Turn on hidpi as we will leave GNOME to scale the buffers
++  - The default looks tiny when its unscaled
++  - tianocore also has its own setting which you’d want to change in order for sdboot to be readable
++  - Dynamic resolution works nicely on qemu, a bit buggy on applevirt (or llvmpiple)
++  - Turn on hidpi as we will leave GNOME to scale the buffers
+ - Add a serial console
+-    - Extremely useful for debugging
+-    - Both the built-in and pseudo-tty work nice, but both of them can be buggy in different ways wrt to clearing terminal codes across context switches and such. systemd logs -> login shell, or debug shell -> login shell transitions can be buggy or display corrupted
++  - Extremely useful for debugging
++  - Both the built-in and pseudo-tty work nice, but both of them can be buggy in different ways wrt to clearing terminal codes across context switches and such. systemd logs -> login shell, or debug shell -> login shell transitions can be buggy or display corrupted
+ 
+ TTYs and debugging
++
+ - Add 2 pseudo ttys
+ - First one: regular console
+ - Second one, we can dedicate to debugshell
+ 
+ debugshells:
++
+ - qemu default tty: `ttyAMA0`
+ - apple virt tty: `hvc0`
+ - systemd.debug_shell=ttyAMA1 and systemd.debug_shell=hvc1
+ 
+ Drive Setup:
++
+ - Import a drive image is the easiest one
+ - However “removable” disk image (needs truncate) as usb device for the system image is more flexible as you can swap out the OS image if need or use the same homedir for both apple virt and qemu vms
+ - systemd-homed attached on a separate “usb device”
+ - Homed needs manaual setup atm, has UI papercuts, likely will need debug shell
+-    - When mounting a homed, need to “adopt it” before it can work
+-    - We can add the pub key for the homed through smbios with qemu arguments. The UI is decent for this as well
++  - When mounting a homed, need to “adopt it” before it can work
++  - We can add the pub key for the homed through smbios with qemu arguments. The UI is decent for this as well
+ 
+ Sharing volumes from the host:
++
+ - oh god
+ - FIXME
+ - https://docs.getutm.app/guest-support/linux/
+ 
+ Mouse and Keyboard:
++
+ - Scrolling with the touchpad is inverted cause it thinks its a mouse whell
+-    - No touchpad gestures either
++  - No touchpad gestures either
+ - Apple Virt can expose the usb devices as apple keyboard and mouse but..
+-    - Trying to force it to a touchpad with a libinput udev rule complains
+-    - fixme: grab the rule and the logs from the other vm
+-    - still no touchpad gestures, doesn’t capture input anyway
++  - Trying to force it to a touchpad with a libinput udev rule complains
++  - fixme: grab the rule and the logs from the other vm
++  - still no touchpad gestures, doesn’t capture input anyway
+ - For qemu, UTM has an “invert scrolling” option in settings
+ - Changing the scrolling on settings does not work, cause it changes both horizontal and vertical directions, but only horizontal is inverted.
+ 
+ keybindings:
+-- fixme: dump karabiner-elements rules
+-
+-
+ 
+-
++- fixme: dump karabiner-elements rules
+ 
+ Create VM:
++
+ - Download aarch64 iso
+ - Create VM -> Native -> Linux
+ - Enable OpenGL
+ - Boot from iso image
+ - Open VM Settings
+-    - Optional: Enable Baloon and TPM 2.0 devices in UEFI settings
+-        - DO NOT RESET UEFI VARIABLES
+-        - DO NOT PRELOAD SECURE BOOT KEYS
+-    - FIXME: shared volume
+-    - Optional Share USB devices
+-    - FIXME: Display
+-        - Retina mode?
+-        - Scaling algo
+-    - Add Serial devices
++  - Optional: Enable Baloon and TPM 2.0 devices in UEFI settings
++    - DO NOT RESET UEFI VARIABLES
++    - DO NOT PRELOAD SECURE BOOT KEYS
++  - FIXME: shared volume
++  - Optional Share USB devices
++  - FIXME: Display
++    - Retina mode?
++    - Scaling algo
++  - Add Serial devices
+
