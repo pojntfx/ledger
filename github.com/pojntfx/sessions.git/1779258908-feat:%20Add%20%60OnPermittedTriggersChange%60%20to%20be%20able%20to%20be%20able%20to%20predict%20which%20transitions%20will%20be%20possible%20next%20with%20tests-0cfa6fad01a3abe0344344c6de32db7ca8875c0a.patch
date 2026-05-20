@@ -1,0 +1,383 @@
+From 0cfa6fad01a3abe0344344c6de32db7ca8875c0a Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Tue, 19 May 2026 23:35:08 -0700
+Subject: [PATCH] feat: Add `OnPermittedTriggersChange` to be able to be able to predict which transitions will be possible next with tests
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/cmd/sessions-fsm/main.go b/cmd/sessions-fsm/main.go
+index 151297226097b12152fdb85742de671c0134bd4c..7acdb652d654ef652616906910d9048191bf6319 100644
+--- a/cmd/sessions-fsm/main.go
++++ b/cmd/sessions-fsm/main.go
+@@ -30,6 +30,8 @@
+ 			OnStartAlarm: func(ctx context.Context) error { return nil },
+ 
+ 			OnStopAlarm: func(ctx context.Context) error { return nil },
++
++			OnPermittedTriggersChange: func(ctx context.Context, permittedTriggers []state.Trigger) error { return nil },
+ 		},
+ 	)
+ 
+diff --git a/pkg/state/constants.go b/pkg/state/constants.go
+index d342ea028f85e20a886b72535afdb0895895c822..7f4098c20c43081e18b169fd6186899b725a99e3 100644
+--- a/pkg/state/constants.go
++++ b/pkg/state/constants.go
+@@ -13,20 +13,23 @@ 	stateCountingDown state = "countingDown"
+ 	stateAlarming     state = "alarming"
+ )
+ 
+-type trigger string
++type Trigger string
+ 
+ const (
+-	triggerPlusTimer  trigger = "plusTimer"
+-	triggerMinusTimer trigger = "minusTimer"
++	TriggerPlusTimer  Trigger = "plusTimer"
++	TriggerMinusTimer Trigger = "minusTimer"
+ 
+-	triggerStartDragging trigger = "startDragging"
+-	triggerStopDragging  trigger = "stopDragging"
++	TriggerStartDragging Trigger = "startDragging"
++	// Checking whether this trigger can be used depends on what the new `remainingTime`
++	// would be, use `CanStopDragging` instead
++	triggerStopDragging Trigger = "stopDragging"
+ 
+-	triggerStartTimer trigger = "startTimer"
+-	triggerStopTimer  trigger = "stopTimer"
++	TriggerStartTimer Trigger = "startTimer"
++	TriggerStopTimer  Trigger = "stopTimer"
+ 
+-	triggerTimerFinished trigger = "timerFinished"
+-	triggerStopAlarming  trigger = "stopAlarming"
++	// This one is only called from within the state machine
++	triggerTimerFinished Trigger = "timerFinished"
++	TriggerStopAlarming  Trigger = "stopAlarming"
+ )
+ 
+ const (
+diff --git a/pkg/state/machine.go b/pkg/state/machine.go
+index c76770d85ac484d866aad64854bbc6c0ef600811..02bd519915192326fa088aa316b1d072824ece96 100644
+--- a/pkg/state/machine.go
++++ b/pkg/state/machine.go
+@@ -23,6 +23,8 @@
+ 	OnStartAlarm func(ctx context.Context) error
+ 
+ 	OnStopAlarm func(ctx context.Context) error
++
++	OnPermittedTriggersChange func(ctx context.Context, permittedTriggers []Trigger) error
+ }
+ 
+ type StateMachine struct {
+@@ -58,12 +60,12 @@ 	// as long as it is higher than the minimum initial remaining time and higher
+ 	// than the maximum remaining time
+ 	s.machine.
+ 		Configure(stateStopped).
+-		PermitReentry(triggerPlusTimer, s.mustBeBelowMaxInitialRemainingTime).
+-		OnEntryFrom(triggerPlusTimer, s.increaseInitialRemainingTime)
++		PermitReentry(TriggerPlusTimer, s.mustBeBelowMaxInitialRemainingTime).
++		OnEntryFrom(TriggerPlusTimer, s.increaseInitialRemainingTime)
+ 	s.machine.
+ 		Configure(stateStopped).
+-		PermitReentry(triggerMinusTimer, s.mustBeAboveMinInitialRemainingTime).
+-		OnEntryFrom(triggerMinusTimer, s.decreaseInitialRemainingTime)
++		PermitReentry(TriggerMinusTimer, s.mustBeAboveMinInitialRemainingTime).
++		OnEntryFrom(TriggerMinusTimer, s.decreaseInitialRemainingTime)
+ 
+ 	// From counting down state, we can also increment and decrement the initial remaining
+ 	// time, same as for the stopped state. When we increment while in counting down state, we
+@@ -71,17 +73,17 @@ 	// stop the timer first; it will be restarted automatically again once we transition back into
+ 	// the counting down state with the new value
+ 	s.machine.
+ 		Configure(stateCountingDown).
+-		PermitReentry(triggerPlusTimer, s.mustBeBelowMaxCurrentRemainingTime).
+-		OnExitWith(triggerPlusTimer, s.stopTimerWithoutHooks).
+-		OnEntryFrom(triggerPlusTimer, s.increaseInitialRemainingTimeFromCurrentRemainingTime)
++		PermitReentry(TriggerPlusTimer, s.mustBeBelowMaxCurrentRemainingTime).
++		OnExitWith(TriggerPlusTimer, s.stopTimerWithoutHooks).
++		OnEntryFrom(TriggerPlusTimer, s.increaseInitialRemainingTimeFromCurrentRemainingTime)
+ 	s.machine.
+ 		Configure(stateCountingDown).
+-		PermitReentry(triggerMinusTimer, s.mustBeAboveMinCurrentRemainingTime).
+-		OnExitWith(triggerMinusTimer, s.stopTimerWithoutHooks).
+-		OnEntryFrom(triggerMinusTimer, s.decreaseInitialRemainingTimeFromCurrentRemainingTime)
++		PermitReentry(TriggerMinusTimer, s.mustBeAboveMinCurrentRemainingTime).
++		OnExitWith(TriggerMinusTimer, s.stopTimerWithoutHooks).
++		OnEntryFrom(TriggerMinusTimer, s.decreaseInitialRemainingTimeFromCurrentRemainingTime)
+ 
+ 	// From stopped state, we can start dragging
+-	s.machine.Configure(stateStopped).Permit(triggerStartDragging, stateDragging)
++	s.machine.Configure(stateStopped).Permit(TriggerStartDragging, stateDragging)
+ 
+ 	// When we stop dragging, before entering into counting down state,
+ 	// we validate whether the new initial remaining time is valid
+@@ -97,18 +99,18 @@ 	// From counting down state, we can start dragging as well. When we start dragging while in counting down state,
+ 	// we stop the timer
+ 	s.machine.
+ 		Configure(stateCountingDown).
+-		Permit(triggerStartDragging, stateDragging).
+-		OnExitWith(triggerStartDragging, s.stopTimerWithoutHooks)
++		Permit(TriggerStartDragging, stateDragging).
++		OnExitWith(TriggerStartDragging, s.stopTimerWithoutHooks)
+ 
+ 	// From counting down state, we can stop/reset and then restart the timer
+-	s.machine.Configure(stateCountingDown).Permit(triggerStopTimer, stateStopped)
+-	s.machine.Configure(stateStopped).Permit(triggerStartTimer, stateCountingDown)
++	s.machine.Configure(stateCountingDown).Permit(TriggerStopTimer, stateStopped)
++	s.machine.Configure(stateStopped).Permit(TriggerStartTimer, stateCountingDown)
+ 
+ 	// From counting down state, we can go into alarming state when the timer has finished
+ 	s.machine.Configure(stateCountingDown).Permit(triggerTimerFinished, stateAlarming)
+ 
+ 	// From alarming state, we can return to stopped state when the alarm is stopped
+-	s.machine.Configure(stateAlarming).Permit(triggerStopAlarming, stateStopped)
++	s.machine.Configure(stateAlarming).Permit(TriggerStopAlarming, stateStopped)
+ 
+ 	// When we enter the counting down state, we start the timer
+ 	s.machine.Configure(stateCountingDown).OnEntry(s.startTimer)
+@@ -121,8 +123,32 @@ 	s.machine.
+ 		Configure(stateStopped).
+ 		// This won't fire when entering from alarming state since the trigger there is
+ 		// triggerStopAlarming, not triggerStopTimer
+-		OnEntryFrom(triggerStopTimer, s.stopTimer).
+-		OnEntryFrom(triggerStopAlarming, s.stopAlarm)
++		OnEntryFrom(TriggerStopTimer, s.stopTimer).
++		OnEntryFrom(TriggerStopAlarming, s.stopAlarm)
++
++	s.machine.OnTransitioned(func(ctx context.Context, _ stateless.Transition) {
++		rawPermittedTriggers, err := s.machine.PermittedTriggersCtx(ctx)
++		if err != nil {
++			s.log.ErrorContext(s.ctx, "Could not get permitted triggers", "err", err)
++
++			return
++		}
++
++		permittedTriggers := make([]Trigger, len(rawPermittedTriggers))
++		for i := range len(permittedTriggers) {
++			// This is always safe since the only defined triggers in the state
++			// machine are our own
++			permittedTriggers[i] = rawPermittedTriggers[i].(Trigger)
++		}
++
++		s.log.InfoContext(
++			s.ctx, "Calling onPermittedTriggersChange hook",
++			"permittedTriggers", permittedTriggers,
++		)
++		if err := s.hooks.OnPermittedTriggersChange(ctx, permittedTriggers); err != nil {
++			s.log.ErrorContext(s.ctx, "Could not call onPermittedTriggersChange hook", "err", err)
++		}
++	})
+ 
+ 	return s
+ }
+@@ -182,6 +208,15 @@ 	return true
+ }
+ 
+ func (s *StateMachine) validInitialRemainingTime(ctx context.Context, args ...any) bool {
++	if len(args) <= 0 {
++		// len(args) will always be larger than 0 except for when
++		// calling s.machine.PermittedTriggersCtx(ctx), in which case
++		// we always deny this transition since we can't make a decision without
++		// knowing the argument value
++
++		return false
++	}
++
+ 	newInitialRemainingTime := args[0].(time.Duration)
+ 	if newInitialRemainingTime < minRemainingTime ||
+ 		newInitialRemainingTime > maxRemainingTime ||
+@@ -265,15 +300,15 @@ 	return true
+ }
+ 
+ func (s *StateMachine) PlusTimer(ctx context.Context) error {
+-	return s.machine.FireCtx(ctx, triggerPlusTimer)
++	return s.machine.FireCtx(ctx, TriggerPlusTimer)
+ }
+ 
+ func (s *StateMachine) MinusTimer(ctx context.Context) error {
+-	return s.machine.FireCtx(ctx, triggerMinusTimer)
++	return s.machine.FireCtx(ctx, TriggerMinusTimer)
+ }
+ 
+ func (s *StateMachine) StartDragging(ctx context.Context) error {
+-	return s.machine.FireCtx(ctx, triggerStartDragging)
++	return s.machine.FireCtx(ctx, TriggerStartDragging)
+ }
+ 
+ func (s *StateMachine) StopDragging(ctx context.Context, remainingTime time.Duration) error {
+@@ -287,11 +322,11 @@ 	return s.machine.CanFireCtx(ctx, triggerStopDragging, remainingTime)
+ }
+ 
+ func (s *StateMachine) StopTimer(ctx context.Context) error {
+-	return s.machine.FireCtx(ctx, triggerStopTimer)
++	return s.machine.FireCtx(ctx, TriggerStopTimer)
+ }
+ 
+ func (s *StateMachine) StartTimer(ctx context.Context) error {
+-	return s.machine.FireCtx(ctx, triggerStartTimer)
++	return s.machine.FireCtx(ctx, TriggerStartTimer)
+ }
+ 
+ func (s *StateMachine) timerFinished(ctx context.Context) error {
+@@ -299,7 +334,7 @@ 	return s.machine.FireCtx(ctx, triggerTimerFinished)
+ }
+ 
+ func (s *StateMachine) StopAlarming(ctx context.Context) error {
+-	return s.machine.FireCtx(ctx, triggerStopAlarming)
++	return s.machine.FireCtx(ctx, TriggerStopAlarming)
+ }
+ 
+ func (s *StateMachine) startTimer(ctx context.Context, args ...any) error {
+diff --git a/pkg/state/machine_test.go b/pkg/state/machine_test.go
+index 395f064511c65969a22f1921104de0449a3a67b5..69236cb47a075eaf40803203242f20ba1073ba6a 100644
+--- a/pkg/state/machine_test.go
++++ b/pkg/state/machine_test.go
+@@ -77,6 +77,8 @@
+ 							OnStartAlarm: func(ctx context.Context) error { return nil },
+ 
+ 							OnStopAlarm: func(ctx context.Context) error { return nil },
++
++							OnPermittedTriggersChange: func(ctx context.Context, permittedTriggers []Trigger) error { return nil },
+ 						},
+ 					)
+ 
+@@ -177,6 +179,8 @@
+ 							OnStartAlarm: func(ctx context.Context) error { return nil },
+ 
+ 							OnStopAlarm: func(ctx context.Context) error { return nil },
++
++							OnPermittedTriggersChange: func(ctx context.Context, permittedTriggers []Trigger) error { return nil },
+ 						},
+ 					)
+ 
+@@ -298,6 +302,8 @@
+ 						OnStartAlarm: func(ctx context.Context) error { return nil },
+ 
+ 						OnStopAlarm: func(ctx context.Context) error { return nil },
++
++						OnPermittedTriggersChange: func(ctx context.Context, permittedTriggers []Trigger) error { return nil },
+ 					},
+ 				)
+ 
+@@ -408,6 +414,8 @@
+ 						OnStartAlarm: func(ctx context.Context) error { return nil },
+ 
+ 						OnStopAlarm: func(ctx context.Context) error { return nil },
++
++						OnPermittedTriggersChange: func(ctx context.Context, permittedTriggers []Trigger) error { return nil },
+ 					},
+ 				)
+ 
+@@ -512,6 +520,8 @@
+ 						OnStartAlarm: func(ctx context.Context) error { return nil },
+ 
+ 						OnStopAlarm: func(ctx context.Context) error { return nil },
++
++						OnPermittedTriggersChange: func(ctx context.Context, permittedTriggers []Trigger) error { return nil },
+ 					},
+ 				)
+ 
+@@ -588,6 +598,8 @@
+ 						OnStartAlarm: func(ctx context.Context) error { return nil },
+ 
+ 						OnStopAlarm: func(ctx context.Context) error { return nil },
++
++						OnPermittedTriggersChange: func(ctx context.Context, permittedTriggers []Trigger) error { return nil },
+ 					},
+ 				)
+ 
+@@ -655,6 +667,8 @@ 							return nil
+ 						},
+ 
+ 						OnStopAlarm: func(ctx context.Context) error { return nil },
++
++						OnPermittedTriggersChange: func(ctx context.Context, permittedTriggers []Trigger) error { return nil },
+ 					},
+ 				)
+ 
+@@ -741,6 +755,8 @@ 							onStopAlarmCalled++
+ 
+ 							return nil
+ 						},
++
++						OnPermittedTriggersChange: func(ctx context.Context, permittedTriggers []Trigger) error { return nil },
+ 					},
+ 				)
+ 
+@@ -778,6 +794,8 @@
+ 		onStartAlarmCalled,
+ 
+ 		onStopAlarmCalled int
++
++		permittedTriggers []Trigger
+ 	}{
+ 		{
+ 			name: "can set an alarm for 60s, wait for it to finish, and stop the alarm",
+@@ -804,6 +822,13 @@
+ 			onStartAlarmCalled: 1,
+ 
+ 			onStopAlarmCalled: 1,
++
++			permittedTriggers: []Trigger{
++				TriggerStartTimer,
++				TriggerPlusTimer,
++				TriggerMinusTimer,
++				TriggerStartDragging,
++			},
+ 		},
+ 		{
+ 			name: "can set an alarm for 120s, wait for it to finish, and stop the alarm",
+@@ -832,6 +857,13 @@
+ 			onStartAlarmCalled: 1,
+ 
+ 			onStopAlarmCalled: 1,
++
++			permittedTriggers: []Trigger{
++				TriggerStartTimer,
++				TriggerPlusTimer,
++				TriggerMinusTimer,
++				TriggerStartDragging,
++			},
+ 		},
+ 		{
+ 			name: "can set an alarm for 120s, wait for it to finish, and keep the alarm running",
+@@ -858,6 +890,8 @@
+ 			onStartAlarmCalled: 1,
+ 
+ 			onStopAlarmCalled: 0,
++
++			permittedTriggers: []Trigger{TriggerStopAlarming},
+ 		},
+ 	}
+ 	for _, tt := range endToEndTests {
+@@ -886,6 +920,8 @@
+ 						onStartAlarmCalled = 0
+ 
+ 						onStopAlarmCalled = 0
++
++						internalPermittedTriggers = []Trigger{}
+ 					)
+ 					s := newTestingStateMachine(
+ 						t,
+@@ -935,6 +971,12 @@ 								onStopAlarmCalled++
+ 
+ 								return nil
+ 							},
++
++							OnPermittedTriggersChange: func(ctx context.Context, permittedTriggers []Trigger) error {
++								internalPermittedTriggers = permittedTriggers
++
++								return nil
++							},
+ 						},
+ 					)
+ 
+@@ -952,6 +994,8 @@ 					require.Equal(t, tt.onAfterStoppingTimerCalled, onAfterStoppingTimerCalled)
+ 
+ 					require.Equal(t, tt.onStartAlarmCalled, onStartAlarmCalled)
+ 					require.Equal(t, tt.onStopAlarmCalled, onStopAlarmCalled)
++
++					require.ElementsMatch(t, tt.permittedTriggers, internalPermittedTriggers)
+ 				})
+ 			},
+ 		)
+
