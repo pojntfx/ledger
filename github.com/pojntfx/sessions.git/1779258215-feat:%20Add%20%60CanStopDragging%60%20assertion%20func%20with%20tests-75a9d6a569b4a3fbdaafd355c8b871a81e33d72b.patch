@@ -1,0 +1,46 @@
+From 75a9d6a569b4a3fbdaafd355c8b871a81e33d72b Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Tue, 19 May 2026 23:23:35 -0700
+Subject: [PATCH] feat: Add `CanStopDragging` assertion func with tests
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/pkg/state/machine.go b/pkg/state/machine.go
+index bdafb0ffbb160823c8134feb34a145f328fbce1a..c76770d85ac484d866aad64854bbc6c0ef600811 100644
+--- a/pkg/state/machine.go
++++ b/pkg/state/machine.go
+@@ -280,6 +280,12 @@ func (s *StateMachine) StopDragging(ctx context.Context, remainingTime time.Duration) error {
+ 	return s.machine.FireCtx(ctx, triggerStopDragging, remainingTime)
+ }
+ 
++// CanStopDragging exists because onPermittedTriggersChange can't correctly report whether
++// you can stop dragging without knowing what the new remainingTime would be
++func (s *StateMachine) CanStopDragging(ctx context.Context, remainingTime time.Duration) (bool, error) {
++	return s.machine.CanFireCtx(ctx, triggerStopDragging, remainingTime)
++}
++
+ func (s *StateMachine) StopTimer(ctx context.Context) error {
+ 	return s.machine.FireCtx(ctx, triggerStopTimer)
+ }
+diff --git a/pkg/state/machine_test.go b/pkg/state/machine_test.go
+index a68eaa9ace21b3a72b1a837900e5948638120994..395f064511c65969a22f1921104de0449a3a67b5 100644
+--- a/pkg/state/machine_test.go
++++ b/pkg/state/machine_test.go
+@@ -413,7 +413,15 @@ 				)
+ 
+ 				require.NoError(t, tt.prepare(s))
+ 
+-				err := s.StopDragging(t.Context(), tt.remainingTime)
++				canStopDragging, err := s.CanStopDragging(t.Context(), tt.remainingTime)
++				require.NoError(t, err)
++				if tt.expectErr {
++					require.False(t, canStopDragging)
++				} else {
++					require.True(t, canStopDragging)
++				}
++
++				err = s.StopDragging(t.Context(), tt.remainingTime)
+ 				if tt.expectErr {
+ 					require.Error(t, err)
+ 				} else {
+
