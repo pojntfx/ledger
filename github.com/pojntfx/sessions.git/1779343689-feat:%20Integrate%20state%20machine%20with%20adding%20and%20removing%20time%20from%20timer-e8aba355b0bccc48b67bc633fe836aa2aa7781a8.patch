@@ -1,0 +1,70 @@
+From e8aba355b0bccc48b67bc633fe836aa2aa7781a8 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Wed, 20 May 2026 23:08:09 -0700
+Subject: [PATCH] feat: Integrate state machine with adding and removing time from timer
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/internal/components/main_window.go b/internal/components/main_window.go
+index a296a76203f734ff4b852abb7a62b7875fae2bef..c26d337fcc620ad726e3868ddfffa98299f6595d 100644
+--- a/internal/components/main_window.go
++++ b/internal/components/main_window.go
+@@ -93,8 +93,19 @@ 		&state.Hooks{
+ 			OnBeforeStartingTimer: func(ctx context.Context) error { return nil },
+ 			OnAfterStartingTimer:  func(ctx context.Context) error { return nil },
+ 
+-			OnInitialRemainingTimeChange: func(ctx context.Context, initialRemainingTime time.Duration) error { return nil },
+-			OnCurrentRemainingTimeTick:   func(ctx context.Context, currentRemainingTime time.Duration) error { return nil },
++			OnInitialRemainingTimeChange: func(ctx context.Context, initialRemainingTime time.Duration) error {
++				w.totalSec = int(initialRemainingTime.Seconds())
++				if w.running {
++					w.remain = initialRemainingTime
++				}
++
++				w.UpdateDial()
++				w.UpdateButtons()
++				w.SaveLastPosition()
++
++				return nil
++			},
++			OnCurrentRemainingTimeTick: func(ctx context.Context, currentRemainingTime time.Duration) error { return nil },
+ 
+ 			OnBeforeStoppingTimer: func(ctx context.Context) error { return nil },
+ 			OnAfterStoppingTimer:  func(ctx context.Context) error { return nil },
+@@ -428,15 +439,8 @@ 	if w.alarming {
+ 		return
+ 	}
+ 
+-	if w.totalSec < int(maxDialValue.Seconds()) {
+-		w.totalSec += int(minDialValue.Seconds())
+-		if w.running {
+-			w.remain = time.Duration(w.totalSec) * time.Second
+-		}
+-
+-		w.UpdateDial()
+-		w.UpdateButtons()
+-		w.SaveLastPosition()
++	if err := w.s.PlusTimer(w.ctx); err != nil {
++		w.log.Error("Could not add time", "err", err)
+ 	}
+ }
+ 
+@@ -445,15 +449,8 @@ 	if w.alarming {
+ 		return
+ 	}
+ 
+-	if w.totalSec > int(minDialValue.Seconds()) {
+-		w.totalSec -= int(minDialValue.Seconds())
+-		if w.running {
+-			w.remain = time.Duration(w.totalSec) * time.Second
+-		}
+-
+-		w.UpdateDial()
+-		w.UpdateButtons()
+-		w.SaveLastPosition()
++	if err := w.s.MinusTimer(w.ctx); err != nil {
++		w.log.Error("Could not remove time", "err", err)
+ 	}
+ }
+ 
+
