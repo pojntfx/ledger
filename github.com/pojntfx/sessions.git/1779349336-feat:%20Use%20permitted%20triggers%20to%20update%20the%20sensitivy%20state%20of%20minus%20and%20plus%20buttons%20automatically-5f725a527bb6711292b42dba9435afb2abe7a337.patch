@@ -1,0 +1,98 @@
+From 5f725a527bb6711292b42dba9435afb2abe7a337 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Thu, 21 May 2026 00:42:16 -0700
+Subject: [PATCH] feat: Use permitted triggers to update the sensitivy state of minus and plus buttons automatically
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/internal/components/main_window.go b/internal/components/main_window.go
+index 821f9c9b8193e160f9b584206edf9f559c997b87..af9b35c33fd2fa68b78d6d1adb146196572ab931 100644
+--- a/internal/components/main_window.go
++++ b/internal/components/main_window.go
+@@ -6,6 +6,7 @@ 	"fmt"
+ 	"log/slog"
+ 	"math"
+ 	"runtime"
++	"slices"
+ 	"time"
+ 	"unsafe"
+ 
+@@ -114,9 +115,44 @@ 			OnStartAlarm: func(ctx context.Context) error { return nil },
+ 
+ 			OnStopAlarm: func(ctx context.Context) error { return nil },
+ 
+-			OnPermittedTriggersChange: func(ctx context.Context, permittedTriggers []state.Trigger) error { return nil },
++			OnPermittedTriggersChange: func(ctx context.Context, permittedTriggers []state.Trigger) error {
++				if slices.Contains(permittedTriggers, state.TriggerMinusTimer) {
++					fn := glib.SourceFunc(func(_ uintptr) bool {
++						w.minusButton.SetSensitive(true)
++
++						return false
++					})
++					glib.IdleAdd(&fn, 0)
++				} else {
++					fn := glib.SourceFunc(func(_ uintptr) bool {
++						w.minusButton.SetSensitive(false)
++
++						return false
++					})
++					glib.IdleAdd(&fn, 0)
++				}
++
++				if slices.Contains(permittedTriggers, state.TriggerPlusTimer) {
++					fn := glib.SourceFunc(func(_ uintptr) bool {
++						w.plusButton.SetSensitive(true)
++
++						return false
++					})
++					glib.IdleAdd(&fn, 0)
++				} else {
++					fn := glib.SourceFunc(func(_ uintptr) bool {
++						w.plusButton.SetSensitive(false)
++
++						return false
++					})
++					glib.IdleAdd(&fn, 0)
++				}
++
++				return nil
++			},
+ 		},
+ 	)
++	w.s.FlushPermittedTriggers(w.ctx)
+ }
+ 
+ func (w *MainWindow) SaveLastPosition() {
+@@ -218,30 +254,16 @@ 	w.label.RemoveCssClass("dial__display--alarming")
+ }
+ 
+ func (w *MainWindow) UpdateButtons() {
+-	if w.alarming {
+-		w.actionButton.SetIconName("media-playback-stop-symbolic")
+-		w.actionButton.SetLabel(L("_Stop"))
+-		w.actionButton.RemoveCssClass("suggested-action")
+-		w.actionButton.AddCssClass("destructive-action")
+-
+-		w.plusButton.SetSensitive(false)
+-		w.minusButton.SetSensitive(false)
+-	} else if w.running {
++	if w.alarming || w.running {
+ 		w.actionButton.SetIconName("media-playback-stop-symbolic")
+ 		w.actionButton.SetLabel(L("_Stop"))
+ 		w.actionButton.RemoveCssClass("suggested-action")
+ 		w.actionButton.AddCssClass("destructive-action")
+-
+-		w.plusButton.SetSensitive(w.totalSec < int(maxDialValue.Seconds()))
+-		w.minusButton.SetSensitive(w.totalSec > int(minDialValue.Seconds()))
+ 	} else {
+ 		w.actionButton.SetIconName("media-playback-start-symbolic")
+ 		w.actionButton.SetLabel(L("_Start Timer"))
+ 		w.actionButton.RemoveCssClass("destructive-action")
+ 		w.actionButton.AddCssClass("suggested-action")
+-
+-		w.plusButton.SetSensitive(w.totalSec < int(maxDialValue.Seconds()))
+-		w.minusButton.SetSensitive(w.totalSec > int(minDialValue.Seconds()))
+ 	}
+ }
+ 
+
