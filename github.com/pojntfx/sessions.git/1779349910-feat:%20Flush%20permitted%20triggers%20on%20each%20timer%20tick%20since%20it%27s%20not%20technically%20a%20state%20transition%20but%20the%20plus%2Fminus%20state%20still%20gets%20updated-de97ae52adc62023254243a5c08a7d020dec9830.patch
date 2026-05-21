@@ -1,0 +1,87 @@
+From de97ae52adc62023254243a5c08a7d020dec9830 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Thu, 21 May 2026 00:51:50 -0700
+Subject: [PATCH] feat: Flush permitted triggers on each timer tick since it's not technically a state transition but the plus/minus state still gets updated
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/pkg/state/machine.go b/pkg/state/machine.go
+index 231dbacf83a150588f03927f4ba2c9a5d663596c..9cac5e13baff7524f5a82e5433e1219626472fd9 100644
+--- a/pkg/state/machine.go
++++ b/pkg/state/machine.go
+@@ -370,6 +370,7 @@ 				)
+ 				if err := s.hooks.OnCurrentRemainingTimeTick(ctx, s.currentRemainingTime); err != nil {
+ 					s.log.ErrorContext(s.ctx, "Could not call onCurrentRemainingTimeTick hook", "err", err)
+ 				}
++				s.FlushPermittedTriggers(ctx)
+ 
+ 				if s.currentRemainingTime == 0 {
+ 					if err := s.timerFinished(s.ctx); err != nil {
+diff --git a/pkg/state/machine_test.go b/pkg/state/machine_test.go
+index e88a553a92b2ab8af264dddc7f41957900cb1e47..b97554552ed905b8be4c297f25d3eae42c7a721e 100644
+--- a/pkg/state/machine_test.go
++++ b/pkg/state/machine_test.go
+@@ -809,6 +809,8 @@
+ 		onStopAlarmCalled int
+ 
+ 		permittedTriggers []Trigger
++
++		onPermittedTriggersChangeCalled int
+ 	}{
+ 		{
+ 			name: "can set an alarm for 60s, wait for it to finish, and stop the alarm",
+@@ -842,6 +844,8 @@ 				TriggerPlusTimer,
+ 				TriggerMinusTimer,
+ 				TriggerStartDragging,
+ 			},
++
++			onPermittedTriggersChangeCalled: 96,
+ 		},
+ 		{
+ 			name: "can set an alarm for 120s, wait for it to finish, and stop the alarm",
+@@ -877,6 +881,8 @@ 				TriggerPlusTimer,
+ 				TriggerMinusTimer,
+ 				TriggerStartDragging,
+ 			},
++
++			onPermittedTriggersChangeCalled: 158,
+ 		},
+ 		{
+ 			name: "can set an alarm for 120s, wait for it to finish, and keep the alarm running",
+@@ -905,6 +911,8 @@
+ 			onStopAlarmCalled: 0,
+ 
+ 			permittedTriggers: []Trigger{TriggerStopAlarming},
++
++			onPermittedTriggersChangeCalled: 157,
+ 		},
+ 	}
+ 	for _, tt := range endToEndTests {
+@@ -935,6 +943,8 @@
+ 						onStopAlarmCalled = 0
+ 
+ 						internalPermittedTriggers = []Trigger{}
++
++						onPermittedTriggersChangeCalled = 0
+ 					)
+ 					s := newTestingStateMachine(
+ 						t,
+@@ -986,6 +996,8 @@ 								return nil
+ 							},
+ 
+ 							OnPermittedTriggersChange: func(ctx context.Context, permittedTriggers []Trigger) error {
++								onPermittedTriggersChangeCalled++
++
+ 								internalPermittedTriggers = permittedTriggers
+ 
+ 								return nil
+@@ -1013,6 +1025,8 @@
+ 					s.FlushPermittedTriggers(t.Context())
+ 
+ 					require.ElementsMatch(t, tt.permittedTriggers, internalPermittedTriggers)
++
++					require.Equal(t, tt.onPermittedTriggersChangeCalled, onPermittedTriggersChangeCalled)
+ 				})
+ 			},
+ 		)
+
