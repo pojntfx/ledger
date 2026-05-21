@@ -1,0 +1,98 @@
+From 333e662a9cb425655e9addf20833929941d50535 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Thu, 21 May 2026 00:40:34 -0700
+Subject: [PATCH] feat: Add support for flushing permitted trigger state manually
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/pkg/state/machine.go b/pkg/state/machine.go
+index cebaa18a03ece1e79793f5fc7e1993a6d91baee8..231dbacf83a150588f03927f4ba2c9a5d663596c 100644
+--- a/pkg/state/machine.go
++++ b/pkg/state/machine.go
+@@ -40,6 +40,7 @@ 	tickerCtx       context.Context
+ 	cancelTickerCtx context.CancelFunc
+ }
+ 
++// NewStateMachine creates a new state machine in stopped state
+ func NewStateMachine(
+ 	ctx context.Context,
+ 	remainingTime time.Duration,
+@@ -126,28 +127,10 @@ 		// triggerStopAlarming, not triggerStopTimer
+ 		OnEntryFrom(TriggerStopTimer, s.stopTimer).
+ 		OnEntryFrom(TriggerStopAlarming, s.stopAlarm)
+ 
++	// Every time we finished transitioning to a new state, flush the permitted triggers
++	// so that any external state will be updated
+ 	s.machine.OnTransitioned(func(ctx context.Context, _ stateless.Transition) {
+-		rawPermittedTriggers, err := s.machine.PermittedTriggersCtx(ctx)
+-		if err != nil {
+-			s.log.ErrorContext(s.ctx, "Could not get permitted triggers", "err", err)
+-
+-			return
+-		}
+-
+-		permittedTriggers := make([]Trigger, len(rawPermittedTriggers))
+-		for i := range len(permittedTriggers) {
+-			// This is always safe since the only defined triggers in the state
+-			// machine are our own
+-			permittedTriggers[i] = rawPermittedTriggers[i].(Trigger)
+-		}
+-
+-		s.log.InfoContext(
+-			s.ctx, "Calling onPermittedTriggersChange hook",
+-			"permittedTriggers", permittedTriggers,
+-		)
+-		if err := s.hooks.OnPermittedTriggersChange(ctx, permittedTriggers); err != nil {
+-			s.log.ErrorContext(s.ctx, "Could not call onPermittedTriggersChange hook", "err", err)
+-		}
++		s.FlushPermittedTriggers(ctx)
+ 	})
+ 
+ 	return s
+@@ -159,6 +142,30 @@ }
+ 
+ func (s *StateMachine) String() string {
+ 	return s.machine.String()
++}
++
++func (s *StateMachine) FlushPermittedTriggers(ctx context.Context) {
++	rawPermittedTriggers, err := s.machine.PermittedTriggersCtx(ctx)
++	if err != nil {
++		s.log.ErrorContext(s.ctx, "Could not get permitted triggers", "err", err)
++
++		return
++	}
++
++	permittedTriggers := make([]Trigger, len(rawPermittedTriggers))
++	for i := range len(permittedTriggers) {
++		// This is always safe since the only defined triggers in the state
++		// machine are our own
++		permittedTriggers[i] = rawPermittedTriggers[i].(Trigger)
++	}
++
++	s.log.InfoContext(
++		s.ctx, "Calling onPermittedTriggersChange hook",
++		"permittedTriggers", permittedTriggers,
++	)
++	if err := s.hooks.OnPermittedTriggersChange(ctx, permittedTriggers); err != nil {
++		s.log.ErrorContext(s.ctx, "Could not call onPermittedTriggersChange hook", "err", err)
++	}
+ }
+ 
+ func (s *StateMachine) increaseInitialRemainingTime(ctx context.Context, args ...any) error {
+diff --git a/pkg/state/machine_test.go b/pkg/state/machine_test.go
+index 0e56fdc2ebde5ac78546bccb43620b6e2481b16d..e88a553a92b2ab8af264dddc7f41957900cb1e47 100644
+--- a/pkg/state/machine_test.go
++++ b/pkg/state/machine_test.go
+@@ -1009,6 +1009,10 @@ 					require.Equal(t, tt.onStartAlarmCalled, onStartAlarmCalled)
+ 					require.Equal(t, tt.onStopAlarmCalled, onStopAlarmCalled)
+ 
+ 					require.ElementsMatch(t, tt.permittedTriggers, internalPermittedTriggers)
++
++					s.FlushPermittedTriggers(t.Context())
++
++					require.ElementsMatch(t, tt.permittedTriggers, internalPermittedTriggers)
+ 				})
+ 			},
+ 		)
+
