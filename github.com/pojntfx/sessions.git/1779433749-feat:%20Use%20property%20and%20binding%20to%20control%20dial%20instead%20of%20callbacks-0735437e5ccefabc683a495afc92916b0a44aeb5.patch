@@ -1,0 +1,357 @@
+From 0735437e5ccefabc683a495afc92916b0a44aeb5 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Fri, 22 May 2026 00:09:09 -0700
+Subject: [PATCH] feat: Use property and binding to control dial instead of callbacks
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/internal/components/dial.go b/internal/components/dial.go
+index 39bde5301b59819774b1b5ee8ecd9bf00a341406..9a8988380e4d3975b3c2ddc71b5fa78bc416a9d5 100644
+--- a/internal/components/dial.go
++++ b/internal/components/dial.go
+@@ -6,15 +6,26 @@ 	"runtime"
+ 	"time"
+ 	"unsafe"
+ 
++	"codeberg.org/puregotk/purego"
+ 	"codeberg.org/puregotk/puregotk/v4/adw"
+ 	"codeberg.org/puregotk/puregotk/v4/gdk"
+ 	"codeberg.org/puregotk/puregotk/v4/glib"
+ 	"codeberg.org/puregotk/puregotk/v4/gobject"
++	"codeberg.org/puregotk/puregotk/v4/gobject/types"
+ 	"codeberg.org/puregotk/puregotk/v4/graphene"
+ 	"codeberg.org/puregotk/puregotk/v4/gsk"
+ 	"codeberg.org/puregotk/puregotk/v4/gtk"
+ )
+ 
++const (
++	signalDialDragBegin = "drag-begin"
++	signalDialDragEnd   = "drag-end"
++
++	propertyDialTotalSec = "total-sec"
++
++	propertyIdDialTotalSec uint32 = 1
++)
++
+ var (
+ 	gTypeDial gobject.Type
+ )
+@@ -28,14 +39,7 @@ 	running  bool
+ 	remain   time.Duration
+ }
+ 
+-func NewDial(
+-	app *adw.Application,
+-	onDragBegin func(),
+-	onPositionChanged func(totalSec int),
+-	onDragEnd func(),
+-	FirstPropertyNameVar string,
+-	varArgs ...interface{},
+-) Dial {
++func NewDial(app *adw.Application, FirstPropertyNameVar string, varArgs ...interface{}) Dial {
+ 	obj := gobject.NewObject(gTypeDial, FirstPropertyNameVar, varArgs...)
+ 
+ 	var v Dial
+@@ -49,32 +53,38 @@ 		v.Widget.QueueDraw()
+ 	}
+ 	app.GetStyleManager().ConnectNotify(&styleChangedCallback)
+ 
++	updateTotalSecFromPosition := func(x, y float64) {
++		totalSec, ok := v.positionToTotalSec(x, y)
++		if !ok {
++			return
++		}
++		var val gobject.Value
++		val.Init(types.GType(gobject.TypeIntVal))
++		val.SetInt(int32(totalSec))
++		obj.SetProperty(propertyDialTotalSec, &val)
++		val.Unset()
++	}
++
+ 	drag := gtk.NewGestureDrag()
+ 	onDragBeginCb := func(_ gtk.GestureDrag, x float64, y float64) {
+-		onDragBegin()
+-		if totalSec, ok := v.positionToTotalSec(x, y); ok {
+-			onPositionChanged(totalSec)
+-		}
++		gobject.SignalEmit(obj, gobject.SignalLookup(signalDialDragBegin, gTypeDial), 0)
++		updateTotalSecFromPosition(x, y)
+ 	}
+ 	drag.ConnectDragBegin(&onDragBeginCb)
+ 	onDragUpdateCb := func(drag gtk.GestureDrag, dx float64, dy float64) {
+ 		var x, y float64
+ 		drag.GetStartPoint(&x, &y)
+-		if totalSec, ok := v.positionToTotalSec(x+dx, y+dy); ok {
+-			onPositionChanged(totalSec)
+-		}
++		updateTotalSecFromPosition(x+dx, y+dy)
+ 	}
+ 	drag.ConnectDragUpdate(&onDragUpdateCb)
+ 	onDragEndCb := func(_ gtk.GestureDrag, dx float64, dy float64) {
+-		onDragEnd()
++		gobject.SignalEmit(obj, gobject.SignalLookup(signalDialDragEnd, gTypeDial), 0)
+ 	}
+ 	drag.ConnectDragEnd(&onDragEndCb)
+ 
+ 	click := gtk.NewGestureClick()
+ 	onPress := func(_ gtk.GestureClick, _ int32, x float64, y float64) {
+-		if totalSec, ok := v.positionToTotalSec(x, y); ok {
+-			onPositionChanged(totalSec)
+-		}
++		updateTotalSecFromPosition(x, y)
+ 	}
+ 	click.ConnectPressed(&onPress)
+ 
+@@ -84,16 +94,60 @@
+ 	return v
+ }
+ 
+-func (d *Dial) SetTimer(totalSec int, running bool, remain time.Duration) {
++func (x *Dial) ConnectDragBegin(cb *func()) uint32 {
++	cbPtr := uintptr(unsafe.Pointer(cb))
++	if cbRefPtr, ok := glib.GetCallback(cbPtr); ok {
++		return gobject.SignalConnect(x.GoPointer(), signalDialDragBegin, cbRefPtr)
++	}
++
++	fcb := func(_ uintptr) {
++		(*cb)()
++	}
++	cbRefPtr := purego.NewCallback(fcb)
++	glib.SaveCallback(cbPtr, cbRefPtr)
++	return gobject.SignalConnect(x.GoPointer(), signalDialDragBegin, cbRefPtr)
++}
++
++func (x *Dial) ConnectDragEnd(cb *func()) uint32 {
++	cbPtr := uintptr(unsafe.Pointer(cb))
++	if cbRefPtr, ok := glib.GetCallback(cbPtr); ok {
++		return gobject.SignalConnect(x.GoPointer(), signalDialDragEnd, cbRefPtr)
++	}
++
++	fcb := func(_ uintptr) {
++		(*cb)()
++	}
++	cbRefPtr := purego.NewCallback(fcb)
++	glib.SaveCallback(cbPtr, cbRefPtr)
++	return gobject.SignalConnect(x.GoPointer(), signalDialDragEnd, cbRefPtr)
++}
++
++func (d *Dial) SetTimer(running bool, remain time.Duration) {
+ 	dialW := (*Dial)(unsafe.Pointer(d.Widget.GetData(dataKeyGoInstance)))
+ 
+-	dialW.totalSec = totalSec
+ 	dialW.running = running
+ 	dialW.remain = remain
+ 
+ 	d.Widget.QueueDraw()
+ }
+ 
++func (d *Dial) SetTotalSec(totalSec int) {
++	var val gobject.Value
++	val.Init(types.GType(gobject.TypeIntVal))
++	val.SetInt(int32(totalSec))
++	d.SetProperty(propertyDialTotalSec, &val)
++	val.Unset()
++}
++
++func (d *Dial) GetTotalSec() int {
++	var val gobject.Value
++	val.Init(types.GType(gobject.TypeIntVal))
++	d.GetProperty(propertyDialTotalSec, &val)
++	totalSec := int(val.GetInt())
++	val.Unset()
++	return totalSec
++}
++
+ func (d *Dial) positionToTotalSec(x, y float64) (int, bool) {
+ 	width, height := float64(d.Widget.GetWidth()), float64(d.Widget.GetHeight())
+ 	cx, cy := width/2, height/2
+@@ -118,7 +172,60 @@ }
+ 
+ func init() {
+ 	var classInit gobject.ClassInitFunc = func(tc *gobject.TypeClass, u uintptr) {
++		gobject.SignalNewv(
++			signalDialDragBegin,
++			gTypeDial,
++			gobject.GSignalRunFirstValue,
++			nil,
++			nil,
++			0,
++			nil,
++			types.GType(gobject.TypeNoneVal),
++			0,
++			nil,
++		)
++
++		gobject.SignalNewv(
++			signalDialDragEnd,
++			gTypeDial,
++			gobject.GSignalRunFirstValue,
++			nil,
++			nil,
++			0,
++			nil,
++			types.GType(gobject.TypeNoneVal),
++			0,
++			nil,
++		)
++
+ 		objClass := (*gobject.ObjectClass)(unsafe.Pointer(tc))
++
++		objClass.OverrideSetProperty(func(o *gobject.Object, u uint32, v *gobject.Value, ps *gobject.ParamSpec) {
++			switch u {
++			case propertyIdDialTotalSec:
++				w := (*Dial)(unsafe.Pointer(o.GetData(dataKeyGoInstance)))
++				w.totalSec = int(v.GetInt())
++				w.Widget.QueueDraw()
++			}
++		})
++
++		objClass.OverrideGetProperty(func(o *gobject.Object, u uint32, v *gobject.Value, ps *gobject.ParamSpec) {
++			switch u {
++			case propertyIdDialTotalSec:
++				w := (*Dial)(unsafe.Pointer(o.GetData(dataKeyGoInstance)))
++				v.SetInt(int32(w.totalSec))
++			}
++		})
++
++		objClass.InstallProperty(propertyIdDialTotalSec, gobject.NewParamSpecInt(
++			propertyDialTotalSec,
++			"Total seconds",
++			"Total seconds on the dial",
++			int32(minDialValue.Seconds()),
++			int32(maxDialValue.Seconds()),
++			300,
++			gobject.GParamReadwriteValue,
++		))
+ 
+ 		objClass.OverrideConstructed(func(o *gobject.Object) {
+ 			parentObjClass := (*gobject.ObjectClass)(unsafe.Pointer(tc.PeekParent()))
+diff --git a/internal/components/main_window.go b/internal/components/main_window.go
+index d27e480e1d86331fd2325c7d680e069df8280db4..7b9f4819b47dbd36f5157743cda548b192085c2d 100644
+--- a/internal/components/main_window.go
++++ b/internal/components/main_window.go
+@@ -66,50 +66,58 @@ 	window := (*MainWindow)(unsafe.Pointer(obj.GetData(dataKeyGoInstance)))
+ 	window.app = app
+ 	window.log = log
+ 
+-	dial := NewDial(
+-		app,
+-		func() {
+-			if window.alarming {
+-				return
+-			}
++	dial := NewDial(app, "css-name")
++	dial.Widget.SetHexpand(true)
++	dial.Widget.SetVexpand(true)
++	window.dialArea.Append(&dial.Widget)
++	window.dialWidget = &dial
+ 
+-			if window.running {
+-				window.paused = true
+-			}
+-			window.dragging = true
+-		},
+-		func(totalSec int) {
+-			if window.alarming {
+-				return
+-			}
++	var totalSecToLabel gobject.BindingTransformFunc = func(_ uintptr, from *gobject.Value, to *gobject.Value, _ uintptr) bool {
++		totalSec := int(from.GetInt())
++		to.SetString(fmt.Sprintf("%02d:%02d", totalSec/60, totalSec%60))
++		return true
++	}
++	dial.Widget.Object.BindPropertyFull(
++		"total-sec",
++		&window.label.Widget.Object,
++		"label",
++		gobject.GBindingSyncCreateValue,
++		&totalSecToLabel,
++		nil,
++		0,
++		nil,
++	)
+ 
+-			window.totalSec = totalSec
+-			if window.paused {
+-				window.remain = time.Duration(totalSec) * time.Second
+-			}
++	onDialDragBegin := func() {
++		if window.alarming {
++			return
++		}
+ 
+-			window.UpdateDial()
+-			window.SaveLastPosition()
+-		},
+-		func() {
+-			window.dragging = false
++		if window.running {
++			window.paused = true
++		}
++		window.dragging = true
++	}
++	dial.ConnectDragBegin(&onDialDragBegin)
+ 
+-			if window.alarming {
+-				return
+-			}
++	onDialDragEnd := func() {
++		window.dragging = false
++
++		if window.alarming {
++			return
++		}
+ 
+-			if window.paused {
+-				window.paused = false
+-			} else if !window.running && window.totalSec > 0 {
+-				window.StartTimer()
+-			}
+-		},
+-		"css-name",
+-	)
+-	dial.Widget.SetHexpand(true)
+-	dial.Widget.SetVexpand(true)
+-	window.dialArea.Append(&dial.Widget)
+-	window.dialWidget = &dial
++		totalSec := dial.GetTotalSec()
++		window.totalSec = totalSec
++		if window.paused {
++			window.remain = time.Duration(totalSec) * time.Second
++			window.paused = false
++		} else if !window.running && totalSec > 0 {
++			window.StartTimer()
++		}
++		window.SaveLastPosition()
++	}
++	dial.ConnectDragEnd(&onDialDragEnd)
+ 
+ 	window.ctx = ctx
+ 
+@@ -350,19 +358,16 @@ 	}
+ }
+ 
+ func (w *MainWindow) UpdateDial() {
+-	var m, s int
++	w.dialWidget.SetTotalSec(w.totalSec)
+ 	if w.alarming {
+-		m, s = 0, 0
+-		w.dialWidget.SetTimer(w.totalSec, true, 0)
++		w.dialWidget.SetTimer(true, 0)
++		w.label.SetText("00:00")
+ 	} else if w.running {
+-		m, s = int(w.remain.Minutes()), int(w.remain.Seconds())%60
+-		w.dialWidget.SetTimer(w.totalSec, w.running, w.remain)
++		w.dialWidget.SetTimer(w.running, w.remain)
++		w.label.SetText(fmt.Sprintf("%02d:%02d", int(w.remain.Minutes()), int(w.remain.Seconds())%60))
+ 	} else {
+-		m, s = w.totalSec/60, w.totalSec%60
+-		w.dialWidget.SetTimer(w.totalSec, w.running, w.remain)
++		w.dialWidget.SetTimer(w.running, w.remain)
+ 	}
+-
+-	w.label.SetText(fmt.Sprintf("%02d:%02d", m, s))
+ }
+ 
+ func (w *MainWindow) StartTimer() {
+
