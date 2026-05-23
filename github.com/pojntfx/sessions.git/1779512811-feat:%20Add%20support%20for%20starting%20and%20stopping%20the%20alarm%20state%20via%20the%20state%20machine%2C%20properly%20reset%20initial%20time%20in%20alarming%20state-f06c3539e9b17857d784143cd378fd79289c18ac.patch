@@ -1,0 +1,105 @@
+From f06c3539e9b17857d784143cd378fd79289c18ac Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Fri, 22 May 2026 22:06:51 -0700
+Subject: [PATCH] feat: Add support for starting and stopping the alarm state via the state machine, properly reset initial time in alarming state
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/internal/components/main_window.go b/internal/components/main_window.go
+index 970ffd4ae66f354126aa3301d36754f7e88855ab..d4a0d5d74a2325df7c6e4acdef9fcc43dd9771fd 100644
+--- a/internal/components/main_window.go
++++ b/internal/components/main_window.go
+@@ -24,6 +24,10 @@ var (
+ 	gTypeMainWindow gobject.Type
+ )
+ 
++const (
++	notificationIdVar = "session-finished"
++)
++
+ type MainWindow struct {
+ 	adw.ApplicationWindow
+ 
+@@ -37,7 +41,10 @@ 	label        *gtk.Label
+ 	actionButton *gtk.Button
+ 	plusButton   *gtk.Button
+ 	minusButton  *gtk.Button
+-	app          *adw.Application
++
++	alarmClockElapsedFile *gtk.MediaFile
++
++	app *adw.Application
+ 
+ 	s *state.StateMachine
+ }
+@@ -143,9 +150,58 @@
+ 				return nil
+ 			},
+ 
+-			OnStartAlarm: func(ctx context.Context) error { return nil },
++			OnStartAlarm: func(ctx context.Context) error {
++				fn := glib.SourceFunc(func(u uintptr) bool {
++					window.dialWidget.SetRemainingTime(0)
++
++					window.dialWidget.SetCountingDown(true)
++
++					window.dialWidget.SetSensitive(false)
++
++					window.label.AddCssClass("dial__display--alarming")
++
++					n := gio.NewNotification(L("Session Finished"))
++					n.SetBody(L("Time to take a break"))
++					n.SetPriority(gio.GNotificationPriorityHighValue)
++					// We need to attach to `app`, not `win` since it's possible that no window
++					// is focused when the notification is activated
++					n.SetDefaultAction("app.stopAlarmPlayback")
++
++					window.app.SendNotification(notificationIdVar, n)
++
++					window.alarmClockElapsedFile.Seek(0)
++					window.alarmClockElapsedFile.Play()
++
++					window.label.Announce(L("Session Finished"), gtk.AccessibleAnnouncementPriorityHighValue)
++
++					return false
++				})
++				glib.IdleAdd(&fn, 0)
++
++				return nil
++			},
++
++			OnStopAlarm: func(ctx context.Context) error {
++				fn := glib.SourceFunc(func(u uintptr) bool {
++					window.dialWidget.SetRemainingTime(int(lastInitialRemainingTime.Seconds()))
+ 
+-			OnStopAlarm: func(ctx context.Context) error { return nil },
++					window.dialWidget.SetCountingDown(false)
++
++					window.dialWidget.SetSensitive(true)
++
++					window.label.RemoveCssClass("dial__display--alarming")
++
++					window.alarmClockElapsedFile.SetPlaying(false)
++					window.alarmClockElapsedFile.Seek(0)
++
++					window.app.WithdrawNotification(notificationIdVar)
++
++					return false
++				})
++				glib.IdleAdd(&fn, 0)
++
++				return nil
++			},
+ 
+ 			OnPermittedTriggersChange: func(ctx context.Context, permittedTriggers []state.Trigger) error {
+ 				fn := glib.SourceFunc(func(u uintptr) bool {
+@@ -326,6 +382,8 @@ 				label:        &label,
+ 				actionButton: &actionButton,
+ 				plusButton:   &plusButton,
+ 				minusButton:  &minusButton,
++
++				alarmClockElapsedFile: gtk.NewMediaFileForResource(resources.ResourceAlarmClockElapsedPath),
+ 			}
+ 
+ 			var pinner runtime.Pinner
+
