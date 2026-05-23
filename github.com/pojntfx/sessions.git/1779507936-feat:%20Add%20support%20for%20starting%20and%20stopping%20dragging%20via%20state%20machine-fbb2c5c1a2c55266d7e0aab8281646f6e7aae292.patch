@@ -1,0 +1,50 @@
+From fbb2c5c1a2c55266d7e0aab8281646f6e7aae292 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Fri, 22 May 2026 20:45:36 -0700
+Subject: [PATCH] feat: Add support for starting and stopping dragging via state machine
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/internal/components/main_window.go b/internal/components/main_window.go
+index cda0c2527463282e6161c49033d121dbc02d380c..ffadeb04982f6088db656478ba482658bbdfbda7 100644
+--- a/internal/components/main_window.go
++++ b/internal/components/main_window.go
+@@ -77,12 +77,6 @@ 		0,
+ 		nil,
+ 	)
+ 
+-	onDialDragBegin := func() {}
+-	dial.ConnectDragBegin(&onDialDragBegin)
+-
+-	onDialDragEnd := func() {}
+-	dial.ConnectDragEnd(&onDialDragEnd)
+-
+ 	lastInitialRemainingTime := time.Second * time.Duration(window.settings.GetInt64(resources.SchemaLastPositionKey))
+ 	window.dialWidget.SetRemainingTime(int(lastInitialRemainingTime.Seconds()))
+ 
+@@ -117,6 +111,24 @@ 			OnPermittedTriggersChange: func(ctx context.Context, permittedTriggers []state.Trigger) error { return nil },
+ 		},
+ 	)
+ 	window.s.FlushPermittedTriggers(window.ctx)
++
++	onDialDragBegin := func() {
++		if err := window.s.StartDragging(window.ctx); err != nil {
++			window.log.Error("Could not start dragging", "err", err)
++
++			return
++		}
++	}
++	dial.ConnectDragBegin(&onDialDragBegin)
++
++	onDialDragEnd := func() {
++		if err := window.s.StopDragging(window.ctx, time.Duration(window.dialWidget.GetRemainingTime())*time.Second); err != nil {
++			window.log.Error("Could not stop dragging", "err", err)
++
++			return
++		}
++	}
++	dial.ConnectDragEnd(&onDialDragEnd)
+ 
+ 	toggleTimerAction := gio.NewSimpleAction("toggleTimer", nil)
+ 	onToggleTimer := func(gio.SimpleAction, uintptr) {}
+
