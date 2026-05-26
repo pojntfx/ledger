@@ -1,0 +1,194 @@
+From 700639d14ca488102f3bf887e0a797e4eb01ec76 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Mon, 25 May 2026 23:47:45 -0700
+Subject: [PATCH] fix: Prevent early returns for background portal access in hooks
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/internal/components/main_window.go b/internal/components/main_window.go
+index 8a181bc08724b86cff10127a60688f2e8e369a96..2f5ef6fc3380129ddfef8dc9d2a1a968ce26544d 100644
+--- a/internal/components/main_window.go
++++ b/internal/components/main_window.go
+@@ -109,34 +109,36 @@ 				fn := glib.SourceFunc(func(u uintptr) bool {
+ 					window.dialWidget.SetCountingDown(true)
+ 
+ 					if !window.held {
+-						res, err := background.RequestBackground("", &background.RequestOptions{
+-							// TRANSLATORS: Reason given when requesting permission to run in the background from the system.
+-							Reason: L("Running the Timer in the Background"),
+-						})
+-						if err != nil {
+-							window.log.Error("Could not request permission to run in background via background portal", "err", err)
++						func() {
++							res, err := background.RequestBackground("", &background.RequestOptions{
++								// TRANSLATORS: Reason given when requesting permission to run in the background from the system.
++								Reason: L("Running the Timer in the Background"),
++							})
++							if err != nil {
++								window.log.Error("Could not request permission to run in background via background portal", "err", err)
+ 
+-							return false
+-						}
++								return
++							}
+ 
+-						if !res.Background { // Permission to run the background was denied
+-							return false
+-						}
++							if !res.Background { // Permission to run the background was denied
++								return
++							}
+ 
+-						if err := background.SetStatus(background.StatusOptions{
+-							// TRANSLATORS: Message shown in the background apps list next to the app while the app is running in the background.
+-							Message: L("Timer Running"),
+-						},
+-						); err != nil {
+-							window.log.Error("Could not set app status via background portal", "err", err)
++							if err := background.SetStatus(background.StatusOptions{
++								// TRANSLATORS: Message shown in the background apps list next to the app while the app is running in the background.
++								Message: L("Timer Running"),
++							},
++							); err != nil {
++								window.log.Error("Could not set app status via background portal", "err", err)
+ 
+-							return false
+-						}
++								return
++							}
+ 
+-						window.app.Hold()
+-						window.SetHideOnClose(true)
++							window.app.Hold()
++							window.SetHideOnClose(true)
+ 
+-						window.held = true
++							window.held = true
++						}()
+ 					}
+ 
+ 					return false
+@@ -178,19 +180,21 @@
+ 					window.dialWidget.SetCountingDown(false)
+ 
+ 					if window.held {
+-						if err := background.SetStatus(background.StatusOptions{
+-							Message: "",
+-						},
+-						); err != nil {
+-							window.log.Error("Could not clear app status via background portal", "err", err)
++						func() {
++							if err := background.SetStatus(background.StatusOptions{
++								Message: "",
++							},
++							); err != nil {
++								window.log.Error("Could not clear app status via background portal", "err", err)
+ 
+-							return false
+-						}
++								return
++							}
+ 
+-						window.SetHideOnClose(false)
+-						window.app.Release()
++							window.SetHideOnClose(false)
++							window.app.Release()
+ 
+-						window.held = false
++							window.held = false
++						}()
+ 					}
+ 
+ 					return false
+@@ -207,34 +211,36 @@
+ 					window.dialWidget.SetCountingDown(true)
+ 
+ 					if !window.held {
+-						res, err := background.RequestBackground("", &background.RequestOptions{
+-							// TRANSLATORS: Reason given when requesting permission to run in the background from the system.
+-							Reason: L("Running the Timer in the Background"),
+-						})
+-						if err != nil {
+-							window.log.Error("Could not request permission to run in background via background portal", "err", err)
++						func() {
++							res, err := background.RequestBackground("", &background.RequestOptions{
++								// TRANSLATORS: Reason given when requesting permission to run in the background from the system.
++								Reason: L("Running the Timer in the Background"),
++							})
++							if err != nil {
++								window.log.Error("Could not request permission to run in background via background portal", "err", err)
+ 
+-							return false
+-						}
++								return
++							}
+ 
+-						if !res.Background { // Permission to run the background was denied
+-							return false
+-						}
++							if !res.Background { // Permission to run the background was denied
++								return
++							}
+ 
+-						if err := background.SetStatus(background.StatusOptions{
+-							// TRANSLATORS: Message shown in the background apps list next to the app while the app is running in the background and the session has finished.
+-							Message: L("Session Finished"),
+-						},
+-						); err != nil {
+-							window.log.Error("Could not set app status via background portal", "err", err)
++							if err := background.SetStatus(background.StatusOptions{
++								// TRANSLATORS: Message shown in the background apps list next to the app while the app is running in the background and the session has finished.
++								Message: L("Session Finished"),
++							},
++							); err != nil {
++								window.log.Error("Could not set app status via background portal", "err", err)
+ 
+-							return false
+-						}
++								return
++							}
+ 
+-						window.app.Hold()
+-						window.SetHideOnClose(true)
++							window.app.Hold()
++							window.SetHideOnClose(true)
+ 
+-						window.held = true
++							window.held = true
++						}()
+ 					}
+ 
+ 					window.dialWidget.SetSensitive(false)
+@@ -269,19 +275,21 @@
+ 					window.dialWidget.SetCountingDown(false)
+ 
+ 					if window.held {
+-						if err := background.SetStatus(background.StatusOptions{
+-							Message: "",
+-						},
+-						); err != nil {
+-							window.log.Error("Could not clear app status via background portal", "err", err)
++						func() {
++							if err := background.SetStatus(background.StatusOptions{
++								Message: "",
++							},
++							); err != nil {
++								window.log.Error("Could not clear app status via background portal", "err", err)
+ 
+-							return false
+-						}
++								return
++							}
+ 
+-						window.SetHideOnClose(false)
+-						window.app.Release()
++							window.SetHideOnClose(false)
++							window.app.Release()
+ 
+-						window.held = false
++							window.held = false
++						}()
+ 					}
+ 
+ 					window.dialWidget.SetSensitive(true)
+
