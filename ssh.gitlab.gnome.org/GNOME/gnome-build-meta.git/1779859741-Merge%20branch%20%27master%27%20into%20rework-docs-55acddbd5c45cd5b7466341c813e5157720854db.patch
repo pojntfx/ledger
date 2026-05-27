@@ -1,0 +1,2732 @@
+From 55acddbd5c45cd5b7466341c813e5157720854db Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Tue, 26 May 2026 22:29:01 -0700
+Subject: [PATCH] Merge branch 'master' into rework-docs
+---
+diff --git a/.gitlab-ci/scripts/global-before-script.sh b/.gitlab-ci/scripts/global-before-script.sh
+index 4a8f858c784046c093414bcd8c51e9a8ac898b3d..4e03c79480b9de0364656991e6b9dcb8d5f821b3 100644
+--- a/.gitlab-ci/scripts/global-before-script.sh
++++ b/.gitlab-ci/scripts/global-before-script.sh
+@@ -21,12 +21,14 @@
+ ./.gitlab-ci/scripts/generate-buildtream-conf.sh nopush >.gitlab-ci/buildstream-nopush.conf
+ ./.gitlab-ci/scripts/generate-buildtream-conf.sh >.gitlab-ci/buildstream.conf
+ 
+-build_num="${CI_PIPELINE_ID}"
++# Check that the commit timestamps are increasing, as our version numbers depend on that
++git log --format=%cd --date=unix | sort --check --reverse --numeric-sort
++
+ if [ "${CI_COMMIT_BRANCH-}" = master ]; then
+-    IMAGE_VERSION="nightly.$build_num"
++    version_num=$(TZ=UTC git log --format="%cd" --date="format-local:%Y%m%d" | uniq -c | (head -n1 && cat >/dev/null) | awk '{print ($2"."($1-1))}')
++    IMAGE_VERSION="nightly.$version_num"
+ elif [ "${CI_COMMIT_REF_PROTECTED-}" = true ]; then
+-    # Assume this will always be a stable branch string like "gnome-44"
+-    IMAGE_VERSION=$(echo "${CI_COMMIT_REF_SLUG}.$build_num" | sed "s/-/_/g")
++    IMAGE_VERSION=$(git describe | cut -d - -f 1-2)
+ else
+     target="${CI_MERGE_REQUEST_TARGET_BRANCH_NAME-unknown}"
+     if [ "${target}" = master ]; then
+@@ -35,10 +37,9 @@     fi
+     IMAGE_VERSION=$(echo "${target}-branch" | sed "s/-/_/g")
+ fi
+ 
+-# The longest GPT label is of shape "gnomeos_usr_XXXX_v_%A" where
+-# XXXX is the layer name. The longest layer name is 4. The longest
+-# possible label is 36. So the longest version is 17.
+-if [ "${#IMAGE_VERSION}" -gt 17 ]; then
++# The longest GPT label is of shape "gnomeos_usr_v_%A".
++# The longest possible label is 36. So the longest version is 22.
++if [ "${#IMAGE_VERSION}" -gt 22 ]; then
+     echo "Version is too long" 1>&2
+     exit 1
+ fi
+diff --git a/elements/core-deps/evolution-data-server.bst b/elements/core-deps/evolution-data-server.bst
+index 243475858a5c1954b4e99b80ae57f14d4523aab3..c6856bffcd9b03747213e9d396e5f87df295a04f 100644
+--- a/elements/core-deps/evolution-data-server.bst
++++ b/elements/core-deps/evolution-data-server.bst
+@@ -4,7 +4,7 @@ sources:
+ - kind: git_repo
+   url: gnome:evolution-data-server.git
+   track: master
+-  ref: 3.60.0-59-g1e4a2b3bea167af9885c5289b22c10029922c748
++  ref: 3.60.0-66-gc02a6940598c8683955bee281ecff8323ddc1398
+ 
+ build-depends:
+ - sdk/gobject-introspection.bst
+diff --git a/elements/core-deps/flatpak.bst b/elements/core-deps/flatpak.bst
+index a64e0441fe762d8045bdb9be530b22f36a139622..d761d5ec912c87a83ecc1acb2cc8374d8eb9cec0 100644
+--- a/elements/core-deps/flatpak.bst
++++ b/elements/core-deps/flatpak.bst
+@@ -3,7 +3,11 @@
+ sources:
+ - kind: git_repo
+   url: github:flatpak/flatpak.git
+-  track: main
++  (?):
++  - channel == "nightly":
++      track: main
++  - channel == "stable":
++      track: 1.[0-8][02468].*
+   ref: 1.17.7-6-g588eef8e65c94af037c4855577535769994a2e05
+ 
+ build-depends:
+diff --git a/elements/core-deps/foundry.bst b/elements/core-deps/foundry.bst
+index e4550e791ead6500c091e0b1b5461325fdf85041..f70ec0b71abd05c17a8666d280ffa7caa0680e55 100644
+--- a/elements/core-deps/foundry.bst
++++ b/elements/core-deps/foundry.bst
+@@ -4,7 +4,7 @@ sources:
+ - kind: git_repo
+   url: gnome:foundry.git
+   track: main
+-  ref: 1.1.1-23-gaf535745052a4008c061be29494c71e018e534e8
++  ref: 1.1.1-37-g3fde05fc9049d55ed3b81f2173968a721d71a8f1
+ 
+ build-depends:
+ - freedesktop-sdk.bst:public-stacks/buildsystem-meson.bst
+diff --git a/elements/core-deps/glibmm.bst b/elements/core-deps/glibmm.bst
+index 06902fa3fa4964810d371b75743b20a05b606be0..c9302949a29bc68295fa75ffb9f6c7137a66558d 100644
+--- a/elements/core-deps/glibmm.bst
++++ b/elements/core-deps/glibmm.bst
+@@ -5,7 +5,7 @@ - kind: git_repo
+   url: gnome:glibmm.git
+   track: master
+ 
+-  ref: 2.88.0-22-g9e40a8a77244183796cb1a18c58cc9aa718247de
++  ref: 2.88.0-26-ge454df52387caece6b0cb4157b5d2cc778f38d9f
+ build-depends:
+ - core-deps/graphviz.bst
+ - core-deps/mm-common.bst
+diff --git a/elements/core-deps/grilo-plugins.bst b/elements/core-deps/grilo-plugins.bst
+index bf8357b918ebd1c04369c967fa5c7abebc54a7bf..52324d3ecf8042c4ab1fb78d39f4b7a070bb4282 100644
+--- a/elements/core-deps/grilo-plugins.bst
++++ b/elements/core-deps/grilo-plugins.bst
+@@ -4,7 +4,7 @@ sources:
+ - kind: git_repo
+   url: gnome:grilo-plugins.git
+   track: master
+-  ref: grilo-plugins-0.3.18-12-gf3cb22bb73d4ad9b1043d997e8c0a12762fc4dbf
++  ref: grilo-plugins-0.3.18-13-g7c6c618b188c309ed3056405f09e695a2ff7839d
+ 
+ build-depends:
+ - core-deps/localsearch.bst
+diff --git a/elements/core-deps/grilo.bst b/elements/core-deps/grilo.bst
+index c7c28a06f52b38fb42491904e4fe737ea92fd6d4..6c216c789aa2acdc2a408d71fc1866480c3cafeb 100644
+--- a/elements/core-deps/grilo.bst
++++ b/elements/core-deps/grilo.bst
+@@ -4,7 +4,7 @@ sources:
+ - kind: git_repo
+   url: gnome:grilo.git
+   track: master
+-  ref: grilo-0.3.19-4-gd64e73a48c02c4890010311784c19a6daac83055
++  ref: grilo-0.3.19-5-gf46fb1460d5019cb97e877bd88a7379c2e6558be
+ 
+ build-depends:
+ - sdk/gobject-introspection.bst
+diff --git a/elements/core-deps/gtkmm.bst b/elements/core-deps/gtkmm.bst
+index ec4fa18f67f0ea641e3138113fcdaef52292739a..3a9e827eec6750798c7732b289142737e4f8fe43 100644
+--- a/elements/core-deps/gtkmm.bst
++++ b/elements/core-deps/gtkmm.bst
+@@ -4,7 +4,7 @@ sources:
+ - kind: git_repo
+   url: gnome:gtkmm.git
+   track: master
+-  ref: 4.22.0-3-g5c7cc2708cf1e89c1d32c455af08d1cf47781b94
++  ref: 4.22.0-5-g2160941ea7e63daa74782e53c7089659b5628293
+ 
+ build-depends:
+ - core-deps/graphviz.bst
+diff --git a/elements/core-deps/gweather-locations.bst b/elements/core-deps/gweather-locations.bst
+index 83ade00680732b31f39b2b8983806539ed9b6692..f7674a5e4d94cbf0c15995b29f087924c85f14e9 100644
+--- a/elements/core-deps/gweather-locations.bst
++++ b/elements/core-deps/gweather-locations.bst
+@@ -4,7 +4,7 @@ sources:
+ - kind: git_repo
+   url: gnome:gweather-locations.git
+   track: main
+-  ref: 2026.2-11-g08a3cd6b2787b3872f184a14fe7e000aadf384f1
++  ref: 2026.2-12-g3c795abb2797b16ba8832db21e0e847f18c0e955
+ 
+ build-depends:
+ - sdk/pygobject.bst
+diff --git a/elements/core-deps/libgit2.bst b/elements/core-deps/libgit2.bst
+index a199a5bb4e4ec6de56da3b3777227a71dc620e36..471e07ae236667e8e184ca61813286a046aafb30 100644
+--- a/elements/core-deps/libgit2.bst
++++ b/elements/core-deps/libgit2.bst
+@@ -4,7 +4,7 @@ sources:
+ - kind: git_repo
+   url: github:libgit2/libgit2.git
+   track: 'v*'
+-  ref: v1.9.3-0-g1affb8b19346c4f90e163a9a0364959ff1410f64
++  ref: v1.9.4-0-gf7164261c9bc0a7e0ebf767c584e5192810a8b24
+ 
+ build-depends:
+ - freedesktop-sdk.bst:public-stacks/buildsystem-cmake.bst
+diff --git a/elements/core-deps/libgtop.bst b/elements/core-deps/libgtop.bst
+index f51c4e6a22268671fd7cbd37c002da68c97055b4..cfcd137c1e45fb8236b329509bf53354a375f87e 100644
+--- a/elements/core-deps/libgtop.bst
++++ b/elements/core-deps/libgtop.bst
+@@ -3,7 +3,7 @@ sources:
+ - kind: git_repo
+   url: gnome:libgtop.git
+   track: master
+-  ref: 2.41.3-17-g6a21532ff67060718eb5ebcdae050d03eaff111e
++  ref: 2.41.3-18-g990b6cc1b8383778b263254ec38aa4e24635e6c4
+ build-depends:
+ - sdk/gobject-introspection.bst
+ - sdk/gtk-doc.bst
+diff --git a/elements/core-deps/libsigcplusplus.bst b/elements/core-deps/libsigcplusplus.bst
+index 1dbd62443ff1edcd0509d0e717439e9d3791e359..9f79bd8c98fb3f9545b74cc6f0eead111111551a 100644
+--- a/elements/core-deps/libsigcplusplus.bst
++++ b/elements/core-deps/libsigcplusplus.bst
+@@ -4,7 +4,7 @@ sources:
+ - kind: git_repo
+   url: github:libsigcplusplus/libsigcplusplus.git
+   track: "*.*.*"
+-  ref: 3.8.0-0-g653447171e2358933781ccaab0840dda7cff64ad
++  ref: 3.8.1-0-g9af9264ac1f3ff48f5cdffa7544caed518e2795b
+ 
+ build-depends:
+ - core-deps/graphviz.bst
+diff --git a/elements/core-deps/libspelling.bst b/elements/core-deps/libspelling.bst
+index ed598421cb1ac5628c5d940737ca7cefb636c1f5..e06ee84c127d93a4f372a032288196bec79d99d8 100644
+--- a/elements/core-deps/libspelling.bst
++++ b/elements/core-deps/libspelling.bst
+@@ -4,7 +4,7 @@ sources:
+ - kind: git_repo
+   url: gnome:libspelling.git
+   track: main
+-  ref: 0.4.10-6-gb819ab86dbc50dca650106c302e5b12cf3b1b1ae
++  ref: 0.4.10-10-g429f32287b616e59476212ad3a8f957b83be878d
+ 
+ build-depends:
+ - sdk/gi-docgen.bst
+diff --git a/elements/core-deps/nodejs.bst b/elements/core-deps/nodejs.bst
+index 934ed20f676acf79e797779d567772dfb3b80369..a127410429a6feb6076378ac497116b00946e370 100644
+--- a/elements/core-deps/nodejs.bst
++++ b/elements/core-deps/nodejs.bst
+@@ -4,7 +4,7 @@ sources:
+ - kind: git_repo
+   url: github:nodejs/node.git
+   track: 'v*'
+-  ref: v26.1.0-0-ge7da6f056ac4afeaaf012042188818ca7736f437
++  ref: v26.2.0-0-gcfd7920d5a2d84905c4292362d01d07870047e93
+ 
+ build-depends:
+ - freedesktop-sdk.bst:components/gyp.bst
+diff --git a/elements/core-deps/plymouth.bst b/elements/core-deps/plymouth.bst
+index 94ebae6ba0981d2e62ed5e7193b4bb4f91d68ed6..6f9e3a6c5c9f406b171ea7faa85234d09b3020ad 100644
+--- a/elements/core-deps/plymouth.bst
++++ b/elements/core-deps/plymouth.bst
+@@ -4,7 +4,7 @@ sources:
+ - kind: git_repo
+   url: freedesktop:plymouth/plymouth.git
+   track: main
+-  ref: 26.134.222-2-g668011c9e8ed0b83648d11059f7c16c02cc4233d
++  ref: 26.134.222-6-g96f5c0100eb9b6bbaede82e4cd064e5bac67cd8f
+ 
+ build-depends:
+ - sdk/gtk-doc.bst
+diff --git a/elements/core-deps/systemd-base.bst b/elements/core-deps/systemd-base.bst
+index 504491101ec698df702fa851fa8c0231ca82b42f..861beaca482f93ed7364ce31730195c3eb8f077c 100644
+--- a/elements/core-deps/systemd-base.bst
++++ b/elements/core-deps/systemd-base.bst
+@@ -7,10 +7,15 @@
+ sources:
+ - kind: git_repo
+   url: github:systemd/systemd.git
+-  track: main
+-  exclude:
+-  - '*-rc*'
+-  ref: v260-1691-gc043b9018733382c49d3d40f7ca406c43e9ae9fc
++  (?):
++  - channel == "nightly":
++      track: main
++  - channel == "stable":
++      track: v*
++      version-guess-pattern: '(\d+)(?:\.(\d+))?'
++      exclude:
++      - '*-rc*'
++  ref: v261-rc1-9-g4d18eac5a99dbc8198f25cde9175e66f27e92cbc
+ 
+ build-depends:
+ - freedesktop-sdk.bst:public-stacks/runtime-minimal.bst
+diff --git a/elements/core-deps/xdg-desktop-portal-base.bst b/elements/core-deps/xdg-desktop-portal-base.bst
+index 6bcb9c86314f66b31895898aa321c7a8cf837d93..4ba2c60985ec0b9de22a102b1a66541204c79a32 100644
+--- a/elements/core-deps/xdg-desktop-portal-base.bst
++++ b/elements/core-deps/xdg-desktop-portal-base.bst
+@@ -35,7 +35,11 @@
+ sources:
+ - kind: git_repo
+   url: github:flatpak/xdg-desktop-portal.git
+-  track: 'main'
++  (?):
++  - channel == "nightly":
++      track: main
++  - channel == "stable":
++      track: 1.[0-8][02468].*
+   ref: 1.21.2-1-gc6f217875485e28799a524b643c34474a289ba4f
+ - kind: git_repo
+   url: gnome:libglnx.git
+diff --git a/elements/core/baobab.bst b/elements/core/baobab.bst
+index 786a7eac9becabcf271f49189d25986cd4a6c024..0a227bfe691c623f62d0eaeedb5880846d53eb95 100644
+--- a/elements/core/baobab.bst
++++ b/elements/core/baobab.bst
+@@ -4,7 +4,7 @@ sources:
+ - kind: git_repo
+   url: gnome:baobab.git
+   track: main
+-  ref: 50.0-8-ga9d72f954001e363b313c9fbb7804de8d0be2e64
++  ref: 50.0-9-ga5cd7ba84389724a36ab0a643d7bc1cc68b581da
+ 
+ build-depends:
+ - sdk/vala.bst
+diff --git a/elements/core/d-spy.bst b/elements/core/d-spy.bst
+index f3bb6705f91423307d55f2cadf093c696a4665bc..6ccf82056c0e62ed9a0d167ec7d1386f1381ab88 100644
+--- a/elements/core/d-spy.bst
++++ b/elements/core/d-spy.bst
+@@ -4,7 +4,7 @@ sources:
+ - kind: git_repo
+   url: gnome:d-spy.git
+   track: main
+-  ref: 50.0-9-gc26e3c654265df50e9c6465dfeb37840ac3ba88b
++  ref: 50.0-10-g062fa93199d355a9bf95b131a8d16d81f746ae3b
+ 
+ build-depends:
+ - freedesktop-sdk.bst:components/desktop-file-utils.bst
+diff --git a/elements/core/gdm.bst b/elements/core/gdm.bst
+index 22c2cc76f7831ddd384d09271a2cdfb431682486..c140b853b4157cbdd7c7832a868d7488c288d84a 100644
+--- a/elements/core/gdm.bst
++++ b/elements/core/gdm.bst
+@@ -4,7 +4,7 @@ sources:
+ - kind: git_repo
+   url: gnome:gdm.git
+   track: main
+-  ref: 50.0-23-g0bc0253727c36f39613c2946c8a99da6211830df
++  ref: 50.0-32-gf06a9ab66c29588c7bd51616bb6d8f497f949b22
+ - kind: local
+   path: files/gdm
+   directory: gdm-config
+diff --git a/elements/core/gnome-bluetooth.bst b/elements/core/gnome-bluetooth.bst
+index d03e62ebed2e9c018c74b8bb6ab1b7f8b0b90288..225fa9ea3858fc4cd86dc508fdb2c04b1adee779 100644
+--- a/elements/core/gnome-bluetooth.bst
++++ b/elements/core/gnome-bluetooth.bst
+@@ -4,7 +4,7 @@ sources:
+ - kind: git_repo
+   url: gnome:gnome-bluetooth.git
+   track: master
+-  ref: 47.1-110-g3aae91c4687baf3d67650c052ba5be26a9c469c2
++  ref: 47.1-111-gab8976c9911fe3a6b5d29bf5dc551d91abac97a9
+ 
+ build-depends:
+ - sdk/gobject-introspection.bst
+diff --git a/elements/core/gnome-boxes.bst b/elements/core/gnome-boxes.bst
+index 02e49c1e5ff037bd974012e79c52a9839e571716..4564d5254549745c63c76b629112951aaf70d476 100644
+--- a/elements/core/gnome-boxes.bst
++++ b/elements/core/gnome-boxes.bst
+@@ -4,7 +4,7 @@ sources:
+ - kind: git_repo
+   url: gnome:gnome-boxes.git
+   track: main
+-  ref: 50.0-21-g9bf8e054cf2a01a581604d10540bb771da999dfc
++  ref: 50.0-23-g4bf2dc83f4d87958816eaf85866594c2e4793e96
+ - kind: git_module
+   url: gnome_gitlab:felipeborges/libovf-glib.git
+   path: subprojects/libovf-glib
+diff --git a/elements/core/gnome-builder.bst b/elements/core/gnome-builder.bst
+index 93556066a0087f35aedb100545f65c924c9f3204..ac4c92db58c5192f960f7c76a06244d99ba858bc 100644
+--- a/elements/core/gnome-builder.bst
++++ b/elements/core/gnome-builder.bst
+@@ -4,7 +4,7 @@ sources:
+ - kind: git_repo
+   url: gnome:gnome-builder.git
+   track: main
+-  ref: 50.0-15-g1e52030a9709ec81e498a8cc1c3b59f6bfa5e443
++  ref: 50.0-16-g05a3038ff04f791ad01025ef5f53a517f7c62290
+ 
+ build-depends:
+ - freedesktop-sdk.bst:components/desktop-file-utils.bst
+diff --git a/elements/core/gnome-calculator.bst b/elements/core/gnome-calculator.bst
+index 0e7802bd43a26b6d702a83ba7891e3b1bb030fba..d876e363fe0abd59cccf23a1dc37e6c4e38014e3 100644
+--- a/elements/core/gnome-calculator.bst
++++ b/elements/core/gnome-calculator.bst
+@@ -4,7 +4,7 @@ sources:
+ - kind: git_repo
+   url: gnome:gnome-calculator.git
+   track: main
+-  ref: 50.0-24-gae67550af5421bdbf1251e0236730968a89e75df
++  ref: 50.0-25-gd2ac199c52c7fcac65ba1b8cdf288999e9c64b70
+ 
+ build-depends:
+ - sdk/blueprint-compiler.bst
+diff --git a/elements/core/gnome-calendar.bst b/elements/core/gnome-calendar.bst
+index 0ffbdc3fa69f4bd6f6daaa270416b331546aeac5..08388e5973c276057ce272ff263a865ca83161e9 100644
+--- a/elements/core/gnome-calendar.bst
++++ b/elements/core/gnome-calendar.bst
+@@ -4,7 +4,7 @@ sources:
+ - kind: git_repo
+   url: gnome:gnome-calendar.git
+   track: main
+-  ref: 50.0-110-gc939c7176d62f245ddb9ea8176331573a56cbf0a
++  ref: 50.0-129-gdc423a29242e283d5a199c7c74a1d00ebd694ee3
+ 
+ build-depends:
+ - sdk/blueprint-compiler.bst
+diff --git a/elements/core/gnome-clocks.bst b/elements/core/gnome-clocks.bst
+index 1be084ad19ea507eda8d6a5ca915a782ddd152c7..7ba25bdd8d079b5bc789206dcfeff897bcce8bf6 100644
+--- a/elements/core/gnome-clocks.bst
++++ b/elements/core/gnome-clocks.bst
+@@ -4,7 +4,7 @@ sources:
+ - kind: git_repo
+   url: gnome:gnome-clocks.git
+   track: master
+-  ref: 50.0-14-g8f64ad7add3345c09feb0bc5839819ea55925fee
++  ref: 50.0-15-gae81ace1800278e4b4e6169cac5cf7d329d17b01
+ 
+ build-depends:
+ - core-deps/vorbis-tools.bst
+diff --git a/elements/core/gnome-color-manager.bst b/elements/core/gnome-color-manager.bst
+index 936fb8c88b908a2e58cc1ae4b779d98e6dcb9693..88e964bd4576ff8792fbbcfc1a8c3033c73f2260 100644
+--- a/elements/core/gnome-color-manager.bst
++++ b/elements/core/gnome-color-manager.bst
+@@ -4,7 +4,7 @@ sources:
+ - kind: git_repo
+   url: gnome:gnome-color-manager.git
+   track: master
+-  ref: 3.36.2-89-g1848b0affd90938e10400099e43bb0ad1866e945
++  ref: 3.36.2-90-g7a08499e69e94e4931188563fd03086e9c3a54fd
+ 
+ build-depends:
+ - freedesktop-sdk.bst:components/itstool.bst
+diff --git a/elements/core/gnome-connections.bst b/elements/core/gnome-connections.bst
+index eb4f6bb7157263f45d79e333e2c78a3fdc2efcfc..bf9ca670d18ed640efea1637cfb87e44911563b0 100644
+--- a/elements/core/gnome-connections.bst
++++ b/elements/core/gnome-connections.bst
+@@ -4,7 +4,7 @@ sources:
+ - kind: git_repo
+   url: gnome:gnome-connections.git
+   track: master
+-  ref: 50.0-16-g70ae85b4bb6b4e5cf251513d53e2035f01d00ee1
++  ref: 50.0-17-g63488f6b2b8fadde1e5d7934c9fc498d9c1b6ff5
+ - kind: git_module
+   url: gnome:gtk-frdp.git
+   path: subprojects/gtk-frdp
+diff --git a/elements/core/gnome-console.bst b/elements/core/gnome-console.bst
+index 25870229071bb93d9262227da383150a49dd6673..950be6f2d43c34c2c0ae627ffaf13d9b0d78b375 100644
+--- a/elements/core/gnome-console.bst
++++ b/elements/core/gnome-console.bst
+@@ -4,7 +4,7 @@ sources:
+ - kind: git_repo
+   url: gnome:console.git
+   track: main
+-  ref: 50.0-21-g4be62098a3fc703103e2e8ede38f705291619888
++  ref: 50.0-22-gf4cf09ae4a2166f1f23882b807a887e5bfb23c53
+ 
+ build-depends:
+ - freedesktop-sdk.bst:components/appstream.bst
+diff --git a/elements/core/gnome-contacts.bst b/elements/core/gnome-contacts.bst
+index e3028222b60b2f6838f8e00c6f7f901ba0077059..70142435c972c4445d309c58db56edebf1a053d7 100644
+--- a/elements/core/gnome-contacts.bst
++++ b/elements/core/gnome-contacts.bst
+@@ -4,7 +4,7 @@ sources:
+ - kind: git_repo
+   url: gnome:gnome-contacts.git
+   track: main
+-  ref: 50.0-7-g6c30130000800e07543340a055227fb757f19048
++  ref: 50.0-8-g2f053ba9042b53dc7b6dbf78dac513487d8ac2e6
+ 
+ build-depends:
+ - sdk/blueprint-compiler.bst
+diff --git a/elements/core/gnome-control-center.bst b/elements/core/gnome-control-center.bst
+index b4111d5564d6bb9116dd457d7399487d4054b292..a9a3d28e261e77c7b9913d784165f1d642fe127f 100644
+--- a/elements/core/gnome-control-center.bst
++++ b/elements/core/gnome-control-center.bst
+@@ -4,7 +4,7 @@ sources:
+ - kind: git_repo
+   url: gnome:gnome-control-center.git
+   track: main
+-  ref: 50.0-187-g6206dbeebf28292a3da44c20168a97751af2c60b
++  ref: 50.0-200-ga7c6a857f345003aca5fec7ee15304035d1174ef
+ - kind: git_module
+   url: gnome:libgnome-volume-control.git
+   path: subprojects/gvc
+@@ -16,7 +16,7 @@ - kind: git_repo
+   url: gnome:libgxdp.git
+   directory: subprojects/libgxdp
+   track: main
+-  ref: 1fe6de799f39b3126e8d0db66fa4f16c10fd9bd6
++  ref: df896e3412b749947bc6f62a91a1aac8e6b6d19b
+ 
+ build-depends:
+ # These two are more like runtime deps of the tests suite
+diff --git a/elements/core/gnome-disk-utility.bst b/elements/core/gnome-disk-utility.bst
+index 5b9ba6e15e12f667580583dd5082bd4bb936b575..346c3bd25491c52c58dc0f38dc196365fae72cfb 100644
+--- a/elements/core/gnome-disk-utility.bst
++++ b/elements/core/gnome-disk-utility.bst
+@@ -6,7 +6,7 @@ #       go and update files/gnome-mimeapps/quirks.toml
+ - kind: git_repo
+   url: gnome:gnome-disk-utility.git
+   track: main
+-  ref: 44.0-767-gb0056847968bd38b8f80055d77d1af861f0a88df
++  ref: 44.0-816-gd70d8a127f04d559c8effe1c060aaede74a84639
+ - kind: cargo2
+   ref:
+   - kind: registry
+@@ -1001,6 +1001,7 @@     name: zvariant_utils
+     version: 2.1.0
+     sha: c51bcff7cc3dbb5055396bcf774748c3dab426b4b8659046963523cee4808340
+ build-depends:
++- sdk/blueprint-compiler.bst
+ - freedesktop-sdk.bst:components/desktop-file-utils.bst
+ - freedesktop-sdk.bst:components/docbook-xsl.bst
+ - freedesktop-sdk.bst:components/libxslt.bst
+diff --git a/elements/core/gnome-font-viewer.bst b/elements/core/gnome-font-viewer.bst
+index 31f9eee1c8898eff2fce5258aa8df3c9894a76ef..92bb3c2fe28eb419c98f74e6c45f6029f1ff68c3 100644
+--- a/elements/core/gnome-font-viewer.bst
++++ b/elements/core/gnome-font-viewer.bst
+@@ -4,7 +4,7 @@ sources:
+ - kind: git_repo
+   url: gnome:gnome-font-viewer.git
+   track: main
+-  ref: 50.0-8-gf958574882cac294d4a7b7d89a01e386f101a28b
++  ref: 50.0-9-g2c8515c68108c5cef179d971910c34e9d2096843
+ 
+ build-depends:
+ - freedesktop-sdk.bst:public-stacks/buildsystem-meson.bst
+diff --git a/elements/core/gnome-initial-setup.bst b/elements/core/gnome-initial-setup.bst
+index 61bd2854724fbd21c266f23b2f9291b68457fd52..6d2ae5e2e7a6ef753560cb8e3d10495b310588e2 100644
+--- a/elements/core/gnome-initial-setup.bst
++++ b/elements/core/gnome-initial-setup.bst
+@@ -4,7 +4,7 @@ sources:
+ - kind: git_repo
+   url: gnome:gnome-initial-setup.git
+   track: master
+-  ref: 50.0-62-gf03e9f165130ca8558b4cbce536ee29d1bb1464f
++  ref: 50.0-63-g5c9f070b93527efb638211b2b74ddca86d6d146b
+ 
+ build-depends:
+ - freedesktop-sdk.bst:public-stacks/buildsystem-meson.bst
+diff --git a/elements/core/gnome-logs.bst b/elements/core/gnome-logs.bst
+index c0ccf2b84b3611f5b38b390c432dbf4c5c9ca140..4671b2a84fa2798800da9ef84a6b54e001b1fbbb 100644
+--- a/elements/core/gnome-logs.bst
++++ b/elements/core/gnome-logs.bst
+@@ -4,7 +4,7 @@ sources:
+ - kind: git_repo
+   url: gnome:gnome-logs.git
+   track: master
+-  ref: 50.0-33-ge65b133b7dc35dab99c7cfd7548bded70f3d3797
++  ref: 50.0-34-g0e70a72a2cf6f3cda8ac4ce94381b355784ef4b6
+ 
+ build-depends:
+ - freedesktop-sdk.bst:components/desktop-file-utils.bst
+diff --git a/elements/core/gnome-maps.bst b/elements/core/gnome-maps.bst
+index a2a3fca03947a226f3d463093c2e312dd0141c36..a71f798b696798fd206a9e21d76f4986e1b6b86c 100644
+--- a/elements/core/gnome-maps.bst
++++ b/elements/core/gnome-maps.bst
+@@ -4,7 +4,7 @@ sources:
+ - kind: git_repo
+   url: gnome:gnome-maps.git
+   track: main
+-  ref: 50.rc-73-g3f07b63a5f3505b5612a3628912be120856a56db
++  ref: 50.rc-74-g0228fbd4d91dbae8f4e2756ac59c0747739cea11
+ 
+ build-depends:
+ - freedesktop-sdk.bst:components/desktop-file-utils.bst
+diff --git a/elements/core/gnome-music.bst b/elements/core/gnome-music.bst
+index ce8e662dbcffa5be2c9b90cf002a5d6e9bc58cc6..7ac18b8de030d0f2fa37a2ca5210ba9eb2dee8be 100644
+--- a/elements/core/gnome-music.bst
++++ b/elements/core/gnome-music.bst
+@@ -4,7 +4,7 @@ sources:
+ - kind: git_repo
+   url: gnome:gnome-music.git
+   track: master
+-  ref: 49.rc-101-g8a9e6c6e69478ed110b7284e7a9e1fb0990bf539
++  ref: 49.rc-102-g6beda1a7db4a0f0fadec827545c87cabc0f9bd6a
+ 
+ build-depends:
+ - freedesktop-sdk.bst:components/desktop-file-utils.bst
+diff --git a/elements/core/gnome-shell.bst b/elements/core/gnome-shell.bst
+index f2855596db89186fa0f4a20d793b022c2ef37109..de93f29ca37477afa44684fb185b940c81931c77 100644
+--- a/elements/core/gnome-shell.bst
++++ b/elements/core/gnome-shell.bst
+@@ -4,7 +4,7 @@ sources:
+ - kind: git_repo
+   url: gnome:gnome-shell.git
+   track: main
+-  ref: 50.1-56-g55f53aa866cccbe643aa840f5b044272d0270751
++  ref: 50.1-86-gaee04a1ac4c7c6cfaa9889c9cb60ae97f7f98a1f
+ # FIXME: Keep this in sync with the repo until we can use wraps as sources
+ # https://gitlab.gnome.org/GNOME/gnome-shell/-/blob/main/subprojects/gvc.wrap?ref_type=heads
+ #
+diff --git a/elements/core/gnome-software.bst b/elements/core/gnome-software.bst
+index 6bd2b2114982f6f672604f41009af797ebdbf7ca..a4ec7ddf48d44455270bcc1f1d3be3fed0c3ebfc 100644
+--- a/elements/core/gnome-software.bst
++++ b/elements/core/gnome-software.bst
+@@ -4,7 +4,7 @@ sources:
+ - kind: git_repo
+   url: gnome:gnome-software.git
+   track: main
+-  ref: 50.0-123-g6af298bbfd16371b35b63dfc98376e14d82913a9
++  ref: 50.0-133-g474fd13ad857738155608756a2b265c3e14be679
+ - kind: git_module
+   url: gnome_gitlab:mwleeds/gnome-pwa-list.git
+   path: subprojects/gnome-pwa-list
+diff --git a/elements/core/gnome-text-editor.bst b/elements/core/gnome-text-editor.bst
+index 9bf8bb0453ba455777a10a892d95b16cf948764b..8ed0a5355ef7a016fb216c717d139ab9fdb5b14a 100644
+--- a/elements/core/gnome-text-editor.bst
++++ b/elements/core/gnome-text-editor.bst
+@@ -4,7 +4,7 @@ sources:
+ - kind: git_repo
+   url: gnome:gnome-text-editor.git
+   track: main
+-  ref: 50.0-14-g3dd36ea367999cc3660fdca8992a81334b0271e1
++  ref: 50.0-16-gf00b4f5c2f5e03e4833cf14ad58cb04d31480f98
+ 
+ build-depends:
+ - freedesktop-sdk.bst:components/desktop-file-utils.bst
+diff --git a/elements/core/loupe.bst b/elements/core/loupe.bst
+index eaaa595c1615430265631ebe50f63e1b34ddde42..ad7c5654242b18fce8b1df3833458a7e81d1ec8f 100644
+--- a/elements/core/loupe.bst
++++ b/elements/core/loupe.bst
+@@ -4,7 +4,7 @@ sources:
+ - kind: git_repo
+   url: gnome:loupe.git
+   track: main
+-  ref: 50.0-16-gd5bf3df3c0255936c1b7328fbcfdac0650dd4941
++  ref: 50.0-17-g499fbe88010e2c50dbca7be7c6b7c3f21dae431d
+ - kind: cargo2
+ 
+   ref:
+diff --git a/elements/core/manuals.bst b/elements/core/manuals.bst
+index 34aafb8170c1a31b368e6e48aae645c20fd117fb..42b1913d91683a504a259ca648040b53fa7f8298 100644
+--- a/elements/core/manuals.bst
++++ b/elements/core/manuals.bst
+@@ -4,7 +4,7 @@ sources:
+ - kind: git_repo
+   url: gnome:manuals.git
+   track: main
+-  ref: 50.1-8-g269318d697b88b9923ceb06f137187f897f105bb
++  ref: 50.1-9-g62387ba29d181b7c4efef1a04df33608eb13f203
+ 
+ build-depends:
+ - freedesktop-sdk.bst:components/desktop-file-utils.bst
+diff --git a/elements/core/mutter.bst b/elements/core/mutter.bst
+index b50b30cc50b464e5b4d2284f4c32335f33613884..fff247e4b9d35898f5075ff26b6a84d3c96bb2ea 100644
+--- a/elements/core/mutter.bst
++++ b/elements/core/mutter.bst
+@@ -4,7 +4,7 @@ sources:
+ - kind: git_repo
+   url: gnome:mutter.git
+   track: main
+-  ref: 50.1-76-g930271ff23d5e310a0e39e38a88f985baf5b213e
++  ref: 50.1-96-gc18af4740c320ffdb1589afcc2063431d2b29d4c
+ # FIXME: Keep this in sync with the repo until we can use wraps as sources
+ # https://gitlab.gnome.org/GNOME/mutter/-/blob/main/subprojects/gvdb.wrap?ref_type=heads
+ - kind: git_repo
+diff --git a/elements/core/nautilus.bst b/elements/core/nautilus.bst
+index d912e9400788ae9fcb4fbdd22345c95384ce65d8..916fcf596c80722ecc41d3e66154e14b6901b106 100644
+--- a/elements/core/nautilus.bst
++++ b/elements/core/nautilus.bst
+@@ -4,7 +4,7 @@ sources:
+ - kind: git_repo
+   url: gnome:nautilus.git
+   track: main
+-  ref: 50.0-135-g3207e7385844a282b6b9a020c7e293c32788772a
++  ref: 50.0-149-ge00f586ac30abb84fa673d77e420d2e8627e88fb
+ 
+ build-depends:
+ - sdk/blueprint-compiler.bst
+diff --git a/elements/core/orca.bst b/elements/core/orca.bst
+index b545084a94741f97d20dcaee2abcd99c3c892ccf..39c253e3e0ab089fef604e2b5c21ea5aada9e54a 100644
+--- a/elements/core/orca.bst
++++ b/elements/core/orca.bst
+@@ -4,7 +4,7 @@ sources:
+ - kind: git_repo
+   url: gnome:orca.git
+   track: main
+-  ref: 50.0-302-gd57606e18b31bd827397a89476a999f39faa7b70
++  ref: 50.0-352-gd18603164fcc4375f39f30f15447ccb831654eed
+ 
+ build-depends:
+ - freedesktop-sdk.bst:components/systemd.bst
+diff --git a/elements/core/papers.bst b/elements/core/papers.bst
+index 602767a4e1090a0b3674a976166e2786164e5577..85b24b208875e0e79f6b6d7b50b0eaff71cd0e8f 100644
+--- a/elements/core/papers.bst
++++ b/elements/core/papers.bst
+@@ -4,7 +4,7 @@ sources:
+ - kind: git_repo
+   url: gnome:papers.git
+   track: main
+-  ref: 50.0-63-g1b82bf627b4d8b414a57b55a9095e6d361799d6c
++  ref: 50.0-67-g16661d95232cd02e600714e1364dba7f1748de43
+ - kind: cargo2
+   ref:
+   - kind: registry
+diff --git a/elements/core/rygel.bst b/elements/core/rygel.bst
+index d490b1c4c8bad221f7f8caebfe4d5a5093e9bb7c..6d27d7968b98a4234d47d4de1a3f4cc6b7b036fb 100644
+--- a/elements/core/rygel.bst
++++ b/elements/core/rygel.bst
+@@ -4,7 +4,7 @@ sources:
+ - kind: git_repo
+   url: gnome:rygel.git
+   track: master
+-  ref: 45.1-10-ga99c923db0da7a780676674b09ab48f842f77fd0
++  ref: 45.1-11-g0f0b83a86ff159ae48965f1e6aad16d232d8d7a1
+ 
+ build-depends:
+ - sdk/vala.bst
+diff --git a/elements/core/sushi.bst b/elements/core/sushi.bst
+index 85f55d5a9749f35a31db47d9f6409a253606476e..8ee18cec207056240768ceb9845c44150adacc32 100644
+--- a/elements/core/sushi.bst
++++ b/elements/core/sushi.bst
+@@ -4,7 +4,7 @@ sources:
+ - kind: git_repo
+   url: gnome:sushi.git
+   track: master
+-  ref: 50.0-35-gc5e7c087d7da914a47d84a1ee2d90edb9daafe2d
++  ref: 50.0-36-ge80c764d83eb855e2a37cf631f25c0a18d911158
+ 
+ build-depends:
+ - freedesktop-sdk.bst:public-stacks/buildsystem-meson.bst
+diff --git a/elements/core/sysprof.inc b/elements/core/sysprof.inc
+index d538a8199526d9cef9f59c58269fd67683529d44..13224b883f6f8adc65c335653d646021850bcbe3 100644
+--- a/elements/core/sysprof.inc
++++ b/elements/core/sysprof.inc
+@@ -2,4 +2,4 @@ sources:
+ - kind: git_repo
+   url: gnome:sysprof.git
+   track: master
+-  ref: 50.0-12-g1b3f1e9c280c5d269d01a4624d59493bd3294e5a
++  ref: 50.0-20-g86b705c8c8b6c4bdd50550fa8b3eebec80b2e0a6
+diff --git a/elements/freedesktop-sdk.bst b/elements/freedesktop-sdk.bst
+index cd55646683676aca3d8942ea6a3679459b0877fe..463f5676ca129bbc71b134b8573f9f13e8669262 100644
+--- a/elements/freedesktop-sdk.bst
++++ b/elements/freedesktop-sdk.bst
+@@ -4,7 +4,7 @@ sources:
+ - kind: git_repo
+   url: gitlab:freedesktop-sdk/freedesktop-sdk.git
+   track: freedesktop-sdk-25.08*
+-  ref: freedesktop-sdk-25.08.11-0-g30517eb37d146e6dcfa1b0e9337ff835e3473ee5
++  ref: freedesktop-sdk-25.08.12-0-gbb510d9021f4def1a60f032bef1e0ca660b8ec3a
+ - kind: patch_queue
+   path: patches/freedesktop-sdk
+ 
+diff --git a/elements/gnomeos-deps/arch-test.bst b/elements/gnomeos-deps/arch-test.bst
+index 142f641a3f30b931b33734f136084e9cc94bcd77..30ce5c6bd5f3949a1598c3acfab0ae8c1e8c3946 100644
+--- a/elements/gnomeos-deps/arch-test.bst
++++ b/elements/gnomeos-deps/arch-test.bst
+@@ -10,7 +10,7 @@ build-depends:
+ - freedesktop-sdk.bst:cross-compilers/binutils-aarch64.bst
+ - freedesktop-sdk.bst:cross-compilers/binutils-riscv64.bst
+ - freedesktop-sdk.bst:cross-compilers/binutils-x86-64.bst
+-- freedesktop-sdk.bst:components/git-minimal.bst
++- freedesktop-sdk.bst:components/git.bst
+ - freedesktop-sdk.bst:public-stacks/buildsystem-make.bst
+ 
+ depends:
+diff --git a/elements/gnomeos-deps/nvidia-container-toolkit.bst b/elements/gnomeos-deps/nvidia-container-toolkit.bst
+index 53a97278612c07388fbb92d1e1d70474b35057f2..865b84659be305d7eb71e9ab37e81eaf2ea24f0f 100644
+--- a/elements/gnomeos-deps/nvidia-container-toolkit.bst
++++ b/elements/gnomeos-deps/nvidia-container-toolkit.bst
+@@ -6,7 +6,7 @@   url: github:NVIDIA/nvidia-container-toolkit.git
+   track: v*.*.*
+   exclude:
+   - "*rc*"
+-  ref: v1.19.0-0-gec7b4e2fa2caecad6d89be4a26029b831fe7503a
++  ref: v1.19.1-0-g09ceee5dde66ba9ce25c7cc69b1ebd5e6e3266fa
+ 
+ build-depends:
+ - freedesktop-sdk.bst:components/go.bst
+diff --git a/elements/gnomeos-deps/openvpn.bst b/elements/gnomeos-deps/openvpn.bst
+index fccc2e93864c05fd486f2746f9adbe594050e77c..e704b8097eb6038bd6ede65abecc6c91a4eef8cb 100644
+--- a/elements/gnomeos-deps/openvpn.bst
++++ b/elements/gnomeos-deps/openvpn.bst
+@@ -12,7 +12,7 @@   ref: v2.7.4-0-g8e9e91f4caff9a80961f32a1f9eda7e5a489176e
+ 
+ build-depends:
+ - freedesktop-sdk.bst:public-stacks/buildsystem-autotools.bst
+-- freedesktop-sdk.bst:components/git-minimal.bst
++- freedesktop-sdk.bst:components/git.bst
+ - freedesktop-sdk.bst:components/python3-docutils.bst
+ 
+ depends:
+diff --git a/elements/gnomeos-deps/shim.bst b/elements/gnomeos-deps/shim.bst
+index c30927f2029c6218661e761a69e602c0b3846e6e..e4f67646966f209df322ed1503236caf3e45f6c5 100644
+--- a/elements/gnomeos-deps/shim.bst
++++ b/elements/gnomeos-deps/shim.bst
+@@ -20,7 +20,7 @@   directory: boot-keys
+ 
+ build-depends:
+ - freedesktop-sdk.bst:public-stacks/buildsystem-make.bst
+-- freedesktop-sdk.bst:components/git-minimal.bst
++- freedesktop-sdk.bst:components/git.bst
+ - freedesktop-sdk.bst:components/openssl.bst
+ - freedesktop-sdk.bst:components/sbsigntools.bst
+ 
+diff --git a/elements/gnomeos-deps/snapd.bst b/elements/gnomeos-deps/snapd.bst
+index c612ec4c128d64ba01461556a7f5ede8f5277001..d50a77c10c9d2e7451f5a9f824f66e5fc8caf3e4 100644
+--- a/elements/gnomeos-deps/snapd.bst
++++ b/elements/gnomeos-deps/snapd.bst
+@@ -10,7 +10,7 @@
+ build-depends:
+ - freedesktop-sdk.bst:public-stacks/buildsystem-autotools.bst
+ - freedesktop-sdk.bst:components/go.bst
+-- freedesktop-sdk.bst:components/git-minimal.bst
++- freedesktop-sdk.bst:components/git.bst
+ - freedesktop-sdk.bst:components/systemd.bst
+ 
+ depends:
+diff --git a/elements/gnomeos-deps/tqftpserv.bst b/elements/gnomeos-deps/tqftpserv.bst
+index 6c2754891311ded3b59e6880223d3d505c805a63..4581e465a4c4a99bb4840b723ade00dd169778ac 100644
+--- a/elements/gnomeos-deps/tqftpserv.bst
++++ b/elements/gnomeos-deps/tqftpserv.bst
+@@ -4,7 +4,7 @@ sources:
+ - kind: git_repo
+   url: github:linux-msm/tqftpserv.git
+   track: 'v*.*'
+-  ref: v1.1.1-0-g443c82aadae2862dc7c12af48ac0b900f4bb0fe7
++  ref: v1.2-0-gb6bb92d40cfffe28621abcf7bfaa6d99beea46cb
+ - kind: local
+   path: files/gnomeos/qrtr/condition.conf
+ 
+diff --git a/elements/gnomeos-deps/zram-generator.bst b/elements/gnomeos-deps/zram-generator.bst
+index 0bb7e98aff494620da4c9a25acfdbf3dc01f660f..b3c3fc49e15b66bba4e8c0eeaceeb57e553426af 100644
+--- a/elements/gnomeos-deps/zram-generator.bst
++++ b/elements/gnomeos-deps/zram-generator.bst
+@@ -16,7 +16,7 @@   track: 'v*.*.*'
+   ref: v1.2.1-0-gc2685d18e596c5843b7d9027f6b8379168d753dc
+ - kind: gen_cargo_lock
+   ref: 
+-    IyBUaGlzIGZpbGUgaXMgYXV0b21hdGljYWxseSBAZ2VuZXJhdGVkIGJ5IENhcmdvLgojIEl0IGlzIG5vdCBpbnRlbmRlZCBmb3IgbWFudWFsIGVkaXRpbmcuCnZlcnNpb24gPSA0CgpbW3BhY2thZ2VdXQpuYW1lID0gImFoYXNoIgp2ZXJzaW9uID0gIjAuNy44Igpzb3VyY2UgPSAicmVnaXN0cnkraHR0cHM6Ly9naXRodWIuY29tL3J1c3QtbGFuZy9jcmF0ZXMuaW8taW5kZXgiCmNoZWNrc3VtID0gIjg5MTQ3N2UwYzZhODk1NzMwOWVlNWM0NWE2MzY4YWYzYWUxNGJiNTEwNzMyZDI2ODRmZmExOWFmMzEwOTIwZjkiCmRlcGVuZGVuY2llcyA9IFsKICJnZXRyYW5kb20gMC4yLjE3IiwKICJvbmNlX2NlbGwiLAogInZlcnNpb25fY2hlY2siLApdCgpbW3BhY2thZ2VdXQpuYW1lID0gImFuc3R5bGUiCnZlcnNpb24gPSAiMS4wLjE0Igpzb3VyY2UgPSAicmVnaXN0cnkraHR0cHM6Ly9naXRodWIuY29tL3J1c3QtbGFuZy9jcmF0ZXMuaW8taW5kZXgiCmNoZWNrc3VtID0gIjk0MGIzYTBjYTYwM2QxZWFkZTUwYTQ4NDZhMmFmZmZkNWVmNTdhOWZlYWMyYzBlMmVjMmUxNGY5ZWFkNzYwMDAiCgpbW3BhY2thZ2VdXQpuYW1lID0gImFueWhvdyIKdmVyc2lvbiA9ICIxLjAuMTAyIgpzb3VyY2UgPSAicmVnaXN0cnkraHR0cHM6Ly9naXRodWIuY29tL3J1c3QtbGFuZy9jcmF0ZXMuaW8taW5kZXgiCmNoZWNrc3VtID0gIjdmMjAyZGY4NjQ4NGM4NjhkYmFkN2VhYTU1N2VmNzg1ZDVjNjYyOTVlNDFiNDYwZWY5MjJlY2EwNzIzYjg0MmMiCgpbW3BhY2thZ2VdXQpuYW1lID0gImF1dG9jZmciCnZlcnNpb24gPSAiMS41LjAiCnNvdXJjZSA9ICJyZWdpc3RyeStodHRwczovL2dpdGh1Yi5jb20vcnVzdC1sYW5nL2NyYXRlcy5pby1pbmRleCIKY2hlY2tzdW0gPSAiYzA4NjA2ZjhjM2NiZjRjZTZlYzhlMjhmYjAwMTRhMmMwODY3MDhmZTk1NGVhYTg4NTM4NGE2MTY1MTcyZTdlOCIKCltbcGFja2FnZV1dCm5hbWUgPSAiYml0ZmxhZ3MiCnZlcnNpb24gPSAiMS4zLjIiCnNvdXJjZSA9ICJyZWdpc3RyeStodHRwczovL2dpdGh1Yi5jb20vcnVzdC1sYW5nL2NyYXRlcy5pby1pbmRleCIKY2hlY2tzdW0gPSAiYmVmMzhkNDUxNjNjMmYxZGRlMDk0YTdkZmQzM2NjZjU5NWM5MjkwNWM4ZjhmNGZkYzE4ZDA2ZmIxMDM3NzE4YSIKCltbcGFja2FnZV1dCm5hbWUgPSAiYml0ZmxhZ3MiCnZlcnNpb24gPSAiMi4xMS4xIgpzb3VyY2UgPSAicmVnaXN0cnkraHR0cHM6Ly9naXRodWIuY29tL3J1c3QtbGFuZy9jcmF0ZXMuaW8taW5kZXgiCmNoZWNrc3VtID0gImM0NTEyMjk5ZjM2ZjA0M2FiMDlhNTgzZTU3YmNlYjVhNWFhYjdhNzNkYjE4MDU4NDhlOGZlZjNjOWU4Yzc4YjMiCgpbW3BhY2thZ2VdXQpuYW1lID0gImNjIgp2ZXJzaW9uID0gIjEuMi42MiIKc291cmNlID0gInJlZ2lzdHJ5K2h0dHBzOi8vZ2l0aHViLmNvbS9ydXN0LWxhbmcvY3JhdGVzLmlvLWluZGV4IgpjaGVja3N1bSA9ICJhMWRjZTg1OWYwODMyYTdkMDg4YzRmMTExOTg4OGFiOTRlZjRiNWQ2Nzk1ZDFjZTA1YWZiN2ZlMTU5ZDc5Zjk4IgpkZXBlbmRlbmNpZXMgPSBbCiAiZmluZC1tc3ZjLXRvb2xzIiwKICJzaGxleCIsCl0KCltbcGFja2FnZV1dCm5hbWUgPSAiY2ZnLWlmIgp2ZXJzaW9uID0gIjEuMC40Igpzb3VyY2UgPSAicmVnaXN0cnkraHR0cHM6Ly9naXRodWIuY29tL3J1c3QtbGFuZy9jcmF0ZXMuaW8taW5kZXgiCmNoZWNrc3VtID0gIjkzMzBmOGIyZmYxM2YzNDU0MGI0NGU5NDZlZjM1MTExODI1NzI3YjM4ZDMzMjg2ZWY5ODYxNDI2MTUxMjE4MDEiCgpbW3BhY2thZ2VdXQpuYW1lID0gImNsYXAiCnZlcnNpb24gPSAiNC42LjEiCnNvdXJjZSA9ICJyZWdpc3RyeStodHRwczovL2dpdGh1Yi5jb20vcnVzdC1sYW5nL2NyYXRlcy5pby1pbmRleCIKY2hlY2tzdW0gPSAiMWRkYjExN2U0M2JiZjdkYWNmMGE0MTkwZmVmNGQzNDViOWJhZDY4ZGZjNjQ5Y2IzNDllN2QxN2QyODQyOGU1MSIKZGVwZW5kZW5jaWVzID0gWwogImNsYXBfYnVpbGRlciIsCl0KCltbcGFja2FnZV1dCm5hbWUgPSAiY2xhcF9idWlsZGVyIgp2ZXJzaW9uID0gIjQuNi4wIgpzb3VyY2UgPSAicmVnaXN0cnkraHR0cHM6Ly9naXRodWIuY29tL3J1c3QtbGFuZy9jcmF0ZXMuaW8taW5kZXgiCmNoZWNrc3VtID0gIjcxNGE1MzAwMWJmNjY0MTZhZGIwZTJlZjVhYzg1NzE0MGU3ZGMzYTBjNDhmYjI4YjJmMTA3NjJmYzRiNTA2OWYiCmRlcGVuZGVuY2llcyA9IFsKICJhbnN0eWxlIiwKICJjbGFwX2xleCIsCl0KCltbcGFja2FnZV1dCm5hbWUgPSAiY2xhcF9sZXgiCnZlcnNpb24gPSAiMS4xLjAiCnNvdXJjZSA9ICJyZWdpc3RyeStodHRwczovL2dpdGh1Yi5jb20vcnVzdC1sYW5nL2NyYXRlcy5pby1pbmRleCIKY2hlY2tzdW0gPSAiYzhkNGEzYmI4YjFlMGMxMDUwNDk5ZDE4MTVmNWFiMTZkMDRmMDk1OWIyMzMwODVmYjMxNjUzZmJmYzlkOThmOSIKCltbcGFja2FnZV1dCm5hbWUgPSAiY3RvciIKdmVyc2lvbiA9ICIwLjIuOSIKc291cmNlID0gInJlZ2lzdHJ5K2h0dHBzOi8vZ2l0aHViLmNvbS9ydXN0LWxhbmcvY3JhdGVzLmlvLWluZGV4IgpjaGVja3N1bSA9ICIzMmEyNzg1NzU1NzYxZjNkZGMxNDkyOTc5Y2UxZTQ4ZDJjMDBkMDkzMTFjMzllNDQ2NjQyOTE4OGYzZGQ2NTAxIgpkZXBlbmRlbmNpZXMgPSBbCiAicXVvdGUiLAogInN5biIsCl0KCltbcGFja2FnZV1dCm5hbWUgPSAiZGx2LWxpc3QiCnZlcnNpb24gPSAiMC4zLjAiCnNvdXJjZSA9ICJyZWdpc3RyeStodHRwczovL2dpdGh1Yi5jb20vcnVzdC1sYW5nL2NyYXRlcy5pby1pbmRleCIKY2hlY2tzdW0gPSAiMDY4OGMyYTdmOTJlNDI3ZjQ0ODk1Y2Q2Mzg0MWJmZjdiMjlmOGQ3YTE2NDhiOWU3ZTA3YTRhMzY1YjJlMTI1NyIKCltbcGFja2FnZV1dCm5hbWUgPSAiZXF1aXZhbGVudCIKdmVyc2lvbiA9ICIxLjAuMiIKc291cmNlID0gInJlZ2lzdHJ5K2h0dHBzOi8vZ2l0aHViLmNvbS9ydXN0LWxhbmcvY3JhdGVzLmlvLWluZGV4IgpjaGVja3N1bSA9ICI4NzdhNGFjZTg3MTNiMGJjZjJhNGU3ZWVjODI1MjljMDI5ZjFkMDYxOTg4NmQxODE0NWZlYTk2YzNmZmU1YzBmIgoKW1twYWNrYWdlXV0KbmFtZSA9ICJlcnJubyIKdmVyc2lvbiA9ICIwLjMuMTQiCnNvdXJjZSA9ICJyZWdpc3RyeStodHRwczovL2dpdGh1Yi5jb20vcnVzdC1sYW5nL2NyYXRlcy5pby1pbmRleCIKY2hlY2tzdW0gPSAiMzljYWI3MTYxN2FlMGQ2M2Y1MWEzNmQ2OWY4NjYzOTE3MzViNTE2OTFkYmRhNjNjZjZmOTZkMDQyYjYzZWZlYiIKZGVwZW5kZW5jaWVzID0gWwogImxpYmMiLAogIndpbmRvd3Mtc3lzIiwKXQoKW1twYWNrYWdlXV0KbmFtZSA9ICJmYXN0ZXZhbCIKdmVyc2lvbiA9ICIwLjIuNCIKc291cmNlID0gInJlZ2lzdHJ5K2h0dHBzOi8vZ2l0aHViLmNvbS9ydXN0LWxhbmcvY3JhdGVzLmlvLWluZGV4IgpjaGVja3N1bSA9ICI0ZjRjZGFjOWU0MDY1ZDdjNDhlMzA3NzBmODY2NWI4Y2VmOWEzYTczYTYzYTQwNTZhMzNhNWYzOTViYzdjZjc1IgoKW1twYWNrYWdlXV0KbmFtZSA9ICJmYXN0cmFuZCIKdmVyc2lvbiA9ICIyLjQuMSIKc291cmNlID0gInJlZ2lzdHJ5K2h0dHBzOi8vZ2l0aHViLmNvbS9ydXN0LWxhbmcvY3JhdGVzLmlvLWluZGV4IgpjaGVja3N1bSA9ICI5ZjFmMjI3NDUyYTM5MDgwNGNkYjYzN2I3NGE4Njk5MGYyYTdkN2JhNGI3ZDU2OTNhYWM5YjRkZDZkZWZkOGQ2IgoKW1twYWNrYWdlXV0KbmFtZSA9ICJmaW5kLW1zdmMtdG9vbHMiCnZlcnNpb24gPSAiMC4xLjkiCnNvdXJjZSA9ICJyZWdpc3RyeStodHRwczovL2dpdGh1Yi5jb20vcnVzdC1sYW5nL2NyYXRlcy5pby1pbmRleCIKY2hlY2tzdW0gPSAiNWJhZWJjMDc3NDE1MWY5MDVhMWEyY2M0MTk4OTMwMGIxZTZmYmIyOWFmZjBjZWZmYTEwNjRmZGQzMDg4ZDU4MiIKCltbcGFja2FnZV1dCm5hbWUgPSAiZm9sZGhhc2giCnZlcnNpb24gPSAiMC4xLjUiCnNvdXJjZSA9ICJyZWdpc3RyeStodHRwczovL2dpdGh1Yi5jb20vcnVzdC1sYW5nL2NyYXRlcy5pby1pbmRleCIKY2hlY2tzdW0gPSAiZDljNGY1ZGFjNWUxNWMyNGViOTk5YzI2MTgxYTZjYTQwYjM5ZmU5NDZjYmU0YzI2M2M3MjA5NDY3YmM4M2FmMiIKCltbcGFja2FnZV1dCm5hbWUgPSAiZnNfZXh0cmEiCnZlcnNpb24gPSAiMS4zLjAiCnNvdXJjZSA9ICJyZWdpc3RyeStodHRwczovL2dpdGh1Yi5jb20vcnVzdC1sYW5nL2NyYXRlcy5pby1pbmRleCIKY2hlY2tzdW0gPSAiNDI3MDM3MDZiNzE2YzM3Zjk2YTc3YWVhODMwMzkyYWQyMzFmNDRjOWU5YTY3ODcyZmE1NTQ4NzA3ZTExYjExYyIKCltbcGFja2FnZV1dCm5hbWUgPSAiZ2V0cmFuZG9tIgp2ZXJzaW9uID0gIjAuMi4xNyIKc291cmNlID0gInJlZ2lzdHJ5K2h0dHBzOi8vZ2l0aHViLmNvbS9ydXN0LWxhbmcvY3JhdGVzLmlvLWluZGV4IgpjaGVja3N1bSA9ICJmZjJhYmMwMGJlN2ZjYTZlYmM0NzQ1MjQ2OTdhZTI3NmFkODQ3YWQwYTZiM2ZhYTRiY2IwMjdlOWE0NjE0YWQwIgpkZXBlbmRlbmNpZXMgPSBbCiAiY2ZnLWlmIiwKICJsaWJjIiwKICJ3YXNpIiwKXQoKW1twYWNrYWdlXV0KbmFtZSA9ICJnZXRyYW5kb20iCnZlcnNpb24gPSAiMC40LjIiCnNvdXJjZSA9ICJyZWdpc3RyeStodHRwczovL2dpdGh1Yi5jb20vcnVzdC1sYW5nL2NyYXRlcy5pby1pbmRleCIKY2hlY2tzdW0gPSAiMGRlNTFlNjg3NGU5NGU3YmY3NmQ3MjZmYzVkMTNiYTc4MmRlY2E3MzRmZjYwZDViYjJmYjI2MDdjNzQwNjU1NSIKZGVwZW5kZW5jaWVzID0gWwogImNmZy1pZiIsCiAibGliYyIsCiAici1lZmkiLAogIndhc2lwMiIsCiAid2FzaXAzIiwKXQoKW1twYWNrYWdlXV0KbmFtZSA9ICJoYXNoYnJvd24iCnZlcnNpb24gPSAiMC4xMi4zIgpzb3VyY2UgPSAicmVnaXN0cnkraHR0cHM6Ly9naXRodWIuY29tL3J1c3QtbGFuZy9jcmF0ZXMuaW8taW5kZXgiCmNoZWNrc3VtID0gIjhhOWVlNzBjNDNhYWY0MTdjOTE0Mzk2NjQ1YTBmYTg1MjYyNDgwMWIyNGViYjdhZTc4ZmU4MjcyODg5YWM4ODgiCmRlcGVuZGVuY2llcyA9IFsKICJhaGFzaCIsCl0KCltbcGFja2FnZV1dCm5hbWUgPSAiaGFzaGJyb3duIgp2ZXJzaW9uID0gIjAuMTUuNSIKc291cmNlID0gInJlZ2lzdHJ5K2h0dHBzOi8vZ2l0aHViLmNvbS9ydXN0LWxhbmcvY3JhdGVzLmlvLWluZGV4IgpjaGVja3N1bSA9ICI5MjI5Y2ZlNTNkZmQ2OWYwNjA5YTQ5ZjY1NDYxYmQ5MzAwMWVhMWVmODg5Y2Q1NTI5ZGQxNzY1OTNmNTMzOGExIgpkZXBlbmRlbmNpZXMgPSBbCiAiZm9sZGhhc2giLApdCgpbW3BhY2thZ2VdXQpuYW1lID0gImhhc2hicm93biIKdmVyc2lvbiA9ICIwLjE3LjEiCnNvdXJjZSA9ICJyZWdpc3RyeStodHRwczovL2dpdGh1Yi5jb20vcnVzdC1sYW5nL2NyYXRlcy5pby1pbmRleCIKY2hlY2tzdW0gPSAiZWQ1OTA5YjZlODlhMmRiNDQ1NmU1NGNkNWY2NzM3OTFkN2VjYTY3MzIyMDJiYmYyYTljYzUwNGZlMmY5Yjg0YSIKCltbcGFja2FnZV1dCm5hbWUgPSAiaGVjayIKdmVyc2lvbiA9ICIwLjUuMCIKc291cmNlID0gInJlZ2lzdHJ5K2h0dHBzOi8vZ2l0aHViLmNvbS9ydXN0LWxhbmcvY3JhdGVzLmlvLWluZGV4IgpjaGVja3N1bSA9ICIyMzA0ZTAwOTgzZjg3ZmZiMzhiNTViNDQ0YjVlM2I2MGE4ODRiNWQzMGMwZmNhN2Q4MmZlMzM0NDliYmU1NWVhIgoKW1twYWNrYWdlXV0KbmFtZSA9ICJpZC1hcmVuYSIKdmVyc2lvbiA9ICIyLjMuMCIKc291cmNlID0gInJlZ2lzdHJ5K2h0dHBzOi8vZ2l0aHViLmNvbS9ydXN0LWxhbmcvY3JhdGVzLmlvLWluZGV4IgpjaGVja3N1bSA9ICIzZDMwNjdkNzliOTc1ZTg4NDRjYTllYjA3MmUxNmIzMWMzYzFjMzY5MjhlZGY5YzY3ODk1NDhjNTI0ZDBkOTU0IgoKW1twYWNrYWdlXV0KbmFtZSA9ICJpbmRleG1hcCIKdmVyc2lvbiA9ICIyLjE0LjAiCnNvdXJjZSA9ICJyZWdpc3RyeStodHRwczovL2dpdGh1Yi5jb20vcnVzdC1sYW5nL2NyYXRlcy5pby1pbmRleCIKY2hlY2tzdW0gPSAiZDQ2NmU5NDU0ZjA4ZTRhOTExZTE0ODA2YzI0ZTE2ZmJhMWI0YzEyMWQxZWE0NzQzOTZmMzk2MDY5Y2Y5NDlkOSIKZGVwZW5kZW5jaWVzID0gWwogImVxdWl2YWxlbnQiLAogImhhc2hicm93biAwLjE3LjEiLAogInNlcmRlIiwKICJzZXJkZV9jb3JlIiwKXQoKW1twYWNrYWdlXV0KbmFtZSA9ICJpdG9hIgp2ZXJzaW9uID0gIjEuMC4xOCIKc291cmNlID0gInJlZ2lzdHJ5K2h0dHBzOi8vZ2l0aHViLmNvbS9ydXN0LWxhbmcvY3JhdGVzLmlvLWluZGV4IgpjaGVja3N1bSA9ICI4ZjQyYTYwY2JkZjlhOTdmNWQyMzA1ZjA4YTg3ZGM0ZTA5MzA4ZDEyNzZkMjhjODY5YzY4NGQ3Nzc3Njg1NjgyIgoKW1twYWNrYWdlXV0KbmFtZSA9ICJsZWIxMjhmbXQiCnZlcnNpb24gPSAiMC4xLjAiCnNvdXJjZSA9ICJyZWdpc3RyeStodHRwczovL2dpdGh1Yi5jb20vcnVzdC1sYW5nL2NyYXRlcy5pby1pbmRleCIKY2hlY2tzdW0gPSAiMDllZGQ5ZThiNTRlNDllNTg3ZTRmNjI5NWE3ZDI5YzNlYTk0ZDQ2OWNiNDBhYjhjYTcwYjI4ODI0OGE4MWRiMiIKCltbcGFja2FnZV1dCm5hbWUgPSAibGliYyIKdmVyc2lvbiA9ICIwLjIuMTg2Igpzb3VyY2UgPSAicmVnaXN0cnkraHR0cHM6Ly9naXRodWIuY29tL3J1c3QtbGFuZy9jcmF0ZXMuaW8taW5kZXgiCmNoZWNrc3VtID0gIjY4YWI5MTAxN2ZlMTZjNjIyNDg2ODQwZTRjODNjOWEzN2FmZWZmOTc4YmQyMzliNTI5M2Q2MWVjZTU4N2RlNjYiCgpbW3BhY2thZ2VdXQpuYW1lID0gImxpYm92ZXJkcm9wIgp2ZXJzaW9uID0gIjAuMS4wIgpzb3VyY2UgPSAicmVnaXN0cnkraHR0cHM6Ly9naXRodWIuY29tL3J1c3QtbGFuZy9jcmF0ZXMuaW8taW5kZXgiCmNoZWNrc3VtID0gIjA4ZTUzNzNkNzUxMjgzNGUyZmJiZTQxMDAxMTE0ODNhOTljMjhjYTM4MTg2MzlmNjdhYjIzMzc2NzIzMDFmOGUiCmRlcGVuZGVuY2llcyA9IFsKICJsb2ciLApdCgpbW3BhY2thZ2VdXQpuYW1lID0gImxpbnV4LXJhdy1zeXMiCnZlcnNpb24gPSAiMC4xMi4xIgpzb3VyY2UgPSAicmVnaXN0cnkraHR0cHM6Ly9naXRodWIuY29tL3J1c3QtbGFuZy9jcmF0ZXMuaW8taW5kZXgiCmNoZWNrc3VtID0gIjMyYTY2OTQ5ZTAzMGRhMDBlOGM3ZDQ0MzRiMjUxNjcwYTkxNTU2ZjQxNDQ5NDFkMzc0NTI3NjljMjVkNThhNTMiCgpbW3BhY2thZ2VdXQpuYW1lID0gImxvZyIKdmVyc2lvbiA9ICIwLjQuMjkiCnNvdXJjZSA9ICJyZWdpc3RyeStodHRwczovL2dpdGh1Yi5jb20vcnVzdC1sYW5nL2NyYXRlcy5pby1pbmRleCIKY2hlY2tzdW0gPSAiNWU1MDMyZTI0MDE5MDQ1Yzc2MmQzYzBmMjhmNWI2YjhiYmYzODU2M2E2NTkwODM4OWJmNzk3ODc1ODkyMDg5NyIKCltbcGFja2FnZV1dCm5hbWUgPSAibWVtY2hyIgp2ZXJzaW9uID0gIjIuOC4wIgpzb3VyY2UgPSAicmVnaXN0cnkraHR0cHM6Ly9naXRodWIuY29tL3J1c3QtbGFuZy9jcmF0ZXMuaW8taW5kZXgiCmNoZWNrc3VtID0gImY4Y2E1OGY0NDdmMDZlZDE3ZDVmYzQwNDNjZTFiMTBkZDIwNWUwNjBmYjNjZTViOTc5YjhlZDhlNTlmZjNmNzkiCgpbW3BhY2thZ2VdXQpuYW1lID0gIm1lbW9mZnNldCIKdmVyc2lvbiA9ICIwLjYuNSIKc291cmNlID0gInJlZ2lzdHJ5K2h0dHBzOi8vZ2l0aHViLmNvbS9ydXN0LWxhbmcvY3JhdGVzLmlvLWluZGV4IgpjaGVja3N1bSA9ICI1YWEzNjFkNGZhZWE5MzYwMzA2NGEwMjc0MTVmMDdiZDhlMWQ1Yzg4YzlmYmY2OGJmNTZhMjg1NDI4ZmQ3OWNlIgpkZXBlbmRlbmNpZXMgPSBbCiAiYXV0b2NmZyIsCl0KCltbcGFja2FnZV1dCm5hbWUgPSAibml4Igp2ZXJzaW9uID0gIjAuMjMuMiIKc291cmNlID0gInJlZ2lzdHJ5K2h0dHBzOi8vZ2l0aHViLmNvbS9ydXN0LWxhbmcvY3JhdGVzLmlvLWluZGV4IgpjaGVja3N1bSA9ICI4ZjM3OTBjMDBhMDE1MDExMmRlMGY0Y2QxNjFlM2Q3ZmM0YjJkOGE1NTQyZmZjMzVmMDk5YTI1NjJhZWNiMzVjIgpkZXBlbmRlbmNpZXMgPSBbCiAiYml0ZmxhZ3MgMS4zLjIiLAogImNjIiwKICJjZmctaWYiLAogImxpYmMiLAogIm1lbW9mZnNldCIsCl0KCltbcGFja2FnZV1dCm5hbWUgPSAib25jZV9jZWxsIgp2ZXJzaW9uID0gIjEuMjEuNCIKc291cmNlID0gInJlZ2lzdHJ5K2h0dHBzOi8vZ2l0aHViLmNvbS9ydXN0LWxhbmcvY3JhdGVzLmlvLWluZGV4IgpjaGVja3N1bSA9ICI5ZjdjM2U0YmViMzNmODVkNDVhZTNlM2ExNzkyMTg1NzA2YzhlMTZkMDQzMjM4YzU5MzMzMWNjN2NkMzEzYjUwIgoKW1twYWNrYWdlXV0KbmFtZSA9ICJvcmRlcmVkLW11bHRpbWFwIgp2ZXJzaW9uID0gIjAuNC4zIgpzb3VyY2UgPSAicmVnaXN0cnkraHR0cHM6Ly9naXRodWIuY29tL3J1c3QtbGFuZy9jcmF0ZXMuaW8taW5kZXgiCmNoZWNrc3VtID0gImNjZDc0NmUzNzE3N2UxNzExYzIwZGQ2MTlhMTYyMGYzNGY1YzhiNTY5YzUzNTkwYTcyZGVkZDUzNDRkODkyNGEiCmRlcGVuZGVuY2llcyA9IFsKICJkbHYtbGlzdCIsCiAiaGFzaGJyb3duIDAuMTIuMyIsCl0KCltbcGFja2FnZV1dCm5hbWUgPSAicHJldHR5cGxlYXNlIgp2ZXJzaW9uID0gIjAuMi4zNyIKc291cmNlID0gInJlZ2lzdHJ5K2h0dHBzOi8vZ2l0aHViLmNvbS9ydXN0LWxhbmcvY3JhdGVzLmlvLWluZGV4IgpjaGVja3N1bSA9ICI0NzljYThhZGFjZGQ3Y2U4ZjFmYjM5Y2U5ZWNjY2JmZTkzYTNmMTM0NGIzZDBkOTdmMjBiYzAxOTYyMDhmNjJiIgpkZXBlbmRlbmNpZXMgPSBbCiAicHJvYy1tYWNybzIiLAogInN5biIsCl0KCltbcGFja2FnZV1dCm5hbWUgPSAicHJvYy1tYWNybzIiCnZlcnNpb24gPSAiMS4wLjEwNiIKc291cmNlID0gInJlZ2lzdHJ5K2h0dHBzOi8vZ2l0aHViLmNvbS9ydXN0LWxhbmcvY3JhdGVzLmlvLWluZGV4IgpjaGVja3N1bSA9ICI4ZmQwMGYwYmIyZTkwZDgxZDEwNDRjMmIzMjYxN2Y2OGZjYjlmYTNiYjc2NDBjMjNlOWM3NDhlNTNmYjMwOTM0IgpkZXBlbmRlbmNpZXMgPSBbCiAidW5pY29kZS1pZGVudCIsCl0KCltbcGFja2FnZV1dCm5hbWUgPSAicXVvdGUiCnZlcnNpb24gPSAiMS4wLjQ1Igpzb3VyY2UgPSAicmVnaXN0cnkraHR0cHM6Ly9naXRodWIuY29tL3J1c3QtbGFuZy9jcmF0ZXMuaW8taW5kZXgiCmNoZWNrc3VtID0gIjQxZjI2MTk5NjYwNTA2ODkzODJkMmI0NGY2NjRmNGJjNTkzZTEyOTc4NWEzNmQ2ZWUzNzZkZGYzNzI1OWI5MjQiCmRlcGVuZGVuY2llcyA9IFsKICJwcm9jLW1hY3JvMiIsCl0KCltbcGFja2FnZV1dCm5hbWUgPSAici1lZmkiCnZlcnNpb24gPSAiNi4wLjAiCnNvdXJjZSA9ICJyZWdpc3RyeStodHRwczovL2dpdGh1Yi5jb20vcnVzdC1sYW5nL2NyYXRlcy5pby1pbmRleCIKY2hlY2tzdW0gPSAiZjhkY2M5YzdkNTJhODExNjk3ZDIxNTFjNzAxZTBkMDg5NTZmOTJiMGUyNDEzNmNmNGNmMjdiNTdhNmEwZDliZiIKCltbcGFja2FnZV1dCm5hbWUgPSAicnVzdC1pbmkiCnZlcnNpb24gPSAiMC4xOC4wIgpzb3VyY2UgPSAicmVnaXN0cnkraHR0cHM6Ly9naXRodWIuY29tL3J1c3QtbGFuZy9jcmF0ZXMuaW8taW5kZXgiCmNoZWNrc3VtID0gImY2ZDVmMjQzNjAyNmI0ZjZlNzlkYzgyOTgzN2Q0NjdjYzdlOWE1NWVlNDBlNzUwZDcxNjcxMzU0MDcxNWEyZGYiCmRlcGVuZGVuY2llcyA9IFsKICJjZmctaWYiLAogIm9yZGVyZWQtbXVsdGltYXAiLApdCgpbW3BhY2thZ2VdXQpuYW1lID0gInJ1c3RpeCIKdmVyc2lvbiA9ICIxLjEuNCIKc291cmNlID0gInJlZ2lzdHJ5K2h0dHBzOi8vZ2l0aHViLmNvbS9ydXN0LWxhbmcvY3JhdGVzLmlvLWluZGV4IgpjaGVja3N1bSA9ICJiNmZlNDU2NWI5NTE4YjgzZWY0ZjkxYmI0N2NlMjk2MjBjYTgyOGJkMzJjYjdlNDA4ZjAwNjJlOTkzMGJhMTkwIgpkZXBlbmRlbmNpZXMgPSBbCiAiYml0ZmxhZ3MgMi4xMS4xIiwKICJlcnJubyIsCiAibGliYyIsCiAibGludXgtcmF3LXN5cyIsCiAid2luZG93cy1zeXMiLApdCgpbW3BhY2thZ2VdXQpuYW1lID0gInNlbXZlciIKdmVyc2lvbiA9ICIxLjAuMjgiCnNvdXJjZSA9ICJyZWdpc3RyeStodHRwczovL2dpdGh1Yi5jb20vcnVzdC1sYW5nL2NyYXRlcy5pby1pbmRleCIKY2hlY2tzdW0gPSAiOGE3ODUyZDAyZmM4NDg5ODJlMGMxNjdlZjE2M2FhZmY5Y2Q5MWRjNjQwYmE4NWUyNjNjYjFjZTQ2ZmFlNTFjZCIKCltbcGFja2FnZV1dCm5hbWUgPSAic2VyZGUiCnZlcnNpb24gPSAiMS4wLjIyOCIKc291cmNlID0gInJlZ2lzdHJ5K2h0dHBzOi8vZ2l0aHViLmNvbS9ydXN0LWxhbmcvY3JhdGVzLmlvLWluZGV4IgpjaGVja3N1bSA9ICI5YThlOTRlYTdmMzc4YmQzMmNiYmQzNzE5OGE0YTkxNDM2MTgwYzViYjQ3MjQxMWU0OGI1ZWMyZTIxMjRhZTllIgpkZXBlbmRlbmNpZXMgPSBbCiAic2VyZGVfY29yZSIsCl0KCltbcGFja2FnZV1dCm5hbWUgPSAic2VyZGVfY29yZSIKdmVyc2lvbiA9ICIxLjAuMjI4Igpzb3VyY2UgPSAicmVnaXN0cnkraHR0cHM6Ly9naXRodWIuY29tL3J1c3QtbGFuZy9jcmF0ZXMuaW8taW5kZXgiCmNoZWNrc3VtID0gIjQxZDM4NWM3ZDRjYTU4ZTU5ZmM3MzJhZjI1YzM5ODNiNjdhYzg1MmMxYTI1MDAwYWZlMTE3NWRlNDU4YjY3YWQiCmRlcGVuZGVuY2llcyA9IFsKICJzZXJkZV9kZXJpdmUiLApdCgpbW3BhY2thZ2VdXQpuYW1lID0gInNlcmRlX2Rlcml2ZSIKdmVyc2lvbiA9ICIxLjAuMjI4Igpzb3VyY2UgPSAicmVnaXN0cnkraHR0cHM6Ly9naXRodWIuY29tL3J1c3QtbGFuZy9jcmF0ZXMuaW8taW5kZXgiCmNoZWNrc3VtID0gImQ1NDBmMjIwZDMxODcxNzNkYTIyMGY4ODVhYjY2NjA4MzY3YjY1NzRlOTI1MDExYTkzNTNlNGJhZGRhOTFkNzkiCmRlcGVuZGVuY2llcyA9IFsKICJwcm9jLW1hY3JvMiIsCiAicXVvdGUiLAogInN5biIsCl0KCltbcGFja2FnZV1dCm5hbWUgPSAic2VyZGVfanNvbiIKdmVyc2lvbiA9ICIxLjAuMTQ5Igpzb3VyY2UgPSAicmVnaXN0cnkraHR0cHM6Ly9naXRodWIuY29tL3J1c3QtbGFuZy9jcmF0ZXMuaW8taW5kZXgiCmNoZWNrc3VtID0gIjgzZmMwMzk0NzNjNTU5NWFjZTg2MGQ4YzRmYWZhMjIwZmY0NzRiM2ZjNmJmZGI0MjkzMzI3ZjFhMzdlOTRkODYiCmRlcGVuZGVuY2llcyA9IFsKICJpdG9hIiwKICJtZW1jaHIiLAogInNlcmRlIiwKICJzZXJkZV9jb3JlIiwKICJ6bWlqIiwKXQoKW1twYWNrYWdlXV0KbmFtZSA9ICJzaGxleCIKdmVyc2lvbiA9ICIxLjMuMCIKc291cmNlID0gInJlZ2lzdHJ5K2h0dHBzOi8vZ2l0aHViLmNvbS9ydXN0LWxhbmcvY3JhdGVzLmlvLWluZGV4IgpjaGVja3N1bSA9ICIwZmRhMmZmMGQwODQwMTliYTRkN2M2ZjM3MWM5NWQ4ZmQ3NWNlMzUyNGMzY2I4ZmI2NTNhMzAyM2Y2MzIzZTY0IgoKW1twYWNrYWdlXV0KbmFtZSA9ICJzeW4iCnZlcnNpb24gPSAiMi4wLjExNyIKc291cmNlID0gInJlZ2lzdHJ5K2h0dHBzOi8vZ2l0aHViLmNvbS9ydXN0LWxhbmcvY3JhdGVzLmlvLWluZGV4IgpjaGVja3N1bSA9ICJlNjY1Yjg4MDNlN2IxZDJhNzI3ZjQwMjM0NTZiYmJiZTc0ZGE2NzA5OWM1ODUyNThhZjBhZDljNTAxM2I5Yjk5IgpkZXBlbmRlbmNpZXMgPSBbCiAicHJvYy1tYWNybzIiLAogInF1b3RlIiwKICJ1bmljb2RlLWlkZW50IiwKXQoKW1twYWNrYWdlXV0KbmFtZSA9ICJ0ZW1wZmlsZSIKdmVyc2lvbiA9ICIzLjI3LjAiCnNvdXJjZSA9ICJyZWdpc3RyeStodHRwczovL2dpdGh1Yi5jb20vcnVzdC1sYW5nL2NyYXRlcy5pby1pbmRleCIKY2hlY2tzdW0gPSAiMzI0OTdlOWE0YzdiMzg1MzJlZmNkZWJlZWY4Nzk3MDdhYTlmNzk0Mjk2YTRmMDI0NGY2ZjY5ZTliYzg1NzRiZCIKZGVwZW5kZW5jaWVzID0gWwogImZhc3RyYW5kIiwKICJnZXRyYW5kb20gMC40LjIiLAogIm9uY2VfY2VsbCIsCiAicnVzdGl4IiwKICJ3aW5kb3dzLXN5cyIsCl0KCltbcGFja2FnZV1dCm5hbWUgPSAidW5pY29kZS1pZGVudCIKdmVyc2lvbiA9ICIxLjAuMjQiCnNvdXJjZSA9ICJyZWdpc3RyeStodHRwczovL2dpdGh1Yi5jb20vcnVzdC1sYW5nL2NyYXRlcy5pby1pbmRleCIKY2hlY2tzdW0gPSAiZTZlNDMxM2NkNWZjZDNkYWQ1Y2FmYTE3OTcwMmUyYjI0NGY3NjA5OTFmNDUzOTdkMTRkNGViZjM4MjQ3ZGE3NSIKCltbcGFja2FnZV1dCm5hbWUgPSAidW5pY29kZS14aWQiCnZlcnNpb24gPSAiMC4yLjYiCnNvdXJjZSA9ICJyZWdpc3RyeStodHRwczovL2dpdGh1Yi5jb20vcnVzdC1sYW5nL2NyYXRlcy5pby1pbmRleCIKY2hlY2tzdW0gPSAiZWJjMWMwNGM3MTUxMGM3ZjcwMmI1MmI3YzM1MDczNGM5ZmYxMjk1YzQ2NGEwMzMzNWIwMGJiODRmYzU0Zjg1MyIKCltbcGFja2FnZV1dCm5hbWUgPSAidmVyc2lvbl9jaGVjayIKdmVyc2lvbiA9ICIwLjkuNSIKc291cmNlID0gInJlZ2lzdHJ5K2h0dHBzOi8vZ2l0aHViLmNvbS9ydXN0LWxhbmcvY3JhdGVzLmlvLWluZGV4IgpjaGVja3N1bSA9ICIwYjkyOGYzM2Q5NzVmYzZhZDlmODZjOGYyODM4NTNhZDI2YmRkNWIxMGI3ZjE1NDJhYTJmYTE1ZTIyODkxMDVhIgoKW1twYWNrYWdlXV0KbmFtZSA9ICJ3YXNpIgp2ZXJzaW9uID0gIjAuMTEuMSt3YXNpLXNuYXBzaG90LXByZXZpZXcxIgpzb3VyY2UgPSAicmVnaXN0cnkraHR0cHM6Ly9naXRodWIuY29tL3J1c3QtbGFuZy9jcmF0ZXMuaW8taW5kZXgiCmNoZWNrc3VtID0gImNjZjNlYzY1MWE4NDdlYjAxZGU3M2NjYWQxNWViN2Q5OWY4MDQ4NWRlMDQzZWZiMmYzNzBjZDY1NGY0ZWE0NGIiCgpbW3BhY2thZ2VdXQpuYW1lID0gIndhc2lwMiIKdmVyc2lvbiA9ICIxLjAuMyt3YXNpLTAuMi45Igpzb3VyY2UgPSAicmVnaXN0cnkraHR0cHM6Ly9naXRodWIuY29tL3J1c3QtbGFuZy9jcmF0ZXMuaW8taW5kZXgiCmNoZWNrc3VtID0gIjIwMDY0NjcyZGIyNmQ3Y2RjODljNzc5OGM0OGEwZmRmYWM4MjEzNDM0YTExODZlNWVmMjlmZDU2MGFlMjIzZDYiCmRlcGVuZGVuY2llcyA9IFsKICJ3aXQtYmluZGdlbiAwLjU3LjEiLApdCgpbW3BhY2thZ2VdXQpuYW1lID0gIndhc2lwMyIKdmVyc2lvbiA9ICIwLjQuMCt3YXNpLTAuMy4wLXJjLTIwMjYtMDEtMDYiCnNvdXJjZSA9ICJyZWdpc3RyeStodHRwczovL2dpdGh1Yi5jb20vcnVzdC1sYW5nL2NyYXRlcy5pby1pbmRleCIKY2hlY2tzdW0gPSAiNTQyOGY4YmY4OGVhNWRkYzA4ZmFkZGVmMmFjNGE2N2UzOTBiODgxODZjNzAzY2U2ZGJkOTU1ZTFjMTQ1YWNhNSIKZGVwZW5kZW5jaWVzID0gWwogIndpdC1iaW5kZ2VuIDAuNTEuMCIsCl0KCltbcGFja2FnZV1dCm5hbWUgPSAid2FzbS1lbmNvZGVyIgp2ZXJzaW9uID0gIjAuMjQ0LjAiCnNvdXJjZSA9ICJyZWdpc3RyeStodHRwczovL2dpdGh1Yi5jb20vcnVzdC1sYW5nL2NyYXRlcy5pby1pbmRleCIKY2hlY2tzdW0gPSAiOTkwMDY1ZjJmZTYzMDAzZmUzMzdiOTMyY2ZiNWUzYjgwZTBiNGQwZjVmZjY1MGU2OTg1YjEwNDhmNjJjODMxOSIKZGVwZW5kZW5jaWVzID0gWwogImxlYjEyOGZtdCIsCiAid2FzbXBhcnNlciIsCl0KCltbcGFja2FnZV1dCm5hbWUgPSAid2FzbS1tZXRhZGF0YSIKdmVyc2lvbiA9ICIwLjI0NC4wIgpzb3VyY2UgPSAicmVnaXN0cnkraHR0cHM6Ly9naXRodWIuY29tL3J1c3QtbGFuZy9jcmF0ZXMuaW8taW5kZXgiCmNoZWNrc3VtID0gImJiMGUzNTNlNmEyZmJkYzE3NjkzMmJiYWFiNDkzNzYyZWIxMjU1YTc5MDBmZTBmZWExYTJmOTZjMjk2Y2M5MDkiCmRlcGVuZGVuY2llcyA9IFsKICJhbnlob3ciLAogImluZGV4bWFwIiwKICJ3YXNtLWVuY29kZXIiLAogIndhc21wYXJzZXIiLApdCgpbW3BhY2thZ2VdXQpuYW1lID0gIndhc21wYXJzZXIiCnZlcnNpb24gPSAiMC4yNDQuMCIKc291cmNlID0gInJlZ2lzdHJ5K2h0dHBzOi8vZ2l0aHViLmNvbS9ydXN0LWxhbmcvY3JhdGVzLmlvLWluZGV4IgpjaGVja3N1bSA9ICI0N2I4MDdjNzJlMWJhYzY5MzgyYjNhNmZiM2RiZThlYTRjMGVkODdmZjU2MjliODY4NWFlNmI5YTYxMTAyOGZlIgpkZXBlbmRlbmNpZXMgPSBbCiAiYml0ZmxhZ3MgMi4xMS4xIiwKICJoYXNoYnJvd24gMC4xNS41IiwKICJpbmRleG1hcCIsCiAic2VtdmVyIiwKXQoKW1twYWNrYWdlXV0KbmFtZSA9ICJ3aW5kb3dzLWxpbmsiCnZlcnNpb24gPSAiMC4yLjEiCnNvdXJjZSA9ICJyZWdpc3RyeStodHRwczovL2dpdGh1Yi5jb20vcnVzdC1sYW5nL2NyYXRlcy5pby1pbmRleCIKY2hlY2tzdW0gPSAiZjA4MDUyMjJlNTdmNzUyMWQ2YTYyZTM2ZmE5MTYzYmM4OTFhY2Q0MjJmOTcxZGVmZTk3ZDY0ZTcwZDBhNGZlNSIKCltbcGFja2FnZV1dCm5hbWUgPSAid2luZG93cy1zeXMiCnZlcnNpb24gPSAiMC42MS4yIgpzb3VyY2UgPSAicmVnaXN0cnkraHR0cHM6Ly9naXRodWIuY29tL3J1c3QtbGFuZy9jcmF0ZXMuaW8taW5kZXgiCmNoZWNrc3VtID0gImFlMTM3MjI5YmNiZDZjZGYwZjdiODBhMzFkZjYxNzY2MTQ1MDc3ZGRmNDk0MTZhNzI4YjAyY2IzOTIxZmYzZmMiCmRlcGVuZGVuY2llcyA9IFsKICJ3aW5kb3dzLWxpbmsiLApdCgpbW3BhY2thZ2VdXQpuYW1lID0gIndpdC1iaW5kZ2VuIgp2ZXJzaW9uID0gIjAuNTEuMCIKc291cmNlID0gInJlZ2lzdHJ5K2h0dHBzOi8vZ2l0aHViLmNvbS9ydXN0LWxhbmcvY3JhdGVzLmlvLWluZGV4IgpjaGVja3N1bSA9ICJkNzI0OTIxOWY2NmNlZDAyOTY5Mzg4Y2YyYmIwNDRhMDk3NTZhMDgzZDBmYWIxZTU2NjA1NmIwNGQ5ZmJjYWE1IgpkZXBlbmRlbmNpZXMgPSBbCiAid2l0LWJpbmRnZW4tcnVzdC1tYWNybyIsCl0KCltbcGFja2FnZV1dCm5hbWUgPSAid2l0LWJpbmRnZW4iCnZlcnNpb24gPSAiMC41Ny4xIgpzb3VyY2UgPSAicmVnaXN0cnkraHR0cHM6Ly9naXRodWIuY29tL3J1c3QtbGFuZy9jcmF0ZXMuaW8taW5kZXgiCmNoZWNrc3VtID0gIjFlYmY5NDRlODdhN2MyNTMyMzNhZDY3NjZlMDgyZTNjZDcxNGI1ZDAzODEyYWNjMjRjMzE4ZjU0OTYxNDUzNmUiCgpbW3BhY2thZ2VdXQpuYW1lID0gIndpdC1iaW5kZ2VuLWNvcmUiCnZlcnNpb24gPSAiMC41MS4wIgpzb3VyY2UgPSAicmVnaXN0cnkraHR0cHM6Ly9naXRodWIuY29tL3J1c3QtbGFuZy9jcmF0ZXMuaW8taW5kZXgiCmNoZWNrc3VtID0gImVhNjFkZTY4NGMzZWE2OGNiMDgyYjdhODg1MDhhOGIyN2ZjYzhiNzk3ZDczOGJmYzk5YTgyZmFjZjFkNzUyZGMiCmRlcGVuZGVuY2llcyA9IFsKICJhbnlob3ciLAogImhlY2siLAogIndpdC1wYXJzZXIiLApdCgpbW3BhY2thZ2VdXQpuYW1lID0gIndpdC1iaW5kZ2VuLXJ1c3QiCnZlcnNpb24gPSAiMC41MS4wIgpzb3VyY2UgPSAicmVnaXN0cnkraHR0cHM6Ly9naXRodWIuY29tL3J1c3QtbGFuZy9jcmF0ZXMuaW8taW5kZXgiCmNoZWNrc3VtID0gImI3YzU2NmUwZjRiMjg0ZGQ2NTYxYzc4NmQ5Y2IwMTQyZGE0OTFmNDZhOWZiZWQ3OWVhNjljZGFkNWRiMTdmMjEiCmRlcGVuZGVuY2llcyA9IFsKICJhbnlob3ciLAogImhlY2siLAogImluZGV4bWFwIiwKICJwcmV0dHlwbGVhc2UiLAogInN5biIsCiAid2FzbS1tZXRhZGF0YSIsCiAid2l0LWJpbmRnZW4tY29yZSIsCiAid2l0LWNvbXBvbmVudCIsCl0KCltbcGFja2FnZV1dCm5hbWUgPSAid2l0LWJpbmRnZW4tcnVzdC1tYWNybyIKdmVyc2lvbiA9ICIwLjUxLjAiCnNvdXJjZSA9ICJyZWdpc3RyeStodHRwczovL2dpdGh1Yi5jb20vcnVzdC1sYW5nL2NyYXRlcy5pby1pbmRleCIKY2hlY2tzdW0gPSAiMGMwZjliZmQ3N2U2YTQ4ZWNjZjUxMzU5ZTNhZTc3MTQwYTdmNTBiMWUyZWJmZTYyNDIyZDhhZmRhZmZhYjE3YSIKZGVwZW5kZW5jaWVzID0gWwogImFueWhvdyIsCiAicHJldHR5cGxlYXNlIiwKICJwcm9jLW1hY3JvMiIsCiAicXVvdGUiLAogInN5biIsCiAid2l0LWJpbmRnZW4tY29yZSIsCiAid2l0LWJpbmRnZW4tcnVzdCIsCl0KCltbcGFja2FnZV1dCm5hbWUgPSAid2l0LWNvbXBvbmVudCIKdmVyc2lvbiA9ICIwLjI0NC4wIgpzb3VyY2UgPSAicmVnaXN0cnkraHR0cHM6Ly9naXRodWIuY29tL3J1c3QtbGFuZy9jcmF0ZXMuaW8taW5kZXgiCmNoZWNrc3VtID0gIjlkNjZlYTIwZTk1NTNiMzAxNzJiNWU4MzE5OTRlMzVmYmRlMmQxNjUzMjViZWM4NGZjNDNkYmY2ZjRlYjljYjIiCmRlcGVuZGVuY2llcyA9IFsKICJhbnlob3ciLAogImJpdGZsYWdzIDIuMTEuMSIsCiAiaW5kZXhtYXAiLAogImxvZyIsCiAic2VyZGUiLAogInNlcmRlX2Rlcml2ZSIsCiAic2VyZGVfanNvbiIsCiAid2FzbS1lbmNvZGVyIiwKICJ3YXNtLW1ldGFkYXRhIiwKICJ3YXNtcGFyc2VyIiwKICJ3aXQtcGFyc2VyIiwKXQoKW1twYWNrYWdlXV0KbmFtZSA9ICJ3aXQtcGFyc2VyIgp2ZXJzaW9uID0gIjAuMjQ0LjAiCnNvdXJjZSA9ICJyZWdpc3RyeStodHRwczovL2dpdGh1Yi5jb20vcnVzdC1sYW5nL2NyYXRlcy5pby1pbmRleCIKY2hlY2tzdW0gPSAiZWNjOGFjNGJjMWRjMzM4MWI3ZjU5YzM0ZjAwYjY3ZTE4ZjkxMGMyYzBmNTAwMTU2NjlkZGU3ZGVmNjU2YTczNiIKZGVwZW5kZW5jaWVzID0gWwogImFueWhvdyIsCiAiaWQtYXJlbmEiLAogImluZGV4bWFwIiwKICJsb2ciLAogInNlbXZlciIsCiAic2VyZGUiLAogInNlcmRlX2Rlcml2ZSIsCiAic2VyZGVfanNvbiIsCiAidW5pY29kZS14aWQiLAogIndhc21wYXJzZXIiLApdCgpbW3BhY2thZ2VdXQpuYW1lID0gInptaWoiCnZlcnNpb24gPSAiMS4wLjIxIgpzb3VyY2UgPSAicmVnaXN0cnkraHR0cHM6Ly9naXRodWIuY29tL3J1c3QtbGFuZy9jcmF0ZXMuaW8taW5kZXgiCmNoZWNrc3VtID0gImI4ODQ4ZWU2N2VjYzhhZWRiYWYzZTQxMjIyMTdhZmY4OTI2MzkyMzFiZWZjNmExYjU4ZDI5ZmZmNGMyY2FiYWEiCgpbW3BhY2thZ2VdXQpuYW1lID0gInpyYW0tZ2VuZXJhdG9yIgp2ZXJzaW9uID0gIjEuMi4xIgpkZXBlbmRlbmNpZXMgPSBbCiAiYW55aG93IiwKICJjbGFwIiwKICJjdG9yIiwKICJmYXN0ZXZhbCIsCiAiZnNfZXh0cmEiLAogImxpYm92ZXJkcm9wIiwKICJsb2ciLAogIm5peCIsCiAicnVzdC1pbmkiLAogInRlbXBmaWxlIiwKXQo=
++    IyBUaGlzIGZpbGUgaXMgYXV0b21hdGljYWxseSBAZ2VuZXJhdGVkIGJ5IENhcmdvLgojIEl0IGlzIG5vdCBpbnRlbmRlZCBmb3IgbWFudWFsIGVkaXRpbmcuCnZlcnNpb24gPSA0CgpbW3BhY2thZ2VdXQpuYW1lID0gImFoYXNoIgp2ZXJzaW9uID0gIjAuNy44Igpzb3VyY2UgPSAicmVnaXN0cnkraHR0cHM6Ly9naXRodWIuY29tL3J1c3QtbGFuZy9jcmF0ZXMuaW8taW5kZXgiCmNoZWNrc3VtID0gIjg5MTQ3N2UwYzZhODk1NzMwOWVlNWM0NWE2MzY4YWYzYWUxNGJiNTEwNzMyZDI2ODRmZmExOWFmMzEwOTIwZjkiCmRlcGVuZGVuY2llcyA9IFsKICJnZXRyYW5kb20gMC4yLjE3IiwKICJvbmNlX2NlbGwiLAogInZlcnNpb25fY2hlY2siLApdCgpbW3BhY2thZ2VdXQpuYW1lID0gImFuc3R5bGUiCnZlcnNpb24gPSAiMS4wLjE0Igpzb3VyY2UgPSAicmVnaXN0cnkraHR0cHM6Ly9naXRodWIuY29tL3J1c3QtbGFuZy9jcmF0ZXMuaW8taW5kZXgiCmNoZWNrc3VtID0gIjk0MGIzYTBjYTYwM2QxZWFkZTUwYTQ4NDZhMmFmZmZkNWVmNTdhOWZlYWMyYzBlMmVjMmUxNGY5ZWFkNzYwMDAiCgpbW3BhY2thZ2VdXQpuYW1lID0gImFueWhvdyIKdmVyc2lvbiA9ICIxLjAuMTAyIgpzb3VyY2UgPSAicmVnaXN0cnkraHR0cHM6Ly9naXRodWIuY29tL3J1c3QtbGFuZy9jcmF0ZXMuaW8taW5kZXgiCmNoZWNrc3VtID0gIjdmMjAyZGY4NjQ4NGM4NjhkYmFkN2VhYTU1N2VmNzg1ZDVjNjYyOTVlNDFiNDYwZWY5MjJlY2EwNzIzYjg0MmMiCgpbW3BhY2thZ2VdXQpuYW1lID0gImF1dG9jZmciCnZlcnNpb24gPSAiMS41LjEiCnNvdXJjZSA9ICJyZWdpc3RyeStodHRwczovL2dpdGh1Yi5jb20vcnVzdC1sYW5nL2NyYXRlcy5pby1pbmRleCIKY2hlY2tzdW0gPSAiZjIwMzJmOTExMDQ2ZGU4MGYwYTE5OGUwOTAxMzc4NjI3YzMzZjU5ZWEwYWMwMGUzNjNkNDgxMTE4YmQ3MGE1MyIKCltbcGFja2FnZV1dCm5hbWUgPSAiYml0ZmxhZ3MiCnZlcnNpb24gPSAiMS4zLjIiCnNvdXJjZSA9ICJyZWdpc3RyeStodHRwczovL2dpdGh1Yi5jb20vcnVzdC1sYW5nL2NyYXRlcy5pby1pbmRleCIKY2hlY2tzdW0gPSAiYmVmMzhkNDUxNjNjMmYxZGRlMDk0YTdkZmQzM2NjZjU5NWM5MjkwNWM4ZjhmNGZkYzE4ZDA2ZmIxMDM3NzE4YSIKCltbcGFja2FnZV1dCm5hbWUgPSAiYml0ZmxhZ3MiCnZlcnNpb24gPSAiMi4xMS4xIgpzb3VyY2UgPSAicmVnaXN0cnkraHR0cHM6Ly9naXRodWIuY29tL3J1c3QtbGFuZy9jcmF0ZXMuaW8taW5kZXgiCmNoZWNrc3VtID0gImM0NTEyMjk5ZjM2ZjA0M2FiMDlhNTgzZTU3YmNlYjVhNWFhYjdhNzNkYjE4MDU4NDhlOGZlZjNjOWU4Yzc4YjMiCgpbW3BhY2thZ2VdXQpuYW1lID0gImNjIgp2ZXJzaW9uID0gIjEuMi42MiIKc291cmNlID0gInJlZ2lzdHJ5K2h0dHBzOi8vZ2l0aHViLmNvbS9ydXN0LWxhbmcvY3JhdGVzLmlvLWluZGV4IgpjaGVja3N1bSA9ICJhMWRjZTg1OWYwODMyYTdkMDg4YzRmMTExOTg4OGFiOTRlZjRiNWQ2Nzk1ZDFjZTA1YWZiN2ZlMTU5ZDc5Zjk4IgpkZXBlbmRlbmNpZXMgPSBbCiAiZmluZC1tc3ZjLXRvb2xzIiwKICJzaGxleCIsCl0KCltbcGFja2FnZV1dCm5hbWUgPSAiY2ZnLWlmIgp2ZXJzaW9uID0gIjEuMC40Igpzb3VyY2UgPSAicmVnaXN0cnkraHR0cHM6Ly9naXRodWIuY29tL3J1c3QtbGFuZy9jcmF0ZXMuaW8taW5kZXgiCmNoZWNrc3VtID0gIjkzMzBmOGIyZmYxM2YzNDU0MGI0NGU5NDZlZjM1MTExODI1NzI3YjM4ZDMzMjg2ZWY5ODYxNDI2MTUxMjE4MDEiCgpbW3BhY2thZ2VdXQpuYW1lID0gImNsYXAiCnZlcnNpb24gPSAiNC42LjEiCnNvdXJjZSA9ICJyZWdpc3RyeStodHRwczovL2dpdGh1Yi5jb20vcnVzdC1sYW5nL2NyYXRlcy5pby1pbmRleCIKY2hlY2tzdW0gPSAiMWRkYjExN2U0M2JiZjdkYWNmMGE0MTkwZmVmNGQzNDViOWJhZDY4ZGZjNjQ5Y2IzNDllN2QxN2QyODQyOGU1MSIKZGVwZW5kZW5jaWVzID0gWwogImNsYXBfYnVpbGRlciIsCl0KCltbcGFja2FnZV1dCm5hbWUgPSAiY2xhcF9idWlsZGVyIgp2ZXJzaW9uID0gIjQuNi4wIgpzb3VyY2UgPSAicmVnaXN0cnkraHR0cHM6Ly9naXRodWIuY29tL3J1c3QtbGFuZy9jcmF0ZXMuaW8taW5kZXgiCmNoZWNrc3VtID0gIjcxNGE1MzAwMWJmNjY0MTZhZGIwZTJlZjVhYzg1NzE0MGU3ZGMzYTBjNDhmYjI4YjJmMTA3NjJmYzRiNTA2OWYiCmRlcGVuZGVuY2llcyA9IFsKICJhbnN0eWxlIiwKICJjbGFwX2xleCIsCl0KCltbcGFja2FnZV1dCm5hbWUgPSAiY2xhcF9sZXgiCnZlcnNpb24gPSAiMS4xLjAiCnNvdXJjZSA9ICJyZWdpc3RyeStodHRwczovL2dpdGh1Yi5jb20vcnVzdC1sYW5nL2NyYXRlcy5pby1pbmRleCIKY2hlY2tzdW0gPSAiYzhkNGEzYmI4YjFlMGMxMDUwNDk5ZDE4MTVmNWFiMTZkMDRmMDk1OWIyMzMwODVmYjMxNjUzZmJmYzlkOThmOSIKCltbcGFja2FnZV1dCm5hbWUgPSAiY3RvciIKdmVyc2lvbiA9ICIwLjIuOSIKc291cmNlID0gInJlZ2lzdHJ5K2h0dHBzOi8vZ2l0aHViLmNvbS9ydXN0LWxhbmcvY3JhdGVzLmlvLWluZGV4IgpjaGVja3N1bSA9ICIzMmEyNzg1NzU1NzYxZjNkZGMxNDkyOTc5Y2UxZTQ4ZDJjMDBkMDkzMTFjMzllNDQ2NjQyOTE4OGYzZGQ2NTAxIgpkZXBlbmRlbmNpZXMgPSBbCiAicXVvdGUiLAogInN5biIsCl0KCltbcGFja2FnZV1dCm5hbWUgPSAiZGx2LWxpc3QiCnZlcnNpb24gPSAiMC4zLjAiCnNvdXJjZSA9ICJyZWdpc3RyeStodHRwczovL2dpdGh1Yi5jb20vcnVzdC1sYW5nL2NyYXRlcy5pby1pbmRleCIKY2hlY2tzdW0gPSAiMDY4OGMyYTdmOTJlNDI3ZjQ0ODk1Y2Q2Mzg0MWJmZjdiMjlmOGQ3YTE2NDhiOWU3ZTA3YTRhMzY1YjJlMTI1NyIKCltbcGFja2FnZV1dCm5hbWUgPSAiZXF1aXZhbGVudCIKdmVyc2lvbiA9ICIxLjAuMiIKc291cmNlID0gInJlZ2lzdHJ5K2h0dHBzOi8vZ2l0aHViLmNvbS9ydXN0LWxhbmcvY3JhdGVzLmlvLWluZGV4IgpjaGVja3N1bSA9ICI4NzdhNGFjZTg3MTNiMGJjZjJhNGU3ZWVjODI1MjljMDI5ZjFkMDYxOTg4NmQxODE0NWZlYTk2YzNmZmU1YzBmIgoKW1twYWNrYWdlXV0KbmFtZSA9ICJlcnJubyIKdmVyc2lvbiA9ICIwLjMuMTQiCnNvdXJjZSA9ICJyZWdpc3RyeStodHRwczovL2dpdGh1Yi5jb20vcnVzdC1sYW5nL2NyYXRlcy5pby1pbmRleCIKY2hlY2tzdW0gPSAiMzljYWI3MTYxN2FlMGQ2M2Y1MWEzNmQ2OWY4NjYzOTE3MzViNTE2OTFkYmRhNjNjZjZmOTZkMDQyYjYzZWZlYiIKZGVwZW5kZW5jaWVzID0gWwogImxpYmMiLAogIndpbmRvd3Mtc3lzIiwKXQoKW1twYWNrYWdlXV0KbmFtZSA9ICJmYXN0ZXZhbCIKdmVyc2lvbiA9ICIwLjIuNCIKc291cmNlID0gInJlZ2lzdHJ5K2h0dHBzOi8vZ2l0aHViLmNvbS9ydXN0LWxhbmcvY3JhdGVzLmlvLWluZGV4IgpjaGVja3N1bSA9ICI0ZjRjZGFjOWU0MDY1ZDdjNDhlMzA3NzBmODY2NWI4Y2VmOWEzYTczYTYzYTQwNTZhMzNhNWYzOTViYzdjZjc1IgoKW1twYWNrYWdlXV0KbmFtZSA9ICJmYXN0cmFuZCIKdmVyc2lvbiA9ICIyLjQuMSIKc291cmNlID0gInJlZ2lzdHJ5K2h0dHBzOi8vZ2l0aHViLmNvbS9ydXN0LWxhbmcvY3JhdGVzLmlvLWluZGV4IgpjaGVja3N1bSA9ICI5ZjFmMjI3NDUyYTM5MDgwNGNkYjYzN2I3NGE4Njk5MGYyYTdkN2JhNGI3ZDU2OTNhYWM5YjRkZDZkZWZkOGQ2IgoKW1twYWNrYWdlXV0KbmFtZSA9ICJmaW5kLW1zdmMtdG9vbHMiCnZlcnNpb24gPSAiMC4xLjkiCnNvdXJjZSA9ICJyZWdpc3RyeStodHRwczovL2dpdGh1Yi5jb20vcnVzdC1sYW5nL2NyYXRlcy5pby1pbmRleCIKY2hlY2tzdW0gPSAiNWJhZWJjMDc3NDE1MWY5MDVhMWEyY2M0MTk4OTMwMGIxZTZmYmIyOWFmZjBjZWZmYTEwNjRmZGQzMDg4ZDU4MiIKCltbcGFja2FnZV1dCm5hbWUgPSAiZm9sZGhhc2giCnZlcnNpb24gPSAiMC4xLjUiCnNvdXJjZSA9ICJyZWdpc3RyeStodHRwczovL2dpdGh1Yi5jb20vcnVzdC1sYW5nL2NyYXRlcy5pby1pbmRleCIKY2hlY2tzdW0gPSAiZDljNGY1ZGFjNWUxNWMyNGViOTk5YzI2MTgxYTZjYTQwYjM5ZmU5NDZjYmU0YzI2M2M3MjA5NDY3YmM4M2FmMiIKCltbcGFja2FnZV1dCm5hbWUgPSAiZnNfZXh0cmEiCnZlcnNpb24gPSAiMS4zLjAiCnNvdXJjZSA9ICJyZWdpc3RyeStodHRwczovL2dpdGh1Yi5jb20vcnVzdC1sYW5nL2NyYXRlcy5pby1pbmRleCIKY2hlY2tzdW0gPSAiNDI3MDM3MDZiNzE2YzM3Zjk2YTc3YWVhODMwMzkyYWQyMzFmNDRjOWU5YTY3ODcyZmE1NTQ4NzA3ZTExYjExYyIKCltbcGFja2FnZV1dCm5hbWUgPSAiZ2V0cmFuZG9tIgp2ZXJzaW9uID0gIjAuMi4xNyIKc291cmNlID0gInJlZ2lzdHJ5K2h0dHBzOi8vZ2l0aHViLmNvbS9ydXN0LWxhbmcvY3JhdGVzLmlvLWluZGV4IgpjaGVja3N1bSA9ICJmZjJhYmMwMGJlN2ZjYTZlYmM0NzQ1MjQ2OTdhZTI3NmFkODQ3YWQwYTZiM2ZhYTRiY2IwMjdlOWE0NjE0YWQwIgpkZXBlbmRlbmNpZXMgPSBbCiAiY2ZnLWlmIiwKICJsaWJjIiwKICJ3YXNpIiwKXQoKW1twYWNrYWdlXV0KbmFtZSA9ICJnZXRyYW5kb20iCnZlcnNpb24gPSAiMC40LjIiCnNvdXJjZSA9ICJyZWdpc3RyeStodHRwczovL2dpdGh1Yi5jb20vcnVzdC1sYW5nL2NyYXRlcy5pby1pbmRleCIKY2hlY2tzdW0gPSAiMGRlNTFlNjg3NGU5NGU3YmY3NmQ3MjZmYzVkMTNiYTc4MmRlY2E3MzRmZjYwZDViYjJmYjI2MDdjNzQwNjU1NSIKZGVwZW5kZW5jaWVzID0gWwogImNmZy1pZiIsCiAibGliYyIsCiAici1lZmkiLAogIndhc2lwMiIsCiAid2FzaXAzIiwKXQoKW1twYWNrYWdlXV0KbmFtZSA9ICJoYXNoYnJvd24iCnZlcnNpb24gPSAiMC4xMi4zIgpzb3VyY2UgPSAicmVnaXN0cnkraHR0cHM6Ly9naXRodWIuY29tL3J1c3QtbGFuZy9jcmF0ZXMuaW8taW5kZXgiCmNoZWNrc3VtID0gIjhhOWVlNzBjNDNhYWY0MTdjOTE0Mzk2NjQ1YTBmYTg1MjYyNDgwMWIyNGViYjdhZTc4ZmU4MjcyODg5YWM4ODgiCmRlcGVuZGVuY2llcyA9IFsKICJhaGFzaCIsCl0KCltbcGFja2FnZV1dCm5hbWUgPSAiaGFzaGJyb3duIgp2ZXJzaW9uID0gIjAuMTUuNSIKc291cmNlID0gInJlZ2lzdHJ5K2h0dHBzOi8vZ2l0aHViLmNvbS9ydXN0LWxhbmcvY3JhdGVzLmlvLWluZGV4IgpjaGVja3N1bSA9ICI5MjI5Y2ZlNTNkZmQ2OWYwNjA5YTQ5ZjY1NDYxYmQ5MzAwMWVhMWVmODg5Y2Q1NTI5ZGQxNzY1OTNmNTMzOGExIgpkZXBlbmRlbmNpZXMgPSBbCiAiZm9sZGhhc2giLApdCgpbW3BhY2thZ2VdXQpuYW1lID0gImhhc2hicm93biIKdmVyc2lvbiA9ICIwLjE3LjEiCnNvdXJjZSA9ICJyZWdpc3RyeStodHRwczovL2dpdGh1Yi5jb20vcnVzdC1sYW5nL2NyYXRlcy5pby1pbmRleCIKY2hlY2tzdW0gPSAiZWQ1OTA5YjZlODlhMmRiNDQ1NmU1NGNkNWY2NzM3OTFkN2VjYTY3MzIyMDJiYmYyYTljYzUwNGZlMmY5Yjg0YSIKCltbcGFja2FnZV1dCm5hbWUgPSAiaGVjayIKdmVyc2lvbiA9ICIwLjUuMCIKc291cmNlID0gInJlZ2lzdHJ5K2h0dHBzOi8vZ2l0aHViLmNvbS9ydXN0LWxhbmcvY3JhdGVzLmlvLWluZGV4IgpjaGVja3N1bSA9ICIyMzA0ZTAwOTgzZjg3ZmZiMzhiNTViNDQ0YjVlM2I2MGE4ODRiNWQzMGMwZmNhN2Q4MmZlMzM0NDliYmU1NWVhIgoKW1twYWNrYWdlXV0KbmFtZSA9ICJpZC1hcmVuYSIKdmVyc2lvbiA9ICIyLjMuMCIKc291cmNlID0gInJlZ2lzdHJ5K2h0dHBzOi8vZ2l0aHViLmNvbS9ydXN0LWxhbmcvY3JhdGVzLmlvLWluZGV4IgpjaGVja3N1bSA9ICIzZDMwNjdkNzliOTc1ZTg4NDRjYTllYjA3MmUxNmIzMWMzYzFjMzY5MjhlZGY5YzY3ODk1NDhjNTI0ZDBkOTU0IgoKW1twYWNrYWdlXV0KbmFtZSA9ICJpbmRleG1hcCIKdmVyc2lvbiA9ICIyLjE0LjAiCnNvdXJjZSA9ICJyZWdpc3RyeStodHRwczovL2dpdGh1Yi5jb20vcnVzdC1sYW5nL2NyYXRlcy5pby1pbmRleCIKY2hlY2tzdW0gPSAiZDQ2NmU5NDU0ZjA4ZTRhOTExZTE0ODA2YzI0ZTE2ZmJhMWI0YzEyMWQxZWE0NzQzOTZmMzk2MDY5Y2Y5NDlkOSIKZGVwZW5kZW5jaWVzID0gWwogImVxdWl2YWxlbnQiLAogImhhc2hicm93biAwLjE3LjEiLAogInNlcmRlIiwKICJzZXJkZV9jb3JlIiwKXQoKW1twYWNrYWdlXV0KbmFtZSA9ICJpdG9hIgp2ZXJzaW9uID0gIjEuMC4xOCIKc291cmNlID0gInJlZ2lzdHJ5K2h0dHBzOi8vZ2l0aHViLmNvbS9ydXN0LWxhbmcvY3JhdGVzLmlvLWluZGV4IgpjaGVja3N1bSA9ICI4ZjQyYTYwY2JkZjlhOTdmNWQyMzA1ZjA4YTg3ZGM0ZTA5MzA4ZDEyNzZkMjhjODY5YzY4NGQ3Nzc3Njg1NjgyIgoKW1twYWNrYWdlXV0KbmFtZSA9ICJsZWIxMjhmbXQiCnZlcnNpb24gPSAiMC4xLjAiCnNvdXJjZSA9ICJyZWdpc3RyeStodHRwczovL2dpdGh1Yi5jb20vcnVzdC1sYW5nL2NyYXRlcy5pby1pbmRleCIKY2hlY2tzdW0gPSAiMDllZGQ5ZThiNTRlNDllNTg3ZTRmNjI5NWE3ZDI5YzNlYTk0ZDQ2OWNiNDBhYjhjYTcwYjI4ODI0OGE4MWRiMiIKCltbcGFja2FnZV1dCm5hbWUgPSAibGliYyIKdmVyc2lvbiA9ICIwLjIuMTg2Igpzb3VyY2UgPSAicmVnaXN0cnkraHR0cHM6Ly9naXRodWIuY29tL3J1c3QtbGFuZy9jcmF0ZXMuaW8taW5kZXgiCmNoZWNrc3VtID0gIjY4YWI5MTAxN2ZlMTZjNjIyNDg2ODQwZTRjODNjOWEzN2FmZWZmOTc4YmQyMzliNTI5M2Q2MWVjZTU4N2RlNjYiCgpbW3BhY2thZ2VdXQpuYW1lID0gImxpYm92ZXJkcm9wIgp2ZXJzaW9uID0gIjAuMS4wIgpzb3VyY2UgPSAicmVnaXN0cnkraHR0cHM6Ly9naXRodWIuY29tL3J1c3QtbGFuZy9jcmF0ZXMuaW8taW5kZXgiCmNoZWNrc3VtID0gIjA4ZTUzNzNkNzUxMjgzNGUyZmJiZTQxMDAxMTE0ODNhOTljMjhjYTM4MTg2MzlmNjdhYjIzMzc2NzIzMDFmOGUiCmRlcGVuZGVuY2llcyA9IFsKICJsb2ciLApdCgpbW3BhY2thZ2VdXQpuYW1lID0gImxpbnV4LXJhdy1zeXMiCnZlcnNpb24gPSAiMC4xMi4xIgpzb3VyY2UgPSAicmVnaXN0cnkraHR0cHM6Ly9naXRodWIuY29tL3J1c3QtbGFuZy9jcmF0ZXMuaW8taW5kZXgiCmNoZWNrc3VtID0gIjMyYTY2OTQ5ZTAzMGRhMDBlOGM3ZDQ0MzRiMjUxNjcwYTkxNTU2ZjQxNDQ5NDFkMzc0NTI3NjljMjVkNThhNTMiCgpbW3BhY2thZ2VdXQpuYW1lID0gImxvZyIKdmVyc2lvbiA9ICIwLjQuMjkiCnNvdXJjZSA9ICJyZWdpc3RyeStodHRwczovL2dpdGh1Yi5jb20vcnVzdC1sYW5nL2NyYXRlcy5pby1pbmRleCIKY2hlY2tzdW0gPSAiNWU1MDMyZTI0MDE5MDQ1Yzc2MmQzYzBmMjhmNWI2YjhiYmYzODU2M2E2NTkwODM4OWJmNzk3ODc1ODkyMDg5NyIKCltbcGFja2FnZV1dCm5hbWUgPSAibWVtY2hyIgp2ZXJzaW9uID0gIjIuOC4wIgpzb3VyY2UgPSAicmVnaXN0cnkraHR0cHM6Ly9naXRodWIuY29tL3J1c3QtbGFuZy9jcmF0ZXMuaW8taW5kZXgiCmNoZWNrc3VtID0gImY4Y2E1OGY0NDdmMDZlZDE3ZDVmYzQwNDNjZTFiMTBkZDIwNWUwNjBmYjNjZTViOTc5YjhlZDhlNTlmZjNmNzkiCgpbW3BhY2thZ2VdXQpuYW1lID0gIm1lbW9mZnNldCIKdmVyc2lvbiA9ICIwLjYuNSIKc291cmNlID0gInJlZ2lzdHJ5K2h0dHBzOi8vZ2l0aHViLmNvbS9ydXN0LWxhbmcvY3JhdGVzLmlvLWluZGV4IgpjaGVja3N1bSA9ICI1YWEzNjFkNGZhZWE5MzYwMzA2NGEwMjc0MTVmMDdiZDhlMWQ1Yzg4YzlmYmY2OGJmNTZhMjg1NDI4ZmQ3OWNlIgpkZXBlbmRlbmNpZXMgPSBbCiAiYXV0b2NmZyIsCl0KCltbcGFja2FnZV1dCm5hbWUgPSAibml4Igp2ZXJzaW9uID0gIjAuMjMuMiIKc291cmNlID0gInJlZ2lzdHJ5K2h0dHBzOi8vZ2l0aHViLmNvbS9ydXN0LWxhbmcvY3JhdGVzLmlvLWluZGV4IgpjaGVja3N1bSA9ICI4ZjM3OTBjMDBhMDE1MDExMmRlMGY0Y2QxNjFlM2Q3ZmM0YjJkOGE1NTQyZmZjMzVmMDk5YTI1NjJhZWNiMzVjIgpkZXBlbmRlbmNpZXMgPSBbCiAiYml0ZmxhZ3MgMS4zLjIiLAogImNjIiwKICJjZmctaWYiLAogImxpYmMiLAogIm1lbW9mZnNldCIsCl0KCltbcGFja2FnZV1dCm5hbWUgPSAib25jZV9jZWxsIgp2ZXJzaW9uID0gIjEuMjEuNCIKc291cmNlID0gInJlZ2lzdHJ5K2h0dHBzOi8vZ2l0aHViLmNvbS9ydXN0LWxhbmcvY3JhdGVzLmlvLWluZGV4IgpjaGVja3N1bSA9ICI5ZjdjM2U0YmViMzNmODVkNDVhZTNlM2ExNzkyMTg1NzA2YzhlMTZkMDQzMjM4YzU5MzMzMWNjN2NkMzEzYjUwIgoKW1twYWNrYWdlXV0KbmFtZSA9ICJvcmRlcmVkLW11bHRpbWFwIgp2ZXJzaW9uID0gIjAuNC4zIgpzb3VyY2UgPSAicmVnaXN0cnkraHR0cHM6Ly9naXRodWIuY29tL3J1c3QtbGFuZy9jcmF0ZXMuaW8taW5kZXgiCmNoZWNrc3VtID0gImNjZDc0NmUzNzE3N2UxNzExYzIwZGQ2MTlhMTYyMGYzNGY1YzhiNTY5YzUzNTkwYTcyZGVkZDUzNDRkODkyNGEiCmRlcGVuZGVuY2llcyA9IFsKICJkbHYtbGlzdCIsCiAiaGFzaGJyb3duIDAuMTIuMyIsCl0KCltbcGFja2FnZV1dCm5hbWUgPSAicHJldHR5cGxlYXNlIgp2ZXJzaW9uID0gIjAuMi4zNyIKc291cmNlID0gInJlZ2lzdHJ5K2h0dHBzOi8vZ2l0aHViLmNvbS9ydXN0LWxhbmcvY3JhdGVzLmlvLWluZGV4IgpjaGVja3N1bSA9ICI0NzljYThhZGFjZGQ3Y2U4ZjFmYjM5Y2U5ZWNjY2JmZTkzYTNmMTM0NGIzZDBkOTdmMjBiYzAxOTYyMDhmNjJiIgpkZXBlbmRlbmNpZXMgPSBbCiAicHJvYy1tYWNybzIiLAogInN5biIsCl0KCltbcGFja2FnZV1dCm5hbWUgPSAicHJvYy1tYWNybzIiCnZlcnNpb24gPSAiMS4wLjEwNiIKc291cmNlID0gInJlZ2lzdHJ5K2h0dHBzOi8vZ2l0aHViLmNvbS9ydXN0LWxhbmcvY3JhdGVzLmlvLWluZGV4IgpjaGVja3N1bSA9ICI4ZmQwMGYwYmIyZTkwZDgxZDEwNDRjMmIzMjYxN2Y2OGZjYjlmYTNiYjc2NDBjMjNlOWM3NDhlNTNmYjMwOTM0IgpkZXBlbmRlbmNpZXMgPSBbCiAidW5pY29kZS1pZGVudCIsCl0KCltbcGFja2FnZV1dCm5hbWUgPSAicXVvdGUiCnZlcnNpb24gPSAiMS4wLjQ1Igpzb3VyY2UgPSAicmVnaXN0cnkraHR0cHM6Ly9naXRodWIuY29tL3J1c3QtbGFuZy9jcmF0ZXMuaW8taW5kZXgiCmNoZWNrc3VtID0gIjQxZjI2MTk5NjYwNTA2ODkzODJkMmI0NGY2NjRmNGJjNTkzZTEyOTc4NWEzNmQ2ZWUzNzZkZGYzNzI1OWI5MjQiCmRlcGVuZGVuY2llcyA9IFsKICJwcm9jLW1hY3JvMiIsCl0KCltbcGFja2FnZV1dCm5hbWUgPSAici1lZmkiCnZlcnNpb24gPSAiNi4wLjAiCnNvdXJjZSA9ICJyZWdpc3RyeStodHRwczovL2dpdGh1Yi5jb20vcnVzdC1sYW5nL2NyYXRlcy5pby1pbmRleCIKY2hlY2tzdW0gPSAiZjhkY2M5YzdkNTJhODExNjk3ZDIxNTFjNzAxZTBkMDg5NTZmOTJiMGUyNDEzNmNmNGNmMjdiNTdhNmEwZDliZiIKCltbcGFja2FnZV1dCm5hbWUgPSAicnVzdC1pbmkiCnZlcnNpb24gPSAiMC4xOC4wIgpzb3VyY2UgPSAicmVnaXN0cnkraHR0cHM6Ly9naXRodWIuY29tL3J1c3QtbGFuZy9jcmF0ZXMuaW8taW5kZXgiCmNoZWNrc3VtID0gImY2ZDVmMjQzNjAyNmI0ZjZlNzlkYzgyOTgzN2Q0NjdjYzdlOWE1NWVlNDBlNzUwZDcxNjcxMzU0MDcxNWEyZGYiCmRlcGVuZGVuY2llcyA9IFsKICJjZmctaWYiLAogIm9yZGVyZWQtbXVsdGltYXAiLApdCgpbW3BhY2thZ2VdXQpuYW1lID0gInJ1c3RpeCIKdmVyc2lvbiA9ICIxLjEuNCIKc291cmNlID0gInJlZ2lzdHJ5K2h0dHBzOi8vZ2l0aHViLmNvbS9ydXN0LWxhbmcvY3JhdGVzLmlvLWluZGV4IgpjaGVja3N1bSA9ICJiNmZlNDU2NWI5NTE4YjgzZWY0ZjkxYmI0N2NlMjk2MjBjYTgyOGJkMzJjYjdlNDA4ZjAwNjJlOTkzMGJhMTkwIgpkZXBlbmRlbmNpZXMgPSBbCiAiYml0ZmxhZ3MgMi4xMS4xIiwKICJlcnJubyIsCiAibGliYyIsCiAibGludXgtcmF3LXN5cyIsCiAid2luZG93cy1zeXMiLApdCgpbW3BhY2thZ2VdXQpuYW1lID0gInNlbXZlciIKdmVyc2lvbiA9ICIxLjAuMjgiCnNvdXJjZSA9ICJyZWdpc3RyeStodHRwczovL2dpdGh1Yi5jb20vcnVzdC1sYW5nL2NyYXRlcy5pby1pbmRleCIKY2hlY2tzdW0gPSAiOGE3ODUyZDAyZmM4NDg5ODJlMGMxNjdlZjE2M2FhZmY5Y2Q5MWRjNjQwYmE4NWUyNjNjYjFjZTQ2ZmFlNTFjZCIKCltbcGFja2FnZV1dCm5hbWUgPSAic2VyZGUiCnZlcnNpb24gPSAiMS4wLjIyOCIKc291cmNlID0gInJlZ2lzdHJ5K2h0dHBzOi8vZ2l0aHViLmNvbS9ydXN0LWxhbmcvY3JhdGVzLmlvLWluZGV4IgpjaGVja3N1bSA9ICI5YThlOTRlYTdmMzc4YmQzMmNiYmQzNzE5OGE0YTkxNDM2MTgwYzViYjQ3MjQxMWU0OGI1ZWMyZTIxMjRhZTllIgpkZXBlbmRlbmNpZXMgPSBbCiAic2VyZGVfY29yZSIsCl0KCltbcGFja2FnZV1dCm5hbWUgPSAic2VyZGVfY29yZSIKdmVyc2lvbiA9ICIxLjAuMjI4Igpzb3VyY2UgPSAicmVnaXN0cnkraHR0cHM6Ly9naXRodWIuY29tL3J1c3QtbGFuZy9jcmF0ZXMuaW8taW5kZXgiCmNoZWNrc3VtID0gIjQxZDM4NWM3ZDRjYTU4ZTU5ZmM3MzJhZjI1YzM5ODNiNjdhYzg1MmMxYTI1MDAwYWZlMTE3NWRlNDU4YjY3YWQiCmRlcGVuZGVuY2llcyA9IFsKICJzZXJkZV9kZXJpdmUiLApdCgpbW3BhY2thZ2VdXQpuYW1lID0gInNlcmRlX2Rlcml2ZSIKdmVyc2lvbiA9ICIxLjAuMjI4Igpzb3VyY2UgPSAicmVnaXN0cnkraHR0cHM6Ly9naXRodWIuY29tL3J1c3QtbGFuZy9jcmF0ZXMuaW8taW5kZXgiCmNoZWNrc3VtID0gImQ1NDBmMjIwZDMxODcxNzNkYTIyMGY4ODVhYjY2NjA4MzY3YjY1NzRlOTI1MDExYTkzNTNlNGJhZGRhOTFkNzkiCmRlcGVuZGVuY2llcyA9IFsKICJwcm9jLW1hY3JvMiIsCiAicXVvdGUiLAogInN5biIsCl0KCltbcGFja2FnZV1dCm5hbWUgPSAic2VyZGVfanNvbiIKdmVyc2lvbiA9ICIxLjAuMTUwIgpzb3VyY2UgPSAicmVnaXN0cnkraHR0cHM6Ly9naXRodWIuY29tL3J1c3QtbGFuZy9jcmF0ZXMuaW8taW5kZXgiCmNoZWNrc3VtID0gImU4MDE0ZTQ0YjQ3MzZlZDA1MzhhZGVlY2RlZDBmY2UyYTI3MmYyMmRjOTU3OGE3ZWI2YjJkOTk5M2M3NGNmYjkiCmRlcGVuZGVuY2llcyA9IFsKICJpdG9hIiwKICJtZW1jaHIiLAogInNlcmRlIiwKICJzZXJkZV9jb3JlIiwKICJ6bWlqIiwKXQoKW1twYWNrYWdlXV0KbmFtZSA9ICJzaGxleCIKdmVyc2lvbiA9ICIxLjMuMCIKc291cmNlID0gInJlZ2lzdHJ5K2h0dHBzOi8vZ2l0aHViLmNvbS9ydXN0LWxhbmcvY3JhdGVzLmlvLWluZGV4IgpjaGVja3N1bSA9ICIwZmRhMmZmMGQwODQwMTliYTRkN2M2ZjM3MWM5NWQ4ZmQ3NWNlMzUyNGMzY2I4ZmI2NTNhMzAyM2Y2MzIzZTY0IgoKW1twYWNrYWdlXV0KbmFtZSA9ICJzeW4iCnZlcnNpb24gPSAiMi4wLjExNyIKc291cmNlID0gInJlZ2lzdHJ5K2h0dHBzOi8vZ2l0aHViLmNvbS9ydXN0LWxhbmcvY3JhdGVzLmlvLWluZGV4IgpjaGVja3N1bSA9ICJlNjY1Yjg4MDNlN2IxZDJhNzI3ZjQwMjM0NTZiYmJiZTc0ZGE2NzA5OWM1ODUyNThhZjBhZDljNTAxM2I5Yjk5IgpkZXBlbmRlbmNpZXMgPSBbCiAicHJvYy1tYWNybzIiLAogInF1b3RlIiwKICJ1bmljb2RlLWlkZW50IiwKXQoKW1twYWNrYWdlXV0KbmFtZSA9ICJ0ZW1wZmlsZSIKdmVyc2lvbiA9ICIzLjI3LjAiCnNvdXJjZSA9ICJyZWdpc3RyeStodHRwczovL2dpdGh1Yi5jb20vcnVzdC1sYW5nL2NyYXRlcy5pby1pbmRleCIKY2hlY2tzdW0gPSAiMzI0OTdlOWE0YzdiMzg1MzJlZmNkZWJlZWY4Nzk3MDdhYTlmNzk0Mjk2YTRmMDI0NGY2ZjY5ZTliYzg1NzRiZCIKZGVwZW5kZW5jaWVzID0gWwogImZhc3RyYW5kIiwKICJnZXRyYW5kb20gMC40LjIiLAogIm9uY2VfY2VsbCIsCiAicnVzdGl4IiwKICJ3aW5kb3dzLXN5cyIsCl0KCltbcGFja2FnZV1dCm5hbWUgPSAidW5pY29kZS1pZGVudCIKdmVyc2lvbiA9ICIxLjAuMjQiCnNvdXJjZSA9ICJyZWdpc3RyeStodHRwczovL2dpdGh1Yi5jb20vcnVzdC1sYW5nL2NyYXRlcy5pby1pbmRleCIKY2hlY2tzdW0gPSAiZTZlNDMxM2NkNWZjZDNkYWQ1Y2FmYTE3OTcwMmUyYjI0NGY3NjA5OTFmNDUzOTdkMTRkNGViZjM4MjQ3ZGE3NSIKCltbcGFja2FnZV1dCm5hbWUgPSAidW5pY29kZS14aWQiCnZlcnNpb24gPSAiMC4yLjYiCnNvdXJjZSA9ICJyZWdpc3RyeStodHRwczovL2dpdGh1Yi5jb20vcnVzdC1sYW5nL2NyYXRlcy5pby1pbmRleCIKY2hlY2tzdW0gPSAiZWJjMWMwNGM3MTUxMGM3ZjcwMmI1MmI3YzM1MDczNGM5ZmYxMjk1YzQ2NGEwMzMzNWIwMGJiODRmYzU0Zjg1MyIKCltbcGFja2FnZV1dCm5hbWUgPSAidmVyc2lvbl9jaGVjayIKdmVyc2lvbiA9ICIwLjkuNSIKc291cmNlID0gInJlZ2lzdHJ5K2h0dHBzOi8vZ2l0aHViLmNvbS9ydXN0LWxhbmcvY3JhdGVzLmlvLWluZGV4IgpjaGVja3N1bSA9ICIwYjkyOGYzM2Q5NzVmYzZhZDlmODZjOGYyODM4NTNhZDI2YmRkNWIxMGI3ZjE1NDJhYTJmYTE1ZTIyODkxMDVhIgoKW1twYWNrYWdlXV0KbmFtZSA9ICJ3YXNpIgp2ZXJzaW9uID0gIjAuMTEuMSt3YXNpLXNuYXBzaG90LXByZXZpZXcxIgpzb3VyY2UgPSAicmVnaXN0cnkraHR0cHM6Ly9naXRodWIuY29tL3J1c3QtbGFuZy9jcmF0ZXMuaW8taW5kZXgiCmNoZWNrc3VtID0gImNjZjNlYzY1MWE4NDdlYjAxZGU3M2NjYWQxNWViN2Q5OWY4MDQ4NWRlMDQzZWZiMmYzNzBjZDY1NGY0ZWE0NGIiCgpbW3BhY2thZ2VdXQpuYW1lID0gIndhc2lwMiIKdmVyc2lvbiA9ICIxLjAuMyt3YXNpLTAuMi45Igpzb3VyY2UgPSAicmVnaXN0cnkraHR0cHM6Ly9naXRodWIuY29tL3J1c3QtbGFuZy9jcmF0ZXMuaW8taW5kZXgiCmNoZWNrc3VtID0gIjIwMDY0NjcyZGIyNmQ3Y2RjODljNzc5OGM0OGEwZmRmYWM4MjEzNDM0YTExODZlNWVmMjlmZDU2MGFlMjIzZDYiCmRlcGVuZGVuY2llcyA9IFsKICJ3aXQtYmluZGdlbiAwLjU3LjEiLApdCgpbW3BhY2thZ2VdXQpuYW1lID0gIndhc2lwMyIKdmVyc2lvbiA9ICIwLjQuMCt3YXNpLTAuMy4wLXJjLTIwMjYtMDEtMDYiCnNvdXJjZSA9ICJyZWdpc3RyeStodHRwczovL2dpdGh1Yi5jb20vcnVzdC1sYW5nL2NyYXRlcy5pby1pbmRleCIKY2hlY2tzdW0gPSAiNTQyOGY4YmY4OGVhNWRkYzA4ZmFkZGVmMmFjNGE2N2UzOTBiODgxODZjNzAzY2U2ZGJkOTU1ZTFjMTQ1YWNhNSIKZGVwZW5kZW5jaWVzID0gWwogIndpdC1iaW5kZ2VuIDAuNTEuMCIsCl0KCltbcGFja2FnZV1dCm5hbWUgPSAid2FzbS1lbmNvZGVyIgp2ZXJzaW9uID0gIjAuMjQ0LjAiCnNvdXJjZSA9ICJyZWdpc3RyeStodHRwczovL2dpdGh1Yi5jb20vcnVzdC1sYW5nL2NyYXRlcy5pby1pbmRleCIKY2hlY2tzdW0gPSAiOTkwMDY1ZjJmZTYzMDAzZmUzMzdiOTMyY2ZiNWUzYjgwZTBiNGQwZjVmZjY1MGU2OTg1YjEwNDhmNjJjODMxOSIKZGVwZW5kZW5jaWVzID0gWwogImxlYjEyOGZtdCIsCiAid2FzbXBhcnNlciIsCl0KCltbcGFja2FnZV1dCm5hbWUgPSAid2FzbS1tZXRhZGF0YSIKdmVyc2lvbiA9ICIwLjI0NC4wIgpzb3VyY2UgPSAicmVnaXN0cnkraHR0cHM6Ly9naXRodWIuY29tL3J1c3QtbGFuZy9jcmF0ZXMuaW8taW5kZXgiCmNoZWNrc3VtID0gImJiMGUzNTNlNmEyZmJkYzE3NjkzMmJiYWFiNDkzNzYyZWIxMjU1YTc5MDBmZTBmZWExYTJmOTZjMjk2Y2M5MDkiCmRlcGVuZGVuY2llcyA9IFsKICJhbnlob3ciLAogImluZGV4bWFwIiwKICJ3YXNtLWVuY29kZXIiLAogIndhc21wYXJzZXIiLApdCgpbW3BhY2thZ2VdXQpuYW1lID0gIndhc21wYXJzZXIiCnZlcnNpb24gPSAiMC4yNDQuMCIKc291cmNlID0gInJlZ2lzdHJ5K2h0dHBzOi8vZ2l0aHViLmNvbS9ydXN0LWxhbmcvY3JhdGVzLmlvLWluZGV4IgpjaGVja3N1bSA9ICI0N2I4MDdjNzJlMWJhYzY5MzgyYjNhNmZiM2RiZThlYTRjMGVkODdmZjU2MjliODY4NWFlNmI5YTYxMTAyOGZlIgpkZXBlbmRlbmNpZXMgPSBbCiAiYml0ZmxhZ3MgMi4xMS4xIiwKICJoYXNoYnJvd24gMC4xNS41IiwKICJpbmRleG1hcCIsCiAic2VtdmVyIiwKXQoKW1twYWNrYWdlXV0KbmFtZSA9ICJ3aW5kb3dzLWxpbmsiCnZlcnNpb24gPSAiMC4yLjEiCnNvdXJjZSA9ICJyZWdpc3RyeStodHRwczovL2dpdGh1Yi5jb20vcnVzdC1sYW5nL2NyYXRlcy5pby1pbmRleCIKY2hlY2tzdW0gPSAiZjA4MDUyMjJlNTdmNzUyMWQ2YTYyZTM2ZmE5MTYzYmM4OTFhY2Q0MjJmOTcxZGVmZTk3ZDY0ZTcwZDBhNGZlNSIKCltbcGFja2FnZV1dCm5hbWUgPSAid2luZG93cy1zeXMiCnZlcnNpb24gPSAiMC42MS4yIgpzb3VyY2UgPSAicmVnaXN0cnkraHR0cHM6Ly9naXRodWIuY29tL3J1c3QtbGFuZy9jcmF0ZXMuaW8taW5kZXgiCmNoZWNrc3VtID0gImFlMTM3MjI5YmNiZDZjZGYwZjdiODBhMzFkZjYxNzY2MTQ1MDc3ZGRmNDk0MTZhNzI4YjAyY2IzOTIxZmYzZmMiCmRlcGVuZGVuY2llcyA9IFsKICJ3aW5kb3dzLWxpbmsiLApdCgpbW3BhY2thZ2VdXQpuYW1lID0gIndpdC1iaW5kZ2VuIgp2ZXJzaW9uID0gIjAuNTEuMCIKc291cmNlID0gInJlZ2lzdHJ5K2h0dHBzOi8vZ2l0aHViLmNvbS9ydXN0LWxhbmcvY3JhdGVzLmlvLWluZGV4IgpjaGVja3N1bSA9ICJkNzI0OTIxOWY2NmNlZDAyOTY5Mzg4Y2YyYmIwNDRhMDk3NTZhMDgzZDBmYWIxZTU2NjA1NmIwNGQ5ZmJjYWE1IgpkZXBlbmRlbmNpZXMgPSBbCiAid2l0LWJpbmRnZW4tcnVzdC1tYWNybyIsCl0KCltbcGFja2FnZV1dCm5hbWUgPSAid2l0LWJpbmRnZW4iCnZlcnNpb24gPSAiMC41Ny4xIgpzb3VyY2UgPSAicmVnaXN0cnkraHR0cHM6Ly9naXRodWIuY29tL3J1c3QtbGFuZy9jcmF0ZXMuaW8taW5kZXgiCmNoZWNrc3VtID0gIjFlYmY5NDRlODdhN2MyNTMyMzNhZDY3NjZlMDgyZTNjZDcxNGI1ZDAzODEyYWNjMjRjMzE4ZjU0OTYxNDUzNmUiCgpbW3BhY2thZ2VdXQpuYW1lID0gIndpdC1iaW5kZ2VuLWNvcmUiCnZlcnNpb24gPSAiMC41MS4wIgpzb3VyY2UgPSAicmVnaXN0cnkraHR0cHM6Ly9naXRodWIuY29tL3J1c3QtbGFuZy9jcmF0ZXMuaW8taW5kZXgiCmNoZWNrc3VtID0gImVhNjFkZTY4NGMzZWE2OGNiMDgyYjdhODg1MDhhOGIyN2ZjYzhiNzk3ZDczOGJmYzk5YTgyZmFjZjFkNzUyZGMiCmRlcGVuZGVuY2llcyA9IFsKICJhbnlob3ciLAogImhlY2siLAogIndpdC1wYXJzZXIiLApdCgpbW3BhY2thZ2VdXQpuYW1lID0gIndpdC1iaW5kZ2VuLXJ1c3QiCnZlcnNpb24gPSAiMC41MS4wIgpzb3VyY2UgPSAicmVnaXN0cnkraHR0cHM6Ly9naXRodWIuY29tL3J1c3QtbGFuZy9jcmF0ZXMuaW8taW5kZXgiCmNoZWNrc3VtID0gImI3YzU2NmUwZjRiMjg0ZGQ2NTYxYzc4NmQ5Y2IwMTQyZGE0OTFmNDZhOWZiZWQ3OWVhNjljZGFkNWRiMTdmMjEiCmRlcGVuZGVuY2llcyA9IFsKICJhbnlob3ciLAogImhlY2siLAogImluZGV4bWFwIiwKICJwcmV0dHlwbGVhc2UiLAogInN5biIsCiAid2FzbS1tZXRhZGF0YSIsCiAid2l0LWJpbmRnZW4tY29yZSIsCiAid2l0LWNvbXBvbmVudCIsCl0KCltbcGFja2FnZV1dCm5hbWUgPSAid2l0LWJpbmRnZW4tcnVzdC1tYWNybyIKdmVyc2lvbiA9ICIwLjUxLjAiCnNvdXJjZSA9ICJyZWdpc3RyeStodHRwczovL2dpdGh1Yi5jb20vcnVzdC1sYW5nL2NyYXRlcy5pby1pbmRleCIKY2hlY2tzdW0gPSAiMGMwZjliZmQ3N2U2YTQ4ZWNjZjUxMzU5ZTNhZTc3MTQwYTdmNTBiMWUyZWJmZTYyNDIyZDhhZmRhZmZhYjE3YSIKZGVwZW5kZW5jaWVzID0gWwogImFueWhvdyIsCiAicHJldHR5cGxlYXNlIiwKICJwcm9jLW1hY3JvMiIsCiAicXVvdGUiLAogInN5biIsCiAid2l0LWJpbmRnZW4tY29yZSIsCiAid2l0LWJpbmRnZW4tcnVzdCIsCl0KCltbcGFja2FnZV1dCm5hbWUgPSAid2l0LWNvbXBvbmVudCIKdmVyc2lvbiA9ICIwLjI0NC4wIgpzb3VyY2UgPSAicmVnaXN0cnkraHR0cHM6Ly9naXRodWIuY29tL3J1c3QtbGFuZy9jcmF0ZXMuaW8taW5kZXgiCmNoZWNrc3VtID0gIjlkNjZlYTIwZTk1NTNiMzAxNzJiNWU4MzE5OTRlMzVmYmRlMmQxNjUzMjViZWM4NGZjNDNkYmY2ZjRlYjljYjIiCmRlcGVuZGVuY2llcyA9IFsKICJhbnlob3ciLAogImJpdGZsYWdzIDIuMTEuMSIsCiAiaW5kZXhtYXAiLAogImxvZyIsCiAic2VyZGUiLAogInNlcmRlX2Rlcml2ZSIsCiAic2VyZGVfanNvbiIsCiAid2FzbS1lbmNvZGVyIiwKICJ3YXNtLW1ldGFkYXRhIiwKICJ3YXNtcGFyc2VyIiwKICJ3aXQtcGFyc2VyIiwKXQoKW1twYWNrYWdlXV0KbmFtZSA9ICJ3aXQtcGFyc2VyIgp2ZXJzaW9uID0gIjAuMjQ0LjAiCnNvdXJjZSA9ICJyZWdpc3RyeStodHRwczovL2dpdGh1Yi5jb20vcnVzdC1sYW5nL2NyYXRlcy5pby1pbmRleCIKY2hlY2tzdW0gPSAiZWNjOGFjNGJjMWRjMzM4MWI3ZjU5YzM0ZjAwYjY3ZTE4ZjkxMGMyYzBmNTAwMTU2NjlkZGU3ZGVmNjU2YTczNiIKZGVwZW5kZW5jaWVzID0gWwogImFueWhvdyIsCiAiaWQtYXJlbmEiLAogImluZGV4bWFwIiwKICJsb2ciLAogInNlbXZlciIsCiAic2VyZGUiLAogInNlcmRlX2Rlcml2ZSIsCiAic2VyZGVfanNvbiIsCiAidW5pY29kZS14aWQiLAogIndhc21wYXJzZXIiLApdCgpbW3BhY2thZ2VdXQpuYW1lID0gInptaWoiCnZlcnNpb24gPSAiMS4wLjIxIgpzb3VyY2UgPSAicmVnaXN0cnkraHR0cHM6Ly9naXRodWIuY29tL3J1c3QtbGFuZy9jcmF0ZXMuaW8taW5kZXgiCmNoZWNrc3VtID0gImI4ODQ4ZWU2N2VjYzhhZWRiYWYzZTQxMjIyMTdhZmY4OTI2MzkyMzFiZWZjNmExYjU4ZDI5ZmZmNGMyY2FiYWEiCgpbW3BhY2thZ2VdXQpuYW1lID0gInpyYW0tZ2VuZXJhdG9yIgp2ZXJzaW9uID0gIjEuMi4xIgpkZXBlbmRlbmNpZXMgPSBbCiAiYW55aG93IiwKICJjbGFwIiwKICJjdG9yIiwKICJmYXN0ZXZhbCIsCiAiZnNfZXh0cmEiLAogImxpYm92ZXJkcm9wIiwKICJsb2ciLAogIm5peCIsCiAicnVzdC1pbmkiLAogInRlbXBmaWxlIiwKXQo=
+ - kind: cargo2
+   cargo-lock: Cargo.lock
+   ref:
+@@ -34,8 +34,8 @@     version: 1.0.102
+     sha: 7f202df86484c868dbad7eaa557ef785d5c66295e41b460ef922eca0723b842c
+   - kind: registry
+     name: autocfg
+-    version: 1.5.0
+-    sha: c08606f8c3cbf4ce6ec8e28fb0014a2c086708fe954eaa885384a6165172e7e8
++    version: 1.5.1
++    sha: f2032f911046de80f0a198e0901378627c33f59ea0ac00e363d481118bd70a53
+   - kind: registry
+     name: bitflags
+     version: 1.3.2
+@@ -218,8 +218,8 @@     version: 1.0.228
+     sha: d540f220d3187173da220f885ab66608367b6574e925011a9353e4badda91d79
+   - kind: registry
+     name: serde_json
+-    version: 1.0.149
+-    sha: 83fc039473c5595ace860d8c4fafa220ff474b3fc6bfdb4293327f1a37e94d86
++    version: 1.0.150
++    sha: e8014e44b4736ed0538adeecded0fce2a272f22dc9578a7eb6b2d9993c74cfb9
+   - kind: registry
+     name: shlex
+     version: 1.3.0
+diff --git a/elements/gnomeos/signed-boot-common.bst b/elements/gnomeos/signed-boot-common.bst
+index 11a32fece9cf1ffa168974876805940b41fd9d32..261017c7fc0a7145722b9a4748131c430cb00942 100644
+--- a/elements/gnomeos/signed-boot-common.bst
++++ b/elements/gnomeos/signed-boot-common.bst
+@@ -37,15 +37,6 @@
+   - mkdir -p %{install-root}/efi/EFI/
+   - cp -rT /efi/EFI "%{install-root}/efi/EFI"
+ 
+-  # systemd-boot config file
+-  - mkdir -p "%{install-root}/efi/loader"
+-  - |
+-    cat <<EOF >%{install-root}/efi/loader/loader.conf
+-    timeout 3
+-    editor yes
+-    console-mode keep
+-    EOF
+-
+   - |
+     install -Dm644 %{indep-libdir}/systemd/boot/efi/systemd-boot%{efi-arch}.efi "%{install-root}/efi/EFI/systemd/systemd-boot%{efi-arch}.efi"
+ 
+diff --git a/elements/incubator/meta-gnome-incubator-apps.bst b/elements/incubator/meta-gnome-incubator-apps.bst
+index e1c3140d2dd1077ce027fe8cb5eae0ca8a1f9be1..d2bbc329abb2f1643accd7549c06129b3e5efb44 100644
+--- a/elements/incubator/meta-gnome-incubator-apps.bst
++++ b/elements/incubator/meta-gnome-incubator-apps.bst
+@@ -6,3 +6,5 @@ #
+ # When updating this list, please also update the [incubating] section in
+ # files/gnome-mimeapps/quirks.toml
+ kind: stack
++depends:
++- incubator/resources.bst
+diff --git a/elements/incubator/resources.bst b/elements/incubator/resources.bst
+new file mode 100644
+index 0000000000000000000000000000000000000000..f391e17b61c0a1a072ca649a6c194eef931ebe16
+--- /dev/null
++++ b/elements/incubator/resources.bst
+@@ -0,0 +1,819 @@
++kind: meson
++
++sources:
++- kind: git_repo
++  url: gnome:Incubator/resources.git
++  track: main
++  ref: v1.10.2-85-g0aecf1c5ba5c809b2067ee70128ede8fe3361494
++- kind: cargo2
++
++  ref:
++  - kind: registry
++    name: aho-corasick
++    version: 1.1.4
++    sha: ddd31a130427c27518df266943a5308ed92d4b226cc639f5a8f1002816174301
++  - kind: registry
++    name: anstream
++    version: 1.0.0
++    sha: 824a212faf96e9acacdbd09febd34438f8f711fb84e09a8916013cd7815ca28d
++  - kind: registry
++    name: anstyle
++    version: 1.0.14
++    sha: 940b3a0ca603d1eade50a4846a2afffd5ef57a9feac2c0e2ec2e14f9ead76000
++  - kind: registry
++    name: anstyle-parse
++    version: 1.0.0
++    sha: 52ce7f38b242319f7cabaa6813055467063ecdc9d355bbb4ce0c68908cd8130e
++  - kind: registry
++    name: anstyle-query
++    version: 1.1.5
++    sha: 40c48f72fd53cd289104fc64099abca73db4166ad86ea0b4341abe65af83dadc
++  - kind: registry
++    name: anstyle-wincon
++    version: 3.0.11
++    sha: 291e6a250ff86cd4a820112fb8898808a366d8f9f58ce16d1f538353ad55747d
++  - kind: registry
++    name: anyhow
++    version: 1.0.102
++    sha: 7f202df86484c868dbad7eaa557ef785d5c66295e41b460ef922eca0723b842c
++  - kind: registry
++    name: async-channel
++    version: 2.5.0
++    sha: 924ed96dd52d1b75e9c1a3e6275715fd320f5f9439fb5a4a11fa51f4221158d2
++  - kind: registry
++    name: autocfg
++    version: 1.5.0
++    sha: c08606f8c3cbf4ce6ec8e28fb0014a2c086708fe954eaa885384a6165172e7e8
++  - kind: registry
++    name: bitflags
++    version: 2.11.1
++    sha: c4512299f36f043ab09a583e57bceb5a5aab7a73db1805848e8fef3c9e8c78b3
++  - kind: registry
++    name: block
++    version: 0.1.6
++    sha: 0d8c1fef690941d3e7788d328517591fecc684c084084702d6ff1641e993699a
++  - kind: registry
++    name: bumpalo
++    version: 3.20.2
++    sha: 5d20789868f4b01b2f2caec9f5c4e0213b41e3e5702a50157d699ae31ced2fcb
++  - kind: registry
++    name: byteorder
++    version: 1.5.0
++    sha: 1fd0f2584146f6f2ef48085050886acf353beff7305ebd1ae69500e27c67f64b
++  - kind: registry
++    name: cairo-rs
++    version: 0.21.5
++    sha: b01fe135c0bd16afe262b6dea349bd5ea30e6de50708cec639aae7c5c14cc7e4
++  - kind: registry
++    name: cairo-sys-rs
++    version: 0.21.5
++    sha: 06c28280c6b12055b5e39e4554271ae4e6630b27c0da9148c4cf6485fc6d245c
++  - kind: registry
++    name: cc
++    version: 1.2.61
++    sha: d16d90359e986641506914ba71350897565610e87ce0ad9e6f28569db3dd5c6d
++  - kind: registry
++    name: cfg-expr
++    version: 0.20.7
++    sha: 3c6b04e07d8080154ed4ac03546d9a2b303cc2fe1901ba0b35b301516e289368
++  - kind: registry
++    name: cfg-if
++    version: 1.0.4
++    sha: 9330f8b2ff13f34540b44e946ef35111825727b38d33286ef986142615121801
++  - kind: registry
++    name: cfg_aliases
++    version: 0.2.1
++    sha: 613afe47fcd5fac7ccf1db93babcb082c5994d996f20b8b159f2ad1658eb5724
++  - kind: registry
++    name: clap
++    version: 4.6.1
++    sha: 1ddb117e43bbf7dacf0a4190fef4d345b9bad68dfc649cb349e7d17d28428e51
++  - kind: registry
++    name: clap_builder
++    version: 4.6.0
++    sha: 714a53001bf66416adb0e2ef5ac857140e7dc3a0c48fb28b2f10762fc4b5069f
++  - kind: registry
++    name: clap_derive
++    version: 4.6.1
++    sha: f2ce8604710f6733aa641a2b3731eaa1e8b3d9973d5e3565da11800813f997a9
++  - kind: registry
++    name: clap_lex
++    version: 1.1.0
++    sha: c8d4a3bb8b1e0c1050499d1815f5ab16d04f0959b233085fb31653fbfc9d98f9
++  - kind: registry
++    name: colorchoice
++    version: 1.0.5
++    sha: 1d07550c9036bf2ae0c684c4297d503f838287c83c53686d05370d0e139ae570
++  - kind: registry
++    name: concurrent-queue
++    version: 2.5.0
++    sha: 4ca0197aee26d1ae37445ee532fefce43251d24cc7c166799f4d46817f1d3973
++  - kind: registry
++    name: const-random
++    version: 0.1.18
++    sha: 87e00182fe74b066627d63b85fd550ac2998d4b0bd86bfed477a0ae4c7c71359
++  - kind: registry
++    name: const-random-macro
++    version: 0.1.16
++    sha: f9d839f2a20b0aee515dc581a6172f2321f96cab76c1a38a4c584a194955390e
++  - kind: registry
++    name: convert_case
++    version: 0.6.0
++    sha: ec182b0ca2f35d8fc196cf3404988fd8b8c739a4d270ff118a398feb0cbec1ca
++  - kind: registry
++    name: crossbeam-utils
++    version: 0.8.21
++    sha: d0a5c400df2834b80a4c3327b3aad3a4c4cd4de0629063962b03235697506a28
++  - kind: registry
++    name: crunchy
++    version: 0.2.4
++    sha: 460fbee9c2c2f33933d720630a6a0bac33ba7053db5344fac858d4b8952d77d5
++  - kind: registry
++    name: darling
++    version: 0.20.11
++    sha: fc7f46116c46ff9ab3eb1597a45688b6715c6e628b5c133e288e709a29bcb4ee
++  - kind: registry
++    name: darling_core
++    version: 0.20.11
++    sha: 0d00b9596d185e565c2207a0b01f8bd1a135483d02d9b7b0a54b11da8d53412e
++  - kind: registry
++    name: darling_macro
++    version: 0.20.11
++    sha: fc34b93ccb385b40dc71c6fceac4b2ad23662c7eeb248cf10d529b7e055b6ead
++  - kind: registry
++    name: diff
++    version: 0.1.13
++    sha: 56254986775e3233ffa9c4d7d3faaf6d36a2c09d30b20687e9f88bc8bafc16c8
++  - kind: registry
++    name: dlv-list
++    version: 0.5.2
++    sha: 442039f5147480ba31067cb00ada1adae6892028e40e45fc5de7b7df6dcc1b5f
++  - kind: registry
++    name: either
++    version: 1.15.0
++    sha: 48c757948c5ede0e46177b7add2e67155f70e33c07fea8284df6576da70b3719
++  - kind: registry
++    name: env_logger
++    version: 0.10.2
++    sha: 4cd405aab171cb85d6735e5c8d9db038c17d3ca007a4d2c25f337935c3d90580
++  - kind: registry
++    name: equivalent
++    version: 1.0.2
++    sha: 877a4ace8713b0bcf2a4e7eec82529c029f1d0619886d18145fea96c3ffe5c0f
++  - kind: registry
++    name: errno
++    version: 0.2.8
++    sha: f639046355ee4f37944e44f60642c6f3a7efa3cf6b78c78a0d989a8ce6c396a1
++  - kind: registry
++    name: errno-dragonfly
++    version: 0.1.2
++    sha: aa68f1b12764fab894d2755d2518754e71b4fd80ecfb822714a1206c2aab39bf
++  - kind: registry
++    name: event-listener
++    version: 5.4.1
++    sha: e13b66accf52311f30a0db42147dadea9850cb48cd070028831ae5f5d4b856ab
++  - kind: registry
++    name: event-listener-strategy
++    version: 0.5.4
++    sha: 8be9f3dfaaffdae2972880079a491a1a8bb7cbed0b8dd7a347f668b4150a3b93
++  - kind: registry
++    name: field-offset
++    version: 0.3.6
++    sha: 38e2275cc4e4fc009b0669731a1e5ab7ebf11f469eaede2bab9309a5b4d6057f
++  - kind: registry
++    name: find-msvc-tools
++    version: 0.1.9
++    sha: 5baebc0774151f905a1a2cc41989300b1e6fbb29aff0ceffa1064fdd3088d582
++  - kind: registry
++    name: fnv
++    version: 1.0.7
++    sha: 3f9eec918d3f24069decb9af1554cad7c880e2da24a9afd88aca000531ab82c1
++  - kind: registry
++    name: futures
++    version: 0.3.32
++    sha: 8b147ee9d1f6d097cef9ce628cd2ee62288d963e16fb287bd9286455b241382d
++  - kind: registry
++    name: futures-channel
++    version: 0.3.32
++    sha: 07bbe89c50d7a535e539b8c17bc0b49bdb77747034daa8087407d655f3f7cc1d
++  - kind: registry
++    name: futures-core
++    version: 0.3.32
++    sha: 7e3450815272ef58cec6d564423f6e755e25379b217b0bc688e295ba24df6b1d
++  - kind: registry
++    name: futures-executor
++    version: 0.3.32
++    sha: baf29c38818342a3b26b5b923639e7b1f4a61fc5e76102d4b1981c6dc7a7579d
++  - kind: registry
++    name: futures-io
++    version: 0.3.32
++    sha: cecba35d7ad927e23624b22ad55235f2239cfa44fd10428eecbeba6d6a717718
++  - kind: registry
++    name: futures-macro
++    version: 0.3.32
++    sha: e835b70203e41293343137df5c0664546da5745f82ec9b84d40be8336958447b
++  - kind: registry
++    name: futures-sink
++    version: 0.3.32
++    sha: c39754e157331b013978ec91992bde1ac089843443c49cbc7f46150b0fad0893
++  - kind: registry
++    name: futures-task
++    version: 0.3.32
++    sha: 037711b3d59c33004d3856fbdc83b99d4ff37a24768fa1be9ce3538a1cde4393
++  - kind: registry
++    name: futures-util
++    version: 0.3.32
++    sha: 389ca41296e6190b48053de0321d02a77f32f8a5d2461dd38762c0593805c6d6
++  - kind: registry
++    name: gdk-pixbuf
++    version: 0.21.5
++    sha: debb0d39e3cdd84626edfd54d6e4a6ba2da9a0ef2e796e691c4e9f8646fda00c
++  - kind: registry
++    name: gdk-pixbuf-sys
++    version: 0.21.5
++    sha: bd95ad50b9a3d2551e25dd4f6892aff0b772fe5372d84514e9d0583af60a0ce7
++  - kind: registry
++    name: gdk4
++    version: 0.10.3
++    sha: 756564212bbe4a4ce05d88ffbd2582581ac6003832d0d32822d0825cca84bfbf
++  - kind: registry
++    name: gdk4-sys
++    version: 0.10.3
++    sha: a6d4e5b3ccf591826a4adcc83f5f57b4e59d1925cb4bf620b0d645f79498b034
++  - kind: registry
++    name: getrandom
++    version: 0.2.17
++    sha: ff2abc00be7fca6ebc474524697ae276ad847ad0a6b3faa4bcb027e9a4614ad0
++  - kind: registry
++    name: gettext-rs
++    version: 0.7.7
++    sha: 5d5857dc1b7f0fee86961de833f434e29494d72af102ce5355738c0664222bdf
++  - kind: registry
++    name: gettext-sys
++    version: 0.26.0
++    sha: 4ea859ab0dd7e70ff823032b3e077d03d39c965d68c6c10775add60e999d8ee9
++  - kind: registry
++    name: gio
++    version: 0.21.5
++    sha: c5ff48bf600c68b476e61dc6b7c762f2f4eb91deef66583ba8bb815c30b5811a
++  - kind: registry
++    name: gio-sys
++    version: 0.21.5
++    sha: 0071fe88dba8e40086c8ff9bbb62622999f49628344b1d1bf490a48a29d80f22
++  - kind: registry
++    name: glib
++    version: 0.21.5
++    sha: 16de123c2e6c90ce3b573b7330de19be649080ec612033d397d72da265f1bd8b
++  - kind: registry
++    name: glib-macros
++    version: 0.21.5
++    sha: cf59b675301228a696fe01c3073974643365080a76cc3ed5bc2cbc466ad87f17
++  - kind: registry
++    name: glib-sys
++    version: 0.21.5
++    sha: 2d95e1a3a19ae464a7286e14af9a90683c64d70c02532d88d87ce95056af3e6c
++  - kind: registry
++    name: glob
++    version: 0.3.3
++    sha: 0cc23270f6e1808e30a928bdc84dea0b9b4136a8bc82338574f23baf47bbd280
++  - kind: registry
++    name: gobject-sys
++    version: 0.21.5
++    sha: 2dca35da0d19a18f4575f3cb99fe1c9e029a2941af5662f326f738a21edaf294
++  - kind: registry
++    name: graphene-rs
++    version: 0.21.5
++    sha: 2730030ac9db663fd8bfe1e7093742c1cafb92db9c315c9417c29032341fe2f9
++  - kind: registry
++    name: graphene-sys
++    version: 0.21.5
++    sha: 915e32091ea9ad241e4b044af62b7351c2d68aeb24f489a0d7f37a0fc484fd93
++  - kind: registry
++    name: gsk4
++    version: 0.10.3
++    sha: e755de9d8c5896c5beaa028b89e1969d067f1b9bf1511384ede971f5983aa153
++  - kind: registry
++    name: gsk4-sys
++    version: 0.10.3
++    sha: 7ce91472391146f482065f1041876d8f869057b195b95399414caa163d72f4f7
++  - kind: registry
++    name: gtk4
++    version: 0.10.3
++    sha: acb21d53cfc6f7bfaf43549731c43b67ca47d87348d81c8cfc4dcdd44828e1a4
++  - kind: registry
++    name: gtk4-macros
++    version: 0.10.3
++    sha: 3ccfb5a14a3d941244815d5f8101fa12d4577b59cc47245778d8d907b0003e42
++  - kind: registry
++    name: gtk4-sys
++    version: 0.10.3
++    sha: 842577fe5a1ee15d166cd3afe804ce0cab6173bc789ca32e21308834f20088dd
++  - kind: registry
++    name: hashbrown
++    version: 0.14.5
++    sha: e5274423e17b7c9fc20b6e7e208532f9b19825d82dfd615708b70edd83df41f1
++  - kind: registry
++    name: hashbrown
++    version: 0.17.0
++    sha: 4f467dd6dccf739c208452f8014c75c18bb8301b050ad1cfb27153803edb0f51
++  - kind: registry
++    name: heck
++    version: 0.5.0
++    sha: 2304e00983f87ffb38b55b444b5e3b60a884b5d30c0fca7d82fe33449bbe55ea
++  - kind: registry
++    name: hermit-abi
++    version: 0.5.2
++    sha: fc0fef456e4baa96da950455cd02c081ca953b141298e41db3fc7e36b1da849c
++  - kind: registry
++    name: humantime
++    version: 2.3.0
++    sha: 135b12329e5e3ce057a9f972339ea52bc954fe1e9358ef27f95e89716fbc5424
++  - kind: registry
++    name: ident_case
++    version: 1.0.1
++    sha: b9e0384b61958566e926dc50660321d12159025e767c18e043daf26b70104c39
++  - kind: registry
++    name: indexmap
++    version: 2.14.0
++    sha: d466e9454f08e4a911e14806c24e16fba1b4c121d1ea474396f396069cf949d9
++  - kind: registry
++    name: is-terminal
++    version: 0.4.17
++    sha: 3640c1c38b8e4e43584d8df18be5fc6b0aa314ce6ebf51b53313d4306cca8e46
++  - kind: registry
++    name: is_terminal_polyfill
++    version: 1.70.2
++    sha: a6cb138bb79a146c1bd460005623e142ef0181e3d0219cb493e02f7d08a35695
++  - kind: registry
++    name: itoa
++    version: 1.0.18
++    sha: 8f42a60cbdf9a97f5d2305f08a87dc4e09308d1276d28c869c684d7777685682
++  - kind: registry
++    name: js-sys
++    version: 0.3.95
++    sha: 2964e92d1d9dc3364cae4d718d93f227e3abb088e747d92e0395bfdedf1c12ca
++  - kind: registry
++    name: kernel32-sys
++    version: 0.2.2
++    sha: 7507624b29483431c0ba2d82aece8ca6cdba9382bff4ddd0f7490560c056098d
++  - kind: registry
++    name: kinded
++    version: 0.3.0
++    sha: ce4bdbb2f423660b19f0e9f7115182214732d8dd5f840cd0a3aee3e22562f34c
++  - kind: registry
++    name: kinded_macros
++    version: 0.3.0
++    sha: a13b4ddc5dcb32f45dac3d6f606da2a52fdb9964a18427e63cd5ef6c0d13288d
++  - kind: registry
++    name: lazy-regex
++    version: 3.6.0
++    sha: 6bae91019476d3ec7147de9aa291cadb6d870abf2f3015d2da73a90325ac1496
++  - kind: registry
++    name: lazy-regex-proc_macros
++    version: 3.6.0
++    sha: 4de9c1e1439d8b7b3061b2d209809f447ca33241733d9a3c01eabf2dc8d94358
++  - kind: registry
++    name: lazy_static
++    version: 1.5.0
++    sha: bbd2bcb4c963f2ddae06a2efc7e9f3591312473c50c6685e1f298068316e66fe
++  - kind: registry
++    name: libadwaita
++    version: 0.8.1
++    sha: fb09e12bf8f73342b3315c839d0a7668cc0ccebd78490c49fec48bab15d5484b
++  - kind: registry
++    name: libadwaita-sys
++    version: 0.8.1
++    sha: 6d7f94227ba87eb596fecada2491f04e357d507324142f77bf76d9e6be4a3e31
++  - kind: registry
++    name: libc
++    version: 0.2.186
++    sha: 68ab91017fe16c622486840e4c83c9a37afeff978bd239b5293d61ece587de66
++  - kind: registry
++    name: libloading
++    version: 0.8.9
++    sha: d7c4b02199fee7c5d21a5ae7d8cfa79a6ef5bb2fc834d6e9058e89c825efdc55
++  - kind: registry
++    name: locale_config
++    version: 0.3.0
++    sha: 08d2c35b16f4483f6c26f0e4e9550717a2f6575bcd6f12a53ff0c490a94a6934
++  - kind: registry
++    name: log
++    version: 0.4.29
++    sha: 5e5032e24019045c762d3c0f28f5b6b8bbf38563a65908389bf7978758920897
++  - kind: registry
++    name: malloc_buf
++    version: 0.0.6
++    sha: 62bb907fe88d54d8d9ce32a3cceab4218ed2f6b7d35617cafe9adf84e43919cb
++  - kind: registry
++    name: memchr
++    version: 2.8.0
++    sha: f8ca58f447f06ed17d5fc4043ce1b10dd205e060fb3ce5b979b8ed8e59ff3f79
++  - kind: registry
++    name: memoffset
++    version: 0.9.1
++    sha: 488016bfae457b036d996092f6cb448677611ce4449e970ceaf42695203f218a
++  - kind: registry
++    name: neli
++    version: 0.6.5
++    sha: 93062a0dce6da2517ea35f301dfc88184ce18d3601ec786a727a87bf535deca9
++  - kind: registry
++    name: neli-proc-macros
++    version: 0.1.4
++    sha: 0c8034b7fbb6f9455b2a96c19e6edf8dc9fc34c70449938d8ee3b4df363f61fe
++  - kind: registry
++    name: neli-wifi
++    version: 0.6.1
++    sha: 7a72cd90a5d1ab54ed62cfe032972cb78303cfffd7d82c87c5da889a353fc451
++  - kind: registry
++    name: nix
++    version: 0.31.2
++    sha: 5d6d0705320c1e6ba1d912b5e37cf18071b6c2e9b7fa8215a1e8a7651966f5d3
++  - kind: registry
++    name: num-traits
++    version: 0.2.19
++    sha: 071dfc062690e90b734c0b2273ce72ad0ffa95f0c74596bc250dcfd960262841
++  - kind: registry
++    name: num_cpus
++    version: 1.17.0
++    sha: 91df4bbde75afed763b708b7eee1e8e7651e02d97f6d5dd763e89367e957b23b
++  - kind: registry
++    name: nutype
++    version: 0.6.2
++    sha: 70587a780088c67dad31bf722b875c5616096b4d8c0ded8b7de03294ffb9bbb5
++  - kind: registry
++    name: nutype_macros
++    version: 0.6.2
++    sha: 148934b975faeddd8f0679d7cf11280b50c4c5495d6fe72bdaf07c932874b404
++  - kind: registry
++    name: nvml-wrapper
++    version: 0.12.1
++    sha: f049ae562349fefb8e837eb15443da1e7c6dcbd8a11f52a228f92220c2e5c85e
++  - kind: registry
++    name: nvml-wrapper-sys
++    version: 0.9.1
++    sha: 6b4d594420fcda43b1c2c4bd44d48974aa3c7a9ab2cbf10dc18e35265767bf0b
++  - kind: registry
++    name: objc
++    version: 0.2.7
++    sha: 915b1b472bc21c53464d6c8461c9d3af805ba1ef837e1cac254428f4a77177b1
++  - kind: registry
++    name: objc-foundation
++    version: 0.1.1
++    sha: 1add1b659e36c9607c7aab864a76c7a4c2760cd0cd2e120f3fb8b952c7e22bf9
++  - kind: registry
++    name: objc_id
++    version: 0.1.1
++    sha: c92d4ddb4bd7b50d730c215ff871754d0da6b2178849f8a2a2ab69712d0c073b
++  - kind: registry
++    name: once_cell
++    version: 1.21.4
++    sha: 9f7c3e4beb33f85d45ae3e3a1792185706c8e16d043238c593331cc7cd313b50
++  - kind: registry
++    name: once_cell_polyfill
++    version: 1.70.2
++    sha: 384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe
++  - kind: registry
++    name: ordered-multimap
++    version: 0.7.3
++    sha: 49203cdcae0030493bad186b28da2fa25645fa276a51b6fec8010d281e02ef79
++  - kind: registry
++    name: pango
++    version: 0.21.5
++    sha: 52d1d85e2078077a065bb7fc072783d5bcd4e51b379f22d67107d0a16937eb69
++  - kind: registry
++    name: pango-sys
++    version: 0.21.5
++    sha: b4f06627d36ed5ff303d2df65211fc2e52ba5b17bf18dd80ff3d9628d6e06cfd
++  - kind: registry
++    name: parking
++    version: 2.2.1
++    sha: f38d5652c16fde515bb1ecef450ab0f6a219d619a7274976324d5e377f7dceba
++  - kind: registry
++    name: pastey
++    version: 0.2.2
++    sha: c5a797f0e07bdf071d15742978fc3128ec6c22891c31a3a931513263904c982a
++  - kind: registry
++    name: path-dedot
++    version: 3.1.1
++    sha: 07ba0ad7e047712414213ff67533e6dd477af0a4e1d14fb52343e53d30ea9397
++  - kind: registry
++    name: pin-project-lite
++    version: 0.2.17
++    sha: a89322df9ebe1c1578d689c92318e070967d1042b512afbe49518723f4e6d5cd
++  - kind: registry
++    name: pkg-config
++    version: 0.3.33
++    sha: 19f132c84eca552bf34cab8ec81f1c1dcc229b811638f9d283dceabe58c5569e
++  - kind: registry
++    name: plotters
++    version: 0.3.7
++    sha: 5aeb6f403d7a4911efb1e33402027fc44f29b5bf6def3effcc22d7bb75f2b747
++  - kind: registry
++    name: plotters-backend
++    version: 0.3.7
++    sha: df42e13c12958a16b3f7f4386b9ab1f3e7933914ecea48da7139435263a4172a
++  - kind: registry
++    name: plotters-cairo
++    version: 0.8.0
++    sha: 413f5b51670e5e60d1f981e142bc7156bf73f5b015313fedc2c8e94f09be2aa3
++  - kind: registry
++    name: pretty_assertions
++    version: 1.4.1
++    sha: 3ae130e2f271fbc2ac3a40fb1d07180839cdbbe443c7a27e1e3c13c5cac0116d
++  - kind: registry
++    name: pretty_env_logger
++    version: 0.5.0
++    sha: 865724d4dbe39d9f3dd3b52b88d859d66bcb2d6a0acfd5ea68a65fb66d4bdc1c
++  - kind: registry
++    name: proc-macro-crate
++    version: 3.5.0
++    sha: e67ba7e9b2b56446f1d419b1d807906278ffa1a658a8a5d8a39dcb1f5a78614f
++  - kind: registry
++    name: proc-macro2
++    version: 1.0.106
++    sha: 8fd00f0bb2e90d81d1044c2b32617f68fcb9fa3bb7640c23e9c748e53fb30934
++  - kind: registry
++    name: quote
++    version: 1.0.45
++    sha: 41f2619966050689382d2b44f664f4bc593e129785a36d6ee376ddf37259b924
++  - kind: registry
++    name: regex
++    version: 1.12.3
++    sha: e10754a14b9137dd7b1e3e5b0493cc9171fdd105e0ab477f51b72e7f3ac0e276
++  - kind: registry
++    name: regex-automata
++    version: 0.4.14
++    sha: 6e1dd4122fc1595e8162618945476892eefca7b88c52820e74af6262213cae8f
++  - kind: registry
++    name: regex-syntax
++    version: 0.8.10
++    sha: dc897dd8d9e8bd1ed8cdad82b5966c3e0ecae09fb1907d58efaa013543185d0a
++  - kind: registry
++    name: rmp
++    version: 0.8.15
++    sha: 4ba8be72d372b2c9b35542551678538b562e7cf86c3315773cae48dfbfe7790c
++  - kind: registry
++    name: rmp-serde
++    version: 1.3.1
++    sha: 72f81bee8c8ef9b577d1681a70ebbc962c232461e397b22c208c43c04b67a155
++  - kind: registry
++    name: ron
++    version: 0.12.1
++    sha: 4147b952f3f819eca0e99527022f7d6a8d05f111aeb0a62960c74eb283bec8fc
++  - kind: registry
++    name: rust-ini
++    version: 0.21.3
++    sha: 796e8d2b6696392a43bea58116b667fb4c29727dc5abd27d6acf338bb4f688c7
++  - kind: registry
++    name: rustc_version
++    version: 0.4.1
++    sha: cfcb3a22ef46e85b45de6ee7e79d063319ebb6594faafcf1c225ea92ab6e9b92
++  - kind: registry
++    name: rustversion
++    version: 1.0.22
++    sha: b39cdef0fa800fc44525c84ccb54a029961a8215f9619753635a9c0d2538d46d
++  - kind: registry
++    name: semver
++    version: 1.0.28
++    sha: 8a7852d02fc848982e0c167ef163aaff9cd91dc640ba85e263cb1ce46fae51cd
++  - kind: registry
++    name: serde
++    version: 1.0.228
++    sha: 9a8e94ea7f378bd32cbbd37198a4a91436180c5bb472411e48b5ec2e2124ae9e
++  - kind: registry
++    name: serde_core
++    version: 1.0.228
++    sha: 41d385c7d4ca58e59fc732af25c3983b67ac852c1a25000afe1175de458b67ad
++  - kind: registry
++    name: serde_derive
++    version: 1.0.228
++    sha: d540f220d3187173da220f885ab66608367b6574e925011a9353e4badda91d79
++  - kind: registry
++    name: serde_json
++    version: 1.0.149
++    sha: 83fc039473c5595ace860d8c4fafa220ff474b3fc6bfdb4293327f1a37e94d86
++  - kind: registry
++    name: serde_spanned
++    version: 1.1.1
++    sha: 6662b5879511e06e8999a8a235d848113e942c9124f211511b16466ee2995f26
++  - kind: registry
++    name: shlex
++    version: 1.3.0
++    sha: 0fda2ff0d084019ba4d7c6f371c95d8fd75ce3524c3cb8fb653a3023f6323e64
++  - kind: registry
++    name: slab
++    version: 0.4.12
++    sha: 0c790de23124f9ab44544d7ac05d60440adc586479ce501c1d6d7da3cd8c9cf5
++  - kind: registry
++    name: smallvec
++    version: 1.15.1
++    sha: 67b1b7a3b5fe4f1376887184045fcf45c69e92af734b7aaddc05fb777b6fbd03
++  - kind: registry
++    name: soup3
++    version: 0.8.0
++    sha: d44d8fc55afd18491c0cce8a5c66e48f6d4b2db8a68c90a0e3c1b50665eaac74
++  - kind: registry
++    name: soup3-sys
++    version: 0.8.0
++    sha: 5e018383cf56cc1e2f5f9a5b7b6c46531767aa58be8788dc5b3a338380a920f7
++  - kind: registry
++    name: static_assertions
++    version: 1.1.0
++    sha: a2eb9349b6444b326872e140eb1cf5e7c522154d69e7a0ffb0fb81c06b37543f
++  - kind: registry
++    name: strsim
++    version: 0.11.1
++    sha: 7da8b5736845d9f2fcb837ea5d9e2628564b3b043a70948a3f0b778838c5fb4f
++  - kind: registry
++    name: strum
++    version: 0.28.0
++    sha: 9628de9b8791db39ceda2b119bbe13134770b56c138ec1d3af810d045c04f9bd
++  - kind: registry
++    name: strum_macros
++    version: 0.28.0
++    sha: ab85eea0270ee17587ed4156089e10b9e6880ee688791d45a905f5b1ca36f664
++  - kind: registry
++    name: syn
++    version: 1.0.109
++    sha: 72b64191b275b66ffe2469e8af2c1cfe3bafa67b529ead792a6d0160888b4237
++  - kind: registry
++    name: syn
++    version: 2.0.117
++    sha: e665b8803e7b1d2a727f4023456bbbbe74da67099c585258af0ad9c5013b9b99
++  - kind: registry
++    name: sysconf
++    version: 0.3.4
++    sha: 59e93f5d45535f49b6a05ef7ac2f0f795d28de494cf53a512751602c9849bea3
++  - kind: registry
++    name: system-deps
++    version: 7.0.8
++    sha: 396a35feb67335377e0251fcbc1092fc85c484bd4e3a7a54319399da127796e7
++  - kind: registry
++    name: target-lexicon
++    version: 0.13.3
++    sha: df7f62577c25e07834649fc3b39fafdc597c0a3527dc1c60129201ccfcbaa50c
++  - kind: registry
++    name: temp-dir
++    version: 0.1.16
++    sha: 83176759e9416cf81ee66cb6508dbfe9c96f20b8b56265a39917551c23c70964
++  - kind: registry
++    name: termcolor
++    version: 1.4.1
++    sha: 06794f8f6c5c898b3275aebefa6b8a1cb24cd2c6c79397ab15774837a0bc5755
++  - kind: registry
++    name: thiserror
++    version: 1.0.69
++    sha: b6aaf5339b578ea85b50e080feb250a3e8ae8cfcdff9a461c9ec2904bc923f52
++  - kind: registry
++    name: thiserror
++    version: 2.0.18
++    sha: 4288b5bcbc7920c07a1149a35cf9590a2aa808e0bc1eafaade0b80947865fbc4
++  - kind: registry
++    name: thiserror-impl
++    version: 1.0.69
++    sha: 4fee6c4efc90059e10f81e6d42c60a18f76588c3d74cb83a0b242a2b6c7504c1
++  - kind: registry
++    name: thiserror-impl
++    version: 2.0.18
++    sha: ebc4ee7f67670e9b64d05fa4253e753e016c6c95ff35b89b7941d6b856dec1d5
++  - kind: registry
++    name: tiny-keccak
++    version: 2.0.2
++    sha: 2c9d3793400a45f954c52e73d068316d76b6f4e36977e3fcebb13a2721e80237
++  - kind: registry
++    name: toml
++    version: 1.1.2+spec-1.1.0
++    sha: 81f3d15e84cbcd896376e6730314d59fb5a87f31e4b038454184435cd57defee
++  - kind: registry
++    name: toml_datetime
++    version: 1.1.1+spec-1.1.0
++    sha: 3165f65f62e28e0115a00b2ebdd37eb6f3b641855f9d636d3cd4103767159ad7
++  - kind: registry
++    name: toml_edit
++    version: 0.25.11+spec-1.1.0
++    sha: 0b59c4d22ed448339746c59b905d24568fcbb3ab65a500494f7b8c3e97739f2b
++  - kind: registry
++    name: toml_parser
++    version: 1.1.2+spec-1.1.0
++    sha: a2abe9b86193656635d2411dc43050282ca48aa31c2451210f4202550afb7526
++  - kind: registry
++    name: toml_writer
++    version: 1.1.1+spec-1.1.0
++    sha: 756daf9b1013ebe47a8776667b466417e2d4c5679d441c26230efd9ef78692db
++  - kind: registry
++    name: typeid
++    version: 1.0.3
++    sha: bc7d623258602320d5c55d1bc22793b57daff0ec7efc270ea7d55ce1d5f5471c
++  - kind: registry
++    name: unescape
++    version: 0.1.0
++    sha: ccb97dac3243214f8d8507998906ca3e2e0b900bf9bf4870477f125b82e68f6e
++  - kind: registry
++    name: unicode-ident
++    version: 1.0.24
++    sha: e6e4313cd5fcd3dad5cafa179702e2b244f760991f45397d14d4ebf38247da75
++  - kind: registry
++    name: unicode-segmentation
++    version: 1.13.2
++    sha: 9629274872b2bfaf8d66f5f15725007f635594914870f65218920345aa11aa8c
++  - kind: registry
++    name: urlencoding
++    version: 2.1.3
++    sha: daf8dba3b7eb870caf1ddeed7bc9d2a049f3cfdfae7cb521b087cc33ae4c49da
++  - kind: registry
++    name: utf8parse
++    version: 0.2.2
++    sha: 06abde3611657adf66d383f00b093d7faecc7fa57071cce2578660c9f1010821
++  - kind: registry
++    name: uzers
++    version: 0.12.2
++    sha: 0b8275fb1afee25b4111d2dc8b5c505dbbc4afd0b990cb96deb2d88bff8be18d
++  - kind: registry
++    name: version-compare
++    version: 0.2.1
++    sha: 03c2856837ef78f57382f06b2b8563a2f512f7185d732608fd9176cb3b8edf0e
++  - kind: registry
++    name: wasi
++    version: 0.11.1+wasi-snapshot-preview1
++    sha: ccf3ec651a847eb01de73ccad15eb7d99f80485de043efb2f370cd654f4ea44b
++  - kind: registry
++    name: wasm-bindgen
++    version: 0.2.118
++    sha: 0bf938a0bacb0469e83c1e148908bd7d5a6010354cf4fb73279b7447422e3a89
++  - kind: registry
++    name: wasm-bindgen-macro
++    version: 0.2.118
++    sha: eeff24f84126c0ec2db7a449f0c2ec963c6a49efe0698c4242929da037ca28ed
++  - kind: registry
++    name: wasm-bindgen-macro-support
++    version: 0.2.118
++    sha: 9d08065faf983b2b80a79fd87d8254c409281cf7de75fc4b773019824196c904
++  - kind: registry
++    name: wasm-bindgen-shared
++    version: 0.2.118
++    sha: 5fd04d9e306f1907bd13c6361b5c6bfc7b3b3c095ed3f8a9246390f8dbdee129
++  - kind: registry
++    name: web-sys
++    version: 0.3.95
++    sha: 4f2dfbb17949fa2088e5d39408c48368947b86f7834484e87b73de55bc14d97d
++  - kind: registry
++    name: winapi
++    version: 0.2.8
++    sha: 167dc9d6949a9b857f3451275e911c3f44255842c1f7a76f33c55103a909087a
++  - kind: registry
++    name: winapi
++    version: 0.3.9
++    sha: 5c839a674fcd7a98952e593242ea400abe93992746761e38641405d28b00f419
++  - kind: registry
++    name: winapi-build
++    version: 0.1.1
++    sha: 2d315eee3b34aca4797b2da6b13ed88266e6d612562a0c46390af8299fc699bc
++  - kind: registry
++    name: winapi-i686-pc-windows-gnu
++    version: 0.4.0
++    sha: ac3b87c63620426dd9b991e5ce0329eff545bccbbb34f3be09ff6fb6ab51b7b6
++  - kind: registry
++    name: winapi-util
++    version: 0.1.11
++    sha: c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22
++  - kind: registry
++    name: winapi-x86_64-pc-windows-gnu
++    version: 0.4.0
++    sha: 712e227841d057c1ee1cd2fb22fa7e5a5461ae8e48fa2ca79ec42cfc1931183f
++  - kind: registry
++    name: windows-link
++    version: 0.2.1
++    sha: f0805222e57f7521d6a62e36fa9163bc891acd422f971defe97d64e70d0a4fe5
++  - kind: registry
++    name: windows-sys
++    version: 0.61.2
++    sha: ae137229bcbd6cdf0f7b80a31df61766145077ddf49416a728b02cb3921ff3fc
++  - kind: registry
++    name: winnow
++    version: 1.0.2
++    sha: 2ee1708bef14716a11bae175f579062d4554d95be2c6829f518df847b7b3fdd0
++  - kind: registry
++    name: wrapcenum-derive
++    version: 0.4.1
++    sha: a76ff259533532054cfbaefb115c613203c73707017459206380f03b3b3f266e
++  - kind: registry
++    name: yansi
++    version: 1.0.1
++    sha: cfe53a6657fd280eaa890a3bc59152892ffa3e30101319d168b781ed6529b049
++  - kind: registry
++    name: zmij
++    version: 1.0.21
++    sha: b8848ee67ecc8aedbaf3e4122217aff892639231befc6a1b58d29fff4c2cabaa
++build-depends:
++- freedesktop-sdk.bst:components/desktop-file-utils.bst
++- freedesktop-sdk.bst:components/itstool.bst
++- freedesktop-sdk.bst:components/rust.bst
++- freedesktop-sdk.bst:public-stacks/buildsystem-meson.bst
++
++depends:
++- sdk/adwaita-icon-theme.bst
++- sdk/glib.bst
++- sdk/gtk.bst
++- sdk/libadwaita.bst
++- freedesktop-sdk.bst:public-stacks/runtime-minimal.bst
++
+diff --git a/elements/plugins/buildstream-plugins-community.bst b/elements/plugins/buildstream-plugins-community.bst
+index fe6bc93f185660f99423783abf750784fbfdca52..53f0dc1ea5577d0e5d55b0a6bc429c8993c2b69d 100644
+--- a/elements/plugins/buildstream-plugins-community.bst
++++ b/elements/plugins/buildstream-plugins-community.bst
+@@ -2,5 +2,5 @@ kind: junction
+ 
+ sources:
+ - kind: tar
+-  url: pypi:08/b4/4b5311dd4ea599bdc69d911263f5d3f8b4c14789d69265d7ea2be7e4e120/buildstream_plugins_community-2.3.0.tar.gz
+-  ref: cdd3b73ff998e4145d2bb1a1215b961c65b073a4956609417ab747ef8f462c44
++  url: pypi:e1/ea/7da8d02d3aff56805c50312cff61d4d27add62e64b7d3236d105e334d383/buildstream_plugins_community-2.3.1.tar.gz
++  ref: 85c2bae9d3a1eb3121c9674f68ef6e87211fddb9c930f3e5057b9a1e66eb41d9
+diff --git a/elements/plugins/buildstream-plugins.bst b/elements/plugins/buildstream-plugins.bst
+index 5c91984e3849fe4bd112d52d3eef8da1e73c9df0..43e4d8815acedf36d2d0931ca30d1f85b0a942d1 100644
+--- a/elements/plugins/buildstream-plugins.bst
++++ b/elements/plugins/buildstream-plugins.bst
+@@ -2,5 +2,5 @@ kind: junction
+ 
+ sources:
+ - kind: tar
+-  url: pypi:d4/25/b7912ba305e6bd5e4cade588c5ae80e56b7cb70fb7fb9b318a1168223349/buildstream-plugins-2.2.0.tar.gz
+-  ref: 9ee14fda3712d086f7ab6c76584fa1e01bc08960ab047a3e8f33247e8c1d68f6
++  url: pypi:a9/93/339aec1602d559d922f3dbdceb745562a33f6abb9a3037881ddabe905418/buildstream_plugins-2.7.0.tar.gz
++  ref: 489e7915f93d3e6b233463552b6b33e47919a7e1be2afdf9efebece7d336c201
+diff --git a/elements/sdk/at-spi2-core.bst b/elements/sdk/at-spi2-core.bst
+index 4c773e933c2777118ee791d9ad1e930aba5d3a94..1c3aa65ee96b01459258ea7254967177b95f065d 100644
+--- a/elements/sdk/at-spi2-core.bst
++++ b/elements/sdk/at-spi2-core.bst
+@@ -3,7 +3,7 @@ sources:
+ - kind: git_repo
+   url: gnome:at-spi2-core.git
+   track: main
+-  ref: 2.60.0-21-gc4e7c714b75105be6146c7c1a69e2a0c6a1e3c24
++  ref: 2.60.0-26-gdad80c9b4d1bc3adae8eda17bdfbba8545bcc9f7
+ build-depends:
+ - sdk/gi-docgen.bst
+ - sdk/gobject-introspection.bst
+diff --git a/elements/sdk/blueprint-compiler.bst b/elements/sdk/blueprint-compiler.bst
+index da9a8f5a139ade69af4475c9bf7bca78cf2af22c..dde93fe82399f0a16d2db835c575adcbc067a3b8 100644
+--- a/elements/sdk/blueprint-compiler.bst
++++ b/elements/sdk/blueprint-compiler.bst
+@@ -4,7 +4,7 @@ sources:
+ - kind: git_repo
+   url: gnome:blueprint-compiler.git
+   track: main
+-  ref: v0.20.0-18-g82c3b2c1e0b68f10803b4a9cbce977a273c39344
++  ref: v0.20.0-19-g13003896052eb68e56773fd1c33df9ce5adc7385
+ 
+ build-depends:
+ - freedesktop-sdk.bst:public-stacks/buildsystem-meson.bst
+diff --git a/elements/sdk/gcr.bst b/elements/sdk/gcr.bst
+index ececa335a3600c1d5968e46a46b38f7ffc56a0ec..dafd2e647724d398ab7d36193bee908d15c9b3fe 100644
+--- a/elements/sdk/gcr.bst
++++ b/elements/sdk/gcr.bst
+@@ -4,7 +4,7 @@ sources:
+ - kind: git_repo
+   url: gnome:gcr.git
+   track: main
+-  ref: 4.4.0.1-24-g13f3392020fd07b3ce4030be72725680ff96da63
++  ref: 4.4.0.1-25-g1a8cf2c4620a80fa652ad54740562ce53d6eafc4
+ 
+ build-depends:
+ - sdk/gi-docgen.bst
+diff --git a/elements/sdk/gjs.bst b/elements/sdk/gjs.bst
+index 719ea41525f77c5e3702f930678bb94503054bc9..0c08d79a219ece2ccdc922fc4a7dbdc27e14f18e 100644
+--- a/elements/sdk/gjs.bst
++++ b/elements/sdk/gjs.bst
+@@ -4,7 +4,7 @@ sources:
+ - kind: git_repo
+   url: gnome:gjs.git
+   track: master
+-  ref: 1.88.0-49-gd29e1801f767e62b4ce039549b521ee4c2db315c
++  ref: 1.88.0-51-g5a070cf07fba62728a1552a19c4a16ab6d698ecb
+ - kind: git_module
+   url: gnome:gobject-introspection-tests.git
+   path: subprojects/gobject-introspection-tests
+diff --git a/elements/sdk/glib-networking.bst b/elements/sdk/glib-networking.bst
+index 632fe47d507fccc0f6dbce9d4db482b5481c1035..6f8190f412edc4976e04826bf3b241e8ac6bc0e2 100644
+--- a/elements/sdk/glib-networking.bst
++++ b/elements/sdk/glib-networking.bst
+@@ -3,7 +3,7 @@ sources:
+ - kind: git_repo
+   url: gnome:glib-networking.git
+   track: master
+-  ref: 2.80.0.97-43-g27009cfa6eac6260d3a708dc233c66808a63f837
++  ref: 2.80.0.97-45-gbe1c87027ca86c356fc2a0c2f86dcf116412d7d1
+ build-depends:
+ - freedesktop-sdk.bst:public-stacks/buildsystem-meson.bst
+ depends:
+diff --git a/elements/sdk/glib.inc b/elements/sdk/glib.inc
+index 8ae96674f5830bac09605ae33d6afbf874c03896..d56cb7265e8e32ace6cd9ca9c00a15c6bd4fc811 100644
+--- a/elements/sdk/glib.inc
++++ b/elements/sdk/glib.inc
+@@ -2,7 +2,7 @@ sources:
+ - kind: git_repo
+   url: gnome:glib.git
+   track: main
+-  ref: 2.88.0-148-ga071d5a209f0fa08a75cffe712df930bb35231f5
++  ref: 2.89.0-4-g94d297fe6bd1348f0d761b8adf4634663620091b
+ - kind: git_module
+   url: gnome:gvdb.git
+   path: subprojects/gvdb
+diff --git a/elements/sdk/gst-plugin-gtk4.bst b/elements/sdk/gst-plugin-gtk4.bst
+index 2c60a1415d58c5236e607eb938bc985c1e3c975d..84fc96dd523892212f8ea79966c624420ec36f3a 100644
+--- a/elements/sdk/gst-plugin-gtk4.bst
++++ b/elements/sdk/gst-plugin-gtk4.bst
+@@ -20,8 +20,8 @@ - freedesktop-sdk.bst:public-stacks/runtime-minimal.bst
+ 
+ sources:
+ - kind: tar
+-  url: crates:crates/gst-plugin-gtk4/gst-plugin-gtk4-0.15.0.crate
+-  ref: e4618f271576021eca046c06efe799c92fa3806fc5c3c535f2e6622d01c9f34f
++  url: crates:crates/gst-plugin-gtk4/gst-plugin-gtk4-0.15.2.crate
++  ref: 9d22a27972c25e706b428e78356458446314c70eb31aef07d4a32b843a6dea94
+ - kind: cargo2
+   ref:
+   - kind: registry
+@@ -34,16 +34,16 @@     version: 2.5.0
+     sha: 924ed96dd52d1b75e9c1a3e6275715fd320f5f9439fb5a4a11fa51f4221158d2
+   - kind: registry
+     name: atomic_refcell
+-    version: 0.1.13
+-    sha: 41e67cd8309bbd06cd603a9e693a784ac2e5d1e955f11286e355089fcab3047c
++    version: 0.1.14
++    sha: 21e4227379beff4205943696e6c3e0cd809bacdf3f0edd6e3dd153e2269571a4
+   - kind: registry
+     name: autocfg
+     version: 1.5.0
+     sha: c08606f8c3cbf4ce6ec8e28fb0014a2c086708fe954eaa885384a6165172e7e8
+   - kind: registry
+     name: bitflags
+-    version: 2.11.0
+-    sha: 843867be96c8daad0d758b57df9392b6d8d271134fce549de6ce169ff98a92af
++    version: 2.11.1
++    sha: c4512299f36f043ab09a583e57bceb5a5aab7a73db1805848e8fef3c9e8c78b3
+   - kind: registry
+     name: bumpalo
+     version: 3.20.2
+@@ -58,8 +58,8 @@     version: 0.22.0
+     sha: f8b4985713047f5faee02b8db6a6ef32bbb50269ff53c1aee716d1d195b76d54
+   - kind: registry
+     name: cc
+-    version: 1.2.56
+-    sha: aebf35691d1bfb0ac386a69bac2fde4dd276fb618cf8bf4f5318fe285e821bb2
++    version: 1.2.62
++    sha: a1dce859f0832a7d088c4f1119888ab94ef4b5d6795d1ce05afb7fe159d79f98
+   - kind: registry
+     name: cfg-expr
+     version: 0.17.2
+@@ -70,8 +70,8 @@     version: 1.0.4
+     sha: 9330f8b2ff13f34540b44e946ef35111825727b38d33286ef986142615121801
+   - kind: registry
+     name: chrono
+-    version: 0.4.43
+-    sha: fac4744fb15ae8337dc853fee7fb3f4e48c0fbaa23d0afe49c447b4fab126118
++    version: 0.4.44
++    sha: c673075a2e0e5f4a1dde27ce9dee1ea4558c7ffe648f576438a20ca1d2acc4b0
+   - kind: registry
+     name: concurrent-queue
+     version: 2.5.0
+@@ -146,12 +146,12 @@     version: 0.22.0
+     sha: 48f31b37b1fc4b48b54f6b91b7ef04c18e00b4585d98359dd7b998774bbd91fb
+   - kind: registry
+     name: gdk4
+-    version: 0.11.0
+-    sha: 2e9a95621b043a35e70ea9f6da89e1a471658ee5771258874f000a11f6a9cb89
++    version: 0.11.2
++    sha: fd42fdbbf48612c6e8f47c65fb92d2e8f39c25aecd6af047e83897c1a22d2a4e
+   - kind: registry
+     name: gdk4-sys
+-    version: 0.11.0
+-    sha: 4d322515677e4a12e10efe7e758743c3e5faa56940237f19ba6890ba8edbbb76
++    version: 0.11.2
++    sha: 9d974ac4f15e67472c3a9728daf612590b4a5762a4b33f0edd298df0b80d043c
+   - kind: registry
+     name: gdk4-wayland
+     version: 0.11.0
+@@ -178,28 +178,28 @@     version: 0.11.0
+     sha: 24d41f2e28f62378b081288914325d73bddbb6ccbbadb41aa6392afc71d27002
+   - kind: registry
+     name: gio
+-    version: 0.22.1
+-    sha: bb018ae3f3967134a833fac8a2568c3e698f4b95c658865360772d73803cc5de
++    version: 0.22.6
++    sha: e3848bcba3a35cc0a71df8ba8ecfd799d6bfb862342a53a4a915fb62213aa4e6
+   - kind: registry
+     name: gio-sys
+     version: 0.22.0
+     sha: 64729ba2772c080448f9f966dba8f4456beeb100d8c28a865ef8a0f2ef4987e1
+   - kind: registry
+     name: glib
+-    version: 0.22.0
+-    sha: 9a3b79a62980e85d61aae88988e5bcca6a35f05b0008e1333aa43bd61ef9bf35
++    version: 0.22.7
++    sha: c207e04e51605dcf7b2924c41591b3a10e1438eaac5bcf448fb91f325381104a
+   - kind: registry
+     name: glib-macros
+-    version: 0.22.0
+-    sha: 8b48a968528354e04603ae96205f00cf7e77347ffde0fc943a2159948d7d6d80
++    version: 0.22.6
++    sha: 506d23499707c7142898429757e8d9a3871d965239a2cb66dfa05052be6d6f19
+   - kind: registry
+     name: glib-sys
+-    version: 0.22.0
+-    sha: 48073e3b228419faa80b9b7f7122759d4ab2f44cd52a065fde7ca08f34c03147
++    version: 0.22.6
++    sha: 5f7fbac234ed5bc2a28359b7bde8e1b9cdf1441cc2d7f068e4824672d7db9445
+   - kind: registry
+     name: gobject-sys
+-    version: 0.22.0
+-    sha: 18eda93f09d3778f38255b231b17ef67195013a592c91624a4daf8bead875565
++    version: 0.22.6
++    sha: 22a861859b887a79cf461359c192c97a57d8fb0229dd291232e57aa11f6fa72c
+   - kind: registry
+     name: graphene-rs
+     version: 0.22.0
+@@ -210,40 +210,40 @@     version: 0.22.0
+     sha: 517f062f3fd6b7fd3e57a3f038a74b3c23ca32f51199ff028aa704609943f79c
+   - kind: registry
+     name: gsk4
+-    version: 0.11.0
+-    sha: c84a7e778764e5c8e67440c616e11a0da21828bbf04490655c4058f6c917af6f
++    version: 0.11.1
++    sha: 53c912dfcbd28acace5fc99c40bb9f25e1dcb73efb1f2608327f66a99acdcb62
+   - kind: registry
+     name: gsk4-sys
+-    version: 0.11.0
+-    sha: 9fbfbe080ce408e35a94eded4b9cc7a16fa2ffbaf6f04ab5a35d9c3c73841c88
++    version: 0.11.1
++    sha: d7d54bbc7a9d8b6ffe4f0c95eede15ccfb365c8bf521275abe6bcfb57b18fb8a
+   - kind: registry
+     name: gst-plugin-version-helper
+     version: 0.8.3
+     sha: a68a894ef2d738054b950e1dbef5d9012b63fd968d4d32dbccd31bd8d8d4b219
+   - kind: registry
+     name: gstreamer
+-    version: 0.25.0
+-    sha: 4b308f4e01e375e0648f9737a0528dca6f6cbf7d4573f2374dbc069c88a027c6
++    version: 0.25.2
++    sha: 28ca0c594cac4e86f5444aaa767c7bb810340c0710667a6467d3ead248e35e84
+   - kind: registry
+     name: gstreamer-allocators
+-    version: 0.25.0
+-    sha: 92b9867fab2889baa59250d600bceee3dea56e5a28631d88bf1bd9f43e0b2549
++    version: 0.25.2
++    sha: 3d8b56a6b63b166823b6a718e2f22fb71d35b3e92748e244c4d9dc3be9993f20
+   - kind: registry
+     name: gstreamer-allocators-sys
+     version: 0.25.0
+     sha: ea44ee4a86b39bcdcfd260179b7dbfdd5f81955d6fee35f11264934caf65230c
+   - kind: registry
+     name: gstreamer-base
+-    version: 0.25.0
+-    sha: c08353a8a382be9a49b15fb9c46b3abd6f8a6e6439e1eaedc87d08f1abdcfad1
++    version: 0.25.2
++    sha: c279df2918be97fb9570e589a32ade33598f643b0c4f0c92c17f06be6940574e
+   - kind: registry
+     name: gstreamer-base-sys
+     version: 0.25.0
+     sha: 6569606feeb89cfcf95a6476a64a0f0aec83fadcef0e91c24e576f7851ceac3a
+   - kind: registry
+     name: gstreamer-gl
+-    version: 0.25.0
+-    sha: 94f83397da547ce27d7b912980ecb21c99c6aedee4015765355fe66cdf0bd9b9
++    version: 0.25.2
++    sha: 91d452d542cee699b747f3b5ab54096fcdf1d9b6f22b890d9d86a9d9f9258f49
+   - kind: registry
+     name: gstreamer-gl-egl
+     version: 0.25.0
+@@ -274,32 +274,32 @@     version: 0.25.0
+     sha: 1391e727c873085ce4f8b2deb7fc4dcb15098ef75433777510860b0d983ff39f
+   - kind: registry
+     name: gstreamer-sys
+-    version: 0.25.0
+-    sha: 85d09343b4c23d64b3ef35f1f644598860cc9a4617e7ccded141de97cd528608
++    version: 0.25.2
++    sha: 533fa8d28fc830eafccbcfcfddb390563ea5d3a351af2c3aab99e197e5f5b1ba
+   - kind: registry
+     name: gstreamer-video
+-    version: 0.25.0
+-    sha: 51809937ed7f6fa3974b2730a39623d59fd7415ede882d08d5ecef5de39d758d
++    version: 0.25.2
++    sha: 2bf728cb21499561ea0d6ce584e550bf2b98b279cc7741067ee42f41f98b486e
+   - kind: registry
+     name: gstreamer-video-sys
+-    version: 0.25.0
+-    sha: 458f82631a5063057c10583a57ba0fbce689e67122cfdb5eddbeaa43eb812e75
++    version: 0.25.2
++    sha: 109c2c997a90a5806a8d7fcb416755e3047d6bab8f580d2ededc9ab7ad553caf
+   - kind: registry
+     name: gtk4
+-    version: 0.11.0
+-    sha: 56f78f0fe325e541c40f1a7f647d324bdda34cf67fe217c2843fd9c18ae514c9
++    version: 0.11.3
++    sha: 7181b837f04cbe93f79441475f7a00560a92cba7a72e38cc1a68b6f8b78eaae2
+   - kind: registry
+     name: gtk4-macros
+     version: 0.11.0
+     sha: 3581b242ba62fdff122ebb626ea641582ec326031622bd19d60f85029c804a87
+   - kind: registry
+     name: gtk4-sys
+-    version: 0.11.0
+-    sha: f063fc314b4d23aac4316a877159c02e86c1b2ba1f0a13e9aafbbebdce9c0800
++    version: 0.11.3
++    sha: 20ba8e695e2640455561274e65e45f0a151619e450746007667f4b23ceae4e1b
+   - kind: registry
+     name: hashbrown
+-    version: 0.16.1
+-    sha: 841d1cc9bed7f9236f321df977030373f4a4163ae1a7dbfe1a51a2c1a51d9100
++    version: 0.17.1
++    sha: ed5909b6e89a2db4456e54cd5f673791d7eca6732202bbf2a9cc504fe2f9b84a
+   - kind: registry
+     name: heck
+     version: 0.5.0
+@@ -314,16 +314,16 @@     version: 0.1.2
+     sha: f31827a206f56af32e590ba56d5d2d085f558508192593743f16b2306495269f
+   - kind: registry
+     name: indexmap
+-    version: 2.13.0
+-    sha: 7714e70437a7dc3ac8eb7e6f8df75fd8eb422675fc7678aff7364301092b1017
++    version: 2.14.0
++    sha: d466e9454f08e4a911e14806c24e16fba1b4c121d1ea474396f396069cf949d9
+   - kind: registry
+     name: itertools
+     version: 0.14.0
+     sha: 2b192c782037fadd9cfa75548310488aabdbf3d2da73885b31bd0abd03351285
+   - kind: registry
+     name: js-sys
+-    version: 0.3.86
+-    sha: d36139f1c97c42c0c86a411910b04e48d4939a0376e6e0f989420cbdee0120e5
++    version: 0.3.98
++    sha: 67df7112613f8bfd9150013a0314e196f4800d3201ae742489d999db2f979f08
+   - kind: registry
+     name: khronos-egl
+     version: 6.0.0
+@@ -334,8 +334,8 @@     version: 2.0.2
+     sha: 558bf9508a558512042d3095138b1f7b8fe90c5467d94f9f1da28b3731c5dbd1
+   - kind: registry
+     name: libc
+-    version: 0.2.182
+-    sha: 6800badb6cb2082ffd7b6a67e6125bb39f18782f793520caee8cb8846be06112
++    version: 0.2.186
++    sha: 68ab91017fe16c622486840e4c83c9a37afeff978bd239b5293d61ece587de66
+   - kind: registry
+     name: log
+     version: 0.4.29
+@@ -366,16 +366,16 @@     version: 0.2.19
+     sha: 071dfc062690e90b734c0b2273ce72ad0ffa95f0c74596bc250dcfd960262841
+   - kind: registry
+     name: once_cell
+-    version: 1.21.3
+-    sha: 42f5e15c9953c5e4ccceeb2e7382a716482c34515315f7b03532b8b4e8393d2d
++    version: 1.21.4
++    sha: 9f7c3e4beb33f85d45ae3e3a1792185706c8e16d043238c593331cc7cd313b50
+   - kind: registry
+     name: option-operations
+     version: 0.6.1
+     sha: aca39cf52b03268400c16eeb9b56382ea3c3353409309b63f5c8f0b1faf42754
+   - kind: registry
+     name: pango
+-    version: 0.22.0
+-    sha: 25d8f224eddef627b896d2f7b05725b3faedbd140e0e8343446f0d34f34238ee
++    version: 0.22.6
++    sha: 251bdc6e6487b811be0e406a21e301e07e45c0aa8fa39e00c0c8e12a91752438
+   - kind: registry
+     name: pango-sys
+     version: 0.22.0
+@@ -386,28 +386,28 @@     version: 2.2.1
+     sha: f38d5652c16fde515bb1ecef450ab0f6a219d619a7274976324d5e377f7dceba
+   - kind: registry
+     name: pastey
+-    version: 0.2.1
+-    sha: b867cad97c0791bbd3aaa6472142568c6c9e8f71937e98379f584cfb0cf35bec
++    version: 0.2.2
++    sha: c5a797f0e07bdf071d15742978fc3128ec6c22891c31a3a931513263904c982a
+   - kind: registry
+     name: pin-project-lite
+-    version: 0.2.16
+-    sha: 3b3cff922bd51709b605d9ead9aa71031d81447142d828eb4a6eba76fe619f9b
++    version: 0.2.17
++    sha: a89322df9ebe1c1578d689c92318e070967d1042b512afbe49518723f4e6d5cd
+   - kind: registry
+     name: pkg-config
+-    version: 0.3.32
+-    sha: 7edddbd0b52d732b21ad9a5fab5c704c14cd949e5e9a1ec5929a24fded1b904c
++    version: 0.3.33
++    sha: 19f132c84eca552bf34cab8ec81f1c1dcc229b811638f9d283dceabe58c5569e
+   - kind: registry
+     name: proc-macro-crate
+-    version: 3.4.0
+-    sha: 219cb19e96be00ab2e37d6e299658a0cfa83e52429179969b0f0121b4ac46983
++    version: 3.5.0
++    sha: e67ba7e9b2b56446f1d419b1d807906278ffa1a658a8a5d8a39dcb1f5a78614f
+   - kind: registry
+     name: proc-macro2
+     version: 1.0.106
+     sha: 8fd00f0bb2e90d81d1044c2b32617f68fcb9fa3bb7640c23e9c748e53fb30934
+   - kind: registry
+     name: quote
+-    version: 1.0.44
+-    sha: 21b2ebcf727b7760c461f091f9f0f539b77b8e87f2fd88131e7f1b433b3cece4
++    version: 1.0.45
++    sha: 41f2619966050689382d2b44f664f4bc593e129785a36d6ee376ddf37259b924
+   - kind: registry
+     name: rustc_version
+     version: 0.4.1
+@@ -418,8 +418,8 @@     version: 1.0.22
+     sha: b39cdef0fa800fc44525c84ccb54a029961a8215f9619753635a9c0d2538d46d
+   - kind: registry
+     name: semver
+-    version: 1.0.27
+-    sha: d767eb0aabc880b29956c35734170f26ed551a859dbd361d140cdbeca61ab1e2
++    version: 1.0.28
++    sha: 8a7852d02fc848982e0c167ef163aaff9cd91dc640ba85e263cb1ce46fae51cd
+   - kind: registry
+     name: serde_core
+     version: 1.0.228
+@@ -430,8 +430,8 @@     version: 1.0.228
+     sha: d540f220d3187173da220f885ab66608367b6574e925011a9353e4badda91d79
+   - kind: registry
+     name: serde_spanned
+-    version: 1.0.4
+-    sha: f8bbf91e5a4d6315eee45e704372590b30e260ee83af6639d64557f51b067776
++    version: 1.1.1
++    sha: 6662b5879511e06e8999a8a235d848113e942c9124f211511b16466ee2995f26
+   - kind: registry
+     name: shlex
+     version: 1.3.0
+@@ -454,8 +454,8 @@     version: 2.0.117
+     sha: e665b8803e7b1d2a727f4023456bbbbe74da67099c585258af0ad9c5013b9b99
+   - kind: registry
+     name: system-deps
+-    version: 7.0.7
+-    sha: 48c8f33736f986f16d69b6cb8b03f55ddcad5c41acc4ccc39dd88e84aa805e7f
++    version: 7.0.8
++    sha: 396a35feb67335377e0251fcbc1092fc85c484bd4e3a7a54319399da127796e7
+   - kind: registry
+     name: target-lexicon
+     version: 0.12.16
+@@ -470,24 +470,32 @@     version: 2.0.18
+     sha: ebc4ee7f67670e9b64d05fa4253e753e016c6c95ff35b89b7941d6b856dec1d5
+   - kind: registry
+     name: toml
+-    version: 0.9.12+spec-1.1.0
+-    sha: cf92845e79fc2e2def6a5d828f0801e29a2f8acc037becc5ab08595c7d5e9863
++    version: 1.1.2+spec-1.1.0
++    sha: 81f3d15e84cbcd896376e6730314d59fb5a87f31e4b038454184435cd57defee
+   - kind: registry
+     name: toml_datetime
+     version: 0.7.5+spec-1.1.0
+     sha: 92e1cfed4a3038bc5a127e35a2d360f145e1f4b971b551a2ba5fd7aedf7e1347
+   - kind: registry
++    name: toml_datetime
++    version: 1.1.1+spec-1.1.0
++    sha: 3165f65f62e28e0115a00b2ebdd37eb6f3b641855f9d636d3cd4103767159ad7
++  - kind: registry
+     name: toml_edit
+     version: 0.23.10+spec-1.0.0
+     sha: 84c8b9f757e028cee9fa244aea147aab2a9ec09d5325a9b01e0a49730c2b5269
++  - kind: registry
++    name: toml_edit
++    version: 0.25.11+spec-1.1.0
++    sha: 0b59c4d22ed448339746c59b905d24568fcbb3ab65a500494f7b8c3e97739f2b
+   - kind: registry
+     name: toml_parser
+-    version: 1.0.9+spec-1.1.0
+-    sha: 702d4415e08923e7e1ef96cd5727c0dfed80b4d2fa25db9647fe5eb6f7c5a4c4
++    version: 1.1.2+spec-1.1.0
++    sha: a2abe9b86193656635d2411dc43050282ca48aa31c2451210f4202550afb7526
+   - kind: registry
+     name: toml_writer
+-    version: 1.0.6+spec-1.1.0
+-    sha: ab16f14aed21ee8bfd8ec22513f7287cd4a91aa92e44edfe2c17ddd004e92607
++    version: 1.1.1+spec-1.1.0
++    sha: 756daf9b1013ebe47a8776667b466417e2d4c5679d441c26230efd9ef78692db
+   - kind: registry
+     name: unicode-ident
+     version: 1.0.24
+@@ -498,20 +506,20 @@     version: 0.2.1
+     sha: 03c2856837ef78f57382f06b2b8563a2f512f7185d732608fd9176cb3b8edf0e
+   - kind: registry
+     name: wasm-bindgen
+-    version: 0.2.109
+-    sha: 9ff9c7baef35ac3c0e17d8bfc9ad75eb62f85a2f02bccc906699dadb0aa9c622
++    version: 0.2.121
++    sha: 49ace1d07c165b0864824eee619580c4689389afa9dc9ed3a4c75040d82e6790
+   - kind: registry
+     name: wasm-bindgen-macro
+-    version: 0.2.109
+-    sha: 39455e84ad887a0bbc93c116d72403f1bb0a39e37dd6f235a43e2128a0c7f1fd
++    version: 0.2.121
++    sha: 8e68e6f4afd367a562002c05637acb8578ff2dea1943df76afb9e83d177c8578
+   - kind: registry
+     name: wasm-bindgen-macro-support
+-    version: 0.2.109
+-    sha: dff4761f60b0b51fd13fec8764167b7bbcc34498ce3e52805fe1db6f2d56b6d6
++    version: 0.2.121
++    sha: d95a9ec35c64b2a7cb35d3fead40c4238d0940c86d107136999567a4703259f2
+   - kind: registry
+     name: wasm-bindgen-shared
+-    version: 0.2.109
+-    sha: bc6a171c53d98021a93a474c4a4579d76ba97f9517d871bc12e27640f218b6dd
++    version: 0.2.121
++    sha: c4e0100b01e9f0d03189a92b96772a1fb998639d981193d7dbab487302513441
+   - kind: registry
+     name: windows-core
+     version: 0.62.2
+@@ -541,10 +549,6 @@     name: windows-sys
+     version: 0.52.0
+     sha: 282be5f36a8ce781fad8c8ae18fa3f9beff57ec1b52cb3de0789201425d9a33d
+   - kind: registry
+-    name: windows-sys
+-    version: 0.61.2
+-    sha: ae137229bcbd6cdf0f7b80a31df61766145077ddf49416a728b02cb3921ff3fc
+-  - kind: registry
+     name: windows-targets
+     version: 0.52.6
+     sha: 9b724f72796e036ab90c1021d4780d4d3d648aca59e491e6b98e725b84e99973
+@@ -582,8 +586,12 @@     version: 0.52.6
+     sha: 589f6da84c646204747d1270a2a5661ea66ed1cced2631d546fdfb155959f9ec
+   - kind: registry
+     name: winnow
+-    version: 0.7.14
+-    sha: 5a5364e9d77fcdeeaa6062ced926ee3381faa2ee02d3eb83a5c27a8825540829
++    version: 0.7.15
++    sha: df79d97927682d2fd8adb29682d1140b343be4ac0f08fd68b7765d9c059d3945
++  - kind: registry
++    name: winnow
++    version: 1.0.2
++    sha: 2ee1708bef14716a11bae175f579062d4554d95be2c6829f518df847b7b3fdd0
+ config:
+   install-commands:
+   - >-
+diff --git a/elements/sdk/gtk+-3.bst b/elements/sdk/gtk+-3.bst
+index fa263fc85a76a119b2e8c8ca6ee974dd9f51615f..40b5f9dbb321b0c2b36be0eb2d0510f09c0dea81 100644
+--- a/elements/sdk/gtk+-3.bst
++++ b/elements/sdk/gtk+-3.bst
+@@ -4,7 +4,7 @@ sources:
+ - kind: git_repo
+   url: gnome:gtk.git
+   track: gtk-3-24
+-  ref: 3.24.52-8-g35a4a789c58493ea082a078efc598089ea6a0ccc
++  ref: 3.24.52-14-g2bc50a44145a5f9fb8e4ee04261ab9011bcc1dbc
+ 
+ build-depends:
+ - sdk/gobject-introspection.bst
+diff --git a/elements/sdk/gtk.bst b/elements/sdk/gtk.bst
+index 7d32338cf0af8c6339361d947e4e8cc0e578289a..66ea30fc864a322cf93ffe03fe4c848a05fade6d 100644
+--- a/elements/sdk/gtk.bst
++++ b/elements/sdk/gtk.bst
+@@ -4,7 +4,7 @@ sources:
+ - kind: git_repo
+   url: gnome:gtk.git
+   track: main
+-  ref: 4.23.0-344-g235cf60bd304ba841e749f81dbbc23be729dd460
++  ref: 4.23.0-455-g9a73d0ac72a878dbf652a916e92eeb2746a578e7
+ 
+ build-depends:
+ - sdk-deps/sassc.bst
+diff --git a/elements/sdk/gtksourceview.bst b/elements/sdk/gtksourceview.bst
+index 0168537c27ccde08496b21a93ac956a3939ba137..e61413776c158ae2c19e08c8cdf5ea04e9d59466 100644
+--- a/elements/sdk/gtksourceview.bst
++++ b/elements/sdk/gtksourceview.bst
+@@ -4,7 +4,7 @@ sources:
+ - kind: git_repo
+   url: gnome:gtksourceview.git
+   track: master
+-  ref: 5.20.0-9-g0efed2a9496917c255cd1ad56a164e5a71ca16f7
++  ref: 5.20.0-10-g121757f8cf734ad9104af8825e6f9f3d868f6ec8
+ 
+ build-depends:
+ - sdk/gi-docgen.bst
+diff --git a/elements/sdk/json-glib.bst b/elements/sdk/json-glib.bst
+index 817b115e9a6addc64323ddf9893da9aeea70af9d..78dfd0935e537daef48f31631b9b4066410787cf 100644
+--- a/elements/sdk/json-glib.bst
++++ b/elements/sdk/json-glib.bst
+@@ -3,7 +3,7 @@ sources:
+ - kind: git_repo
+   url: gnome:json-glib.git
+   track: main
+-  ref: 1.10.8-15-g07cd0a16e2b5bc3cd1775a1f58dd42722908d957
++  ref: 1.10.8-16-g498f4224c341f70589ced05e775b719cebaa3162
+ build-depends:
+ - sdk/gi-docgen.bst
+ - sdk/gobject-introspection.bst
+diff --git a/elements/sdk/libadwaita.bst b/elements/sdk/libadwaita.bst
+index 4eb0778b0f3c44a2bcefb4464c03be238e2a0eab..0c6b354d304dce5d501e169ed4d71f740716d897 100644
+--- a/elements/sdk/libadwaita.bst
++++ b/elements/sdk/libadwaita.bst
+@@ -4,7 +4,7 @@ sources:
+ - kind: git_repo
+   url: gnome:libadwaita.git
+   track: main
+-  ref: 1.9.0-72-gd444dd65c199c78316846177d107b9caf1050d16
++  ref: 1.9.0-75-g5893bd137bfb6f35eae4946bb6e42c7b381505da
+ 
+ build-depends:
+ - sdk-deps/sassc.bst
+diff --git a/elements/sdk/libdex.bst b/elements/sdk/libdex.bst
+index 73b5b662079ff1ecece9a294ff5ee3b5782f1f71..3e78f63c588777c120ae1af79c85e05338276963 100644
+--- a/elements/sdk/libdex.bst
++++ b/elements/sdk/libdex.bst
+@@ -4,7 +4,7 @@ sources:
+ - kind: git_repo
+   url: gnome:libdex.git
+   track: main
+-  ref: 1.1.0-17-g994a91075d66c8277524566fbb6caf716740e108
++  ref: 1.1.0-28-g63194a739ba68664654c2b08ded350e7ecff1dcc
+ 
+ build-depends:
+ - sdk/gi-docgen.bst
+diff --git a/elements/sdk/librsvg.bst b/elements/sdk/librsvg.bst
+index 01e48629323c1a4b85caecf65c871a93c594d90e..77f29ba47b16116f4e044612e9da60b7ec74a973 100644
+--- a/elements/sdk/librsvg.bst
++++ b/elements/sdk/librsvg.bst
+@@ -4,7 +4,7 @@ sources:
+ - kind: git_repo
+   url: gnome:librsvg.git
+   track: main
+-  ref: 2.62.0-87-g60591b4f37fd52118bb2269c959a40476f44bd84
++  ref: 2.62.0-92-gc3db18133ba775d55a0f9c6c49ec16ac235a7d8a
+ - kind: cargo2
+   ref:
+   - kind: registry
+diff --git a/elements/sdk/libsoup.bst b/elements/sdk/libsoup.bst
+index fd3358efd1b8c9ff7bcc3b0427ca210785f25be8..41d3d03e6f84aae7d2e18001c2d5850f530dd018 100644
+--- a/elements/sdk/libsoup.bst
++++ b/elements/sdk/libsoup.bst
+@@ -4,7 +4,7 @@ sources:
+ - kind: git_repo
+   url: gnome:libsoup.git
+   track: master
+-  ref: 3.6.4-143-ge1c8d2d73664300f0e32270c6ff8d040c03f4f2e
++  ref: 3.6.4-146-g8478182216288f288e4e4e9618b6e1b07b8b974f
+ 
+ build-depends:
+ - sdk/gi-docgen.bst
+diff --git a/elements/sdk/tinysparql.bst b/elements/sdk/tinysparql.bst
+index 41f32990b56d85f0b1988da389501e262792a2bf..c44f1cf616a56c82dcdfd295c6d71133640207c2 100644
+--- a/elements/sdk/tinysparql.bst
++++ b/elements/sdk/tinysparql.bst
+@@ -4,7 +4,7 @@ sources:
+ - kind: git_repo
+   url: gnome:tinysparql.git
+   track: main
+-  ref: 3.11.1-7-g72683fb4160d4fe14a805bb4d6c97be8879c1a0e
++  ref: 3.11.1-10-g118246ff2dfd525aae3df896a45283e582267e54
+ # Need to be updated manually until we get a meson wrap source
+ - kind: remote
+   url: snowballstem:libstemmer_c-3.0.1.tar.gz
+diff --git a/elements/sdk/vala.bst b/elements/sdk/vala.bst
+index ed8c6591437d5954ebbd21a987d0809f854adcc5..f8b854b94504ed17431cfd8b4b20909b0d0921ce 100644
+--- a/elements/sdk/vala.bst
++++ b/elements/sdk/vala.bst
+@@ -4,13 +4,13 @@ sources:
+ - kind: git_repo
+   url: gnome:vala.git
+   track: main
+-  ref: 0.57.0-368-ga3e522fdef952cb4449e51b1bc00316186b47a5e
++  ref: 0.57.0-379-g7a80e9901b4640dab0a11e96a9158545df6d6937
+ 
+ build-depends:
+ - sdk/gobject-introspection.bst
+ - freedesktop-sdk.bst:components/bison.bst
+ - freedesktop-sdk.bst:components/flex.bst
+-- freedesktop-sdk.bst:components/git-minimal.bst
++- freedesktop-sdk.bst:components/git.bst
+ - freedesktop-sdk.bst:components/vala-bootstrap.bst
+ - freedesktop-sdk.bst:public-stacks/buildsystem-autotools.bst
+ 
+diff --git a/elements/sdk/yelp.bst b/elements/sdk/yelp.bst
+index ee9f4820e9219d754edb06d0d77d68db525936a3..34966f8f99f6fa726b4878cfa9e018a478aca0eb 100644
+--- a/elements/sdk/yelp.bst
++++ b/elements/sdk/yelp.bst
+@@ -4,7 +4,7 @@ sources:
+ - kind: git_repo
+   url: gnome:yelp.git
+   track: master
+-  ref: 49.1-1-g34c1bd9a78abeb3f77775907dd801cdf62e91780
++  ref: 49.1-2-g96850f19a6dd000ef848031c4a23e60227aff6af
+ 
+ build-depends:
+ - freedesktop-sdk.bst:components/appstream.bst
+diff --git a/files/gnomeos/live/proto-installer/daemon/main.rs b/files/gnomeos/live/proto-installer/daemon/main.rs
+index a71b5476764404c0c35d577e9783b4d5a82bc546..b6a98a4bc66759d04913d2d54401b103932e11ad 100644
+--- a/files/gnomeos/live/proto-installer/daemon/main.rs
++++ b/files/gnomeos/live/proto-installer/daemon/main.rs
+@@ -257,12 +257,16 @@
+ async fn write_repart_d(path : &std::path::Path, has_tpm2 : bool) -> Result<(), InstallerError> {
+     let encrypt : String;
+     let discard : String;
++    let volume_name : String;
+     if has_tpm2 {
+         encrypt = "key-file+tpm2".to_string();
+         discard = "Discard=yes\n".to_string();
++        volume_name = "VolumeName=root\n".to_string();
++
+     } else {
+         encrypt = "off".to_string();
+         discard = "".to_string();
++        volume_name = "".to_string();
+     }
+ 
+     let mut esp = std::fs::File::create(path.join("10-esp.conf"))?;
+@@ -323,7 +327,8 @@         Type=root\n\
+         Label=root\n\
+         Encrypt={encrypt}\n\
+         {discard}\
+-        CopyBlocks=/dev/null\n"
++        BlockDeviceReplace=/\n\
++        {volume_name}"
+     ).as_bytes())?;
+ 
+     Ok(())
+@@ -391,74 +396,6 @@         _ => Err(InstallerError::Unit(UnitError::new("systemd-zram-setup@zram1.service"))),
+     }
+ }
+ 
+-async fn swap_root(conn : &Connection, has_tpm2 : bool, root : &str) -> Result<(), InstallerError> {
+-    let mut real_root = root.to_string();
+-
+-    if has_tpm2 {
+-        let systemd = SystemdProxy::new(conn).await?;
+-        let cryptsetup = systemd.load_unit("systemd-cryptsetup@root.service").await?;
+-        let _ = systemd.start_unit("systemd-cryptsetup@root.service", "replace").await?;
+-        while !matches!(cryptsetup.active_state().await?.as_str(), "active"|"failed") {
+-            cryptsetup.receive_active_state_changed().await;
+-        }
+-        match cryptsetup.active_state().await?.as_str() {
+-            "active" => (),
+-            _ => return Err(InstallerError::Unit(UnitError::new("systemd-cryptsetup@root.service"))),
+-        }
+-
+-        real_root = "/dev/mapper/root".to_string();
+-    }
+-
+-    let btrfs_replace = Command::new("btrfs")
+-        .arg("replace").arg("start").arg("1").arg(real_root).arg("/")
+-        .spawn()?
+-        .wait().await?;
+-    btrfs_replace.code().filter(|code| *code == 0)
+-        .ok_or(CommandError::new("btrfs replace", btrfs_replace))?;
+-
+-    let mut has_started = false;
+-    for _ in 0..20 {
+-        let btrfs_status = Command::new("btrfs")
+-            .arg("replace").arg("status").arg("/")
+-            .output().await?;
+-        let never_started = match String::from_utf8(btrfs_status.stdout) {
+-            Err(_) => false,
+-            Ok(s) => match s.as_str() {
+-                "Never started\n" => true,
+-                _ => false
+-            }
+-        };
+-        if !never_started {
+-            btrfs_status.status.code().filter(|code| *code == 0)
+-                .ok_or(CommandError::new("btrfs replace status", btrfs_status.status))?;
+-            has_started = true;
+-            break;
+-        }
+-        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+-    }
+-    if !has_started {
+-        return Err(InstallerError::Command(CommandError::new("btrfs replace", btrfs_replace)))
+-    }
+-
+-    let btrfs_label = Command::new("btrfs")
+-        .arg("filesystem").arg("label").arg("/").arg("root")
+-        .spawn()?
+-        .wait().await?;
+-    btrfs_label.code().filter(|code| *code == 0)
+-        .ok_or(CommandError::new("btrfs filesystem label", btrfs_label))?;
+-
+-    let btrfs_resize = Command::new("btrfs")
+-        .arg("filesystem").arg("resize").arg("1:max").arg("/")
+-        .spawn()?
+-        .wait().await?;
+-    btrfs_resize.code().filter(|code| *code == 0)
+-        .ok_or(CommandError::new("btrfs filesystem resize", btrfs_resize))?;
+-
+-    stop_zram(conn).await?;
+-
+-    Ok(())
+-}
+-
+ async fn do_install(conn: &Connection, device: String, recovery_passphrase : String, oem_install : bool, has_tpm2 : bool, has_pcrlock : bool) -> Result<(), InstallerError> {
+     let repart_d = tempfile::tempdir()?;
+     let repart_d_path = repart_d.path().to_str().ok_or(GenericInstallError::new("bad path for repart.d"))?;
+@@ -471,6 +408,7 @@
+     dry_run.args([
+         "--dry-run=yes",
+         "--empty=require",
++        "--offline=no",
+     ]);
+ 
+     dry_run.arg(format!("--definitions={repart_d_path}"));
+@@ -520,6 +458,7 @@     cmd.args([
+         "--dry-run=no",
+         "--empty=require",
+         "--json=short",
++        "--offline=no",
+     ]);
+ 
+     cmd.arg(format!("--definitions={repart_d_path}"));
+@@ -597,11 +536,7 @@             swap_verity(
+                 partitions.get("21-usr-A.conf").ok_or(GenericInstallError::new("missing 21-usr-A.conf"))?,
+                 partitions.get("20-usr-verity-A.conf").ok_or(GenericInstallError::new("missing 20-usr-verity-A.conf"))?
+             ),
+-            swap_root(
+-                conn,
+-                has_tpm2,
+-                partitions.get("50-root.conf").ok_or(GenericInstallError::new("missing 50-root.conf"))?,
+-            )
++            stop_zram(conn)
+         )?;
+         remove_loop().await?;
+      }
+diff --git a/patches/freedesktop-sdk/0001-project-Specify-more-limits-to-the-CAS-configs.patch b/patches/freedesktop-sdk/0001-project-Specify-more-limits-to-the-CAS-configs.patch
+index ff438d67f2ab7a46b5907880b08eade657deefcd..e97c0bf07de295977ed4bdcb641e5a40c1f36dde 100644
+--- a/patches/freedesktop-sdk/0001-project-Specify-more-limits-to-the-CAS-configs.patch
++++ b/patches/freedesktop-sdk/0001-project-Specify-more-limits-to-the-CAS-configs.patch
+@@ -1,7 +1,7 @@
+-From 3406fca5fce1561094bc394fb949dbeb5996ce2e Mon Sep 17 00:00:00 2001
++From 9fb78e6083d84e7512d45cf04a71d9b35d33d51c Mon Sep 17 00:00:00 2001
+ From: Jordan Petridis <jpetridis@gnome.org>
+ Date: Mon, 18 Aug 2025 01:06:36 +0100
+-Subject: [PATCH 1/9] project: Specify more limits to the CAS configs
++Subject: [PATCH 01/10] project: Specify more limits to the CAS configs
+ 
+ These are disabled by default due to backward compatibility
+ so we need to explicitly set some values for timeouts and
+diff --git a/patches/freedesktop-sdk/0002-project.conf-Add-GNOME-CAS-servers.patch b/patches/freedesktop-sdk/0002-project.conf-Add-GNOME-CAS-servers.patch
+index 19f67a80c55e61ee3ba9e7a0c58bb67c079cdc08..3a1247ecde2c5ab070c40707bac789417ef808e6 100644
+--- a/patches/freedesktop-sdk/0002-project.conf-Add-GNOME-CAS-servers.patch
++++ b/patches/freedesktop-sdk/0002-project.conf-Add-GNOME-CAS-servers.patch
+@@ -1,7 +1,7 @@
+-From 370caed5e3a627187448040925fe2bc150c11f8c Mon Sep 17 00:00:00 2001
++From 74006d1ac4e9363aec1a979b279df6672b1ef5d7 Mon Sep 17 00:00:00 2001
+ From: Jordan Petridis <jpetridis@gnome.org>
+ Date: Mon, 4 Aug 2025 20:22:27 +0300
+-Subject: [PATCH 2/9] project.conf: Add GNOME CAS servers
++Subject: [PATCH 02/10] project.conf: Add GNOME CAS servers
+ 
+ This is meant as a downstream patch. Till now everyone
+ has to configure the servers in their buildstream config,
+diff --git a/patches/freedesktop-sdk/0003-linux-enable-OnePlus-6-s-panel.patch b/patches/freedesktop-sdk/0003-linux-enable-OnePlus-6-s-panel.patch
+deleted file mode 100644
+index e2930b08a2ed9d548fb5d04ac9a67e6e5a5c51a9..0000000000000000000000000000000000000000
+--- a/patches/freedesktop-sdk/0003-linux-enable-OnePlus-6-s-panel.patch
++++ /dev/null
+@@ -1,38 +0,0 @@
+-From 32906789c70afba2e515dbe399811a398ebf0ea2 Mon Sep 17 00:00:00 2001
+-From: Valentin David <me@valentindavid.com>
+-Date: Sun, 24 Aug 2025 23:39:36 +0100
+-Subject: [PATCH 3/9] linux: enable OnePlus 6's panel
+-
+----
+- files/linux/fdsdk-config.sh | 1 +
+- 1 file changed, 1 insertion(+)
+-
+-diff --git a/files/linux/fdsdk-config.sh b/files/linux/fdsdk-config.sh
+-index e0c1a0523..fd4337eef 100644
+---- a/files/linux/fdsdk-config.sh
+-+++ b/files/linux/fdsdk-config.sh
+-@@ -711,20 +711,21 @@ enable DRM_AMDGPU_USERPTR
+- enable DRM_AMD_ACP
+- case "$arch" in
+-     x86_64)
+-         remove DRM_I915; module DRM_I915
+-         module DRM_GMA500
+-         module DRM_XE
+-     ;;
+-     aarch64)
+-         module DRM_PANFROST
+-         module DRM_MSM
+-+        module DRM_PANEL_SAMSUNG_SOFEF00
+-     ;;
+- esac
+- 
+- # NPUs
+- enable DRM_ACCEL
+- module DRM_ACCEL_QAIC
+- case "$arch" in
+-     x86_64)
+-         module DRM_ACCEL_IVPU
+-         module DRM_ACCEL_AMDXDNA
+--- 
+-2.54.0
+-
+diff --git a/patches/freedesktop-sdk/0004-openssh-Use-etc-ssh-as-sysconfdir.patch b/patches/freedesktop-sdk/0003-openssh-Use-etc-ssh-as-sysconfdir.patch
+rename from patches/freedesktop-sdk/0004-openssh-Use-etc-ssh-as-sysconfdir.patch
+rename to patches/freedesktop-sdk/0003-openssh-Use-etc-ssh-as-sysconfdir.patch
+index 640c74d57fcba4b309aea27fa2ee091d5346f7fd..6c34a4c146244282e4fa482196fea05c75f0d13d 100644
+--- a/patches/freedesktop-sdk/0004-openssh-Use-etc-ssh-as-sysconfdir.patch
++++ b/patches/freedesktop-sdk/0003-openssh-Use-etc-ssh-as-sysconfdir.patch
+@@ -1,7 +1,7 @@
+-From d7c30b13796a328049706d62241dfbf2edd80aa2 Mon Sep 17 00:00:00 2001
++From ef058b495201a3e29fd9f89b252b475a86e0ec2a Mon Sep 17 00:00:00 2001
+ From: Valentin David <me@valentindavid.com>
+ Date: Sun, 26 Oct 2025 11:03:32 +0100
+-Subject: [PATCH 4/9] openssh: Use /etc/ssh as sysconfdir
++Subject: [PATCH 03/10] openssh: Use /etc/ssh as sysconfdir
+ 
+ All other distros use that. And there are expectations from systemd
+ for it to be configured so.
+diff --git a/patches/freedesktop-sdk/0005-openssh-Include-ssh-_config.d-.conf.patch b/patches/freedesktop-sdk/0004-openssh-Include-ssh-_config.d-.conf.patch
+rename from patches/freedesktop-sdk/0005-openssh-Include-ssh-_config.d-.conf.patch
+rename to patches/freedesktop-sdk/0004-openssh-Include-ssh-_config.d-.conf.patch
+index 9ce515245590e3dafb04475d118d75bdeac2eca2..bf7895539af074af9f76052237f55eb70db602f4 100644
+--- a/patches/freedesktop-sdk/0005-openssh-Include-ssh-_config.d-.conf.patch
++++ b/patches/freedesktop-sdk/0004-openssh-Include-ssh-_config.d-.conf.patch
+@@ -1,7 +1,7 @@
+-From ab20c7db5843db19b8236cae39daeb921461906d Mon Sep 17 00:00:00 2001
++From 86f77bbb2b9aa8b40e1fd3bebe81f0b9d81d433d Mon Sep 17 00:00:00 2001
+ From: Valentin David <me@valentindavid.com>
+ Date: Sun, 26 Oct 2025 16:06:02 +0100
+-Subject: [PATCH 5/9] openssh: Include ssh*_config.d/*.conf
++Subject: [PATCH 04/10] openssh: Include ssh*_config.d/*.conf
+ 
+ Most distributions include system-wide configuration fragments from
+ and some software expect it: systemd, libvirt.
+diff --git a/patches/freedesktop-sdk/0006-lvm2-Disable-event-activation-by-default.patch b/patches/freedesktop-sdk/0005-lvm2-Disable-event-activation-by-default.patch
+rename from patches/freedesktop-sdk/0006-lvm2-Disable-event-activation-by-default.patch
+rename to patches/freedesktop-sdk/0005-lvm2-Disable-event-activation-by-default.patch
+index 5c3b4f77b90dbb56c7889a8ada1e6fa10367bd29..093d623ee4ed8ba22f3d9dbcc31f84e198201401 100644
+--- a/patches/freedesktop-sdk/0006-lvm2-Disable-event-activation-by-default.patch
++++ b/patches/freedesktop-sdk/0005-lvm2-Disable-event-activation-by-default.patch
+@@ -1,7 +1,7 @@
+-From 86371f2d871c21b6af3bc2a8a74643dd422f9ce4 Mon Sep 17 00:00:00 2001
++From 2e788774fd148b750fd0bc28abd3f9412a008792 Mon Sep 17 00:00:00 2001
+ From: Valentin David <me@valentindavid.com>
+ Date: Sat, 24 Jan 2026 12:13:27 +0100
+-Subject: [PATCH 6/9] lvm2: Disable event activation by default
++Subject: [PATCH 05/10] lvm2: Disable event activation by default
+ 
+ Because lvm2 does not have a distro wide configuration in /usr and all
+ is in /etc, configuring it is not compatible with systemd-sysupdate
+diff --git a/patches/freedesktop-sdk/0007-Update-elements-components-pipewire-base.bst-to-1.6..patch b/patches/freedesktop-sdk/0007-Update-elements-components-pipewire-base.bst-to-1.6..patch
+index d1eafbb32c51b757755dc39235f0ba2fe03b98cd..feb1d9b6b0a528af02f8993707322b7ea5cb8dd3 100644
+--- a/patches/freedesktop-sdk/0007-Update-elements-components-pipewire-base.bst-to-1.6..patch
++++ b/patches/freedesktop-sdk/0007-Update-elements-components-pipewire-base.bst-to-1.6..patch
+@@ -1,7 +1,7 @@
+-From c8e3cbaf90b82d4852a6234314fc5bc9c552fa99 Mon Sep 17 00:00:00 2001
++From 3a7e4a38ebae9c70f288bd3ed4fc9bed679febdc Mon Sep 17 00:00:00 2001
+ From: freedesktop_sdk_updater <freedesktop_sdk_updater@libreml.com>
+ Date: Thu, 19 Feb 2026 17:09:11 +0000
+-Subject: [PATCH 7/9] Update elements/components/pipewire-base.bst to 1.6.0-0
++Subject: [PATCH 07/10] Update elements/components/pipewire-base.bst to 1.6.0-0
+ 
+ Updates elements/components/pipewire-base.bst to 1.6.0-0 (700cea7)
+ ---
+diff --git a/patches/freedesktop-sdk/0008-Update-Pipewire-to-1.6.1.patch b/patches/freedesktop-sdk/0008-Update-Pipewire-to-1.6.1.patch
+index bd98338cb57bdb64310d400c03c179c0fa10e6d2..851908582dd2f48040ba0d9cf5c3739f73587b8c 100644
+--- a/patches/freedesktop-sdk/0008-Update-Pipewire-to-1.6.1.patch
++++ b/patches/freedesktop-sdk/0008-Update-Pipewire-to-1.6.1.patch
+@@ -1,7 +1,7 @@
+-From 1dbfa6bfa7311b4fead4e520e788b816b920b19c Mon Sep 17 00:00:00 2001
++From 776fb10df9928814588584b8c0befe718f95374a Mon Sep 17 00:00:00 2001
+ From: Valentin David <me@valentindavid.com>
+ Date: Fri, 17 Apr 2026 10:46:15 +0100
+-Subject: [PATCH 8/9] Update Pipewire to 1.6.1
++Subject: [PATCH 08/10] Update Pipewire to 1.6.1
+ 
+ ---
+  elements/components/pipewire-base.bst | 2 +-
+diff --git a/patches/freedesktop-sdk/0009-Add-cross-compilers-binutils-x86-64.bst.patch b/patches/freedesktop-sdk/0006-Add-cross-compilers-binutils-x86-64.bst.patch
+rename from patches/freedesktop-sdk/0009-Add-cross-compilers-binutils-x86-64.bst.patch
+rename to patches/freedesktop-sdk/0006-Add-cross-compilers-binutils-x86-64.bst.patch
+index b6c99bc4db93936a1a13d18cdc5a8f68a5f3338b..8e8db27eede651c28afd2b2c6b65954aae52cb9e 100644
+--- a/patches/freedesktop-sdk/0009-Add-cross-compilers-binutils-x86-64.bst.patch
++++ b/patches/freedesktop-sdk/0006-Add-cross-compilers-binutils-x86-64.bst.patch
+@@ -1,7 +1,7 @@
+-From b7c7a38de3e738940b65197c611fc4863a2c965c Mon Sep 17 00:00:00 2001
++From 15a3e8bb6d3c607ceebe55acb9685147b983a40d Mon Sep 17 00:00:00 2001
+ From: Valentin David <me@valentindavid.com>
+ Date: Fri, 17 Apr 2026 10:48:50 +0100
+-Subject: [PATCH 9/9] Add cross-compilers/binutils-x86-64.bst
++Subject: [PATCH 06/10] Add cross-compilers/binutils-x86-64.bst
+ 
+ ---
+  elements/cross-compilers/binutils-common.yml |  4 +++-
+diff --git a/patches/freedesktop-sdk/0009-Update-Pipewire-to-1.6.5.patch b/patches/freedesktop-sdk/0009-Update-Pipewire-to-1.6.5.patch
+new file mode 100644
+index 0000000000000000000000000000000000000000..77ee7a79bcb461a7d963f4aec68b027c114383ba
+--- /dev/null
++++ b/patches/freedesktop-sdk/0009-Update-Pipewire-to-1.6.5.patch
+@@ -0,0 +1,30 @@
++From 93657e4a9eb97bd9a76c2efec2cd7b0d941ecc4f Mon Sep 17 00:00:00 2001
++From: Jordan Petridis <jpetridis@gnome.org>
++Date: Thu, 21 May 2026 23:30:12 +0300
++Subject: [PATCH 09/10] Update Pipewire to 1.6.5
++
++---
++ elements/components/pipewire-base.bst | 3 ++-
++ 1 file changed, 2 insertions(+), 1 deletion(-)
++
++diff --git a/elements/components/pipewire-base.bst b/elements/components/pipewire-base.bst
++index a38e15d02..e5b14429c 100644
++--- a/elements/components/pipewire-base.bst
+++++ b/elements/components/pipewire-base.bst
++@@ -139,11 +139,12 @@ public:
++       - '%{debugdir}%{libdir}/pipewire-0.3/libpipewire-module-spa-node-factory.so.debug'
++       - '%{debugdir}%{libdir}/pipewire-0.3/libpipewire-module-spa-node.so.debug'
++       - '%{debugdir}%{libdir}/pipewire-0.3/libpipewire-module-zeroconf-discover.so.debug'
++ 
++   cpe:
++     product: pipewire
++ 
++ sources:
++ - kind: git_repo
++   url: freedesktop:PipeWire/pipewire.git
++-  ref: 1.6.1-0-gb7341d068947225fcdf62d39277606e8516d7f52
+++  track: "*.*.*"
+++  ref: 1.6.5-0-g55848f4260a2d2302f9f6bd304d82616976ef9af
++-- 
++2.54.0
++
+diff --git a/patches/freedesktop-sdk/0010-Update-linux-to-7.0.10.patch b/patches/freedesktop-sdk/0010-Update-linux-to-7.0.10.patch
+new file mode 100644
+index 0000000000000000000000000000000000000000..0185516feb2fbe36f12f3039ce65b84258e27df1
+--- /dev/null
++++ b/patches/freedesktop-sdk/0010-Update-linux-to-7.0.10.patch
+@@ -0,0 +1,27 @@
++From bfa901a1cd695df7362e81d1689518e29f74ddf7 Mon Sep 17 00:00:00 2001
++From: Jordan Petridis <jpetridis@gnome.org>
++Date: Sun, 24 May 2026 20:03:11 +0300
++Subject: [PATCH 10/10] Update linux to 7.0.10
++
++---
++ elements/include/linux.yml | 2 +-
++ 1 file changed, 1 insertion(+), 1 deletion(-)
++
++diff --git a/elements/include/linux.yml b/elements/include/linux.yml
++index 81f82350a..ccef862e6 100644
++--- a/elements/include/linux.yml
+++++ b/elements/include/linux.yml
++@@ -1,9 +1,9 @@
++ sources:
++ - kind: git_repo
++   url: kernel:linux/kernel/git/stable/linux.git
++   track: v*
++   exclude:
++   - '*-rc*'
++-  ref: v7.0.7-0-g4d7dbcd7f2c86c830517b827cbc2bc633a489818
+++  ref: v7.0.10-0-g7e98da22115d049ca74373caddd43e0952becfef
++ - kind: patch_queue
++   path: patches/linux
++-- 
++2.54.0
++
+
