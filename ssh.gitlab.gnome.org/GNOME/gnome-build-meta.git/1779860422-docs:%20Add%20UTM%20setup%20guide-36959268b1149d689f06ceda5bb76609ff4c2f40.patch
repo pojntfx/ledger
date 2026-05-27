@@ -1,0 +1,112 @@
+From 36959268b1149d689f06ceda5bb76609ff4c2f40 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Tue, 26 May 2026 22:40:22 -0700
+Subject: [PATCH] docs: Add UTM setup guide
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/docs/utm.md b/docs/utm.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..49780f2c9a182a6ce7f3f60dc111329b46333e98
+--- /dev/null
++++ b/docs/utm.md
+@@ -0,0 +1,98 @@
++# GNOME OS UTM setup
++
++Qemu:
++
++- More flexible
++- Uses spice
++- USB device redirect
++- Spice webdav works but has a magic address to connect to
++- GPU accelerated with virtgl
++- Plymouth and systemd console display no video output
++- TPM2 and Balloon are disabled by default
++  - TPM2 requires reseting the UEFI afterwards
++
++- Since we have no display output, its hard to debug unless you already added a serial console and are aware of what can go wrong and how to drop into a debug shell
++
++- If you have an encrypted drive, the luks decryption prompt does not display, need to unlock from a tty/serial
++
++Apple Virt:
++
++- virtiofs is nice and works much better for sharing files
++- plymouth and systemd console display with the video backend
++- No way for gpu accelaration, stuck with llvmpipe
++  - fixme github link
++- “simpler” setup, tpm2, balloon enabled by default
++- Possibility to enable Rossetta and run x86 binaries
++
++Common:
++
++- No touchpad gestures
++  - They don’t get captured, we only pass a mouse as well
++- Apple Virt can be configured to display a touchapd, but it still shows up as a mouse
++- Set display resolution to something more reasonable
++  - The default looks tiny when its unscaled
++  - tianocore also has its own setting which you’d want to change in order for sdboot to be readable
++  - Dynamic resolution works nicely on qemu, a bit buggy on applevirt (or llvmpiple)
++  - Turn on hidpi as we will leave GNOME to scale the buffers
++- Add a serial console
++  - Extremely useful for debugging
++  - Both the built-in and pseudo-tty work nice, but both of them can be buggy in different ways wrt to clearing terminal codes across context switches and such. systemd logs -> login shell, or debug shell -> login shell transitions can be buggy or display corrupted
++
++TTYs and debugging
++
++- Add 2 pseudo ttys
++- First one: regular console
++- Second one, we can dedicate to debugshell
++
++debugshells:
++
++- qemu default tty: `ttyAMA0`
++- apple virt tty: `hvc0`
++- systemd.debug_shell=ttyAMA1 and systemd.debug_shell=hvc1
++
++Drive Setup:
++
++- Import a drive image is the easiest one
++- However “removable” disk image (needs truncate) as usb device for the system image is more flexible as you can swap out the OS image if need or use the same homedir for both apple virt and qemu vms
++- systemd-homed attached on a separate “usb device”
++- Homed needs manaual setup atm, has UI papercuts, likely will need debug shell
++  - When mounting a homed, need to “adopt it” before it can work
++  - We can add the pub key for the homed through smbios with qemu arguments. The UI is decent for this as well
++
++Sharing volumes from the host:
++
++- oh god
++- FIXME
++- https://docs.getutm.app/guest-support/linux/
++
++Mouse and Keyboard:
++
++- Scrolling with the touchpad is inverted cause it thinks its a mouse whell
++  - No touchpad gestures either
++- Apple Virt can expose the usb devices as apple keyboard and mouse but..
++  - Trying to force it to a touchpad with a libinput udev rule complains
++  - fixme: grab the rule and the logs from the other vm
++  - still no touchpad gestures, doesn’t capture input anyway
++- For qemu, UTM has an “invert scrolling” option in settings
++- Changing the scrolling on settings does not work, cause it changes both horizontal and vertical directions, but only horizontal is inverted.
++
++keybindings:
++
++- fixme: dump karabiner-elements rules
++
++Create VM:
++
++- Download aarch64 iso
++- Create VM -> Native -> Linux
++- Enable OpenGL
++- Boot from iso image
++- Open VM Settings
++  - Optional: Enable Baloon and TPM 2.0 devices in UEFI settings
++    - DO NOT RESET UEFI VARIABLES
++    - DO NOT PRELOAD SECURE BOOT KEYS
++  - FIXME: shared volume
++  - Optional Share USB devices
++  - FIXME: Display
++    - Retina mode?
++    - Scaling algo
++  - Add Serial devices
+
