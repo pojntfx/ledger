@@ -1,0 +1,86 @@
+From a54f0ffd5bef33b2c56ba70c1004b52b3d99018d Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Wed, 27 May 2026 23:21:11 -0700
+Subject: [PATCH] fix: Use new iterator to make sure that we always return four posts regardless of whether there are reblogs or not
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/api/mastodon/index.go b/api/mastodon/index.go
+index 20b2ff3d2973751bfc8c5339d823a0871584a988..ef87e6fb2d056e69053355477f450201fba0d001 100644
+--- a/api/mastodon/index.go
++++ b/api/mastodon/index.go
+@@ -95,13 +95,6 @@ 	output.UserID = string(account.ID)
+ 
+ 	toots := []Toot{}
+ 
+-	sourceToots, err := client.GetAccountStatuses(r.Context(), account.ID, &mastodon.Pagination{
+-		Limit: 4,
+-	})
+-	if err != nil {
+-		panic(err)
+-	}
+-
+ 	feedAuthor := Author{
+ 		UserDisplayName:       account.DisplayName,
+ 		UserName:              account.Username,
+@@ -109,7 +102,19 @@ 		UserURL:               account.URL,
+ 		UserProfilePictureURL: account.AvatarStatic,
+ 	}
+ 
+-	for _, sourceToot := range sourceToots {
++	const wantToots = 4
++
++	for sourceToot, err := range client.AccountStatuses(
++		r.Context(),
++		account.ID,
++		&mastodon.Pagination{
++			Limit: wantToots,
++		},
++	) {
++		if err != nil {
++			panic(err)
++		}
++
+ 		// Hide any non-public toots
+ 		// See https://docs.joinmastodon.org/entities/Status/#visibility
+ 		if sourceToot.Visibility != "public" {
+@@ -162,6 +167,10 @@
+ 		toot.URL = contentSource.URL
+ 
+ 		toots = append(toots, toot)
++
++		if len(toots) >= wantToots {
++			break
++		}
+ 	}
+ 
+ 	output.Toots = toots
+diff --git a/go.mod b/go.mod
+index c5db8d2deee542479e16c086d801d5729c126752..6f13aea834effae18e63f66045b42bb9a55441b0 100644
+--- a/go.mod
++++ b/go.mod
+@@ -6,7 +6,7 @@ require (
+ 	codeberg.org/mvdkleijn/forgejo-sdk/forgejo v1.2.0
+ 	github.com/google/go-github/v42 v42.0.0
+ 	github.com/google/go-github/v68 v68.0.0
+-	github.com/mattn/go-mastodon v0.0.10
++	github.com/mattn/go-mastodon v0.0.11
+ 	github.com/mmcdole/gofeed v1.3.0
+ 	github.com/nicklaw5/helix/v2 v2.31.1
+ 	github.com/pojntfx/skytheon v0.0.0-20230427185454-3bd7fbf1799f
+diff --git a/go.sum b/go.sum
+index 3110979a46b5cd27361981e15785dea53126c277..1386b973570a6b6ea209f8506db77f0002455326 100644
+--- a/go.sum
++++ b/go.sum
+@@ -61,8 +61,8 @@ github.com/kr/pretty v0.3.1 h1:flRD4NNwYAUpkphVc1HcthR4KEIFJ65n8Mw5qdRn3LE=
+ github.com/kr/pretty v0.3.1/go.mod h1:hoEshYVHaxMs3cyo3Yncou5ZscifuDolrwPKZanG3xk=
+ github.com/kr/text v0.2.0 h1:5Nx0Ya0ZqY2ygV366QzturHI13Jq95ApcVaJBhpS+AY=
+ github.com/kr/text v0.2.0/go.mod h1:eLer722TekiGuMkidMxC/pM04lWEeraHUUmBw8l2grE=
+-github.com/mattn/go-mastodon v0.0.10 h1:wz1d/aCkJOIkz46iv4eAqXHVreUMxydY1xBWrPBdDeE=
+-github.com/mattn/go-mastodon v0.0.10/go.mod h1:YBofeqh7G6s787787NQR8erBYz6fKDu+KNMrn5RuD6Y=
++github.com/mattn/go-mastodon v0.0.11 h1:Zcvc/8EHpf3os1mwAuUUB5es5VnfVdAeb4ed6ByJnCY=
++github.com/mattn/go-mastodon v0.0.11/go.mod h1:0DcwYEkqigrvknMvjmfKXLP0vYyeYm+vBdUOvoHcczg=
+ github.com/mmcdole/gofeed v1.3.0 h1:5yn+HeqlcvjMeAI4gu6T+crm7d0anY85+M+v6fIFNG4=
+ github.com/mmcdole/gofeed v1.3.0/go.mod h1:9TGv2LcJhdXePDzxiuMnukhV2/zb6VtnZt1mS+SjkLE=
+ github.com/mmcdole/goxpp v1.1.1 h1:RGIX+D6iQRIunGHrKqnA2+700XMCnNv0bAOOv5MUhx8=
+
