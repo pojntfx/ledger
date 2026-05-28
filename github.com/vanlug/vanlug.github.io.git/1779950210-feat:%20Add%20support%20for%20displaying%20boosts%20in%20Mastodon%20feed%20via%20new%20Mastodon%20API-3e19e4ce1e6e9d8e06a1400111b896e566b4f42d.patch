@@ -1,0 +1,130 @@
+From 3e19e4ce1e6e9d8e06a1400111b896e566b4f42d Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Wed, 27 May 2026 23:36:50 -0700
+Subject: [PATCH] feat: Add support for displaying boosts in Mastodon feed via new Mastodon API
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/assets/js/mastodon-feed.js b/assets/js/mastodon-feed.js
+index 7d73a8d1640f9168c47333735681a71369da8355..df03d5ce4e39655e1bd0ca768fd84099116033ac 100644
+--- a/assets/js/mastodon-feed.js
++++ b/assets/js/mastodon-feed.js
+@@ -4,10 +4,18 @@
+ const tootTemplate = document.createElement("template");
+ tootTemplate.innerHTML = `
+   <a target="_blank" rel="noopener" style="text-decoration: none;">
++    <div class="pf-v6-l-flex pf-m-gap-xs pf-m-align-items-center pf-v6-u-font-size-xs pf-v6-u-text-color-subtle" data-slot="boost" hidden>
++      <i class="fas fa-retweet" aria-hidden="true"></i>
++      <img data-slot="boost-avatar" style="width: 1rem; height: 1rem; border-radius: 50%;" />
++      <span data-slot="boost-label"></span>
++    </div>
+     <div class="pf-v6-c-content pf-v6-u-font-size-sm" data-slot="body"></div>
+     <div data-slot="media"></div>
+     <div class="pf-v6-l-flex pf-m-gap-sm pf-m-align-items-center pf-v6-u-font-size-xs pf-v6-u-text-color-subtle">
+-      <img data-slot="avatar" style="width: 1rem; height: 1rem; border-radius: 50%;" />
++      <span class="pf-v6-l-flex pf-m-align-items-center" data-slot="identity">
++        <img data-slot="avatar" style="width: 1rem; height: 1rem; border-radius: 50%;" />
++        <span data-slot="author-name" hidden></span>
++      </span>
+       <span data-slot="timestamp"></span>
+       <span class="pf-v6-l-flex pf-m-gap-sm pf-m-align-items-center" data-slot="stats"></span>
+     </div>
+@@ -32,6 +40,17 @@     item.style.borderTop =
+       "var(--pf-t--global--border--width--divider--default) solid var(--pf-t--global--border--color--default)";
+   }
+ 
++  const boost = $("boost");
++  if (toot.boostedBy) {
++    boost.hidden = false;
++    const boostAvatar = $("boost-avatar");
++    boostAvatar.src = proxyImageUrl(toot.boostedBy.userProfilePictureURL, api, "sm");
++    boostAvatar.alt = toot.boostedBy.userDisplayName;
++    $("boost-label").textContent = `${toot.boostedBy.userDisplayName} boosted`;
++  } else {
++    boost.remove();
++  }
++
+   const body = $("body");
+   body.innerHTML = DOMPurify.sanitize(toot.body); // In the future, we want to use https://developer.mozilla.org/en-US/docs/Web/API/Element/setHTML for this
+ 
+@@ -49,9 +68,22 @@     mediaSlot.append(el);
+   }
+   if (!mediaSlot.children.length) mediaSlot.remove();
+ 
++  const author = toot.author ?? {
++    userProfilePictureURL: data.userProfilePictureURL,
++    userDisplayName: data.userDisplayName,
++  };
+   const avatar = $("avatar");
+-  avatar.src = proxyImageUrl(data.userProfilePictureURL, api, "sm");
+-  avatar.alt = data.userDisplayName;
++  avatar.src = proxyImageUrl(author.userProfilePictureURL, api, "sm");
++  avatar.alt = author.userDisplayName;
++
++  const authorName = $("author-name");
++  if (toot.boostedBy) {
++    authorName.hidden = false;
++    authorName.textContent = author.userDisplayName;
++    $("identity").classList.add("pf-m-gap-xs");
++  } else {
++    authorName.remove();
++  }
+ 
+   $("timestamp").textContent = new Date(toot.timestamp).toLocaleDateString(
+     undefined,
+@@ -88,7 +120,7 @@       const api = this.getAttribute("api");
+       const profile = this.getAttribute("profile");
+       try {
+         const data = await fetch(
+-          `${api}/mastodon?username=${encodeURIComponent(username)}`,
++          `${api}/mastodon?username=${encodeURIComponent(username)}&includeReblogs`,
+         ).then((r) => r.json());
+         if (!data.toots?.length) {
+           this.textContent = "No posts yet.";
+diff --git a/go.mod b/go.mod
+index e5938cd3a81d6e714e472538ea30fb0b1118c2e9..0675f4a40e7334a9b37b4434dcba3ca0ebf89102 100644
+--- a/go.mod
++++ b/go.mod
+@@ -4,14 +4,14 @@ go 1.26
+ 
+ require (
+ 	github.com/mattn/go-mastodon v0.0.11 // indirect
+-	github.com/pojntfx/felicitas.pojtinger.com v0.4.1
++	github.com/pojntfx/felicitas.pojtinger.com v0.4.2
+ )
+ 
+ require (
+ 	github.com/anthonynsimon/bild v0.15.0
+ 	github.com/gorilla/feeds v1.2.0
+ 	github.com/nicksrandall/prosemirror-go v0.0.0-20170601171447-b0778c4954c7
+-	golang.org/x/image v0.38.0
++	golang.org/x/image v0.41.0
+ 	golang.org/x/sync v0.20.0
+ )
+ 
+diff --git a/go.sum b/go.sum
+index 47bc39f90d8b630d13308cf14db8d9c7adbdfb9b..9146fe33de28c13863f552e040e4418d183b3feb 100644
+--- a/go.sum
++++ b/go.sum
+@@ -16,16 +16,16 @@ github.com/nicksrandall/prosemirror-go v0.0.0-20170601171447-b0778c4954c7 h1:hqdxE60dI1SB2L1jp9B4dIAg4zxnsIL6uR/FiDpucOQ=
+ github.com/nicksrandall/prosemirror-go v0.0.0-20170601171447-b0778c4954c7/go.mod h1:SxVP5G6CLbm5BLRI6CKfAAgr8Ark2LSkCUwazP6vF4g=
+ github.com/pmezard/go-difflib v1.0.0 h1:4DBwDE0NGyQoBHbLQYPwSUPoCMWR5BEzIk/f1lZbAQM=
+ github.com/pmezard/go-difflib v1.0.0/go.mod h1:iKH77koFhYxTK1pcRnkKkqfTogsbg7gZNVY4sRDYZ/4=
+-github.com/pojntfx/felicitas.pojtinger.com v0.4.1 h1:bTUaI/b8csLNWjsEBqb2d3Xao6njUst5XPOREuOfkiM=
+-github.com/pojntfx/felicitas.pojtinger.com v0.4.1/go.mod h1:XaKmAAyinrHKMlRAXF7/rhBeENkC6e/Zf2SrhIGMgbo=
++github.com/pojntfx/felicitas.pojtinger.com v0.4.2 h1:dmRdD4ImwaTQQVi+r3XPwpOE+nK/sLb74ikd6KlsQ0I=
++github.com/pojntfx/felicitas.pojtinger.com v0.4.2/go.mod h1:T269XVGjEx1WCbuuqOzFLEzHsacCd7EeqkIpvkiJCfk=
+ github.com/rogpeppe/go-internal v1.9.0 h1:73kH8U+JUqXU8lRuOHeVHaa/SZPifC7BkcraZVejAe8=
+ github.com/rogpeppe/go-internal v1.9.0/go.mod h1:WtVeX8xhTBvf0smdhujwtBcq4Qrzq/fJaraNFVN+nFs=
+ github.com/stretchr/testify v1.11.1 h1:7s2iGBzp5EwR7/aIZr8ao5+dra3wiQyKjjFuvgVKu7U=
+ github.com/stretchr/testify v1.11.1/go.mod h1:wZwfW3scLgRK+23gO65QZefKpKQRnfz6sD981Nm4B6U=
+ github.com/tomnomnom/linkheader v0.0.0-20250811210735-e5fe3b51442e h1:tD38/4xg4nuQCASJ/JxcvCHNb46w0cdAaJfkzQOO1bA=
+ github.com/tomnomnom/linkheader v0.0.0-20250811210735-e5fe3b51442e/go.mod h1:krvJ5AY/MjdPkTeRgMYbIDhbbbVvnPQPzsIsDJO8xrY=
+-golang.org/x/image v0.38.0 h1:5l+q+Y9JDC7mBOMjo4/aPhMDcxEptsX+Tt3GgRQRPuE=
+-golang.org/x/image v0.38.0/go.mod h1:/3f6vaXC+6CEanU4KJxbcUZyEePbyKbaLoDOe4ehFYY=
++golang.org/x/image v0.41.0 h1:8wS72eGJMJaBxK6okTzd4WaXumUlTVlb753MlsSvTCo=
++golang.org/x/image v0.41.0/go.mod h1:uIc348UZMSvS5Z65CVZ7iDPaNobNFEPeJ4kbqTOszmA=
+ golang.org/x/sync v0.20.0 h1:e0PTpb7pjO8GAtTs2dQ6jYa5BWYlMuX047Dco/pItO4=
+ golang.org/x/sync v0.20.0/go.mod h1:9xrNwdLfx4jkKbNva9FpL6vEN7evnE43NNNJQ2LF3+0=
+ gopkg.in/yaml.v3 v3.0.1 h1:fxVm/GzAzEWqLHuvctI91KS9hhNmmWOoWu0XTYJS7CA=
+
