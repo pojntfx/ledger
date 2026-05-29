@@ -1,0 +1,196 @@
+From 2f2c398b1c103fa56f23be175be6b9b6480aafbd Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Thu, 28 May 2026 22:48:46 -0700
+Subject: [PATCH] GIR: Add option to skip the build tags altogether if only one version is needed
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/gen.go b/gen.go
+index 6dd416ba6d6eea4a312ab3359156f207e405f22b..490d951180ccfad141dc87bcb595c87b6f7fcbd6 100644
+--- a/gen.go
++++ b/gen.go
+@@ -8,7 +8,6 @@ 	"text/template"
+ 
+ 	"codeberg.org/puregotk/puregotk/pkg/gir/pass"
+ 	"codeberg.org/puregotk/puregotk/pkg/gir/util"
+-	"golang.org/x/sync/errgroup"
+ )
+ 
+ //go:generate go run gen.go
+@@ -25,7 +24,13 @@ 		girs = append(girs, path)
+ 		return nil
+ 	})
+ 
+-	p, err := pass.New(girs, "codeberg.org/puregotk/puregotk/v4")
++	p, err := pass.New(
++		girs,
++		"codeberg.org/puregotk/puregotk/v4",
++		pass.Options{
++			IncludeVersionWithoutGIRDocs: true, // With GIR docs (LGPL-3) and without GIR docs (MIT)
++		},
++	)
+ 	if err != nil {
+ 		panic(err)
+ 	}
+@@ -50,20 +55,7 @@ 		panic(err)
+ 	}
+ 
+ 	// Write go files by making the second pass
+-	g := new(errgroup.Group)
+-	g.Go(func() error {
+-		p.Second(dir, gotemp, true) // With GIR docs (LGPL-3)
+-
+-		return nil
+-	})
+-	g.Go(func() error {
+-		p.Second(dir, gotemp, false) // Without GIR docs (MIT)
+-
+-		return nil
+-	})
+-	if err := g.Wait(); err != nil {
+-		panic(err)
+-	}
++	p.Second(dir, gotemp)
+ 
+ 	// Finally copy some extra code that we want in the API
+ 	data, err := os.ReadFile("templates/gobject")
+diff --git a/internal/gir/pass/pass.go b/internal/gir/pass/pass.go
+index a3c1621d122422fe9105961a4494fce5079d0186..0965c8e86c803a0bc246dda37d04e7b4ef1ce688 100644
+--- a/internal/gir/pass/pass.go
++++ b/internal/gir/pass/pass.go
+@@ -15,6 +15,7 @@ 	"text/template"
+ 
+ 	"codeberg.org/puregotk/puregotk/internal/gir/types"
+ 	"codeberg.org/puregotk/puregotk/internal/gir/util"
++	"golang.org/x/sync/errgroup"
+ 	"mvdan.cc/gofumpt/format"
+ )
+ 
+@@ -27,15 +28,21 @@ type Pass struct {
+ 	Parsed []types.Repository
+ 	Types  types.KindMap
+ 
++	opts Options
++
+ 	impModule         string
+ 	impPackageImports map[string]string
+ }
+ 
++type Options struct {
++	IncludeVersionWithoutGIRDocs bool
++}
++
+ // New parses the given GIR files and associates their namespaces with module
+ // for import resolution. Additional deps can override the module for specific
+ // GIR files (e.g. files from a dependency). The returned Pass is then used
+ // across First and Second to collect type info and generate Go source files.
+-func New(files []string, module string, deps ...Dependency) (*Pass, error) {
++func New(files []string, module string, opts Options, deps ...Dependency) (*Pass, error) {
+ 	fileModule := make(map[string]string)
+ 	allFiles := files
+ 	for _, d := range deps {
+@@ -47,6 +54,8 @@ 	}
+ 	p := Pass{
+ 		Parsed: make([]types.Repository, len(allFiles)),
+ 		Types:  make(types.KindMap),
++
++		opts: opts,
+ 
+ 		impModule:         module,
+ 		impPackageImports: make(map[string]string),
+@@ -580,6 +589,15 @@ 		// Packages that need to have their types manually registered
+ 		// See https://bugs.webkit.org/show_bug.cgi?id=175937
+ 		registerTypes := pkgName == "webkit"
+ 
++		buildTag := ""
++		if p.opts.IncludeVersionWithoutGIRDocs {
++			if includeGIRDocs {
++				buildTag = "!nodocs"
++			} else {
++				buildTag = "nodocs"
++			}
++		}
++
+ 		args := types.TemplateArg{
+ 			PkgName:         pkgName,
+ 			PkgEnv:          strings.ToUpper(pkgName),
+@@ -596,7 +614,7 @@ 			Constants:       pf.constants,
+ 			Functions:       pf.functions,
+ 			Interfaces:      pf.interfaces,
+ 			Classes:         pf.classes,
+-			IncludeGIRDocs:  includeGIRDocs,
++			BuildTag:        buildTag,
+ 		}
+ 
+ 		var uf bytes.Buffer
+@@ -619,8 +637,25 @@ 		}
+ 	}
+ }
+ 
+-func (p *Pass) Second(dir string, gotemp *template.Template, includeDocs bool) {
++func (p *Pass) Second(dir string, gotemp *template.Template) {
+ 	for _, r := range p.Parsed {
+-		p.writeGo(r, gotemp, dir, includeDocs)
++		if p.opts.IncludeVersionWithoutGIRDocs {
++			g := new(errgroup.Group)
++			g.Go(func() error {
++				p.writeGo(r, gotemp, dir, true)
++
++				return nil
++			})
++			g.Go(func() error {
++				p.writeGo(r, gotemp, dir, false)
++
++				return nil
++			})
++			if err := g.Wait(); err != nil {
++				panic(err)
++			}
++		} else {
++			p.writeGo(r, gotemp, dir, true)
++		}
+ 	}
+ }
+diff --git a/internal/gir/types/template.go b/internal/gir/types/template.go
+index 96292986fe0a560aa906d735c2408065df04932e..a4ae8e7e73bbb56d6e0a1ca23e03df106e462d1a 100644
+--- a/internal/gir/types/template.go
++++ b/internal/gir/types/template.go
+@@ -550,6 +550,6 @@ 	// Interfaces is the list of interfaces that this package implements
+ 	Interfaces []InterfaceTemplate
+ 	// Classes are the Go struct with receiver declarations
+ 	Classes []ClassTemplate
+-	// IncludeGIRDocs is declares whether the GIR docs should be included or not
+-	IncludeGIRDocs bool
++	// BuildTag is an optional build tag to add as a requirement if set
++	BuildTag string
+ }
+diff --git a/pkg/gir/pass/pass.go b/pkg/gir/pass/pass.go
+index 975220ccaae28613f0d24ed34b4673e82bbf0ba7..66f3bde0d992b2994ee9b7878325d3c23b37acc1 100644
+--- a/pkg/gir/pass/pass.go
++++ b/pkg/gir/pass/pass.go
+@@ -5,6 +5,7 @@
+ type (
+ 	Pass       = pass.Pass
+ 	Dependency = pass.Dependency
++	Options    = pass.Options
+ )
+ 
+ var (
+diff --git a/templates/go b/templates/go
+index f20af4303dfdd66d7e0e04af471ff8a9cbdd8150..f6a00599f10a0be24f41480390fdd95b27000d7c 100644
+--- a/templates/go
++++ b/templates/go
+@@ -1,9 +1,6 @@
+-{{- if .IncludeGIRDocs }}
+-//go:build !nodocs
+-{{- else }}
+-//go:build nodocs
+-{{end}}
+-
++{{- if .BuildTag }}
++//go:build {{ .BuildTag }}
++{{- end}}
+ // Package {{.PkgName}} was automatically generated by codeberg.org/puregotk/puregotk DO NOT EDIT
+ package {{.PkgName}}
+ 
+
