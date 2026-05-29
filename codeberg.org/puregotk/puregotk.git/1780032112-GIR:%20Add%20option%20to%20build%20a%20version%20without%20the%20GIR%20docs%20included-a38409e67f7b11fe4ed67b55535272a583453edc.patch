@@ -1,0 +1,499 @@
+From a38409e67f7b11fe4ed67b55535272a583453edc Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Thu, 28 May 2026 22:21:52 -0700
+Subject: [PATCH] GIR: Add option to build a version without the GIR docs included
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/gen.go b/gen.go
+index 230f2680e4287441688a3c31b515ebaf773c7f30..6dd416ba6d6eea4a312ab3359156f207e405f22b 100644
+--- a/gen.go
++++ b/gen.go
+@@ -8,6 +8,7 @@ 	"text/template"
+ 
+ 	"codeberg.org/puregotk/puregotk/pkg/gir/pass"
+ 	"codeberg.org/puregotk/puregotk/pkg/gir/util"
++	"golang.org/x/sync/errgroup"
+ )
+ 
+ //go:generate go run gen.go
+@@ -49,7 +50,20 @@ 		panic(err)
+ 	}
+ 
+ 	// Write go files by making the second pass
+-	p.Second(dir, gotemp)
++	g := new(errgroup.Group)
++	g.Go(func() error {
++		p.Second(dir, gotemp, true) // With GIR docs (LGPL-3)
++
++		return nil
++	})
++	g.Go(func() error {
++		p.Second(dir, gotemp, false) // Without GIR docs (MIT)
++
++		return nil
++	})
++	if err := g.Wait(); err != nil {
++		panic(err)
++	}
+ 
+ 	// Finally copy some extra code that we want in the API
+ 	data, err := os.ReadFile("templates/gobject")
+diff --git a/go.mod b/go.mod
+index 728696bfc209003c845acdea870b8fb599fcdad0..b0ce7be3a1ab73d6f203a6dae3cdbd2867d43636 100644
+--- a/go.mod
++++ b/go.mod
+@@ -6,6 +6,7 @@ toolchain go1.24.5
+ 
+ require (
+ 	codeberg.org/puregotk/purego v0.0.0-20260224095105-2513c838cb80
++	golang.org/x/sync v0.17.0
+ 	mvdan.cc/gofumpt v0.9.2
+ )
+ 
+diff --git a/go.sum b/go.sum
+index c5e7944ba77223e72649ed2e46b15761baf1decc..9ff40e0f039fa2fdd295ad9fadfb8f1ed8f59c0f 100644
+--- a/go.sum
++++ b/go.sum
+@@ -10,6 +10,8 @@ github.com/kr/text v0.2.0 h1:5Nx0Ya0ZqY2ygV366QzturHI13Jq95ApcVaJBhpS+AY=
+ github.com/kr/text v0.2.0/go.mod h1:eLer722TekiGuMkidMxC/pM04lWEeraHUUmBw8l2grE=
+ github.com/rogpeppe/go-internal v1.14.1 h1:UQB4HGPB6osV0SQTLymcB4TgvyWu6ZyliaW0tI/otEQ=
+ github.com/rogpeppe/go-internal v1.14.1/go.mod h1:MaRKkUm5W0goXpeCfT7UZI6fk/L7L7so1lCWt35ZSgc=
++golang.org/x/sync v0.17.0 h1:l60nONMj9l5drqw6jlhIELNv9I0A4OFgRsG9k2oT9Ug=
++golang.org/x/sync v0.17.0/go.mod h1:9KTHXmSnoGruLpwFjVSX0lNNA75CykiMECbovNTZqGI=
+ golang.org/x/tools v0.38.0 h1:Hx2Xv8hISq8Lm16jvBZ2VQf+RLmbd7wVUsALibYI/IQ=
+ golang.org/x/tools v0.38.0/go.mod h1:yEsQ/d/YK8cjh0L6rZlY8tgtlKiBNTL14pGDJPJpYQs=
+ mvdan.cc/gofumpt v0.9.2 h1:zsEMWL8SVKGHNztrx6uZrXdp7AX8r421Vvp23sz7ik4=
+diff --git a/internal/gir/pass/pass.go b/internal/gir/pass/pass.go
+index 270117cf2050e8a7c8d97a0e7640bf32922d4122..a3c1621d122422fe9105961a4494fce5079d0186 100644
+--- a/internal/gir/pass/pass.go
++++ b/internal/gir/pass/pass.go
+@@ -9,6 +9,7 @@ 	"encoding/xml"
+ 	"fmt"
+ 	"iter"
+ 	"os"
++	"path/filepath"
+ 	"strings"
+ 	"text/template"
+ 
+@@ -177,12 +178,16 @@ 		}
+ 	}
+ }
+ 
+-func (p *Pass) writeGo(r types.Repository, gotemp *template.Template, dir string) {
++func (p *Pass) writeGo(r types.Repository, gotemp *template.Template, dir string, includeGIRDocs bool) {
+ 	ns := r.Namespaces[0]
+ 	pkgName := strings.ToLower(ns.Name)
+ 
+ 	files := make(map[string]*file)
+ 	getFile := func(fn string) *file {
++		if !includeGIRDocs {
++			fn = strings.TrimSuffix(fn, filepath.Ext(".go")) + "_nodocs.go"
++		}
++
+ 		pf, ok := files[fn]
+ 		if !ok {
+ 			pf = &file{
+@@ -195,7 +200,7 @@ 		return pf
+ 	}
+ 
+ 	for _, el := range ns.Bitfields {
+-		temp := el.Template(ns.Name)
++		temp := el.Template(ns.Name, includeGIRDocs)
+ 		pf := getFile(el.FilenameSafe())
+ 		pf.enums = append(pf.enums, temp)
+ 		if temp.TypeGetter != "" {
+@@ -204,7 +209,7 @@ 		}
+ 	}
+ 
+ 	for _, el := range ns.Enums {
+-		temp := el.Template(ns.Name)
++		temp := el.Template(ns.Name, includeGIRDocs)
+ 		pf := getFile(el.FilenameSafe())
+ 		pf.enums = append(pf.enums, temp)
+ 		if temp.TypeGetter != "" {
+@@ -214,14 +219,16 @@ 	}
+ 
+ 	for _, con := range ns.Constants {
+ 		pf := getFile(con.FilenameSafe())
+-		ct := con.Template(ns.Name, p.Types)
++		ct := con.Template(ns.Name, p.Types, includeGIRDocs)
+ 		pf.constants = append(pf.constants, ct)
+ 		pf.imps.TrackGoType(ct.Type)
+ 	}
+ 
+ 	callbackDocs := make(map[string]string)
+-	for _, cb := range ns.Callbacks {
+-		callbackDocs[cb.Name] = cb.Doc.StringSafe()
++	if includeGIRDocs {
++		for _, cb := range ns.Callbacks {
++			callbackDocs[cb.Name] = cb.Doc.StringSafe()
++		}
+ 	}
+ 
+ 	recordLookup := make(map[string]bool)
+@@ -240,7 +247,7 @@ 		for i, c := range rec.Constructors {
+ 			constructors[i] = types.FuncTemplate{
+ 				Name:  util.ConstructorName(c.Name, rec.Name),
+ 				CName: c.CIdentifier,
+-				Doc:   c.Doc.StringSafe(),
++				Doc:   types.DocsOrEmpty(c.Doc.StringSafe(), includeGIRDocs),
+ 				Args:  c.Parameters.Template(ns.Name, "", p.Types, c.Throws, false, imps),
+ 				Ret:   c.ReturnValue.Template(ns.Name, "", p.Types, c.Throws, imps),
+ 			}
+@@ -261,16 +268,18 @@
+ 				apiTypes := args.API.Types
+ 
+ 				var doc string
+-				if f.Callback.Doc != nil && f.Callback.Doc.String != "" {
+-					doc = f.Callback.Doc.StringSafe()
+-				} else {
+-					baseClassName := strings.TrimSuffix(rec.Name, "Class")
+-					callbackName := baseClassName + util.SnakeToCamel(f.Name) + "Func"
++				if includeGIRDocs {
++					if f.Callback.Doc != nil && f.Callback.Doc.String != "" {
++						doc = f.Callback.Doc.StringSafe()
++					} else {
++						baseClassName := strings.TrimSuffix(rec.Name, "Class")
++						callbackName := baseClassName + util.SnakeToCamel(f.Name) + "Func"
+ 
+-					if callbackDoc, exists := callbackDocs[callbackName]; exists && callbackDoc != "" {
+-						doc = callbackDoc
+-					} else {
+-						doc = f.Doc.StringSafe()
++						if callbackDoc, exists := callbackDocs[callbackName]; exists && callbackDoc != "" {
++							doc = callbackDoc
++						} else {
++							doc = f.Doc.StringSafe()
++						}
+ 					}
+ 				}
+ 
+@@ -280,7 +289,7 @@
+ 				callbackAccessors = append(callbackAccessors, types.CallbackAccessor{
+ 					Name:         callbackName,
+ 					CName:        f.Name,
+-					Doc:          doc,
++					Doc:          types.DocsOrEmpty(doc, includeGIRDocs),
+ 					CallbackType: "func(" + strings.Join(apiTypes, ", ") + ") " + ret.Value,
+ 					Args:         args,
+ 					Ret:          ret,
+@@ -336,7 +345,7 @@ 					break
+ 				}
+ 			}
+ 			receivers = append(receivers, types.FuncTemplate{
+-				Doc:   f.Doc.StringSafe(),
++				Doc:   types.DocsOrEmpty(f.Doc.StringSafe(), includeGIRDocs),
+ 				Name:  name,
+ 				CName: f.CIdentifier,
+ 				Args:  f.Parameters.Template(ns.Name, "", p.Types, f.Throws, false, imps),
+@@ -345,7 +354,7 @@ 			})
+ 		}
+ 		pf.records = append(pf.records, types.RecordTemplate{
+ 			Name:              name,
+-			Doc:               rec.Doc.StringSafe(),
++			Doc:               types.DocsOrEmpty(rec.Doc.StringSafe(), includeGIRDocs),
+ 			Constructors:      constructors,
+ 			Receivers:         receivers,
+ 			Fields:            fields,
+@@ -360,7 +369,7 @@ 	for _, cb := range ns.Callbacks {
+ 		pf := getFile(cb.FilenameSafe())
+ 		cbImps := types.NewImportSet(pkgName, p.impModule, p.impPackageImports)
+ 		cbT := types.CallbackTemplate{
+-			Doc:  cb.Doc.StringSafe(),
++			Doc:  types.DocsOrEmpty(cb.Doc.StringSafe(), includeGIRDocs),
+ 			Name: cb.Name,
+ 			Args: cb.Parameters.Template(ns.Name, "", p.Types, cb.Throws, true, cbImps),
+ 			Ret:  cb.ReturnValue.Template(ns.Name, "", p.Types, cb.Throws, cbImps),
+@@ -374,14 +383,14 @@ 	}
+ 
+ 	for _, inter := range ns.Interfaces {
+ 		pf := getFile(inter.FilenameSafe())
+-		pf.interfaces = append(pf.interfaces, types.ConvertInterface(ns.Name, "", inter, nil, p.Types, pf.imps))
++		pf.interfaces = append(pf.interfaces, types.ConvertInterface(ns.Name, "", inter, nil, p.Types, pf.imps, includeGIRDocs))
+ 	}
+ 
+ 	for _, union := range ns.Unions {
+ 		pf := getFile(union.FilenameSafe())
+ 		name := util.SnakeToCamel(union.Name)
+ 		interT := types.AliasTemplate{
+-			Doc:  union.Doc.StringSafe(),
++			Doc:  types.DocsOrEmpty(union.Doc.StringSafe(), includeGIRDocs),
+ 			Name: name,
+ 			// structs are not yet supported in CGO
+ 			Value: "uintptr",
+@@ -397,7 +406,7 @@ 			typeName = "uintptr"
+ 		}
+ 		name := util.SnakeToCamel(alias.Name)
+ 		aliasT := types.AliasTemplate{
+-			Doc:  alias.Doc.StringSafe(),
++			Doc:  types.DocsOrEmpty(alias.Doc.StringSafe(), includeGIRDocs),
+ 			Name: name,
+ 			// structs are not yet supported in CGO
+ 			Value: typeName,
+@@ -414,7 +423,7 @@ 		pf := getFile(f.FilenameSafe())
+ 		pf.functions = append(pf.functions, types.FuncTemplate{
+ 			Name:  name,
+ 			CName: f.CIdentifier,
+-			Doc:   f.Doc.StringSafe(),
++			Doc:   types.DocsOrEmpty(f.Doc.StringSafe(), includeGIRDocs),
+ 			Args:  f.Parameters.Template(ns.Name, "", p.Types, f.Throws, false, pf.imps),
+ 			Ret:   f.ReturnValue.Template(ns.Name, "", p.Types, f.Throws, pf.imps),
+ 		})
+@@ -436,7 +445,7 @@ 			c.ReturnValue.AnyType.Type.Name = cls.Name
+ 			constructors[i] = types.FuncTemplate{
+ 				Name:  util.ConstructorName(c.Name, cls.Name),
+ 				CName: c.CIdentifier,
+-				Doc:   c.Doc.StringSafe(),
++				Doc:   types.DocsOrEmpty(c.Doc.StringSafe(), includeGIRDocs),
+ 				Args:  c.Parameters.Template(ns.Name, "", p.Types, c.Throws, false, imps),
+ 				Ret:   c.ReturnValue.Template(ns.Name, "", p.Types, c.Throws, imps),
+ 			}
+@@ -449,7 +458,7 @@ 			imps.AddPkg("glib")
+ 			imps.AddPkg("gobject")
+ 
+ 			signals[i] = types.SignalsTemplate{
+-				Doc:   s.Doc.StringSafe(),
++				Doc:   types.DocsOrEmpty(s.Doc.StringSafe(), includeGIRDocs),
+ 				Name:  util.DashToCamel(s.Name),
+ 				CName: s.Name,
+ 				Args:  s.Parameters.Template(ns.Name, "", p.Types, false, true, imps),
+@@ -461,7 +470,7 @@ 		for i, f := range cls.Methods {
+ 			name := util.SnakeToCamel(f.Name)
+ 			implemented[name] = true
+ 			receivers[i] = types.FuncTemplate{
+-				Doc:   f.Doc.StringSafe(),
++				Doc:   types.DocsOrEmpty(f.Doc.StringSafe(), includeGIRDocs),
+ 				Name:  name,
+ 				CName: f.CIdentifier,
+ 				Args:  f.Parameters.Template(ns.Name, "", p.Types, f.Throws, false, imps),
+@@ -474,17 +483,17 @@ 			name := fmt.Sprintf("%s%s", util.SnakeToCamel(cls.Name), util.SnakeToCamel(f.Name))
+ 			functions[i] = types.FuncTemplate{
+ 				Name:  name,
+ 				CName: f.CIdentifier,
+-				Doc:   f.Doc.StringSafe(),
++				Doc:   types.DocsOrEmpty(f.Doc.StringSafe(), includeGIRDocs),
+ 				Args:  f.Parameters.Template(ns.Name, "", p.Types, f.Throws, false, imps),
+ 				Ret:   f.ReturnValue.Template(ns.Name, "", p.Types, f.Throws, imps),
+ 			}
+ 		}
+ 		for _, impl := range cls.Implements {
+-			interfaces = append(interfaces, types.GetInterfaceFuncs(ns.Name, impl.Name, implemented, p.Types, imps))
++			interfaces = append(interfaces, types.GetInterfaceFuncs(ns.Name, impl.Name, implemented, p.Types, imps, includeGIRDocs))
+ 		}
+ 		properties := make([]types.PropertyTemplate, 0, len(cls.Properties))
+ 		for _, prop := range cls.Properties {
+-			propTemp := prop.Template(ns.Name, p.Types, imps)
++			propTemp := prop.Template(ns.Name, p.Types, imps, includeGIRDocs)
+ 
+ 			// TODO: Implement non-primitive types, then remove this
+ 			if propTemp.GValueType != "" {
+@@ -496,7 +505,7 @@ 		parent := util.NormalizeNamespace(ns.Name, cls.Parent, true)
+ 		imps.TrackGoType(parent)
+ 
+ 		pf.classes = append(pf.classes, types.ClassTemplate{
+-			Doc:          cls.Doc.StringSafe(),
++			Doc:          types.DocsOrEmpty(cls.Doc.StringSafe(), includeGIRDocs),
+ 			Name:         cls.Name,
+ 			Parent:       parent,
+ 			Constructors: constructors,
+@@ -587,6 +596,7 @@ 			Constants:       pf.constants,
+ 			Functions:       pf.functions,
+ 			Interfaces:      pf.interfaces,
+ 			Classes:         pf.classes,
++			IncludeGIRDocs:  includeGIRDocs,
+ 		}
+ 
+ 		var uf bytes.Buffer
+@@ -609,8 +619,8 @@ 		}
+ 	}
+ }
+ 
+-func (p *Pass) Second(dir string, gotemp *template.Template) {
++func (p *Pass) Second(dir string, gotemp *template.Template, includeDocs bool) {
+ 	for _, r := range p.Parsed {
+-		p.writeGo(r, gotemp, dir)
++		p.writeGo(r, gotemp, dir, includeDocs)
+ 	}
+ }
+diff --git a/internal/gir/types/interface.go b/internal/gir/types/interface.go
+index d482f44951fc41db08578c1551ea9a52836a9825..c48fe32650eacc969b6ef1493549636068cc151f 100644
+--- a/internal/gir/types/interface.go
++++ b/internal/gir/types/interface.go
+@@ -6,7 +6,7 @@
+ 	"codeberg.org/puregotk/puregotk/internal/gir/util"
+ )
+ 
+-func ConvertInterface(currns string, ins string, inter Interface, implemented map[string]bool, kinds KindMap, imps *ImportSet) InterfaceTemplate {
++func ConvertInterface(currns string, ins string, inter Interface, implemented map[string]bool, kinds KindMap, imps *ImportSet, includeGIRDocs bool) InterfaceTemplate {
+ 	var methods []InterfaceFuncTemplate
+ 
+ 	if inter.GLibGetType != "" {
+@@ -30,7 +30,7 @@ 		methods = append(methods, InterfaceFuncTemplate{
+ 			Namespace: newns,
+ 			FullName:  util.SnakeToCamel(m.CIdentifier),
+ 			FuncTemplate: FuncTemplate{
+-				Doc:   m.Doc.StringSafe(),
++				Doc:   DocsOrEmpty(m.Doc.StringSafe(), includeGIRDocs),
+ 				CName: m.CIdentifier,
+ 				Name:  name,
+ 				Args:  m.Parameters.Template(currns, ins, kinds, m.Throws, false, imps),
+@@ -41,7 +41,7 @@ 	}
+ 
+ 	properties := make([]PropertyTemplate, 0, len(inter.Properties))
+ 	for _, prop := range inter.Properties {
+-		propTemp := prop.Template(currns, kinds, imps)
++		propTemp := prop.Template(currns, kinds, imps, includeGIRDocs)
+ 
+ 		// TODO: Implement non-primitive types, then remove this
+ 		if propTemp.GValueType != "" {
+@@ -52,19 +52,27 @@
+ 	name := util.SnakeToCamel(inter.Name)
+ 	return InterfaceTemplate{
+ 		Name:       name,
+-		Doc:        inter.Doc.StringSafe(),
++		Doc:        DocsOrEmpty(inter.Doc.StringSafe(), includeGIRDocs),
+ 		Methods:    methods,
+ 		Properties: properties,
+ 		TypeGetter: inter.GLibGetType,
+ 	}
+ }
+ 
+-func GetInterfaceFuncs(ns string, name string, implemented map[string]bool, kinds KindMap, imps *ImportSet) InterfaceTemplate {
++func GetInterfaceFuncs(ns string, name string, implemented map[string]bool, kinds KindMap, imps *ImportSet, includeGIRDocs bool) InterfaceTemplate {
+ 	inter := kinds.MustInterface(ns, name)
+ 	parts := strings.Split(name, ".")
+ 	var ins string
+ 	if len(parts) > 1 {
+ 		ins = strings.ToLower(parts[0])
+ 	}
+-	return ConvertInterface(ns, ins, inter, implemented, kinds, imps)
++	return ConvertInterface(ns, ins, inter, implemented, kinds, imps, includeGIRDocs)
++}
++
++func DocsOrEmpty(doc string, includeDocs bool) string {
++	if includeDocs {
++		return doc
++	}
++
++	return ""
+ }
+diff --git a/internal/gir/types/template.go b/internal/gir/types/template.go
+index 91dede9e5c2c12178234f2fab7de67f39932fc43..96292986fe0a560aa906d735c2408065df04932e 100644
+--- a/internal/gir/types/template.go
++++ b/internal/gir/types/template.go
+@@ -550,4 +550,6 @@ 	// Interfaces is the list of interfaces that this package implements
+ 	Interfaces []InterfaceTemplate
+ 	// Classes are the Go struct with receiver declarations
+ 	Classes []ClassTemplate
++	// IncludeGIRDocs is declares whether the GIR docs should be included or not
++	IncludeGIRDocs bool
+ }
+diff --git a/internal/gir/types/types.go b/internal/gir/types/types.go
+index a2472c868a978acbbe4cc7065178d719945acb4d..b305e07647dd07c5f2e8202009f3e67b9b8f5587 100644
+--- a/internal/gir/types/types.go
++++ b/internal/gir/types/types.go
+@@ -216,7 +216,7 @@ 	InfoAttrs
+ 	InfoElements
+ }
+ 
+-func (b *Bitfield) Template(ns string) EnumTemplate {
++func (b *Bitfield) Template(ns string, includeGIRDocs bool) EnumTemplate {
+ 	els := make([]enumValues, len(b.Members))
+ 	for i, m := range b.Members {
+ 		v, err := strconv.Atoi(m.Value)
+@@ -225,14 +225,14 @@ 			panic(err)
+ 		}
+ 		// + Value needed to get rid of duplicates
+ 		els[i] = enumValues{
+-			Doc:   m.Doc.StringSafe(),
++			Doc:   DocsOrEmpty(m.Doc.StringSafe(), includeGIRDocs),
+ 			Name:  util.SnakeToCamel(util.RemoveSnakePrefix(strings.ToLower(m.CIdentifier), ns)) + "Value",
+ 			Value: v,
+ 		}
+ 	}
+ 	return EnumTemplate{
+ 		Name:       util.SnakeToCamel(b.Name),
+-		Doc:        b.Doc.StringSafe(),
++		Doc:        DocsOrEmpty(b.Doc.StringSafe(), includeGIRDocs),
+ 		Values:     els,
+ 		TypeGetter: b.GLibGetType,
+ 	}
+@@ -408,7 +408,7 @@ 	InfoAttrs
+ 	InfoElements
+ }
+ 
+-func (c *Constant) Template(ns string, kinds KindMap) ConstantTemplate {
++func (c *Constant) Template(ns string, kinds KindMap, includeGIRDocs bool) ConstantTemplate {
+ 	t := c.Type.Template(ns, kinds, false)
+ 	v := c.Value
+ 
+@@ -419,7 +419,7 @@ 	}
+ 
+ 	return ConstantTemplate{
+ 		Name:  c.Name,
+-		Doc:   c.Doc.StringSafe(),
++		Doc:   DocsOrEmpty(c.Doc.StringSafe(), includeGIRDocs),
+ 		Type:  t,
+ 		Value: v,
+ 	}
+@@ -485,7 +485,7 @@ 	InfoAttrs
+ 	InfoElements
+ }
+ 
+-func (e *Enum) Template(ns string) EnumTemplate {
++func (e *Enum) Template(ns string, includeGIRDocs bool) EnumTemplate {
+ 	els := make([]enumValues, len(e.Members))
+ 
+ 	for i, m := range e.Members {
+@@ -496,7 +496,7 @@ 		}
+ 		id := strings.ToLower(m.CIdentifier)
+ 		sID := util.RemoveSnakePrefix(id, ns)
+ 		els[i] = enumValues{
+-			Doc: m.Doc.StringSafe(),
++			Doc: DocsOrEmpty(m.Doc.StringSafe(), includeGIRDocs),
+ 			// + Value needed to get rid of duplicates
+ 			Name:  util.SnakeToCamel(sID) + "Value",
+ 			Value: v,
+@@ -504,7 +504,7 @@ 		}
+ 	}
+ 	return EnumTemplate{
+ 		Name:       util.SnakeToCamel(e.Name),
+-		Doc:        e.Doc.StringSafe(),
++		Doc:        DocsOrEmpty(e.Doc.StringSafe(), includeGIRDocs),
+ 		Values:     els,
+ 		TypeGetter: e.GLibGetType,
+ 	}
+@@ -734,7 +734,7 @@ func (p Property) IsReadable() bool {
+ 	return p.Readable == nil || *p.Readable
+ }
+ 
+-func (p *Property) Template(ns string, kinds KindMap, imps *ImportSet) PropertyTemplate {
++func (p *Property) Template(ns string, kinds KindMap, imps *ImportSet, includeGIRDocs bool) PropertyTemplate {
+ 	var (
+ 		goType                           = p.AnyType.Translate(ns, kinds)
+ 		cName                            = p.Name
+@@ -764,7 +764,7 @@ 		}
+ 	}
+ 
+ 	return PropertyTemplate{
+-		Doc:        p.Doc.StringSafe(),
++		Doc:        DocsOrEmpty(p.Doc.StringSafe(), includeGIRDocs),
+ 		Name:       util.DashToCamel(cName),
+ 		CName:      cName,
+ 		GoType:     goType,
+diff --git a/templates/go b/templates/go
+index f90951c7e292c64cec1714ad8ced0f1a2be0295a..f20af4303dfdd66d7e0e04af471ff8a9cbdd8150 100644
+--- a/templates/go
++++ b/templates/go
+@@ -1,3 +1,9 @@
++{{- if .IncludeGIRDocs }}
++//go:build !nodocs
++{{- else }}
++//go:build nodocs
++{{end}}
++
+ // Package {{.PkgName}} was automatically generated by codeberg.org/puregotk/puregotk DO NOT EDIT
+ package {{.PkgName}}
+ 
+
