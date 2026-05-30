@@ -1,0 +1,113 @@
+From e1d2d7563d354e83b032e984cc9dc68fcbadec74 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Fri, 29 May 2026 23:10:51 -0700
+Subject: [PATCH] feat: Add support for cleaning up callbacks in dial when dial widget is destroyed
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/internal/components/dial.go b/internal/components/dial.go
+index 9ad24f7f8db2f9ff2b63a037eff32c3ee2b4040b..c1d752e1cedfbbfe6c5f008d93503880f514aa21 100644
+--- a/internal/components/dial.go
++++ b/internal/components/dial.go
+@@ -1,6 +1,7 @@
+ package components
+ 
+ import (
++	"log/slog"
+ 	"math"
+ 	"runtime"
+ 	"unsafe"
+@@ -35,23 +36,30 @@
+ type Dial struct {
+ 	gtk.Widget
+ 
++	log *slog.Logger
++
+ 	app           *adw.Application
+ 	remainingTime int
+ 	countingDown  bool
++
++	callbacks []interface{}
+ }
+ 
+-func NewDial(app *adw.Application, FirstPropertyNameVar string, varArgs ...interface{}) Dial {
++func NewDial(app *adw.Application, log *slog.Logger, FirstPropertyNameVar string, varArgs ...interface{}) Dial {
+ 	obj := gobject.NewObject(gTypeDial, FirstPropertyNameVar, varArgs...)
+ 
+ 	var v Dial
+ 	obj.Cast(&v)
+ 
+ 	dial := (*Dial)(unsafe.Pointer(obj.GetData(dataKeyGoInstance)))
++	dial.log = log
++
+ 	dial.app = app
+ 
+ 	var styleChangedCallback func(gobject.Object, uintptr) = func(_ gobject.Object, _ uintptr) {
+ 		v.Widget.QueueDraw()
+ 	}
++	dial.callbacks = append(dial.callbacks, &styleChangedCallback)
+ 	app.GetStyleManager().ConnectNotify(&styleChangedCallback)
+ 
+ 	updateRemainingTimeFromPosition := func(x, y float64) {
+@@ -71,22 +79,26 @@ 	onDragBeginCb := func(_ gtk.GestureDrag, x float64, y float64) {
+ 		gobject.SignalEmit(obj, gobject.SignalLookup(signalDialDragBegin, gTypeDial), 0)
+ 		updateRemainingTimeFromPosition(x, y)
+ 	}
++	dial.callbacks = append(dial.callbacks, &onDragBeginCb)
+ 	drag.ConnectDragBegin(&onDragBeginCb)
+ 	onDragUpdateCb := func(drag gtk.GestureDrag, dx float64, dy float64) {
+ 		var x, y float64
+ 		drag.GetStartPoint(&x, &y)
+ 		updateRemainingTimeFromPosition(x+dx, y+dy)
+ 	}
++	dial.callbacks = append(dial.callbacks, &onDragUpdateCb)
+ 	drag.ConnectDragUpdate(&onDragUpdateCb)
+ 	onDragEndCb := func(_ gtk.GestureDrag, dx float64, dy float64) {
+ 		gobject.SignalEmit(obj, gobject.SignalLookup(signalDialDragEnd, gTypeDial), 0)
+ 	}
++	dial.callbacks = append(dial.callbacks, &onDragEndCb)
+ 	drag.ConnectDragEnd(&onDragEndCb)
+ 
+ 	click := gtk.NewGestureClick()
+ 	onPress := func(_ gtk.GestureClick, _ int32, x float64, y float64) {
+ 		updateRemainingTimeFromPosition(x, y)
+ 	}
++	dial.callbacks = append(dial.callbacks, &onPress)
+ 	click.ConnectPressed(&onPress)
+ 
+ 	v.Widget.AddController(&drag.EventController)
+@@ -260,12 +272,20 @@ 			w := &Dial{
+ 				Widget:        parent,
+ 				remainingTime: 300,
+ 				countingDown:  false,
++
++				callbacks: []interface{}{},
+ 			}
+ 
+ 			var pinner runtime.Pinner
+ 			pinner.Pin(w)
+ 
+ 			var cleanupCallback glib.DestroyNotify = func(data uintptr) {
++				for _, callback := range w.callbacks {
++					if err := glib.UnrefCallback(callback); err != nil {
++						w.log.Error("Could not unref callback", "err", err)
++					}
++				}
++
+ 				pinner.Unpin()
+ 			}
+ 			o.SetDataFull(dataKeyGoInstance, uintptr(unsafe.Pointer(w)), &cleanupCallback)
+diff --git a/internal/components/main_window.go b/internal/components/main_window.go
+index 1ece80355e0589c8e7171cb7a2b4057a10e52680..be1185450f83c6bb9c365cc5df7ca9ece075acad 100644
+--- a/internal/components/main_window.go
++++ b/internal/components/main_window.go
+@@ -65,7 +65,7 @@ 	window.app = app
+ 
+ 	window.ctx = ctx
+ 
+-	dial := NewDial(window.app, "css-name")
++	dial := NewDial(window.app, window.log, "css-name")
+ 	dial.Widget.SetHexpand(true)
+ 	dial.Widget.SetVexpand(true)
+ 	window.dialArea.Append(&dial.Widget)
+
