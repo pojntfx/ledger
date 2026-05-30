@@ -1,0 +1,98 @@
+From 3e78f4616a5008ad2a15148faa86137d5226e2e3 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Fri, 29 May 2026 23:24:02 -0700
+Subject: [PATCH] feat: Add support for cleaning up callbacks in main window when main window widget is destroyed
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/internal/components/main_window.go b/internal/components/main_window.go
+index be1185450f83c6bb9c365cc5df7ca9ece075acad..0f6cbabdac187d845d0205068fcbaa70c79296ad 100644
+--- a/internal/components/main_window.go
++++ b/internal/components/main_window.go
+@@ -49,6 +49,8 @@ 	app *adw.Application
+ 
+ 	s    *state.StateMachine
+ 	held bool
++
++	callbacks []interface{}
+ }
+ 
+ func NewMainWindow(ctx context.Context, app *adw.Application, log *slog.Logger, settings *gio.Settings, FirstPropertyNameVar string, varArgs ...interface{}) MainWindow {
+@@ -367,6 +369,7 @@
+ 			return
+ 		}
+ 	}
++	window.callbacks = append(window.callbacks, &onDialDragBegin)
+ 	dial.ConnectDragBegin(&onDialDragBegin)
+ 
+ 	onDialDragEnd := func() {
+@@ -376,6 +379,7 @@
+ 			return
+ 		}
+ 	}
++	window.callbacks = append(window.callbacks, &onDialDragEnd)
+ 	dial.ConnectDragEnd(&onDialDragEnd)
+ 
+ 	onToggleTimer := func(gio.SimpleAction, uintptr) {
+@@ -405,6 +409,7 @@
+ 			return
+ 		}
+ 	}
++	window.callbacks = append(window.callbacks, &onToggleTimer)
+ 	toggleTimerAction.ConnectActivate(&onToggleTimer)
+ 	window.AddAction(toggleTimerAction)
+ 
+@@ -415,6 +420,7 @@
+ 			return
+ 		}
+ 	}
++	window.callbacks = append(window.callbacks, &onAddTime)
+ 	addTimeAction.ConnectActivate(&onAddTime)
+ 	window.AddAction(addTimeAction)
+ 
+@@ -425,6 +431,7 @@
+ 			return
+ 		}
+ 	}
++	window.callbacks = append(window.callbacks, &onRemoveTime)
+ 	removeTimeAction.ConnectActivate(&onRemoveTime)
+ 	window.AddAction(removeTimeAction)
+ 
+@@ -432,6 +439,7 @@ 	closeWindowAction := gio.NewSimpleAction("closeWindow", nil)
+ 	onCloseWindow := func(gio.SimpleAction, uintptr) {
+ 		window.Close()
+ 	}
++	window.callbacks = append(window.callbacks, &closeWindowAction)
+ 	closeWindowAction.ConnectActivate(&onCloseWindow)
+ 	window.AddAction(closeWindowAction)
+ 
+@@ -445,6 +453,7 @@ 		}
+ 
+ 		window.app.Activate()
+ 	}
++	window.callbacks = append(window.callbacks, &onStopAlarmPlaybackAction)
+ 	stopAlarmPlaybackAction.ConnectActivate(&onStopAlarmPlaybackAction)
+ 	window.app.AddAction(stopAlarmPlaybackAction)
+ 
+@@ -516,12 +525,20 @@ 				plusButton:   &plusButton,
+ 				minusButton:  &minusButton,
+ 
+ 				alarmClockElapsedFile: gtk.NewMediaFileForResource(resources.ResourceAlarmClockElapsedPath),
++
++				callbacks: []interface{}{},
+ 			}
+ 
+ 			var pinner runtime.Pinner
+ 			pinner.Pin(w)
+ 
+ 			var cleanupCallback glib.DestroyNotify = func(data uintptr) {
++				for _, callback := range w.callbacks {
++					if err := glib.UnrefCallback(callback); err != nil {
++						w.log.Error("Could not unref callback", "err", err)
++					}
++				}
++
+ 				pinner.Unpin()
+ 			}
+ 			o.SetDataFull(dataKeyGoInstance, uintptr(unsafe.Pointer(w)), &cleanupCallback)
+
