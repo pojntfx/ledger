@@ -1,0 +1,73 @@
+From 7cda39487597b6c97283bb99c16a4c6e23a5360a Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Sat, 30 May 2026 00:39:51 -0700
+Subject: [PATCH] fix: Free `onCloseWindow`, not `closeWindowAction`
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/go.mod b/go.mod
+index 362d7b54da2175b760f55b3d4acbad78f1908e99..7d9141fc756b95dec5d0799a7bc6c354d3a2a59a 100644
+--- a/go.mod
++++ b/go.mod
+@@ -5,6 +5,7 @@
+ tool github.com/dennwc/flatpak-go-mod
+ 
+ require (
++	codeberg.org/puregotk/purego v0.0.0-20260224095105-2513c838cb80
+ 	codeberg.org/puregotk/puregotk v0.0.0-20260420231554-98419d54d2d2
+ 	github.com/neilotoole/slogt v1.1.0
+ 	github.com/pojntfx/go-gettext v0.4.2
+@@ -14,7 +15,6 @@ 	github.com/stretchr/testify v1.11.1
+ )
+ 
+ require (
+-	codeberg.org/puregotk/purego v0.0.0-20260224095105-2513c838cb80 // indirect
+ 	github.com/davecgh/go-spew v1.1.1 // indirect
+ 	github.com/dennwc/flatpak-go-mod v0.1.1-0.20250809093520-ddf8d84264aa // indirect
+ 	github.com/goccy/go-yaml v1.18.0 // indirect
+diff --git a/go.mod.json b/go.mod.json
+index 51a0a9274bf94919394c327ab46d31445f808cc7..9a76cc205a6446181feb49e04e52d4ccd39a7514 100644
+--- a/go.mod.json
++++ b/go.mod.json
+@@ -5,6 +5,13 @@     "path": "modules.txt",
+     "type": "file"
+   },
+   {
++    "dest": "vendor/codeberg.org/puregotk/purego",
++    "sha256": "0d5fb9e11934b151ac357a9c0660e4dcd287d2f93db0829356415f6e6a8ef84b",
++    "strip-components": 3,
++    "type": "archive",
++    "url": "https://proxy.golang.org/codeberg.org/puregotk/purego/@v/v0.0.0-20260224095105-2513c838cb80.zip"
++  },
++  {
+     "dest": "vendor/codeberg.org/puregotk/puregotk",
+     "sha256": "e7fded6b4e364e3f2926d9470a991de1e422a712849008a24c347b2ccd96b5cf",
+     "strip-components": 3,
+@@ -45,13 +52,6 @@     "sha256": "b7325b561ead5304b72b9f32aebc871ff49b3823667d530a49fd6c8f3adfc96e",
+     "strip-components": 3,
+     "type": "archive",
+     "url": "https://proxy.golang.org/github.com/stretchr/testify/@v/v1.11.1.zip"
+-  },
+-  {
+-    "dest": "vendor/codeberg.org/puregotk/purego",
+-    "sha256": "0d5fb9e11934b151ac357a9c0660e4dcd287d2f93db0829356415f6e6a8ef84b",
+-    "strip-components": 3,
+-    "type": "archive",
+-    "url": "https://proxy.golang.org/codeberg.org/puregotk/purego/@v/v0.0.0-20260224095105-2513c838cb80.zip"
+   },
+   {
+     "dest": "vendor/github.com/davecgh/go-spew",
+diff --git a/internal/components/main_window.go b/internal/components/main_window.go
+index 0f6cbabdac187d845d0205068fcbaa70c79296ad..8cd8b2269e861b99137e9c80e24e7c9eb270fbf4 100644
+--- a/internal/components/main_window.go
++++ b/internal/components/main_window.go
+@@ -439,7 +439,7 @@ 	closeWindowAction := gio.NewSimpleAction("closeWindow", nil)
+ 	onCloseWindow := func(gio.SimpleAction, uintptr) {
+ 		window.Close()
+ 	}
+-	window.callbacks = append(window.callbacks, &closeWindowAction)
++	window.callbacks = append(window.callbacks, &onCloseWindow)
+ 	closeWindowAction.ConnectActivate(&onCloseWindow)
+ 	window.AddAction(closeWindowAction)
+ 
+
