@@ -1,0 +1,96 @@
+From ee154004a2e57a75113b4daff04de0fd22443cdd Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Fri, 29 May 2026 20:27:43 -0700
+Subject: [PATCH] fix: Manually unref callbacks dispatched to main thread after they ran
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/internal/components/main_window.go b/internal/components/main_window.go
+index 4f87749c7019333fcbd4529b771cdf454bc10c39..1ece80355e0589c8e7171cb7a2b4057a10e52680 100644
+--- a/internal/components/main_window.go
++++ b/internal/components/main_window.go
+@@ -104,7 +104,10 @@ 		lastInitialRemainingTime,
+ 		window.log,
+ 		&state.Hooks{
+ 			OnStartTimer: func(ctx context.Context) error {
+-				fn := glib.SourceFunc(func(u uintptr) bool {
++				var fn glib.SourceFunc
++				fn = glib.SourceFunc(func(u uintptr) bool {
++					defer glib.UnrefCallback(&fn)
++
+ 					window.dialWidget.SetCountingDown(true)
+ 
+ 					if !window.held {
+@@ -147,7 +150,10 @@
+ 				return nil
+ 			},
+ 			OnStopTimer: func(ctx context.Context) error {
+-				fn := glib.SourceFunc(func(u uintptr) bool {
++				var fn glib.SourceFunc
++				fn = glib.SourceFunc(func(u uintptr) bool {
++					defer glib.UnrefCallback(&fn)
++
+ 					window.dialWidget.SetRemainingTime(int(lastInitialRemainingTime.Seconds()))
+ 
+ 					window.dialWidget.SetCountingDown(false)
+@@ -180,7 +186,10 @@
+ 			OnInitialRemainingTimeChange: func(ctx context.Context, initialRemainingTime time.Duration) error {
+ 				lastInitialRemainingTime = initialRemainingTime
+ 
+-				fn := glib.SourceFunc(func(u uintptr) bool {
++				var fn glib.SourceFunc
++				fn = glib.SourceFunc(func(u uintptr) bool {
++					defer glib.UnrefCallback(&fn)
++
+ 					window.dialWidget.SetRemainingTime(int(lastInitialRemainingTime.Seconds()))
+ 					window.settings.SetInt64(resources.SchemaLastPositionKey, int64(lastInitialRemainingTime.Seconds()))
+ 
+@@ -191,7 +200,10 @@
+ 				return nil
+ 			},
+ 			OnCurrentRemainingTimeTick: func(ctx context.Context, currentRemainingTime time.Duration) error {
+-				fn := glib.SourceFunc(func(u uintptr) bool {
++				var fn glib.SourceFunc
++				fn = glib.SourceFunc(func(u uintptr) bool {
++					defer glib.UnrefCallback(&fn)
++
+ 					window.dialWidget.SetRemainingTime(int(currentRemainingTime.Seconds()))
+ 
+ 					return false
+@@ -202,7 +214,10 @@ 				return nil
+ 			},
+ 
+ 			OnStartAlarm: func(ctx context.Context) error {
+-				fn := glib.SourceFunc(func(u uintptr) bool {
++				var fn glib.SourceFunc
++				fn = glib.SourceFunc(func(u uintptr) bool {
++					defer glib.UnrefCallback(&fn)
++
+ 					window.dialWidget.SetRemainingTime(0)
+ 
+ 					window.dialWidget.SetCountingDown(true)
+@@ -265,7 +280,10 @@
+ 				return nil
+ 			},
+ 			OnStopAlarm: func(ctx context.Context) error {
+-				fn := glib.SourceFunc(func(u uintptr) bool {
++				var fn glib.SourceFunc
++				fn = glib.SourceFunc(func(u uintptr) bool {
++					defer glib.UnrefCallback(&fn)
++
+ 					window.dialWidget.SetRemainingTime(int(lastInitialRemainingTime.Seconds()))
+ 
+ 					window.dialWidget.SetCountingDown(false)
+@@ -305,7 +323,10 @@ 				return nil
+ 			},
+ 
+ 			OnPermittedTriggersChange: func(ctx context.Context, permittedTriggers []state.Trigger) error {
+-				fn := glib.SourceFunc(func(u uintptr) bool {
++				var fn glib.SourceFunc
++				fn = glib.SourceFunc(func(u uintptr) bool {
++					defer glib.UnrefCallback(&fn)
++
+ 					toggleTimerAction.SetEnabled(
+ 						slices.Contains(permittedTriggers, state.TriggerStartTimer) ||
+ 							slices.Contains(permittedTriggers, state.TriggerStopTimer) ||
+
