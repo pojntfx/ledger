@@ -1,0 +1,66 @@
+From 81ba203ebdbfb39f36bbf381f9b32247d0b2d12f Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Tue, 02 Jun 2026 23:35:38 -0700
+Subject: [PATCH] feat: Add Hugo CI/CD configuration based on Forgejo actions
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/.forgejo/workflows/hugo.yaml b/.forgejo/workflows/hugo.yaml
+new file mode 100644
+index 0000000000000000000000000000000000000000..7233f8f681fe3b3d4ad5344ce98764eb79899b5a
+--- /dev/null
++++ b/.forgejo/workflows/hugo.yaml
+@@ -0,0 +1,52 @@
++# Based on https://codeberg.org/steiger/hugo-on-codeberg-pages-documentation#4-set-up-forgejo-action
++# and https://github.com/vanlug/vanlug.github.io/blob/main/.github/workflows/hugo.yaml
++
++name: Hugo CI
++on:
++  push:
++    branches:
++      - main
++jobs:
++  build:
++    runs-on: codeberg-small
++    env:
++      DART_SASS_VERSION: 1.99.0
++      HUGO_VERSION: 0.157.0
++      NODE_VERSION: 25.6.1
++    steps:
++      - name: Checkout
++        uses: actions/checkout@v6
++        with:
++          fetch-depth: 0
++      - name: Setup Node.js
++        uses: actions/setup-node@v6
++        with:
++          node-version: ${{ env.NODE_VERSION }}
++      - name: Install Dart Sass
++        run: |
++          curl -sLJO "https://github.com/sass/dart-sass/releases/download/${DART_SASS_VERSION}/dart-sass-${DART_SASS_VERSION}-linux-x64.tar.gz"
++          tar -C "${HOME}/.local" -xf "dart-sass-${DART_SASS_VERSION}-linux-x64.tar.gz"
++          rm "dart-sass-${DART_SASS_VERSION}-linux-x64.tar.gz"
++          echo "${HOME}/.local/dart-sass" >> "${GITHUB_PATH}"
++      - name: Install Hugo
++        run: |
++          curl -sLJO "https://github.com/gohugoio/hugo/releases/download/v${HUGO_VERSION}/hugo_extended_${HUGO_VERSION}_linux-amd64.tar.gz"
++          mkdir "${HOME}/.local/hugo"
++          tar -C "${HOME}/.local/hugo" -xf "hugo_extended_${HUGO_VERSION}_linux-amd64.tar.gz"
++          rm "hugo_extended_${HUGO_VERSION}_linux-amd64.tar.gz"
++          echo "${HOME}/.local/hugo" >> "${GITHUB_PATH}"
++      - name: Install Node.js dependencies
++        run: |
++          [[ -f package-lock.json || -f npm-shrinkwrap.json ]] && npm ci || true
++      - name: Build the site
++        run: |
++          hugo build \
++            --gc \
++            --minify \
++            --baseURL "https://pojntfx.codeberg.page/netteart-com/"
++      - name: Deploy to Forgejo Pages
++        uses: actions/git-pages@v2
++        with:
++          site: https://pojntfx.codeberg.page/netteart-com/
++          token: ${{ forge.token }}
++          source: public/
+
