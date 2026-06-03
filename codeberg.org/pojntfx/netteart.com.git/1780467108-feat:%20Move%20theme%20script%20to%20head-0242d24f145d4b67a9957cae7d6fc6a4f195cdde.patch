@@ -1,0 +1,56 @@
+From 0242d24f145d4b67a9957cae7d6fc6a4f195cdde Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Tue, 02 Jun 2026 23:11:48 -0700
+Subject: [PATCH] feat: Move theme script to head
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/assets/js/head.js b/assets/js/head.js
+new file mode 100644
+index 0000000000000000000000000000000000000000..a9b98a695a1b3730bc149ba2eb94ee827cd07fb0
+--- /dev/null
++++ b/assets/js/head.js
+@@ -0,0 +1,10 @@
++const applyTheme = () =>
++  document.documentElement.classList.toggle(
++    "pf-v6-theme-dark",
++    matchMedia("(prefers-color-scheme: dark)").matches,
++  );
++applyTheme();
++matchMedia("(prefers-color-scheme: dark)").addEventListener(
++  "change",
++  applyTheme,
++);
+diff --git a/layouts/baseof.html b/layouts/baseof.html
+index 3e65972789110d95cc1bac408eb519b76cff54b9..bef2e1834367a3ae01cde303abb20acb3e3e7344 100644
+--- a/layouts/baseof.html
++++ b/layouts/baseof.html
+@@ -54,11 +54,22 @@     <meta property="og:image" content="/design/header.png" />
+     <meta property="og:url" content="{{ .Site.BaseURL }}" />
+     <meta property="og:type" content="website" />
+     <meta property="og:site_name" content="{{ .Site.Data.site.author }}" />
+-    <meta property="og:locale" content="de_DE" />
+-    <script>
+-      if (matchMedia("(prefers-color-scheme: dark)").matches)
+-        document.documentElement.classList.add("pf-v6-theme-dark");
+-    </script>
++    <meta property="og:locale" content="{{ .Site.Language.LanguageCode }}" />
++    {{ with resources.Get "js/head.js" }}
++      {{ $opts := dict
++        "minify" (not hugo.IsDevelopment)
++        "sourceMap" (cond hugo.IsDevelopment "linked" "none")
++      }}
++      {{ with . | js.Build $opts }}
++        {{ if hugo.IsDevelopment }}
++          <script src="{{ .RelPermalink }}"></script>
++        {{ else }}
++          {{ with . | fingerprint }}
++            <script src="{{ .RelPermalink }}" integrity="{{ .Data.Integrity }}" crossorigin="anonymous"></script>
++          {{ end }}
++        {{ end }}
++      {{ end }}
++    {{ end }}
+     <noscript>
+       {{ with resources.Get "scss/noscript.scss" | toCSS (dict "outputStyle" "compressed") }}
+         {{ if hugo.IsDevelopment }}
+
