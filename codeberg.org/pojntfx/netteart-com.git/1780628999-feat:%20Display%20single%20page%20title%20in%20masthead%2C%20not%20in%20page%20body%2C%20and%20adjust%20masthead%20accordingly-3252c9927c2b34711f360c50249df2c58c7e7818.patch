@@ -1,0 +1,125 @@
+From 3252c9927c2b34711f360c50249df2c58c7e7818 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Thu, 04 Jun 2026 20:09:59 -0700
+Subject: [PATCH] feat: Display single page title in masthead, not in page body, and adjust masthead accordingly
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/assets/scss/main.scss b/assets/scss/main.scss
+index f1b4eeef26cb539bcbd4c1c3e7366204b18fdeb7..8f7fed8a71e0ee27932434211ba0bab1d8825955 100644
+--- a/assets/scss/main.scss
++++ b/assets/scss/main.scss
+@@ -34,3 +34,18 @@ .logo--home {
+   width: auto;
+   max-width: 15rem;
+ }
++
++.pf-v6-c-masthead {
++  --pf-v6-c-masthead--ColumnGap: 1.5rem;
++  --pf-v6-c-masthead--GridTemplateColumns: min-content max-content;
++  --pf-v6-c-masthead__brand--Order: initial;
++  --pf-v6-c-masthead__brand--PaddingBlockEnd: 0;
++  --pf-v6-c-masthead__brand--BorderBlockEnd: 0;
++  --pf-v6-c-masthead__main--GridColumn: 1;
++  --pf-v6-c-masthead__main--Display: flex;
++  --pf-v6-c-masthead__main--ColumnGap: 1rem;
++  --pf-v6-c-masthead__content--GridColumn: 2;
++  --pf-v6-c-masthead__content--Order: 0;
++  --pf-v6-c-masthead--c-toolbar--Width: auto;
++  --pf-v6-c-masthead__logo--Width: auto;
++}
+diff --git a/layouts/_partials/footer.html b/layouts/_partials/footer.html
+index ebb3fa607d1f5495ef2e1dd6e843e1ebcf12e672..f8004f8e6e21a023496c15200af279a60c910714 100644
+--- a/layouts/_partials/footer.html
++++ b/layouts/_partials/footer.html
+@@ -9,8 +9,7 @@         target="_blank"
+         rel="noopener"
+         class="pf-v6-l-grid__item pf-m-12-col pf-m-6-col-on-xl"
+       >
+-        © {{ now.Year }} {{ .Site.Data.site.author }} ({{
+-        .Site.Data.site.license }})
++        © {{ now.Year }} {{ .Site.Data.site.author }}
+       </a>
+       <div class="pf-v6-l-grid__item pf-m-12-col pf-m-6-col-on-xl pf-v6-u-text-align-end-on-xl">
+         <a href="{{ .Site.Data.site.source }}" target="_blank" rel="noopener"
+diff --git a/layouts/baseof.html b/layouts/baseof.html
+index fc7c4ebb2b528cf5a489be1cc2c23b2c73b5bf37..7a0e10a881465f6199eb51fb5519cf82e7fcb9d2 100644
+--- a/layouts/baseof.html
++++ b/layouts/baseof.html
+@@ -91,6 +91,31 @@           <span class="pf-v6-c-button__text">Zum Inhalt springen</span>
+         </a>
+       </div>
+ 
++      {{ if not .IsHome }}
++      <header class="pf-v6-c-masthead">
++        <div class="pf-v6-c-masthead__main">
++          <div class="pf-v6-c-masthead__brand">
++            <a class="pf-v6-c-masthead__logo" href="/">
++              <img alt="NetteART Logo" src="/design/icon.svg" />
++            </a>
++          </div>
++        </div>
++        <div class="pf-v6-c-masthead__content">
++          <div
++            class="pf-v6-c-toolbar pf-m-static"
++          >
++            <div class="pf-v6-c-toolbar__content">
++              <div class="pf-v6-c-toolbar__content-section">
++                <h1 id="main-title" class="pf-v6-c-title pf-m-lg">
++                  {{ .Title }}
++                </h1>
++              </div>
++            </div>
++          </div>
++        </div>
++      </header>
++      {{ end }}
++
+       <div class="pf-v6-c-page__main-container {{ if .IsHome }}pf-v6-c-page__main-container--home{{ end }}" tabindex="-1"> 
+         <div
+           class="pf-v6-c-page__main"
+diff --git a/layouts/single.html b/layouts/single.html
+index 468a563c82e5e9652908b87d82dfe65c154ef856..d2378190f6fdb76b50a15f70070f69d6e2f2288a 100644
+--- a/layouts/single.html
++++ b/layouts/single.html
+@@ -1,38 +1,12 @@
+ {{ define "main" }}
+ <main class="pf-v6-u-flex-1 pf-v6-u-display-flex pf-v6-u-flex-direction-column">
+-  <section class="pf-v6-c-page__main-breadcrumb pf-m-limit-width">
+-    <div class="pf-v6-c-page__main-body">
+-      <nav class="pf-v6-c-breadcrumb" aria-label="breadcrumb">
+-        <ol class="pf-v6-c-breadcrumb__list" role="list">
+-          <li class="pf-v6-c-breadcrumb__item">
+-            <a href="/" class="pf-v6-c-breadcrumb__link">Home</a>
+-          </li>
+-          <li class="pf-v6-c-breadcrumb__item">
+-            <span class="pf-v6-c-breadcrumb__item-divider">
+-              <span class="pf-v6-c-icon">
+-                <span class="pf-v6-c-icon__content">
+-                  <i class="fas fa-caret-right" aria-hidden="true"></i>
+-                </span>
+-              </span>
+-            </span>
+-
+-            <a href="#" class="pf-v6-c-breadcrumb__link">{{ .Title }}</a>
+-          </li>
+-        </ol>
+-      </nav>
+-    </div>
+-  </section>
+-
++  <!-- #main-title is in masthead -->
+   <section
+     class="pf-v6-c-page__main-section pf-m-limit-width pf-m-align-center"
+     style="--pf-v6-c-page--section--m-limit-width--MaxWidth: 62rem"
+     aria-labelledby="main-title"
+   >
+     <div class="pf-v6-c-page__main-body">
+-      <h1 class="pf-v6-c-content--h1 pf-m-page-title" id="main-title">
+-        {{ .Title }}
+-      </h1>
+-
+       <div class="pf-v6-c-content">{{ .Content }}</div>
+     </div>
+   </section>
+
