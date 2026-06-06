@@ -1,0 +1,177 @@
+From 327d48e994538029b1d49bc99158926adf84e133 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Fri, 05 Jun 2026 23:51:52 -0700
+Subject: [PATCH] feat: Start implementation of miqt/Kirigami-based implementation based on the new state machine
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/go.mod b/go.mod
+index 7d9141fc756b95dec5d0799a7bc6c354d3a2a59a..bef6924dd0f0485250eaf9677d6cc255716e6fb2 100644
+--- a/go.mod
++++ b/go.mod
+@@ -7,6 +7,7 @@
+ require (
+ 	codeberg.org/puregotk/purego v0.0.0-20260224095105-2513c838cb80
+ 	codeberg.org/puregotk/puregotk v0.0.0-20260420231554-98419d54d2d2
++	github.com/mappu/miqt v0.14.0
+ 	github.com/neilotoole/slogt v1.1.0
+ 	github.com/pojntfx/go-gettext v0.4.2
+ 	github.com/qmuntal/stateless v1.8.0
+diff --git a/go.mod.json b/go.mod.json
+index 9a76cc205a6446181feb49e04e52d4ccd39a7514..c6a867e87d94024d0a9292b515c199e975c1d625 100644
+--- a/go.mod.json
++++ b/go.mod.json
+@@ -19,6 +19,13 @@     "type": "archive",
+     "url": "https://proxy.golang.org/codeberg.org/puregotk/puregotk/@v/v0.0.0-20260420231554-98419d54d2d2.zip"
+   },
+   {
++    "dest": "vendor/github.com/mappu/miqt",
++    "sha256": "4324a3192b941c4d3b1788c9930dc560e3a8ef3d1ede12f586f1ac712d17b320",
++    "strip-components": 3,
++    "type": "archive",
++    "url": "https://proxy.golang.org/github.com/mappu/miqt/@v/v0.14.0.zip"
++  },
++  {
+     "dest": "vendor/github.com/neilotoole/slogt",
+     "sha256": "2d581091f136e279eb6a860023bee8ec3ac57d285d96e90f06c81692dac7b9d0",
+     "strip-components": 3,
+diff --git a/go.sum b/go.sum
+index 57fd322bf5b232b33b46e4957989c33a498dc360..f7977da2e8765dc5d94ab0d74b2ea6b5512d20b5 100644
+--- a/go.sum
++++ b/go.sum
+@@ -10,6 +10,8 @@ github.com/goccy/go-yaml v1.18.0 h1:8W7wMFS12Pcas7KU+VVkaiCng+kG8QiFeFwzFb+rwuw=
+ github.com/goccy/go-yaml v1.18.0/go.mod h1:XBurs7gK8ATbW4ZPGKgcbrY1Br56PdM69F7LkFRi1kA=
+ github.com/godbus/dbus/v5 v5.2.2 h1:TUR3TgtSVDmjiXOgAAyaZbYmIeP3DPkld3jgKGV8mXQ=
+ github.com/godbus/dbus/v5 v5.2.2/go.mod h1:3AAv2+hPq5rdnr5txxxRwiGjPXamgoIHgz9FPBfOp3c=
++github.com/mappu/miqt v0.14.0 h1:PPP3TBREc79Ei/sMous6rN+z6s7Y6pq5U+NsljtvVfg=
++github.com/mappu/miqt v0.14.0/go.mod h1:xFg7ADaO1QSkmXPsPODoKe/bydJpRG9fgCYyIDl/h1U=
+ github.com/neilotoole/slogt v1.1.0 h1:c7qE92sq+V0yvCuaxph+RQ2jOKL61c4hqS1Bv9W7FZE=
+ github.com/neilotoole/slogt v1.1.0/go.mod h1:RCrGXkPc/hYybNulqQrMHRtvlQ7F6NktNVLuLwk6V+w=
+ github.com/pmezard/go-difflib v1.0.0 h1:4DBwDE0NGyQoBHbLQYPwSUPoCMWR5BEzIk/f1lZbAQM=
+diff --git a/modules.txt b/modules.txt
+index 788f9f120489e60513701f64217f213915725244..0c7e555608449332ba0eb626941f70f308176207 100644
+--- a/modules.txt
++++ b/modules.txt
+@@ -42,6 +42,11 @@ github.com/goccy/go-yaml/token
+ # github.com/godbus/dbus/v5 v5.2.2
+ ## explicit; go 1.20
+ github.com/godbus/dbus/v5
++# github.com/mappu/miqt v0.14.0
++## explicit; go 1.19
++github.com/mappu/miqt/libmiqt
++github.com/mappu/miqt/qt6
++github.com/mappu/miqt/qt6/qml
+ # github.com/neilotoole/slogt v1.1.0
+ ## explicit; go 1.21
+ github.com/neilotoole/slogt
+diff --git a/qt/main.go b/qt/main.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..959e1e86a228b1703ee0e501f110dd358fc01473
+--- /dev/null
++++ b/qt/main.go
+@@ -0,0 +1,46 @@
++package main
++
++import (
++	"context"
++	"log/slog"
++	"os"
++	"path/filepath"
++	"time"
++
++	"github.com/mappu/miqt/qt6"
++	"github.com/mappu/miqt/qt6/qml"
++	"github.com/pojntfx/sessions/pkg/state"
++)
++
++func main() {
++	ctx, cancel := context.WithCancel(context.Background())
++	defer cancel()
++
++	log := slog.Default()
++
++	qt6.NewQApplication(os.Args)
++
++	engine := qml.NewQQmlApplicationEngine()
++
++	url := qt6.QUrl_FromLocalFile(filepath.Join("qt", "main.qml"))
++
++	engine.Load(url)
++
++	s := state.NewStateMachine(
++		ctx,
++		time.Minute*5,
++		log,
++		&state.Hooks{
++			OnStartTimer:                 func(ctx context.Context) error { return nil },
++			OnStopTimer:                  func(ctx context.Context) error { return nil },
++			OnInitialRemainingTimeChange: func(ctx context.Context, initialRemainingTime time.Duration) error { return nil },
++			OnCurrentRemainingTimeTick:   func(ctx context.Context, currentRemainingTime time.Duration) error { return nil },
++			OnStartAlarm:                 func(ctx context.Context) error { return nil },
++			OnStopAlarm:                  func(ctx context.Context) error { return nil },
++			OnPermittedTriggersChange:    func(ctx context.Context, permittedTriggers []state.Trigger) error { return nil },
++		},
++	)
++	s.FlushPermittedTriggers(ctx)
++
++	qt6.QApplication_Exec()
++}
+diff --git a/qt/main.qml b/qt/main.qml
+new file mode 100644
+index 0000000000000000000000000000000000000000..ea751e53d48bca2bef00472ebb7eacc62e41f1fa
+--- /dev/null
++++ b/qt/main.qml
+@@ -0,0 +1,52 @@
++import QtQuick
++import QtQuick.Layouts
++import QtQuick.Controls as Controls
++import org.kde.kirigami as Kirigami
++
++Kirigami.ApplicationWindow {
++    id: root
++
++    width: 360
++    height: 360
++
++    title: "Sessions"
++
++    pageStack.initialPage: Kirigami.Page {
++
++        ColumnLayout {
++            anchors.fill: parent
++
++            Controls.Label {
++                id: analogTimeLabel
++
++                text: "05:00"
++
++                Layout.alignment: Qt.AlignCenter
++            }
++
++            Controls.Button {
++                id: minusButton
++
++                text: "Remove 30 seconds"
++
++                Layout.alignment: Qt.AlignCenter
++            }
++
++            Controls.Button {
++                id: actionButton
++
++                text: "Start Timer"
++
++                Layout.alignment: Qt.AlignCenter
++            }
++
++            Controls.Button {
++                id: plusButton
++
++                text: "Add 30 seconds"
++
++                Layout.alignment: Qt.AlignCenter
++            }
++        }
++    }
++}
+
