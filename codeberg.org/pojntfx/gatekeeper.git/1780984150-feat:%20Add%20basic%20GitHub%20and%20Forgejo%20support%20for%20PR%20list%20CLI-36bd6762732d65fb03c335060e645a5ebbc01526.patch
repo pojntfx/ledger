@@ -1,0 +1,284 @@
+From 36bd6762732d65fb03c335060e645a5ebbc01526 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Mon, 08 Jun 2026 22:49:10 -0700
+Subject: [PATCH] feat: Add basic GitHub and Forgejo support for PR list CLI
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/cmd/gatekeeper-list-prs/main.go b/cmd/gatekeeper-list-prs/main.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..302c9c172fd087ab8e261d15ad8a450f8ce694fd
+--- /dev/null
++++ b/cmd/gatekeeper-list-prs/main.go
+@@ -0,0 +1,174 @@
++package main
++
++import (
++	"context"
++	"encoding/json"
++	"errors"
++	"flag"
++	"os"
++
++	"codeberg.org/mvdkleijn/forgejo-sdk/forgejo"
++	"github.com/google/go-github/v88/github"
++	"gopkg.in/yaml.v3"
++)
++
++type ForgeType string
++
++const (
++	ForgeTypeGitHub  ForgeType = "github"
++	ForgeTypeForgejo ForgeType = "forgejo"
++)
++
++type ForgeConfig struct {
++	Type ForgeType `yaml:"type"`
++	API  string    `yaml:"api"`
++}
++
++type RepoRepoConfig struct {
++	Owner string `yaml:"owner"`
++	Repo  string `yaml:"repo"`
++}
++
++type RepoConfig struct {
++	Name  string         `yaml:"name"`
++	Forge ForgeConfig    `yaml:"forge"`
++	Repo  RepoRepoConfig `yaml:"repo"`
++}
++
++type PullRequest struct {
++	Title  string   `yaml:"title"`
++	Labels []string `yaml:"labels"` // TODO: Use a well-known list of labels (e.g. "blocked")
++}
++
++func fetchGitHubPullRequests(ctx context.Context, repo RepoConfig, token string) ([]PullRequest, error) {
++	options := []github.ClientOptionsFunc{}
++	if token != "" {
++		options = append(options, github.WithAuthToken(token))
++	}
++
++	client, err := github.NewClient()
++	if err != nil {
++		return []PullRequest{}, err
++	}
++
++	var pullRequests []PullRequest
++	for pr, err := range client.PullRequests.ListIter(
++		ctx,
++		repo.Repo.Owner,
++		repo.Repo.Repo,
++		&github.PullRequestListOptions{
++			State: "open",
++		},
++	) {
++		if err != nil {
++			return pullRequests, err
++		}
++
++		labels := []string{}
++		for _, label := range pr.Labels {
++			labels = append(labels, label.GetName())
++		}
++
++		pullRequests = append(pullRequests, PullRequest{
++			Title:  pr.GetTitle(),
++			Labels: labels,
++		})
++	}
++
++	return pullRequests, nil
++}
++
++func fetchForgejoPullRequests(ctx context.Context, repo RepoConfig, token string) ([]PullRequest, error) {
++	options := []forgejo.ClientOption{
++		forgejo.SetContext(ctx),
++	}
++	if token != "" {
++		options = append(options, forgejo.SetToken(token))
++	}
++
++	client, err := forgejo.NewClient(repo.Forge.API, options...)
++	if err != nil {
++		return []PullRequest{}, err
++	}
++
++	rawPullRequests, _, err := client.ListRepoPullRequests(
++		repo.Repo.Owner,
++		repo.Repo.Repo,
++		forgejo.ListPullRequestsOptions{
++			State: "open",
++		},
++	)
++	if err != nil {
++		panic(err)
++	}
++
++	var pullRequests []PullRequest
++	for _, pr := range rawPullRequests {
++		labels := []string{}
++		for _, label := range pr.Labels {
++			labels = append(labels, label.Name)
++		}
++
++		pullRequests = append(pullRequests, PullRequest{
++			Title:  pr.Title,
++			Labels: labels,
++		})
++	}
++
++	return pullRequests, nil
++}
++
++func main() {
++	ctx, cancel := context.WithCancel(context.Background())
++	defer cancel()
++
++	rawRepos := flag.String("repos", "repos.yaml", "Repos configuration file")
++	rawTokens := flag.String("tokens", "", "Forge tokens as JSON object, e.g. {\"github.com\": \"token\"}")
++
++	flag.Parse()
++
++	reposFile, err := os.Open(*rawRepos)
++	if err != nil {
++		panic(err)
++	}
++
++	var repos []RepoConfig
++	if err := yaml.NewDecoder(reposFile).Decode(&repos); err != nil {
++		panic(err)
++	}
++
++	tokens := map[string]string{}
++	if *rawTokens != "" {
++		if err := json.Unmarshal([]byte(*rawTokens), &tokens); err != nil {
++			panic(errors.Join(errors.New("could not parse forge tokens"), err))
++		}
++	}
++
++	var allPullRequests []PullRequest
++	for _, repo := range repos {
++		token := tokens[repo.Forge.API]
++
++		var (
++			pullRequests []PullRequest
++			err          error
++		)
++
++		switch repo.Forge.Type {
++		case ForgeTypeGitHub:
++			pullRequests, err = fetchGitHubPullRequests(ctx, repo, token)
++
++		case ForgeTypeForgejo:
++			pullRequests, err = fetchForgejoPullRequests(ctx, repo, token)
++		}
++
++		if err != nil {
++			panic(err)
++		}
++
++		allPullRequests = append(allPullRequests, pullRequests...)
++	}
++
++	if err := yaml.NewEncoder(os.Stdout).Encode(allPullRequests); err != nil {
++		panic(err)
++	}
++}
+diff --git a/go.mod b/go.mod
+new file mode 100644
+index 0000000000000000000000000000000000000000..1a7c1e669c85ead0ab8afad3b3460f5e54f5eb70
+--- /dev/null
++++ b/go.mod
+@@ -0,0 +1,19 @@
++module codeberg.org/pojntfx/gatekeeper
++
++go 1.25.0
++
++require (
++	codeberg.org/mvdkleijn/forgejo-sdk/forgejo v1.2.0
++	github.com/google/go-github/v88 v88.0.0
++	gopkg.in/yaml.v3 v3.0.1
++)
++
++require (
++	github.com/42wim/httpsig v1.2.2 // indirect
++	github.com/davidmz/go-pageant v1.0.2 // indirect
++	github.com/go-fed/httpsig v1.1.0 // indirect
++	github.com/google/go-querystring v1.2.0 // indirect
++	github.com/hashicorp/go-version v1.7.0 // indirect
++	golang.org/x/crypto v0.28.0 // indirect
++	golang.org/x/sys v0.26.0 // indirect
++)
+diff --git a/go.sum b/go.sum
+new file mode 100644
+index 0000000000000000000000000000000000000000..ed2e629ad9e6cc2c6ccf7d5980f9f418721462fb
+--- /dev/null
++++ b/go.sum
+@@ -0,0 +1,45 @@
++codeberg.org/mvdkleijn/forgejo-sdk/forgejo v1.2.0 h1:/z7iYYHgTuP+BnJY5qnWj6UjlA1YsAFYhi36JZY1S7Y=
++codeberg.org/mvdkleijn/forgejo-sdk/forgejo v1.2.0/go.mod h1:qGzzS6EYParzgmXvnf1QANdnQmHFSyAlJN3SiRZp7e8=
++github.com/42wim/httpsig v1.2.2 h1:ofAYoHUNs/MJOLqQ8hIxeyz2QxOz8qdSVvp3PX/oPgA=
++github.com/42wim/httpsig v1.2.2/go.mod h1:P/UYo7ytNBFwc+dg35IubuAUIs8zj5zzFIgUCEl55WY=
++github.com/davecgh/go-spew v1.1.1 h1:vj9j/u1bqnvCEfJOwUhtlOARqs3+rkHYY13jYWTU97c=
++github.com/davecgh/go-spew v1.1.1/go.mod h1:J7Y8YcW2NihsgmVo/mv3lAwl/skON4iLHjSsI+c5H38=
++github.com/davidmz/go-pageant v1.0.2 h1:bPblRCh5jGU+Uptpz6LgMZGD5hJoOt7otgT454WvHn0=
++github.com/davidmz/go-pageant v1.0.2/go.mod h1:P2EDDnMqIwG5Rrp05dTRITj9z2zpGcD9efWSkTNKLIE=
++github.com/go-fed/httpsig v1.1.0 h1:9M+hb0jkEICD8/cAiNqEB66R87tTINszBRTjwjQzWcI=
++github.com/go-fed/httpsig v1.1.0/go.mod h1:RCMrTZvN1bJYtofsG4rd5NaO5obxQ5xBkdiS7xsT7bM=
++github.com/google/go-cmp v0.6.0/go.mod h1:17dUlkBOakJ0+DkrSSNjCkIjxS6bF9zb3elmeNGIjoY=
++github.com/google/go-cmp v0.7.0 h1:wk8382ETsv4JYUZwIsn6YpYiWiBsYLSJiTsyBybVuN8=
++github.com/google/go-cmp v0.7.0/go.mod h1:pXiqmnSA92OHEEa9HXL2W4E7lf9JzCmGVUdgjX3N/iU=
++github.com/google/go-github/v88 v88.0.0 h1:dZA9IKkPK1eXZj4ypngnpRj5FwdpTv4whix2PrQMP7M=
++github.com/google/go-github/v88 v88.0.0/go.mod h1:rufTDgn2N45wjhukLTyxmvc9nilSp3mr3Rgtt6b1MPw=
++github.com/google/go-querystring v1.2.0 h1:yhqkPbu2/OH+V9BfpCVPZkNmUXhb2gBxJArfhIxNtP0=
++github.com/google/go-querystring v1.2.0/go.mod h1:8IFJqpSRITyJ8QhQ13bmbeMBDfmeEJZD5A0egEOmkqU=
++github.com/hashicorp/go-version v1.7.0 h1:5tqGy27NaOTB8yJKUZELlFAS/LTKJkrmONwQKeRZfjY=
++github.com/hashicorp/go-version v1.7.0/go.mod h1:fltr4n8CU8Ke44wwGCBoEymUuxUHl09ZGVZPK5anwXA=
++github.com/pmezard/go-difflib v1.0.0 h1:4DBwDE0NGyQoBHbLQYPwSUPoCMWR5BEzIk/f1lZbAQM=
++github.com/pmezard/go-difflib v1.0.0/go.mod h1:iKH77koFhYxTK1pcRnkKkqfTogsbg7gZNVY4sRDYZ/4=
++github.com/stretchr/testify v1.9.0 h1:HtqpIVDClZ4nwg75+f6Lvsy/wHu+3BoSGCbBAcpTsTg=
++github.com/stretchr/testify v1.9.0/go.mod h1:r2ic/lqez/lEtzL7wO/rwa5dbSLXVDPFyf8C91i36aY=
++golang.org/x/crypto v0.0.0-20190308221718-c2843e01d9a2/go.mod h1:djNgcEr1/C05ACkg1iLfiJU5Ep61QUkGW8qpdssI0+w=
++golang.org/x/crypto v0.0.0-20200622213623-75b288015ac9/go.mod h1:LzIPMQfyMNhhGPhUkYOs5KpL4U8rLKemX1yGLhDgUto=
++golang.org/x/crypto v0.0.0-20210513164829-c07d793c2f9a/go.mod h1:P+XmwS30IXTQdn5tA2iutPOUgjI07+tq3H3K9MVA1s8=
++golang.org/x/crypto v0.28.0 h1:GBDwsMXVQi34v5CCYUm2jkJvu4cbtru2U4TN2PSyQnw=
++golang.org/x/crypto v0.28.0/go.mod h1:rmgy+3RHxRZMyY0jjAJShp2zgEdOqj2AO7U0pYmeQ7U=
++golang.org/x/net v0.0.0-20190404232315-eb5bcb51f2a3/go.mod h1:t9HGtf8HONx5eT2rtn7q6eTqICYqUVnKs3thJo3Qplg=
++golang.org/x/net v0.0.0-20210226172049-e18ecbb05110/go.mod h1:m0MpNAwzfU5UDzcl9v0D8zg8gWTRqZa9RBIspLL5mdg=
++golang.org/x/sys v0.0.0-20190215142949-d0b11bdaac8a/go.mod h1:STP8DvDyc/dI5b8T5hshtkjS+E42TnysNCUPdjciGhY=
++golang.org/x/sys v0.0.0-20190412213103-97732733099d/go.mod h1:h1NjWce9XRLGQEsW7wpKNCjG9DtNlClVuFLEZdDNbEs=
++golang.org/x/sys v0.0.0-20201119102817-f84b799fce68/go.mod h1:h1NjWce9XRLGQEsW7wpKNCjG9DtNlClVuFLEZdDNbEs=
++golang.org/x/sys v0.26.0 h1:KHjCJyddX0LoSTb3J+vWpupP9p0oznkqVk/IfjymZbo=
++golang.org/x/sys v0.26.0/go.mod h1:/VUhepiaJMQUp4+oa/7Zr1D23ma6VTLIYjOOTFZPUcA=
++golang.org/x/term v0.0.0-20201126162022-7de9c90e9dd1/go.mod h1:bj7SfCRtBDWHUb9snDiAeCFNEtKQo2Wmx5Cou7ajbmo=
++golang.org/x/term v0.25.0 h1:WtHI/ltw4NvSUig5KARz9h521QvRC8RmF/cuYqifU24=
++golang.org/x/term v0.25.0/go.mod h1:RPyXicDX+6vLxogjjRxjgD2TKtmAO6NZBsBRfrOLu7M=
++golang.org/x/text v0.3.0/go.mod h1:NqM8EUOU14njkJ3fqMW+pc6Ldnwhi/IjpwHt7yyuwOQ=
++golang.org/x/text v0.3.3/go.mod h1:5Zoc/QRtKVWzQhOtBMvqHzDpF6irO9z98xDceosuGiQ=
++golang.org/x/tools v0.0.0-20180917221912-90fa682c2a6e/go.mod h1:n7NCudcB/nEzxVGmLbDWY5pfWTLqBcC2KZ6jyYvM4mQ=
++gopkg.in/check.v1 v0.0.0-20161208181325-20d25e280405 h1:yhCVgyC4o1eVCa2tZl7eS0r+SDo693bJlVdllGtEeKM=
++gopkg.in/check.v1 v0.0.0-20161208181325-20d25e280405/go.mod h1:Co6ibVJAznAaIkqp8huTwlJQCZ016jof/cbN4VW5Yz0=
++gopkg.in/yaml.v3 v3.0.1 h1:fxVm/GzAzEWqLHuvctI91KS9hhNmmWOoWu0XTYJS7CA=
++gopkg.in/yaml.v3 v3.0.1/go.mod h1:K4uyk7z7BCEPqu6E+C64Yfv1cQ7kz7rIZviUmN+EgEM=
+diff --git a/repos.yaml b/repos.yaml
+new file mode 100644
+index 0000000000000000000000000000000000000000..be204266f66e127885c44a43140f904494e4f94f
+--- /dev/null
++++ b/repos.yaml
+@@ -0,0 +1,14 @@
++- name: Flathub on GitHub
++  forge:
++    type: github
++    api: https://api.github.com/
++  repo:
++    owner: flathub
++    repo: flathub
++- name: Flathub on Codeberg
++  forge:
++    type: forgejo
++    api: https://codeberg.org/
++  repo:
++    owner: comaps # Placeholder
++    repo: comaps # Placeholder
+
