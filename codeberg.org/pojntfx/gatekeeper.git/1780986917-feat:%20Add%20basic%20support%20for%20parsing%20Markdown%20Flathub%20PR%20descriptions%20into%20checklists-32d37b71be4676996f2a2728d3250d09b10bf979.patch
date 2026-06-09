@@ -1,0 +1,165 @@
+From 32d37b71be4676996f2a2728d3250d09b10bf979 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Mon, 08 Jun 2026 23:35:17 -0700
+Subject: [PATCH] feat: Add basic support for parsing Markdown Flathub PR descriptions into checklists
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/cmd/gatekeeper-list-prs/main.go b/cmd/gatekeeper-list-prs/main.go
+index 302c9c172fd087ab8e261d15ad8a450f8ce694fd..2b20f2d1c65c3b9d940974d79ff6b4b3f34d9ab2 100644
+--- a/cmd/gatekeeper-list-prs/main.go
++++ b/cmd/gatekeeper-list-prs/main.go
+@@ -6,10 +6,17 @@ 	"encoding/json"
+ 	"errors"
+ 	"flag"
+ 	"os"
++	"strings"
+ 
+ 	"codeberg.org/mvdkleijn/forgejo-sdk/forgejo"
+ 	"github.com/google/go-github/v88/github"
+ 	"gopkg.in/yaml.v3"
++
++	"github.com/yuin/goldmark"
++	"github.com/yuin/goldmark/ast"
++	"github.com/yuin/goldmark/extension"
++	east "github.com/yuin/goldmark/extension/ast"
++	"github.com/yuin/goldmark/text"
+ )
+ 
+ type ForgeType string
+@@ -36,8 +43,71 @@ 	Repo  RepoRepoConfig `yaml:"repo"`
+ }
+ 
+ type PullRequest struct {
+-	Title  string   `yaml:"title"`
+-	Labels []string `yaml:"labels"` // TODO: Use a well-known list of labels (e.g. "blocked")
++	Title     string    `yaml:"title"`
++	Labels    []string  `yaml:"labels"` // TODO: Use a well-known list of labels (e.g. "blocked")
++	Checklist Checklist `yaml:"checklist"`
++}
++
++type Checklist struct {
++	DescriptionChecked            bool   `yaml:"descriptionChecked"`
++	Description                   string `yaml:"description"`
++	VideoChecked                  bool   `yaml:"videoChecked"`
++	Video                         string `yaml:"video"`
++	AppIDChecked                  bool   `yaml:"appIDChecked"`
++	SubmissionRequirementsChecked bool   `yaml:"submissionRequirementsChecked"`
++	AuthorChecked                 bool   `yaml:"authorChecked"`
++}
++
++const (
++	descriptionPrefix            = "Please describe the application briefly."
++	videoPrefix                  = "Please attach a video showcasing the application on Linux using the Flatpak"
++	appIDPrefix                  = "The Flatpak ID follows all the rules listed in the" // TODO: Include the local URL reference etc. so that we can split cleanly
++	submissionRequirementsPrefix = "I have read and followed all the"                   // TODO: Include the local URL reference etc. so that we can split cleanly
++	authorPrefix                 = "I am the author of the project."
++)
++
++func parseChecklistFromMarkdown(body []byte) (Checklist, error) {
++	root := goldmark.New(goldmark.WithExtensions(extension.TaskList)).
++		Parser().
++		Parse(text.NewReader(body))
++
++	var checklist Checklist
++	ast.Walk(root, func(n ast.Node, entering bool) (ast.WalkStatus, error) {
++		if !entering {
++			return ast.WalkContinue, nil
++		}
++
++		// TODO: Add nil asserts here
++		checkBox, ok := n.(*east.TaskCheckBox)
++		if !ok {
++			return ast.WalkContinue, nil
++		}
++
++		// TODO: Add nil asserts here
++		label, ok := checkBox.NextSibling().(*ast.Text)
++		if !ok {
++			return ast.WalkContinue, nil
++		}
++
++		content := string(label.Segment.Value(body))
++		if after, ok := strings.CutPrefix(content, descriptionPrefix); ok {
++			checklist.Description = after
++			checklist.DescriptionChecked = checkBox.IsChecked
++		} else if after, ok := strings.CutPrefix(content, videoPrefix); ok {
++			checklist.Video = after
++			checklist.VideoChecked = checkBox.IsChecked
++		} else if _, ok := strings.CutPrefix(content, appIDPrefix); ok {
++			checklist.AppIDChecked = checkBox.IsChecked
++		} else if _, ok := strings.CutPrefix(content, submissionRequirementsPrefix); ok {
++			checklist.SubmissionRequirementsChecked = checkBox.IsChecked
++		} else if _, ok := strings.CutPrefix(content, authorPrefix); ok {
++			checklist.AuthorChecked = checkBox.IsChecked
++		}
++
++		return ast.WalkContinue, nil
++	})
++
++	return checklist, nil
+ }
+ 
+ func fetchGitHubPullRequests(ctx context.Context, repo RepoConfig, token string) ([]PullRequest, error) {
+@@ -69,9 +139,15 @@ 		for _, label := range pr.Labels {
+ 			labels = append(labels, label.GetName())
+ 		}
+ 
++		checklist, err := parseChecklistFromMarkdown([]byte(pr.GetBody()))
++		if err != nil {
++			return pullRequests, err
++		}
++
+ 		pullRequests = append(pullRequests, PullRequest{
+-			Title:  pr.GetTitle(),
+-			Labels: labels,
++			Title:     pr.GetTitle(),
++			Labels:    labels,
++			Checklist: checklist,
+ 		})
+ 	}
+ 
+@@ -109,9 +185,15 @@ 		for _, label := range pr.Labels {
+ 			labels = append(labels, label.Name)
+ 		}
+ 
++		checklist, err := parseChecklistFromMarkdown([]byte(pr.Body))
++		if err != nil {
++			return pullRequests, err
++		}
++
+ 		pullRequests = append(pullRequests, PullRequest{
+-			Title:  pr.Title,
+-			Labels: labels,
++			Title:     pr.Title,
++			Labels:    labels,
++			Checklist: checklist,
+ 		})
+ 	}
+ 
+diff --git a/go.mod b/go.mod
+index 1a7c1e669c85ead0ab8afad3b3460f5e54f5eb70..f0f2208c2c893b3f2e5b29b1fefb900d3778541d 100644
+--- a/go.mod
++++ b/go.mod
+@@ -5,6 +5,7 @@
+ require (
+ 	codeberg.org/mvdkleijn/forgejo-sdk/forgejo v1.2.0
+ 	github.com/google/go-github/v88 v88.0.0
++	github.com/yuin/goldmark v1.8.2
+ 	gopkg.in/yaml.v3 v3.0.1
+ )
+ 
+diff --git a/go.sum b/go.sum
+index ed2e629ad9e6cc2c6ccf7d5980f9f418721462fb..69971eb5bf10e87197e6617ed1883ba6d3b22478 100644
+--- a/go.sum
++++ b/go.sum
+@@ -21,6 +21,8 @@ github.com/pmezard/go-difflib v1.0.0 h1:4DBwDE0NGyQoBHbLQYPwSUPoCMWR5BEzIk/f1lZbAQM=
+ github.com/pmezard/go-difflib v1.0.0/go.mod h1:iKH77koFhYxTK1pcRnkKkqfTogsbg7gZNVY4sRDYZ/4=
+ github.com/stretchr/testify v1.9.0 h1:HtqpIVDClZ4nwg75+f6Lvsy/wHu+3BoSGCbBAcpTsTg=
+ github.com/stretchr/testify v1.9.0/go.mod h1:r2ic/lqez/lEtzL7wO/rwa5dbSLXVDPFyf8C91i36aY=
++github.com/yuin/goldmark v1.8.2 h1:kEGpgqJXdgbkhcOgBxkC0X0PmoPG1ZyoZ117rDVp4zE=
++github.com/yuin/goldmark v1.8.2/go.mod h1:ip/1k0VRfGynBgxOz0yCqHrbZXhcjxyuS66Brc7iBKg=
+ golang.org/x/crypto v0.0.0-20190308221718-c2843e01d9a2/go.mod h1:djNgcEr1/C05ACkg1iLfiJU5Ep61QUkGW8qpdssI0+w=
+ golang.org/x/crypto v0.0.0-20200622213623-75b288015ac9/go.mod h1:LzIPMQfyMNhhGPhUkYOs5KpL4U8rLKemX1yGLhDgUto=
+ golang.org/x/crypto v0.0.0-20210513164829-c07d793c2f9a/go.mod h1:P+XmwS30IXTQdn5tA2iutPOUgjI07+tq3H3K9MVA1s8=
+
