@@ -1,0 +1,55 @@
+From 1dfc816fa327c92d40404dd87e130c19b979ed9d Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Tue, 09 Jun 2026 18:22:50 -0700
+Subject: [PATCH] feat: Sort all PRs reverse-chronologically
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/cmd/gatekeeper-list-prs/main.go b/cmd/gatekeeper-list-prs/main.go
+index abbcdc50ccb85f546f134e2148b72ab5e452d0a2..4add94ba19b93788cdb423b5da5d65f1985200a2 100644
+--- a/cmd/gatekeeper-list-prs/main.go
++++ b/cmd/gatekeeper-list-prs/main.go
+@@ -8,6 +8,7 @@ 	"flag"
+ 	"os"
+ 	"slices"
+ 	"strings"
++	"time"
+ 
+ 	"codeberg.org/mvdkleijn/forgejo-sdk/forgejo"
+ 	"github.com/google/go-github/v88/github"
+@@ -48,6 +49,7 @@ 	URL         string       `yaml:"url"`
+ 	Title       string       `yaml:"title"`
+ 	Checklist   Checklist    `yaml:"checklist"`
+ 	KnownLabels []KnownLabel `yaml:"knownLabels"`
++	LastUpdated time.Time    `yaml:"lastUpdated"`
+ }
+ 
+ type Checklist struct {
+@@ -217,6 +219,7 @@ 			URL:         pr.GetHTMLURL(),
+ 			Title:       pr.GetTitle(),
+ 			Checklist:   checklist,
+ 			KnownLabels: knownLabels,
++			LastUpdated: pr.GetUpdatedAt().Time,
+ 		})
+ 	}
+ 
+@@ -269,6 +272,7 @@ 			URL:         pr.URL,
+ 			Title:       pr.Title,
+ 			Checklist:   checklist,
+ 			KnownLabels: knownLabels,
++			LastUpdated: *pr.Updated,
+ 		})
+ 	}
+ 
+@@ -324,6 +328,10 @@ 		}
+ 
+ 		allPullRequests = append(allPullRequests, pullRequests...)
+ 	}
++
++	slices.SortFunc(allPullRequests, func(a, b PullRequest) int {
++		return b.LastUpdated.Compare(a.LastUpdated) // Reverse-chronological
++	})
+ 
+ 	if err := yaml.NewEncoder(os.Stdout).Encode(allPullRequests); err != nil {
+ 		panic(err)
+
