@@ -1,0 +1,86 @@
+From ce660bd5619888f2fd8cb2e215ccc788003dbe2d Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Tue, 09 Jun 2026 21:10:02 -0700
+Subject: [PATCH] feat: Also extract author text from descriptions since there are multiple options which can be tagged
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/cmd/gatekeeper-list-prs/main.go b/cmd/gatekeeper-list-prs/main.go
+index 93ac3d5c875bb3a86d0b76700c5bcf58a6e924b4..6f2948bd5b0cc723bc5128390f2fd01f44111315 100644
+--- a/cmd/gatekeeper-list-prs/main.go
++++ b/cmd/gatekeeper-list-prs/main.go
+@@ -62,6 +62,7 @@ 	VideoChecked                  bool   `yaml:"videoChecked"`
+ 	Video                         string `yaml:"video"`
+ 	AppIDChecked                  bool   `yaml:"appIDChecked"`
+ 	SubmissionRequirementsChecked bool   `yaml:"submissionRequirementsChecked"`
++	Author                        string `yaml:"author"`
+ 	AuthorChecked                 bool   `yaml:"authorChecked"`
+ }
+ 
+@@ -70,7 +71,7 @@ 	descriptionPrefix            = "Please describe the application briefly."
+ 	videoPrefix                  = "Please attach a video showcasing the application on Linux using the Flatpak."
+ 	appIDPrefix                  = "The Flatpak ID follows all the rules listed in the"
+ 	submissionRequirementsPrefix = "I have read and followed all the"
+-	authorPrefix                 = "I am the author of the project."
++	authorPrefix                 = "I am" // The rest is customizable; see https://github.com/flathub/flathub/blob/master/.github/pull_request_template.md
+ )
+ 
+ type KnownLabel string
+@@ -163,20 +164,25 @@
+ 	return url, nil
+ }
+ 
+-func descriptionInMarkdown(body []byte) (string, error) {
++func paragraphInMarkdown(body []byte, prefix []byte, reAddPrefix bool) (string, error) {
+ 	// We want to skip leading whitespace and the `- []` too
+-	if i := bytes.Index(body, []byte(descriptionPrefix)); i >= 0 {
+-		body = body[i+len(descriptionPrefix):]
++	if i := bytes.Index(body, prefix); i >= 0 {
++		body = body[i+len(prefix):]
++	}
++
++	// For when we want to keep the prefix but not the checkbox
++	if reAddPrefix {
++		body = append(prefix, body...)
+ 	}
+ 
+ 	md := goldmark.New(goldmark.WithExtensions(extension.GFM))
+ 
+-	var description bytes.Buffer
+-	if err := md.Convert(body, &description); err != nil {
++	var paragraph bytes.Buffer
++	if err := md.Convert(body, &paragraph); err != nil {
+ 		return "", err
+ 	}
+ 
+-	return p.SanitizeReader(&description).String(), nil
++	return p.SanitizeReader(&paragraph).String(), nil
+ }
+ 
+ func parseChecklistFromMarkdown(body []byte) (Checklist, error) {
+@@ -220,7 +226,7 @@ 			descriptionWindow := len(body)
+ 			if i+1 < len(taskItems) { // Whether another checkbox follows this one
+ 				descriptionWindow = taskItems[i+1].prefix // Stop searching for description items before next checkbox begins
+ 			}
+-			description, err := descriptionInMarkdown(body[item.prefix:descriptionWindow])
++			description, err := paragraphInMarkdown(body[item.prefix:descriptionWindow], []byte(descriptionPrefix), false)
+ 			if err != nil {
+ 				return Checklist{}, err
+ 			}
+@@ -242,6 +248,15 @@ 			checklist.AppIDChecked = item.checked
+ 		} else if _, ok := strings.CutPrefix(item.content, submissionRequirementsPrefix); ok {
+ 			checklist.SubmissionRequirementsChecked = item.checked
+ 		} else if _, ok := strings.CutPrefix(item.content, authorPrefix); ok {
++			authorWindow := len(body)
++			if i+1 < len(taskItems) { // Whether another checkbox follows this one
++				authorWindow = taskItems[i+1].prefix // Stop searching for author items before next checkbox begins
++			}
++			author, err := paragraphInMarkdown(body[item.prefix:authorWindow], []byte(authorPrefix), true)
++			if err != nil {
++				return Checklist{}, err
++			}
++			checklist.Author = author
+ 			checklist.AuthorChecked = item.checked
+ 		}
+ 	}
+
