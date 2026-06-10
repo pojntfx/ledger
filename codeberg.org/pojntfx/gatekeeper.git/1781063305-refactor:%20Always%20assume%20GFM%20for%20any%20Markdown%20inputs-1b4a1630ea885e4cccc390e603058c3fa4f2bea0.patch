@@ -1,0 +1,39 @@
+From 1b4a1630ea885e4cccc390e603058c3fa4f2bea0 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Tue, 09 Jun 2026 20:48:25 -0700
+Subject: [PATCH] refactor: Always assume GFM for any Markdown inputs
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/cmd/gatekeeper-list-prs/main.go b/cmd/gatekeeper-list-prs/main.go
+index 02a6abd4294dce6fc7626a3344e84383cf165438..93ac3d5c875bb3a86d0b76700c5bcf58a6e924b4 100644
+--- a/cmd/gatekeeper-list-prs/main.go
++++ b/cmd/gatekeeper-list-prs/main.go
+@@ -128,7 +128,7 @@ 	p = bluemonday.UGCPolicy()
+ )
+ 
+ func firstLinkInMarkdown(body []byte) (string, error) {
+-	root := goldmark.New(goldmark.WithExtensions(extension.Linkify)).
++	root := goldmark.New(goldmark.WithExtensions(extension.GFM)).
+ 		Parser().
+ 		Parse(text.NewReader(body))
+ 
+@@ -169,7 +169,7 @@ 	if i := bytes.Index(body, []byte(descriptionPrefix)); i >= 0 {
+ 		body = body[i+len(descriptionPrefix):]
+ 	}
+ 
+-	md := goldmark.New()
++	md := goldmark.New(goldmark.WithExtensions(extension.GFM))
+ 
+ 	var description bytes.Buffer
+ 	if err := md.Convert(body, &description); err != nil {
+@@ -180,7 +180,7 @@ 	return p.SanitizeReader(&description).String(), nil
+ }
+ 
+ func parseChecklistFromMarkdown(body []byte) (Checklist, error) {
+-	root := goldmark.New(goldmark.WithExtensions(extension.TaskList)).
++	root := goldmark.New(goldmark.WithExtensions(extension.GFM)).
+ 		Parser().
+ 		Parse(text.NewReader(body))
+ 
+
