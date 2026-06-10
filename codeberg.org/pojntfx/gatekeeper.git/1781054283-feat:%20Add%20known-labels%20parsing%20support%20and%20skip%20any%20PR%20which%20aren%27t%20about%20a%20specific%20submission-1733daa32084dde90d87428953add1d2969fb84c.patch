@@ -1,0 +1,181 @@
+From 1733daa32084dde90d87428953add1d2969fb84c Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Tue, 09 Jun 2026 18:18:03 -0700
+Subject: [PATCH] feat: Add known-labels parsing support and skip any PR which aren't about a specific submission
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/cmd/gatekeeper-list-prs/main.go b/cmd/gatekeeper-list-prs/main.go
+index eee4ea07620f6541569869e7a34b6a59c0d4ab91..abbcdc50ccb85f546f134e2148b72ab5e452d0a2 100644
+--- a/cmd/gatekeeper-list-prs/main.go
++++ b/cmd/gatekeeper-list-prs/main.go
+@@ -6,6 +6,7 @@ 	"encoding/json"
+ 	"errors"
+ 	"flag"
+ 	"os"
++	"slices"
+ 	"strings"
+ 
+ 	"codeberg.org/mvdkleijn/forgejo-sdk/forgejo"
+@@ -43,10 +44,10 @@ 	Repo  RepoRepoConfig `yaml:"repo"`
+ }
+ 
+ type PullRequest struct {
+-	URL       string    `yaml:"url"`
+-	Title     string    `yaml:"title"`
+-	Labels    []string  `yaml:"labels"` // TODO: Use a well-known list of labels (e.g. "blocked")
+-	Checklist Checklist `yaml:"checklist"`
++	URL         string       `yaml:"url"`
++	Title       string       `yaml:"title"`
++	Checklist   Checklist    `yaml:"checklist"`
++	KnownLabels []KnownLabel `yaml:"knownLabels"`
+ }
+ 
+ type Checklist struct {
+@@ -67,6 +68,50 @@ 	submissionRequirementsPrefix = "I have read and followed all the"                   // TODO: Include the local URL reference etc. so that we can split cleanly
+ 	authorPrefix                 = "I am the author of the project."
+ )
+ 
++type KnownLabel string
++
++// From https://github.com/flathub/flathub/labels
++// Only labels relevant to submissions are included, others (e.g. access-request) are not
++const (
++	KnownLabelAISlop           KnownLabel = "AI Slop"           // Mark obviously AI generated PR or app
++	KnownLabelAwaitingChanges  KnownLabel = "awaiting-changes"  // Pull request waiting for inputs or changes from author
++	KnownLabelAwaitingReview   KnownLabel = "awaiting-review"   // Pull requests waiting for review
++	KnownLabelAwaitingUpstream KnownLabel = "awaiting-upstream" // Pull request waiting for inputs or changes from author
++	KnownLabelBeta             KnownLabel = "beta"              // The submission is for the beta repository.
++	KnownLabelBlocked          KnownLabel = "blocked"           // Pull requests marked as blocked by reviewers
++	KnownLabelHelpWanted       KnownLabel = "help-wanted"       // Contributions welcome
++	KnownLabelMigrateAppID     KnownLabel = "migrate-app-id"    // Migrate an application to a new app-id
++	KnownLabelNeedsInfo        KnownLabel = "needs-info"        // Issue needs more information from reporter to make it actionable
++	KnownLabelNeedsReview      KnownLabel = "needs-review"      // PRs needing review
++	KnownLabelPRCheckBlocked   KnownLabel = "pr-check-blocked"  // Pull requests marked as blocked by automation
++	KnownLabelReady            KnownLabel = "ready"             // Pull request ready for final review and merge
++	KnownLabelSpam             KnownLabel = "spam"              // Marked issues will be closed and locked automatically. Do not modify
++	KnownLabelStale            KnownLabel = "Stale"             // Stale PR, no activity for over a year. Used by automated workflows. Do not modify
++	KnownLabelStaleBlocked     KnownLabel = "stale-blocked"     // Handled by automation
++	KnownLabelWorkInProgress   KnownLabel = "work-in-progress"  // Draft PRs
++)
++
++var (
++	AllKnownLabels = []KnownLabel{
++		KnownLabelAISlop,
++		KnownLabelAwaitingChanges,
++		KnownLabelAwaitingReview,
++		KnownLabelAwaitingUpstream,
++		KnownLabelBeta,
++		KnownLabelBlocked,
++		KnownLabelHelpWanted,
++		KnownLabelMigrateAppID,
++		KnownLabelNeedsInfo,
++		KnownLabelNeedsReview,
++		KnownLabelPRCheckBlocked,
++		KnownLabelReady,
++		KnownLabelSpam,
++		KnownLabelStale,
++		KnownLabelStaleBlocked,
++		KnownLabelWorkInProgress,
++	}
++)
++
+ func parseChecklistFromMarkdown(body []byte) (Checklist, error) {
+ 	root := goldmark.New(goldmark.WithExtensions(extension.TaskList)).
+ 		Parser().
+@@ -111,6 +156,23 @@
+ 	return checklist, nil
+ }
+ 
++func parseKnownLabelsFromLabels(labels []string) (knownLabels []KnownLabel, skip bool) {
++	for _, label := range labels {
++		knownLabel := KnownLabel(label)
++		if slices.Contains(AllKnownLabels, knownLabel) {
++			knownLabels = append(knownLabels, knownLabel)
++		}
++	}
++
++	// Only consider a PR if it has no labels (hasn't been triaged yet)
++	// or if it has known labels
++	if !(len(labels) == 0 || len(knownLabels) > 0) {
++		return []KnownLabel{}, true
++	}
++
++	return knownLabels, false
++}
++
+ func fetchGitHubPullRequests(ctx context.Context, repo RepoConfig, token string) ([]PullRequest, error) {
+ 	options := []github.ClientOptionsFunc{}
+ 	if token != "" {
+@@ -135,21 +197,26 @@ 		if err != nil {
+ 			return pullRequests, err
+ 		}
+ 
+-		labels := []string{}
+-		for _, label := range pr.Labels {
++		checklist, err := parseChecklistFromMarkdown([]byte(pr.GetBody()))
++		if err != nil {
++			return pullRequests, err
++		}
++
++		var labels []string
++		for _, label := range pr.GetLabels() {
+ 			labels = append(labels, label.GetName())
+ 		}
+ 
+-		checklist, err := parseChecklistFromMarkdown([]byte(pr.GetBody()))
+-		if err != nil {
+-			return pullRequests, err
++		knownLabels, skip := parseKnownLabelsFromLabels(labels)
++		if skip {
++			continue
+ 		}
+ 
+ 		pullRequests = append(pullRequests, PullRequest{
+-			URL:       pr.GetHTMLURL(),
+-			Title:     pr.GetTitle(),
+-			Labels:    labels,
+-			Checklist: checklist,
++			URL:         pr.GetHTMLURL(),
++			Title:       pr.GetTitle(),
++			Checklist:   checklist,
++			KnownLabels: knownLabels,
+ 		})
+ 	}
+ 
+@@ -182,21 +249,26 @@ 	}
+ 
+ 	var pullRequests []PullRequest
+ 	for _, pr := range rawPullRequests {
+-		labels := []string{}
++		checklist, err := parseChecklistFromMarkdown([]byte(pr.Body))
++		if err != nil {
++			return pullRequests, err
++		}
++
++		var labels []string
+ 		for _, label := range pr.Labels {
+ 			labels = append(labels, label.Name)
+ 		}
+ 
+-		checklist, err := parseChecklistFromMarkdown([]byte(pr.Body))
+-		if err != nil {
+-			return pullRequests, err
++		knownLabels, skip := parseKnownLabelsFromLabels(labels)
++		if skip {
++			continue
+ 		}
+ 
+ 		pullRequests = append(pullRequests, PullRequest{
+-			URL:       pr.URL,
+-			Title:     pr.Title,
+-			Labels:    labels,
+-			Checklist: checklist,
++			URL:         pr.URL,
++			Title:       pr.Title,
++			Checklist:   checklist,
++			KnownLabels: knownLabels,
+ 		})
+ 	}
+ 
+
