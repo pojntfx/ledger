@@ -1,0 +1,197 @@
+From b1a2d382aebe1254821b0692dc00838527d0025d Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Tue, 09 Jun 2026 20:45:04 -0700
+Subject: [PATCH] feat: Extract submission description as sanitized HTML from PR description
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/cmd/gatekeeper-list-prs/main.go b/cmd/gatekeeper-list-prs/main.go
+index 3b2c63fd360fdf354e2a8daf6eea8633f3dd245b..02a6abd4294dce6fc7626a3344e84383cf165438 100644
+--- a/cmd/gatekeeper-list-prs/main.go
++++ b/cmd/gatekeeper-list-prs/main.go
+@@ -1,6 +1,7 @@
+ package main
+ 
+ import (
++	"bytes"
+ 	"context"
+ 	"encoding/json"
+ 	"errors"
+@@ -19,6 +20,8 @@ 	"github.com/yuin/goldmark/ast"
+ 	"github.com/yuin/goldmark/extension"
+ 	east "github.com/yuin/goldmark/extension/ast"
+ 	"github.com/yuin/goldmark/text"
++
++	"github.com/microcosm-cc/bluemonday"
+ )
+ 
+ type ForgeType string
+@@ -65,8 +68,8 @@
+ const (
+ 	descriptionPrefix            = "Please describe the application briefly."
+ 	videoPrefix                  = "Please attach a video showcasing the application on Linux using the Flatpak."
+-	appIDPrefix                  = "The Flatpak ID follows all the rules listed in the" // TODO: Include the local URL reference etc. so that we can split cleanly
+-	submissionRequirementsPrefix = "I have read and followed all the"                   // TODO: Include the local URL reference etc. so that we can split cleanly
++	appIDPrefix                  = "The Flatpak ID follows all the rules listed in the"
++	submissionRequirementsPrefix = "I have read and followed all the"
+ 	authorPrefix                 = "I am the author of the project."
+ )
+ 
+@@ -120,13 +123,17 @@ 	content string
+ 	prefix  int
+ }
+ 
+-func firstLinkInMarkdown(body []byte) string {
++var (
++	p = bluemonday.UGCPolicy()
++)
++
++func firstLinkInMarkdown(body []byte) (string, error) {
+ 	root := goldmark.New(goldmark.WithExtensions(extension.Linkify)).
+ 		Parser().
+ 		Parse(text.NewReader(body))
+ 
+ 	var url string
+-	ast.Walk(root, func(n ast.Node, entering bool) (ast.WalkStatus, error) {
++	if err := ast.Walk(root, func(n ast.Node, entering bool) (ast.WalkStatus, error) {
+ 		if !entering {
+ 			return ast.WalkContinue, nil
+ 		}
+@@ -149,9 +156,27 @@ 			return ast.WalkStop, nil
+ 		}
+ 
+ 		return ast.WalkContinue, nil
+-	})
++	}); err != nil {
++		return "", err
++	}
++
++	return url, nil
++}
++
++func descriptionInMarkdown(body []byte) (string, error) {
++	// We want to skip leading whitespace and the `- []` too
++	if i := bytes.Index(body, []byte(descriptionPrefix)); i >= 0 {
++		body = body[i+len(descriptionPrefix):]
++	}
++
++	md := goldmark.New()
++
++	var description bytes.Buffer
++	if err := md.Convert(body, &description); err != nil {
++		return "", err
++	}
+ 
+-	return url
++	return p.SanitizeReader(&description).String(), nil
+ }
+ 
+ func parseChecklistFromMarkdown(body []byte) (Checklist, error) {
+@@ -160,7 +185,7 @@ 		Parser().
+ 		Parse(text.NewReader(body))
+ 
+ 	var taskItems []taskItem
+-	ast.Walk(root, func(n ast.Node, entering bool) (ast.WalkStatus, error) {
++	if err := ast.Walk(root, func(n ast.Node, entering bool) (ast.WalkStatus, error) {
+ 		if !entering {
+ 			return ast.WalkContinue, nil
+ 		}
+@@ -184,19 +209,33 @@ 			prefix:  checkBox.Parent().Lines().At(0).Start,
+ 		})
+ 
+ 		return ast.WalkContinue, nil
+-	})
++	}); err != nil {
++		return Checklist{}, err
++	}
+ 
+ 	var checklist Checklist
+ 	for i, item := range taskItems {
+-		if after, ok := strings.CutPrefix(item.content, descriptionPrefix); ok {
+-			checklist.Description = after
++		if _, ok := strings.CutPrefix(item.content, descriptionPrefix); ok {
++			descriptionWindow := len(body)
++			if i+1 < len(taskItems) { // Whether another checkbox follows this one
++				descriptionWindow = taskItems[i+1].prefix // Stop searching for description items before next checkbox begins
++			}
++			description, err := descriptionInMarkdown(body[item.prefix:descriptionWindow])
++			if err != nil {
++				return Checklist{}, err
++			}
++			checklist.Description = description
+ 			checklist.DescriptionChecked = item.checked
+ 		} else if _, ok := strings.CutPrefix(item.content, videoPrefix); ok {
+ 			linkWindow := len(body)
+ 			if i+1 < len(taskItems) { // Whether another checkbox follows this one
+ 				linkWindow = taskItems[i+1].prefix // Stop searching for links before next checkbox begins
+ 			}
+-			checklist.Video = firstLinkInMarkdown(body[item.prefix:linkWindow])
++			video, err := firstLinkInMarkdown(body[item.prefix:linkWindow])
++			if err != nil {
++				return Checklist{}, err
++			}
++			checklist.Video = video
+ 			checklist.VideoChecked = item.checked
+ 		} else if _, ok := strings.CutPrefix(item.content, appIDPrefix); ok {
+ 			checklist.AppIDChecked = item.checked
+diff --git a/go.mod b/go.mod
+index f0f2208c2c893b3f2e5b29b1fefb900d3778541d..d915ceca6d8e2298a555e68534365e4a93aba9fd 100644
+--- a/go.mod
++++ b/go.mod
+@@ -5,16 +5,20 @@
+ require (
+ 	codeberg.org/mvdkleijn/forgejo-sdk/forgejo v1.2.0
+ 	github.com/google/go-github/v88 v88.0.0
++	github.com/microcosm-cc/bluemonday v1.0.27
+ 	github.com/yuin/goldmark v1.8.2
+ 	gopkg.in/yaml.v3 v3.0.1
+ )
+ 
+ require (
+ 	github.com/42wim/httpsig v1.2.2 // indirect
++	github.com/aymerick/douceur v0.2.0 // indirect
+ 	github.com/davidmz/go-pageant v1.0.2 // indirect
+ 	github.com/go-fed/httpsig v1.1.0 // indirect
+ 	github.com/google/go-querystring v1.2.0 // indirect
++	github.com/gorilla/css v1.0.1 // indirect
+ 	github.com/hashicorp/go-version v1.7.0 // indirect
+ 	golang.org/x/crypto v0.28.0 // indirect
++	golang.org/x/net v0.26.0 // indirect
+ 	golang.org/x/sys v0.26.0 // indirect
+ )
+diff --git a/go.sum b/go.sum
+index 69971eb5bf10e87197e6617ed1883ba6d3b22478..407e0e023183d82e4bc4361a372ede0354d09334 100644
+--- a/go.sum
++++ b/go.sum
+@@ -2,6 +2,8 @@ codeberg.org/mvdkleijn/forgejo-sdk/forgejo v1.2.0 h1:/z7iYYHgTuP+BnJY5qnWj6UjlA1YsAFYhi36JZY1S7Y=
+ codeberg.org/mvdkleijn/forgejo-sdk/forgejo v1.2.0/go.mod h1:qGzzS6EYParzgmXvnf1QANdnQmHFSyAlJN3SiRZp7e8=
+ github.com/42wim/httpsig v1.2.2 h1:ofAYoHUNs/MJOLqQ8hIxeyz2QxOz8qdSVvp3PX/oPgA=
+ github.com/42wim/httpsig v1.2.2/go.mod h1:P/UYo7ytNBFwc+dg35IubuAUIs8zj5zzFIgUCEl55WY=
++github.com/aymerick/douceur v0.2.0 h1:Mv+mAeH1Q+n9Fr+oyamOlAkUNPWPlA8PPGR0QAaYuPk=
++github.com/aymerick/douceur v0.2.0/go.mod h1:wlT5vV2O3h55X9m7iVYN0TBM0NH/MmbLnd30/FjWUq4=
+ github.com/davecgh/go-spew v1.1.1 h1:vj9j/u1bqnvCEfJOwUhtlOARqs3+rkHYY13jYWTU97c=
+ github.com/davecgh/go-spew v1.1.1/go.mod h1:J7Y8YcW2NihsgmVo/mv3lAwl/skON4iLHjSsI+c5H38=
+ github.com/davidmz/go-pageant v1.0.2 h1:bPblRCh5jGU+Uptpz6LgMZGD5hJoOt7otgT454WvHn0=
+@@ -15,8 +17,12 @@ github.com/google/go-github/v88 v88.0.0 h1:dZA9IKkPK1eXZj4ypngnpRj5FwdpTv4whix2PrQMP7M=
+ github.com/google/go-github/v88 v88.0.0/go.mod h1:rufTDgn2N45wjhukLTyxmvc9nilSp3mr3Rgtt6b1MPw=
+ github.com/google/go-querystring v1.2.0 h1:yhqkPbu2/OH+V9BfpCVPZkNmUXhb2gBxJArfhIxNtP0=
+ github.com/google/go-querystring v1.2.0/go.mod h1:8IFJqpSRITyJ8QhQ13bmbeMBDfmeEJZD5A0egEOmkqU=
++github.com/gorilla/css v1.0.1 h1:ntNaBIghp6JmvWnxbZKANoLyuXTPZ4cAMlo6RyhlbO8=
++github.com/gorilla/css v1.0.1/go.mod h1:BvnYkspnSzMmwRK+b8/xgNPLiIuNZr6vbZBTPQ2A3b0=
+ github.com/hashicorp/go-version v1.7.0 h1:5tqGy27NaOTB8yJKUZELlFAS/LTKJkrmONwQKeRZfjY=
+ github.com/hashicorp/go-version v1.7.0/go.mod h1:fltr4n8CU8Ke44wwGCBoEymUuxUHl09ZGVZPK5anwXA=
++github.com/microcosm-cc/bluemonday v1.0.27 h1:MpEUotklkwCSLeH+Qdx1VJgNqLlpY2KXwXFM08ygZfk=
++github.com/microcosm-cc/bluemonday v1.0.27/go.mod h1:jFi9vgW+H7c3V0lb6nR74Ib/DIB5OBs92Dimizgw2cA=
+ github.com/pmezard/go-difflib v1.0.0 h1:4DBwDE0NGyQoBHbLQYPwSUPoCMWR5BEzIk/f1lZbAQM=
+ github.com/pmezard/go-difflib v1.0.0/go.mod h1:iKH77koFhYxTK1pcRnkKkqfTogsbg7gZNVY4sRDYZ/4=
+ github.com/stretchr/testify v1.9.0 h1:HtqpIVDClZ4nwg75+f6Lvsy/wHu+3BoSGCbBAcpTsTg=
+@@ -30,6 +36,8 @@ golang.org/x/crypto v0.28.0 h1:GBDwsMXVQi34v5CCYUm2jkJvu4cbtru2U4TN2PSyQnw=
+ golang.org/x/crypto v0.28.0/go.mod h1:rmgy+3RHxRZMyY0jjAJShp2zgEdOqj2AO7U0pYmeQ7U=
+ golang.org/x/net v0.0.0-20190404232315-eb5bcb51f2a3/go.mod h1:t9HGtf8HONx5eT2rtn7q6eTqICYqUVnKs3thJo3Qplg=
+ golang.org/x/net v0.0.0-20210226172049-e18ecbb05110/go.mod h1:m0MpNAwzfU5UDzcl9v0D8zg8gWTRqZa9RBIspLL5mdg=
++golang.org/x/net v0.26.0 h1:soB7SVo0PWrY4vPW/+ay0jKDNScG2X9wFeYlXIvJsOQ=
++golang.org/x/net v0.26.0/go.mod h1:5YKkiSynbBIh3p6iOc/vibscux0x38BZDkn8sCUPxHE=
+ golang.org/x/sys v0.0.0-20190215142949-d0b11bdaac8a/go.mod h1:STP8DvDyc/dI5b8T5hshtkjS+E42TnysNCUPdjciGhY=
+ golang.org/x/sys v0.0.0-20190412213103-97732733099d/go.mod h1:h1NjWce9XRLGQEsW7wpKNCjG9DtNlClVuFLEZdDNbEs=
+ golang.org/x/sys v0.0.0-20201119102817-f84b799fce68/go.mod h1:h1NjWce9XRLGQEsW7wpKNCjG9DtNlClVuFLEZdDNbEs=
+
