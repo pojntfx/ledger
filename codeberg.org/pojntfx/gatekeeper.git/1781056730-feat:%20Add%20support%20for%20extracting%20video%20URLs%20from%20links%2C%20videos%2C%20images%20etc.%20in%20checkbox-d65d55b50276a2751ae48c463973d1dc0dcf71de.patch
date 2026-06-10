@@ -1,0 +1,126 @@
+From d65d55b50276a2751ae48c463973d1dc0dcf71de Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Tue, 09 Jun 2026 18:58:50 -0700
+Subject: [PATCH] feat: Add support for extracting video URLs from links, videos, images etc. in checkbox
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/cmd/gatekeeper-list-prs/main.go b/cmd/gatekeeper-list-prs/main.go
+index 4add94ba19b93788cdb423b5da5d65f1985200a2..3b2c63fd360fdf354e2a8daf6eea8633f3dd245b 100644
+--- a/cmd/gatekeeper-list-prs/main.go
++++ b/cmd/gatekeeper-list-prs/main.go
+@@ -64,7 +64,7 @@ }
+ 
+ const (
+ 	descriptionPrefix            = "Please describe the application briefly."
+-	videoPrefix                  = "Please attach a video showcasing the application on Linux using the Flatpak"
++	videoPrefix                  = "Please attach a video showcasing the application on Linux using the Flatpak."
+ 	appIDPrefix                  = "The Flatpak ID follows all the rules listed in the" // TODO: Include the local URL reference etc. so that we can split cleanly
+ 	submissionRequirementsPrefix = "I have read and followed all the"                   // TODO: Include the local URL reference etc. so that we can split cleanly
+ 	authorPrefix                 = "I am the author of the project."
+@@ -113,13 +113,53 @@ 		KnownLabelStaleBlocked,
+ 		KnownLabelWorkInProgress,
+ 	}
+ )
++
++type taskItem struct {
++	checked bool
++	content string
++	prefix  int
++}
++
++func firstLinkInMarkdown(body []byte) string {
++	root := goldmark.New(goldmark.WithExtensions(extension.Linkify)).
++		Parser().
++		Parse(text.NewReader(body))
++
++	var url string
++	ast.Walk(root, func(n ast.Node, entering bool) (ast.WalkStatus, error) {
++		if !entering {
++			return ast.WalkContinue, nil
++		}
++
++		switch v := n.(type) {
++		case *ast.Link: // See https://github.com/flathub/flathub/pull/6985
++			url = string(v.Destination)
++
++			return ast.WalkStop, nil
++
++		case *ast.Image: // See https://github.com/flathub/flathub/pull/7783
++			url = string(v.Destination)
++
++			return ast.WalkStop, nil
++
++		case *ast.AutoLink: // See https://github.com/flathub/flathub/pull/7223
++			url = string(v.URL(body))
++
++			return ast.WalkStop, nil
++		}
++
++		return ast.WalkContinue, nil
++	})
++
++	return url
++}
+ 
+ func parseChecklistFromMarkdown(body []byte) (Checklist, error) {
+ 	root := goldmark.New(goldmark.WithExtensions(extension.TaskList)).
+ 		Parser().
+ 		Parse(text.NewReader(body))
+ 
+-	var checklist Checklist
++	var taskItems []taskItem
+ 	ast.Walk(root, func(n ast.Node, entering bool) (ast.WalkStatus, error) {
+ 		if !entering {
+ 			return ast.WalkContinue, nil
+@@ -137,23 +177,35 @@ 		if !ok {
+ 			return ast.WalkContinue, nil
+ 		}
+ 
+-		content := string(label.Segment.Value(body))
+-		if after, ok := strings.CutPrefix(content, descriptionPrefix); ok {
+-			checklist.Description = after
+-			checklist.DescriptionChecked = checkBox.IsChecked
+-		} else if after, ok := strings.CutPrefix(content, videoPrefix); ok {
+-			checklist.Video = after
+-			checklist.VideoChecked = checkBox.IsChecked
+-		} else if _, ok := strings.CutPrefix(content, appIDPrefix); ok {
+-			checklist.AppIDChecked = checkBox.IsChecked
+-		} else if _, ok := strings.CutPrefix(content, submissionRequirementsPrefix); ok {
+-			checklist.SubmissionRequirementsChecked = checkBox.IsChecked
+-		} else if _, ok := strings.CutPrefix(content, authorPrefix); ok {
+-			checklist.AuthorChecked = checkBox.IsChecked
+-		}
++		taskItems = append(taskItems, taskItem{
++			checked: checkBox.IsChecked,
++			content: string(label.Segment.Value(body)),
++			prefix:  checkBox.Parent().Lines().At(0).Start,
++		})
+ 
+ 		return ast.WalkContinue, nil
+ 	})
++
++	var checklist Checklist
++	for i, item := range taskItems {
++		if after, ok := strings.CutPrefix(item.content, descriptionPrefix); ok {
++			checklist.Description = after
++			checklist.DescriptionChecked = item.checked
++		} else if _, ok := strings.CutPrefix(item.content, videoPrefix); ok {
++			linkWindow := len(body)
++			if i+1 < len(taskItems) { // Whether another checkbox follows this one
++				linkWindow = taskItems[i+1].prefix // Stop searching for links before next checkbox begins
++			}
++			checklist.Video = firstLinkInMarkdown(body[item.prefix:linkWindow])
++			checklist.VideoChecked = item.checked
++		} else if _, ok := strings.CutPrefix(item.content, appIDPrefix); ok {
++			checklist.AppIDChecked = item.checked
++		} else if _, ok := strings.CutPrefix(item.content, submissionRequirementsPrefix); ok {
++			checklist.SubmissionRequirementsChecked = item.checked
++		} else if _, ok := strings.CutPrefix(item.content, authorPrefix); ok {
++			checklist.AuthorChecked = item.checked
++		}
++	}
+ 
+ 	return checklist, nil
+ }
+
