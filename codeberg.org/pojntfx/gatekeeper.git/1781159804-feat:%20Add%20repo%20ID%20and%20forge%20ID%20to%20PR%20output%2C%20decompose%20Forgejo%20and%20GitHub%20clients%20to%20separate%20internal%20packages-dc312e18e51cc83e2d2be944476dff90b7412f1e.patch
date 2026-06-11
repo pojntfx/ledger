@@ -1,0 +1,279 @@
+From dc312e18e51cc83e2d2be944476dff90b7412f1e Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Wed, 10 Jun 2026 23:36:44 -0700
+Subject: [PATCH] feat: Add repo ID and forge ID to PR output, decompose Forgejo and GitHub clients to separate internal packages
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/cmd/gatekeeper-list-prs/main.go b/cmd/gatekeeper-list-prs/main.go
+index 6f2948bd5b0cc723bc5128390f2fd01f44111315..f10dcb6bfa4b4da5490908c1e5d272c36bc95140 100644
+--- a/cmd/gatekeeper-list-prs/main.go
++++ b/cmd/gatekeeper-list-prs/main.go
+@@ -3,8 +3,6 @@
+ import (
+ 	"bytes"
+ 	"context"
+-	"encoding/json"
+-	"errors"
+ 	"flag"
+ 	"os"
+ 	"slices"
+@@ -12,6 +10,8 @@ 	"strings"
+ 	"time"
+ 
+ 	"codeberg.org/mvdkleijn/forgejo-sdk/forgejo"
++	"codeberg.org/pojntfx/gatekeeper/internal/config"
++	"codeberg.org/pojntfx/gatekeeper/internal/forges"
+ 	"github.com/google/go-github/v88/github"
+ 	"gopkg.in/yaml.v3"
+ 
+@@ -24,30 +24,9 @@
+ 	"github.com/microcosm-cc/bluemonday"
+ )
+ 
+-type ForgeType string
+-
+-const (
+-	ForgeTypeGitHub  ForgeType = "github"
+-	ForgeTypeForgejo ForgeType = "forgejo"
+-)
+-
+-type ForgeConfig struct {
+-	Type ForgeType `yaml:"type"`
+-	API  string    `yaml:"api"`
+-}
+-
+-type RepoRepoConfig struct {
+-	Owner string `yaml:"owner"`
+-	Repo  string `yaml:"repo"`
+-}
+-
+-type RepoConfig struct {
+-	Name  string         `yaml:"name"`
+-	Forge ForgeConfig    `yaml:"forge"`
+-	Repo  RepoRepoConfig `yaml:"repo"`
+-}
+-
+ type PullRequest struct {
++	RepoID      string       `yaml:"repoID"`
++	ID          int64        `yaml:"id"`
+ 	URL         string       `yaml:"url"`
+ 	Title       string       `yaml:"title"`
+ 	Checklist   Checklist    `yaml:"checklist"`
+@@ -281,13 +260,8 @@
+ 	return knownLabels, false
+ }
+ 
+-func fetchGitHubPullRequests(ctx context.Context, repo RepoConfig, token string) ([]PullRequest, error) {
+-	options := []github.ClientOptionsFunc{}
+-	if token != "" {
+-		options = append(options, github.WithAuthToken(token))
+-	}
+-
+-	client, err := github.NewClient()
++func fetchGitHubPullRequests(ctx context.Context, repo config.RepoConfig, token string) ([]PullRequest, error) {
++	client, err := forges.NewGitHubClient(token, repo.Forge.API)
+ 	if err != nil {
+ 		return []PullRequest{}, err
+ 	}
+@@ -321,6 +295,8 @@ 			continue
+ 		}
+ 
+ 		pullRequests = append(pullRequests, PullRequest{
++			RepoID:      repo.ID,
++			ID:          int64(pr.GetNumber()),
+ 			URL:         pr.GetHTMLURL(),
+ 			Title:       pr.GetTitle(),
+ 			Checklist:   checklist,
+@@ -332,15 +308,8 @@
+ 	return pullRequests, nil
+ }
+ 
+-func fetchForgejoPullRequests(ctx context.Context, repo RepoConfig, token string) ([]PullRequest, error) {
+-	options := []forgejo.ClientOption{
+-		forgejo.SetContext(ctx),
+-	}
+-	if token != "" {
+-		options = append(options, forgejo.SetToken(token))
+-	}
+-
+-	client, err := forgejo.NewClient(repo.Forge.API, options...)
++func fetchForgejoPullRequests(ctx context.Context, repo config.RepoConfig, token string) ([]PullRequest, error) {
++	client, err := forges.NewForgejoClient(ctx, token, repo.Forge.API)
+ 	if err != nil {
+ 		return []PullRequest{}, err
+ 	}
+@@ -374,6 +343,8 @@ 			continue
+ 		}
+ 
+ 		pullRequests = append(pullRequests, PullRequest{
++			RepoID:      repo.ID,
++			ID:          pr.Index,
+ 			URL:         pr.URL,
+ 			Title:       pr.Title,
+ 			Checklist:   checklist,
+@@ -394,23 +365,11 @@ 	rawTokens := flag.String("tokens", "", "Forge tokens as JSON object, e.g. {\"github.com\": \"token\"}")
+ 
+ 	flag.Parse()
+ 
+-	reposFile, err := os.Open(*rawRepos)
++	repos, tokens, err := config.ParseReposFileAndTokens(*rawRepos, *rawTokens)
+ 	if err != nil {
+ 		panic(err)
+ 	}
+ 
+-	var repos []RepoConfig
+-	if err := yaml.NewDecoder(reposFile).Decode(&repos); err != nil {
+-		panic(err)
+-	}
+-
+-	tokens := map[string]string{}
+-	if *rawTokens != "" {
+-		if err := json.Unmarshal([]byte(*rawTokens), &tokens); err != nil {
+-			panic(errors.Join(errors.New("could not parse forge tokens"), err))
+-		}
+-	}
+-
+ 	var allPullRequests []PullRequest
+ 	for _, repo := range repos {
+ 		token := tokens[repo.Forge.API]
+@@ -421,10 +380,10 @@ 			err          error
+ 		)
+ 
+ 		switch repo.Forge.Type {
+-		case ForgeTypeGitHub:
++		case config.ForgeTypeGitHub:
+ 			pullRequests, err = fetchGitHubPullRequests(ctx, repo, token)
+ 
+-		case ForgeTypeForgejo:
++		case config.ForgeTypeForgejo:
+ 			pullRequests, err = fetchForgejoPullRequests(ctx, repo, token)
+ 		}
+ 
+diff --git a/internal/config/repos.go b/internal/config/repos.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..d65010d194b6aa7958f1480da6f90a4cb5cb60df
+--- /dev/null
++++ b/internal/config/repos.go
+@@ -0,0 +1,54 @@
++package config
++
++import (
++	"encoding/json"
++	"errors"
++	"os"
++
++	"gopkg.in/yaml.v3"
++)
++
++type ForgeType string
++
++const (
++	ForgeTypeGitHub  ForgeType = "github"
++	ForgeTypeForgejo ForgeType = "forgejo"
++)
++
++type ForgeConfig struct {
++	Type ForgeType `yaml:"type"`
++	API  string    `yaml:"api"`
++}
++
++type RepoRepoConfig struct {
++	Owner string `yaml:"owner"`
++	Repo  string `yaml:"repo"`
++}
++
++type RepoConfig struct {
++	ID    string         `yaml:"id"`
++	Name  string         `yaml:"name"`
++	Forge ForgeConfig    `yaml:"forge"`
++	Repo  RepoRepoConfig `yaml:"repo"`
++}
++
++func ParseReposFileAndTokens(reposFilePath string, rawTokens string) ([]RepoConfig, map[string]string, error) {
++	reposFile, err := os.Open(reposFilePath)
++	if err != nil {
++		return []RepoConfig{}, map[string]string{}, errors.Join(errors.New("could not open repos file"), err)
++	}
++
++	var repos []RepoConfig
++	if err := yaml.NewDecoder(reposFile).Decode(&repos); err != nil {
++		return []RepoConfig{}, map[string]string{}, errors.Join(errors.New("could not parse repos file"), err)
++	}
++
++	tokens := map[string]string{}
++	if rawTokens != "" {
++		if err := json.Unmarshal([]byte(rawTokens), &tokens); err != nil {
++			return []RepoConfig{}, map[string]string{}, errors.Join(errors.New("could not parse forge tokens"), err)
++		}
++	}
++
++	return repos, tokens, nil
++}
+diff --git a/internal/forges/forgejo.go b/internal/forges/forgejo.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..8ec5b61935bb2e1dd2a9cadd9424f57f2aba00ef
+--- /dev/null
++++ b/internal/forges/forgejo.go
+@@ -0,0 +1,18 @@
++package forges
++
++import (
++	"context"
++
++	"codeberg.org/mvdkleijn/forgejo-sdk/forgejo"
++)
++
++func NewForgejoClient(ctx context.Context, token, api string) (*forgejo.Client, error) {
++	options := []forgejo.ClientOption{
++		forgejo.SetContext(ctx),
++	}
++	if token != "" {
++		options = append(options, forgejo.SetToken(token))
++	}
++
++	return forgejo.NewClient(api, options...)
++}
+diff --git a/internal/forges/github.go b/internal/forges/github.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..595423bebb84cee24877fc3b67675dec60fe6af8
+--- /dev/null
++++ b/internal/forges/github.go
+@@ -0,0 +1,16 @@
++package forges
++
++import "github.com/google/go-github/v88/github"
++
++func NewGitHubClient(token, api string) (*github.Client, error) {
++	options := []github.ClientOptionsFunc{}
++	if token != "" {
++		options = append(options, github.WithAuthToken(token))
++	}
++
++	if api != "" {
++		options = append(options, github.WithEnterpriseURLs(api, api))
++	}
++
++	return github.NewClient()
++}
+diff --git a/repos.yaml b/repos.yaml
+index be204266f66e127885c44a43140f904494e4f94f..b3b00ac452ea7a8c53df2b1d94f28a117b7da892 100644
+--- a/repos.yaml
++++ b/repos.yaml
+@@ -1,11 +1,13 @@
+-- name: Flathub on GitHub
++- id: flathub-github
++  name: Flathub on GitHub
+   forge:
+     type: github
+     api: https://api.github.com/
+   repo:
+     owner: flathub
+     repo: flathub
+-- name: Flathub on Codeberg
++- id: flathub-codeberg
++  name: Flathub on Codeberg
+   forge:
+     type: forgejo
+     api: https://codeberg.org/
+
