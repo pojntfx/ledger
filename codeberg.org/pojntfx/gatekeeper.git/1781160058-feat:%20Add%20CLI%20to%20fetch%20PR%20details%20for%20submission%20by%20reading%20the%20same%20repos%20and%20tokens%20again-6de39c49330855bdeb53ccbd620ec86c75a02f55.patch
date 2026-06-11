@@ -1,0 +1,94 @@
+From 6de39c49330855bdeb53ccbd620ec86c75a02f55 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Wed, 10 Jun 2026 23:40:58 -0700
+Subject: [PATCH] feat: Add CLI to fetch PR details for submission by reading the same repos and tokens again
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/cmd/gatekeeper-try-submission/main.go b/cmd/gatekeeper-try-submission/main.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..44c05518693e81c61a348df392ab95abde5bd90d
+--- /dev/null
++++ b/cmd/gatekeeper-try-submission/main.go
+@@ -0,0 +1,80 @@
++package main
++
++import (
++	"context"
++	"errors"
++	"flag"
++	"os"
++
++	"codeberg.org/pojntfx/gatekeeper/internal/config"
++	"codeberg.org/pojntfx/gatekeeper/internal/forges"
++	"gopkg.in/yaml.v3"
++)
++
++func main() {
++	ctx, cancel := context.WithCancel(context.Background())
++	defer cancel()
++
++	rawRepos := flag.String("repos", "repos.yaml", "Repos configuration file")
++	rawTokens := flag.String("tokens", "", "Forge tokens as JSON object, e.g. {\"github.com\": \"token\"}")
++
++	repoID := flag.String("repo-id", "", "ID of the repo in the repos configuration file that the PR is hosted on")
++	prID := flag.Int64("pr-id", 0, "ID of the PR for the submission to try out")
++
++	flag.Parse()
++
++	repos, tokens, err := config.ParseReposFileAndTokens(*rawRepos, *rawTokens)
++	if err != nil {
++		panic(err)
++	}
++
++	var repo *config.RepoConfig
++	for _, candidate := range repos {
++		if candidate.ID == *repoID {
++			repo = &candidate
++
++			break
++		}
++	}
++
++	if repo == nil {
++		panic(errors.New("could not find repo with your repod-id in the repos configuration file"))
++	}
++
++	token := tokens[repo.Forge.API]
++
++	switch repo.Forge.Type {
++	case config.ForgeTypeGitHub:
++		client, err := forges.NewGitHubClient(token, repo.Forge.API)
++		if err != nil {
++			panic(err)
++		}
++
++		// Even though GitHub's API internally uses int64 for IDs, the PR "number" is a regular int
++		pr, _, err := client.PullRequests.Get(ctx, repo.Repo.Owner, repo.Repo.Repo, int(*prID))
++		if err != nil {
++			panic(err)
++		}
++
++		if err := yaml.NewEncoder(os.Stdout).Encode(pr); err != nil {
++			panic(err)
++		}
++
++	case config.ForgeTypeForgejo:
++		client, err := forges.NewForgejoClient(ctx, token, repo.Forge.API)
++		if err != nil {
++			panic(err)
++		}
++
++		pr, _, err := client.GetPullRequest(repo.Repo.Owner, repo.Repo.Repo, *prID)
++		if err != nil {
++			panic(err)
++		}
++
++		if err := yaml.NewEncoder(os.Stdout).Encode(pr); err != nil {
++			panic(err)
++		}
++	}
++
++	// TODO: Using go-git, clone submission from PR (via HTTPS), run `flatpak build` via the Flathub-vendored flatpak-builder (including all deps), install as user, then run `flatpak run`
++}
+
