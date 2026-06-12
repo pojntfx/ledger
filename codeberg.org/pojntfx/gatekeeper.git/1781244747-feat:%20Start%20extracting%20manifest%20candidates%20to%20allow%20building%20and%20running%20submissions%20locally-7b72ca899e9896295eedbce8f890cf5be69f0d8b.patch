@@ -1,0 +1,98 @@
+From 7b72ca899e9896295eedbce8f890cf5be69f0d8b Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Thu, 11 Jun 2026 23:12:27 -0700
+Subject: [PATCH] feat: Start extracting manifest candidates to allow building and running submissions locally
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/cmd/gatekeeper-try-submission/main.go b/cmd/gatekeeper-try-submission/main.go
+index 423d6c459699fb33bda9499a7d1f35a32c83e244..fdd5b8a5f925d501028c4a0a3c11a41ed9b14d54 100644
+--- a/cmd/gatekeeper-try-submission/main.go
++++ b/cmd/gatekeeper-try-submission/main.go
+@@ -7,6 +7,8 @@ 	"flag"
+ 	"fmt"
+ 	"os"
+ 	"path/filepath"
++	"slices"
++	"strings"
+ 
+ 	"codeberg.org/pojntfx/gatekeeper/internal/config"
+ 	"codeberg.org/pojntfx/gatekeeper/internal/forges"
+@@ -16,6 +18,16 @@
+ 	"github.com/go-git/go-git/v6"
+ 	"github.com/go-git/go-git/v6/plumbing"
+ )
++
++var (
++	// See https://github.com/flathub-infra/vorarbeiter/blob/7d8a593b65a38646310e5cd18b1959b5e3f839f2/app/routes/webhooks.py#L735
++	manifestExtensions = []string{".yml", ".yaml", ".json"}
++)
++
++type manifestCandidate struct {
++	Extension string
++	AppID     string
++}
+ 
+ func main() {
+ 	ctx, cancel := context.WithCancel(context.Background())
+@@ -125,16 +137,56 @@ 		}
+ 
+ 		openRepo, err = git.PlainCloneContext(ctx, repoPath, &git.CloneOptions{
+ 			URL:           cloneURL,
+-			ReferenceName: plumbing.ReferenceName(cloneBranch),
++			ReferenceName: plumbing.NewBranchReferenceName(cloneBranch),
+ 		})
+ 		if err != nil {
+ 			panic(err)
+ 		}
+ 	}
+ 
+-	if err := yaml.NewEncoder(os.Stdout).Encode(openRepo); err != nil {
++	repoFiles, err := os.ReadDir(repoPath)
++	if err != nil {
+ 		panic(err)
+ 	}
+ 
+-	// TODO: Using go-git, clone submission from PR (via HTTPS), run `flatpak build` via the Flathub-vendored flatpak-builder (including all deps), install as user, then run `flatpak run` (allow forwarding all flags to `flatpak run` past `--`)
++	manifestCandidates := []manifestCandidate{}
++	for _, file := range repoFiles {
++		var (
++			extension = filepath.Ext(file.Name())
++			appID     = strings.TrimSuffix(file.Name(), extension)
++		)
++		if slices.Contains(manifestExtensions, extension) {
++			manifestCandidates = append(manifestCandidates, manifestCandidate{
++				Extension: extension,
++				AppID:     appID,
++			})
++		}
++	}
++
++	if err := yaml.NewEncoder(os.Stdout).Encode(manifestCandidates); err != nil {
++		panic(err)
++	}
++
++	// TODO: Loop over all candidates, parse them as YAML (even the JSON ones since it's a strict subset), read app-id/id, check if
++	// it matches manifestCandidate.appID, and if it does short-circuit and set manifestName = appID + extension
++	// See https://github.com/flathub-infra/vorarbeiter/blob/7d8a593b65a38646310e5cd18b1959b5e3f839f2/app/utils/manifest.py#L55
++
++	// cmd := exec.CommandContext(
++	// 	ctx,
++	// 	"flatpak",
++	// 	"run",
++	// 	"--command=flathub-build",
++	// 	"org.flatpak.Builder",
++	// 	"--install",
++	// 	manifestName,
++	// )
++	// cmd.Dir = repoPath
++	// cmd.Stdout = os.Stdout
++	// cmd.Stderr = os.Stderr
++
++	// if err := cmd.Run(); err != nil {
++	// 	panic(err)
++	// }
++
++	// TODO: Run `flatpak build` via the Flathub-vendored flatpak-builder (including all deps), install as user, then run `flatpak run` (allow forwarding all flags to `flatpak run` past `--`)
+ }
+
