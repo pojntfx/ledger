@@ -1,0 +1,40 @@
+From a3209d7f04eb30373344dc813023e9dcd63a6c36 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Thu, 11 Jun 2026 23:11:02 -0700
+Subject: [PATCH] refactor: Always hard reset to remote ref if there are changes that could be pulled
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/cmd/gatekeeper-try-submission/main.go b/cmd/gatekeeper-try-submission/main.go
+index 3865eb328a468ed41809826ad209359d79b51bad..423d6c459699fb33bda9499a7d1f35a32c83e244 100644
+--- a/cmd/gatekeeper-try-submission/main.go
++++ b/cmd/gatekeeper-try-submission/main.go
+@@ -99,9 +99,24 @@ 		if err != nil {
+ 			panic(err)
+ 		}
+ 
+-		// TODO: Support hard-resetting to origin HEAD if we can't pull (e.g. if remote was force-pushed to)
+-		if err := worktree.PullContext(ctx, &git.PullOptions{}); err != nil && !errors.Is(err, git.NoErrAlreadyUpToDate) {
+-			panic(err)
++		if err := openRepo.FetchContext(ctx, &git.FetchOptions{}); err != nil {
++			if !errors.Is(err, git.NoErrAlreadyUpToDate) {
++				panic(err)
++			}
++
++			remoteRef, err := openRepo.Reference(plumbing.NewRemoteReferenceName("origin", cloneBranch), true)
++			if err != nil {
++				panic(err)
++			}
++
++			// We always hard-reset here so that we don't run into any issues if the submission repo was force-pushed to
++			// Untracked local files (e.g. the build directory) stay untouched
++			if err := worktree.Reset(&git.ResetOptions{
++				Mode:   git.HardReset,
++				Commit: remoteRef.Hash(),
++			}); err != nil {
++				panic(err)
++			}
+ 		}
+ 	} else {
+ 		if !errors.Is(err, git.ErrRepositoryNotExists) {
+
