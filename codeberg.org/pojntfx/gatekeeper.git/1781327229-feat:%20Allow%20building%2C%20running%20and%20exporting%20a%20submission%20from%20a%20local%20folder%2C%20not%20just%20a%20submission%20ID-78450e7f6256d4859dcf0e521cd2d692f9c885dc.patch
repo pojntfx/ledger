@@ -1,0 +1,250 @@
+From 78450e7f6256d4859dcf0e521cd2d692f9c885dc Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Fri, 12 Jun 2026 22:07:09 -0700
+Subject: [PATCH] feat: Allow building, running and exporting a submission from a local folder, not just a submission ID
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/cmd/gatekeeper-try-submission/main.go b/cmd/gatekeeper-try-submission/main.go
+index 8cebe2386f1b2ffbdb15365f5502679884f6e8e3..04459e137364d8b53cad1056f2d74bb2be2775f6 100644
+--- a/cmd/gatekeeper-try-submission/main.go
++++ b/cmd/gatekeeper-try-submission/main.go
+@@ -52,106 +52,111 @@ 	lintRepo := flag.Bool("lint-repo", true, "Whether to lint the repo")
+ 
+ 	output := flag.String("output", "", "Path to write the .flatpak bundle to instead of running the submission after building it")
+ 
+-	flag.Parse()
+-
+-	repos, tokens, err := config.ParseReposFileAndTokens(*rawRepos, *rawTokens)
+-	if err != nil {
+-		panic(err)
+-	}
+-
+-	var repo *config.RepoConfig
+-	for _, candidate := range repos {
+-		if candidate.ID == *repoID {
+-			repo = &candidate
+-
+-			break
+-		}
+-	}
+-
+-	if repo == nil {
+-		panic(errors.New("could not find repo with your repo-id in the repos configuration file"))
+-	}
+-
+-	token := tokens[repo.Forge.API]
++	input := flag.String("input", "", "Path to local repo of submission to use instead of cloning it first via repo-id and pr-id")
+ 
+-	var (
+-		cloneURL,
+-		cloneBranch string
+-	)
+-	switch repo.Forge.Type {
+-	case config.ForgeTypeGitHub:
+-		client, err := forges.NewGitHubClient(token, repo.Forge.API)
+-		if err != nil {
+-			panic(err)
+-		}
++	flag.Parse()
+ 
+-		// Even though GitHub's API internally uses int64 for IDs, the PR "number" is a regular int
+-		pr, _, err := client.PullRequests.Get(ctx, repo.Repo.Owner, repo.Repo.Repo, int(*prID))
++	repoPath := *input
++	if *input == "" {
++		repos, tokens, err := config.ParseReposFileAndTokens(*rawRepos, *rawTokens)
+ 		if err != nil {
+ 			panic(err)
+ 		}
+ 
+-		head := pr.GetHead()
+-		cloneURL, cloneBranch = head.GetRepo().GetCloneURL(), head.GetRef()
++		var repo *config.RepoConfig
++		for _, candidate := range repos {
++			if candidate.ID == *repoID {
++				repo = &candidate
+ 
+-	case config.ForgeTypeForgejo:
+-		client, err := forges.NewForgejoClient(ctx, token, repo.Forge.API)
+-		if err != nil {
+-			panic(err)
++				break
++			}
+ 		}
+ 
+-		pr, _, err := client.GetPullRequest(repo.Repo.Owner, repo.Repo.Repo, *prID)
+-		if err != nil {
+-			panic(err)
++		if repo == nil {
++			panic(errors.New("could not find repo with your repo-id in the repos configuration file"))
+ 		}
+ 
+-		head := pr.Head
+-		cloneURL, cloneBranch = head.Repository.CloneURL, head.Ref
+-	}
+-
+-	repoPath := filepath.Join(*workDir, "clones", *repoID, fmt.Sprintf("%v", *prID))
+-	if err := os.MkdirAll(repoPath, os.ModePerm); err != nil {
+-		panic(err)
+-	}
++		token := tokens[repo.Forge.API]
+ 
+-	openRepo, err := git.PlainOpen(repoPath)
+-	if err == nil {
+-		// We've cloned this before; pull
+-		worktree, err := openRepo.Worktree()
+-		if err != nil {
+-			panic(err)
+-		}
++		var (
++			cloneURL,
++			cloneBranch string
++		)
++		switch repo.Forge.Type {
++		case config.ForgeTypeGitHub:
++			client, err := forges.NewGitHubClient(token, repo.Forge.API)
++			if err != nil {
++				panic(err)
++			}
+ 
+-		if err := openRepo.FetchContext(ctx, &git.FetchOptions{}); err != nil {
+-			if !errors.Is(err, git.NoErrAlreadyUpToDate) {
++			// Even though GitHub's API internally uses int64 for IDs, the PR "number" is a regular int
++			pr, _, err := client.PullRequests.Get(ctx, repo.Repo.Owner, repo.Repo.Repo, int(*prID))
++			if err != nil {
+ 				panic(err)
+ 			}
+ 
+-			remoteRef, err := openRepo.Reference(plumbing.NewRemoteReferenceName("origin", cloneBranch), true)
++			head := pr.GetHead()
++			cloneURL, cloneBranch = head.GetRepo().GetCloneURL(), head.GetRef()
++
++		case config.ForgeTypeForgejo:
++			client, err := forges.NewForgejoClient(ctx, token, repo.Forge.API)
+ 			if err != nil {
+ 				panic(err)
+ 			}
+ 
+-			// We always hard-reset here so that we don't run into any issues if the submission repo was force-pushed to
+-			// Untracked local files (e.g. the build directory) stay untouched
+-			if err := worktree.Reset(&git.ResetOptions{
+-				Mode:   git.HardReset,
+-				Commit: remoteRef.Hash(),
+-			}); err != nil {
++			pr, _, err := client.GetPullRequest(repo.Repo.Owner, repo.Repo.Repo, *prID)
++			if err != nil {
+ 				panic(err)
+ 			}
++
++			head := pr.Head
++			cloneURL, cloneBranch = head.Repository.CloneURL, head.Ref
+ 		}
+-	} else {
+-		if !errors.Is(err, git.ErrRepositoryNotExists) {
++
++		repoPath = filepath.Join(*workDir, "clones", *repoID, fmt.Sprintf("%v", *prID))
++		if err := os.MkdirAll(repoPath, os.ModePerm); err != nil {
+ 			panic(err)
+ 		}
+ 
+-		openRepo, err = git.PlainCloneContext(ctx, repoPath, &git.CloneOptions{
+-			URL:           cloneURL,
+-			ReferenceName: plumbing.NewBranchReferenceName(cloneBranch),
+-		})
+-		if err != nil {
+-			panic(err)
++		openRepo, err := git.PlainOpen(repoPath)
++		if err == nil {
++			// We've cloned this before; pull
++			worktree, err := openRepo.Worktree()
++			if err != nil {
++				panic(err)
++			}
++
++			if err := openRepo.FetchContext(ctx, &git.FetchOptions{}); err != nil {
++				if !errors.Is(err, git.NoErrAlreadyUpToDate) {
++					panic(err)
++				}
++
++				remoteRef, err := openRepo.Reference(plumbing.NewRemoteReferenceName("origin", cloneBranch), true)
++				if err != nil {
++					panic(err)
++				}
++
++				// We always hard-reset here so that we don't run into any issues if the submission repo was force-pushed to
++				// Untracked local files (e.g. the build directory) stay untouched
++				if err := worktree.Reset(&git.ResetOptions{
++					Mode:   git.HardReset,
++					Commit: remoteRef.Hash(),
++				}); err != nil {
++					panic(err)
++				}
++			}
++		} else {
++			if !errors.Is(err, git.ErrRepositoryNotExists) {
++				panic(err)
++			}
++
++			openRepo, err = git.PlainCloneContext(ctx, repoPath, &git.CloneOptions{
++				URL:           cloneURL,
++				ReferenceName: plumbing.NewBranchReferenceName(cloneBranch),
++			})
++			if err != nil {
++				panic(err)
++			}
+ 		}
+ 	}
+ 
+@@ -265,25 +270,7 @@ 			panic(err)
+ 		}
+ 	}
+ 
+-	if *output != "" {
+-		exportCmd := exec.CommandContext(
+-			ctx,
+-			"flatpak",
+-			"run",
+-			"--command=flatpak",
+-			"org.flatpak.Builder",
+-			"build-bundle",
+-			filepath.Join(repoPath, "repo"),
+-			*output,
+-			appID,
+-		)
+-		exportCmd.Stdout = os.Stdout
+-		exportCmd.Stderr = os.Stderr
+-
+-		if err := exportCmd.Run(); err != nil {
+-			panic(err)
+-		}
+-	} else {
++	if *output == "" {
+ 		runCmd := exec.CommandContext(
+ 			ctx,
+ 			"flatpak",
+@@ -301,6 +288,24 @@ 		runCmd.Stdout = os.Stdout
+ 		runCmd.Stderr = os.Stderr
+ 
+ 		if err := runCmd.Run(); err != nil {
++			panic(err)
++		}
++	} else {
++		exportCmd := exec.CommandContext(
++			ctx,
++			"flatpak",
++			"run",
++			"--command=flatpak",
++			"org.flatpak.Builder",
++			"build-bundle",
++			filepath.Join(repoPath, "repo"),
++			*output,
++			appID,
++		)
++		exportCmd.Stdout = os.Stdout
++		exportCmd.Stderr = os.Stderr
++
++		if err := exportCmd.Run(); err != nil {
+ 			panic(err)
+ 		}
+ 	}
+
