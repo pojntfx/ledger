@@ -1,0 +1,86 @@
+From a6846d85bf1a9f69e5231a7857f69deff9be9fe5 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Fri, 12 Jun 2026 21:47:58 -0700
+Subject: [PATCH] feat: Add flag to lint manifest and repo
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/cmd/gatekeeper-try-submission/main.go b/cmd/gatekeeper-try-submission/main.go
+index 8389635a45b943cc0c38fb92e88ae82ba476f15c..06917aca4acd5705899c2e86d25b8e3988cba7b4 100644
+--- a/cmd/gatekeeper-try-submission/main.go
++++ b/cmd/gatekeeper-try-submission/main.go
+@@ -47,6 +47,9 @@ 	prID := flag.Int64("pr-id", 0, "ID of the PR for the submission to try out")
+ 
+ 	workDir := flag.String("work-dir", filepath.Join(xdg.StateHome, "gatekeeper"), "Work directory for cloning and building submissios etc. in")
+ 
++	lintManifest := flag.Bool("lint-manifest", true, "Whether to lint the manifest")
++	lintRepo := flag.Bool("lint-repo", true, "Whether to lint the repo")
++
+ 	flag.Parse()
+ 
+ 	repos, tokens, err := config.ParseReposFileAndTokens(*rawRepos, *rawTokens)
+@@ -205,6 +208,25 @@ 	if manifestName == "" {
+ 		panic(errors.New("the manifest file name and app-id/id in the manifest don't match"))
+ 	}
+ 
++	if *lintManifest {
++		manifestLintCmd := exec.CommandContext(
++			ctx,
++			"flatpak",
++			"run",
++			"--command=flatpak-builder-lint",
++			"org.flatpak.Builder",
++			"manifest",
++			manifestName,
++		)
++		manifestLintCmd.Dir = repoPath
++		manifestLintCmd.Stdout = os.Stdout
++		manifestLintCmd.Stderr = os.Stderr
++
++		if err := manifestLintCmd.Run(); err != nil {
++			panic(err)
++		}
++	}
++
+ 	buildCmd := exec.CommandContext(
+ 		ctx,
+ 		"flatpak",
+@@ -220,6 +242,25 @@ 	buildCmd.Stderr = os.Stderr
+ 
+ 	if err := buildCmd.Run(); err != nil {
+ 		panic(err)
++	}
++
++	if *lintRepo {
++		repoLintCmd := exec.CommandContext(
++			ctx,
++			"flatpak",
++			"run",
++			"--command=flatpak-builder-lint",
++			"org.flatpak.Builder",
++			"repo",
++			"repo",
++		)
++		repoLintCmd.Dir = repoPath
++		repoLintCmd.Stdout = os.Stdout
++		repoLintCmd.Stderr = os.Stderr
++
++		if err := repoLintCmd.Run(); err != nil {
++			panic(err)
++		}
+ 	}
+ 
+ 	runCmd := exec.CommandContext(
+diff --git a/internal/config/repos.go b/internal/config/repos.go
+index d65010d194b6aa7958f1480da6f90a4cb5cb60df..b8d5f2f4a048c1898f896d15710a42ee18188770 100644
+--- a/internal/config/repos.go
++++ b/internal/config/repos.go
+@@ -37,6 +37,7 @@ 	reposFile, err := os.Open(reposFilePath)
+ 	if err != nil {
+ 		return []RepoConfig{}, map[string]string{}, errors.Join(errors.New("could not open repos file"), err)
+ 	}
++	defer reposFile.Close()
+ 
+ 	var repos []RepoConfig
+ 	if err := yaml.NewDecoder(reposFile).Decode(&repos); err != nil {
+
