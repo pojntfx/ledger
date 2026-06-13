@@ -1,0 +1,139 @@
+From d259adc1a41fb0f395cd60b7fc428c0acc7c07c1 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Fri, 12 Jun 2026 21:39:16 -0700
+Subject: [PATCH] feat: Add support for finding the right manifest file, build Flatpak and start it after cloning
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/cmd/gatekeeper-try-submission/main.go b/cmd/gatekeeper-try-submission/main.go
+index fdd5b8a5f925d501028c4a0a3c11a41ed9b14d54..8389635a45b943cc0c38fb92e88ae82ba476f15c 100644
+--- a/cmd/gatekeeper-try-submission/main.go
++++ b/cmd/gatekeeper-try-submission/main.go
+@@ -6,6 +6,7 @@ 	"errors"
+ 	"flag"
+ 	"fmt"
+ 	"os"
++	"os/exec"
+ 	"path/filepath"
+ 	"slices"
+ 	"strings"
+@@ -27,6 +28,11 @@
+ type manifestCandidate struct {
+ 	Extension string
+ 	AppID     string
++}
++
++type flatpakManifest struct {
++	AppID string `yaml:"app-id"`
++	ID    string `yaml:"id"`
+ }
+ 
+ func main() {
+@@ -58,7 +64,7 @@ 		}
+ 	}
+ 
+ 	if repo == nil {
+-		panic(errors.New("could not find repo with your repod-id in the repos configuration file"))
++		panic(errors.New("could not find repo with your repo-id in the repos configuration file"))
+ 	}
+ 
+ 	token := tokens[repo.Forge.API]
+@@ -163,30 +169,76 @@ 			})
+ 		}
+ 	}
+ 
+-	if err := yaml.NewEncoder(os.Stdout).Encode(manifestCandidates); err != nil {
+-		panic(err)
++	if len(manifestCandidates) <= 0 {
++		panic(errors.New("could not find any manifest files in the submission repo"))
+ 	}
+ 
+-	// TODO: Loop over all candidates, parse them as YAML (even the JSON ones since it's a strict subset), read app-id/id, check if
+-	// it matches manifestCandidate.appID, and if it does short-circuit and set manifestName = appID + extension
+-	// See https://github.com/flathub-infra/vorarbeiter/blob/7d8a593b65a38646310e5cd18b1959b5e3f839f2/app/utils/manifest.py#L55
++	var (
++		manifestName,
++		appID string
++	)
++	for _, manifestCandidate := range manifestCandidates {
++		manifestCandidateName := manifestCandidate.AppID + manifestCandidate.Extension
+ 
+-	// cmd := exec.CommandContext(
+-	// 	ctx,
+-	// 	"flatpak",
+-	// 	"run",
+-	// 	"--command=flathub-build",
+-	// 	"org.flatpak.Builder",
+-	// 	"--install",
+-	// 	manifestName,
+-	// )
+-	// cmd.Dir = repoPath
+-	// cmd.Stdout = os.Stdout
+-	// cmd.Stderr = os.Stderr
++		manifestFile, err := os.Open(filepath.Join(repoPath, manifestCandidateName))
++		if err != nil {
++			panic(err)
++		}
++		defer manifestFile.Close()
+ 
+-	// if err := cmd.Run(); err != nil {
+-	// 	panic(err)
+-	// }
++		var manifest flatpakManifest
++		if err := yaml.NewDecoder(manifestFile).Decode(&manifest); err != nil {
++			panic(err)
++		}
+ 
+-	// TODO: Run `flatpak build` via the Flathub-vendored flatpak-builder (including all deps), install as user, then run `flatpak run` (allow forwarding all flags to `flatpak run` past `--`)
++		// See https://github.com/flathub-infra/vorarbeiter/blob/7d8a593b65a38646310e5cd18b1959b5e3f839f2/app/utils/manifest.py#L55
++		if manifest.AppID == manifestCandidate.AppID ||
++			manifest.ID == manifestCandidate.AppID {
++			manifestName = manifestCandidateName
++			appID = manifestCandidate.AppID
++
++			break
++		}
++	}
++
++	if manifestName == "" {
++		panic(errors.New("the manifest file name and app-id/id in the manifest don't match"))
++	}
++
++	buildCmd := exec.CommandContext(
++		ctx,
++		"flatpak",
++		"run",
++		"--command=flathub-build",
++		"org.flatpak.Builder",
++		"--install",
++		manifestName,
++	)
++	buildCmd.Dir = repoPath
++	buildCmd.Stdout = os.Stdout
++	buildCmd.Stderr = os.Stderr
++
++	if err := buildCmd.Run(); err != nil {
++		panic(err)
++	}
++
++	runCmd := exec.CommandContext(
++		ctx,
++		"flatpak",
++		append(
++			[]string{
++				"run",
++				appID,
++			},
++			flag.Args()..., // Any arguments after `--`, see https://pkg.go.dev/flag#hdr-Command_line_flag_syntax
++		)...,
++	)
++	runCmd.Dir = repoPath
++	runCmd.Stdin = os.Stdin
++	runCmd.Stdout = os.Stdout
++	runCmd.Stderr = os.Stderr
++
++	if err := runCmd.Run(); err != nil {
++		panic(err)
++	}
+ }
+
