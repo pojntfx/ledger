@@ -1,0 +1,82 @@
+From 34229ded8f9b9e4f97ede2bfc3b6b44a6cc06f14 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Fri, 12 Jun 2026 21:57:25 -0700
+Subject: [PATCH] feat: Add ability to export a submission to a Flatpak bundle
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/cmd/gatekeeper-try-submission/main.go b/cmd/gatekeeper-try-submission/main.go
+index 06917aca4acd5705899c2e86d25b8e3988cba7b4..8cebe2386f1b2ffbdb15365f5502679884f6e8e3 100644
+--- a/cmd/gatekeeper-try-submission/main.go
++++ b/cmd/gatekeeper-try-submission/main.go
+@@ -50,6 +50,8 @@
+ 	lintManifest := flag.Bool("lint-manifest", true, "Whether to lint the manifest")
+ 	lintRepo := flag.Bool("lint-repo", true, "Whether to lint the repo")
+ 
++	output := flag.String("output", "", "Path to write the .flatpak bundle to instead of running the submission after building it")
++
+ 	flag.Parse()
+ 
+ 	repos, tokens, err := config.ParseReposFileAndTokens(*rawRepos, *rawTokens)
+@@ -263,23 +265,43 @@ 			panic(err)
+ 		}
+ 	}
+ 
+-	runCmd := exec.CommandContext(
+-		ctx,
+-		"flatpak",
+-		append(
+-			[]string{
+-				"run",
+-				appID,
+-			},
+-			flag.Args()..., // Any arguments after `--`, see https://pkg.go.dev/flag#hdr-Command_line_flag_syntax
+-		)...,
+-	)
+-	runCmd.Dir = repoPath
+-	runCmd.Stdin = os.Stdin
+-	runCmd.Stdout = os.Stdout
+-	runCmd.Stderr = os.Stderr
++	if *output != "" {
++		exportCmd := exec.CommandContext(
++			ctx,
++			"flatpak",
++			"run",
++			"--command=flatpak",
++			"org.flatpak.Builder",
++			"build-bundle",
++			filepath.Join(repoPath, "repo"),
++			*output,
++			appID,
++		)
++		exportCmd.Stdout = os.Stdout
++		exportCmd.Stderr = os.Stderr
+ 
+-	if err := runCmd.Run(); err != nil {
+-		panic(err)
++		if err := exportCmd.Run(); err != nil {
++			panic(err)
++		}
++	} else {
++		runCmd := exec.CommandContext(
++			ctx,
++			"flatpak",
++			append(
++				[]string{
++					"run",
++					appID,
++				},
++				flag.Args()..., // Any arguments after `--`, see https://pkg.go.dev/flag#hdr-Command_line_flag_syntax
++			)...,
++		)
++		runCmd.Dir = repoPath
++		runCmd.Stdin = os.Stdin
++		runCmd.Stdout = os.Stdout
++		runCmd.Stderr = os.Stderr
++
++		if err := runCmd.Run(); err != nil {
++			panic(err)
++		}
+ 	}
+ }
+
