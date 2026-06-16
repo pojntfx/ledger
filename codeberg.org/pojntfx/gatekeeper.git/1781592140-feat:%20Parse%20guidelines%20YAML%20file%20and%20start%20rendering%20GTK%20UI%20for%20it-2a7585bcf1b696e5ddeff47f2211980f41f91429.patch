@@ -1,0 +1,267 @@
+From 2a7585bcf1b696e5ddeff47f2211980f41f91429 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Mon, 15 Jun 2026 23:42:20 -0700
+Subject: [PATCH] feat: Parse guidelines YAML file and start rendering GTK UI for it
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/cmd/gatekeeper-create-response/main.go b/cmd/gatekeeper-create-response/main.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..020395f2ee036f49831e37a919fa21c7c6f928fa
+--- /dev/null
++++ b/cmd/gatekeeper-create-response/main.go
+@@ -0,0 +1,219 @@
++package main
++
++import (
++	"flag"
++	"os"
++	"runtime"
++	"unsafe"
++
++	"codeberg.org/puregotk/puregotk/v4/adw"
++	"codeberg.org/puregotk/puregotk/v4/gio"
++	"codeberg.org/puregotk/puregotk/v4/glib"
++	"codeberg.org/puregotk/puregotk/v4/gobject"
++	"codeberg.org/puregotk/puregotk/v4/gtk"
++	"github.com/goccy/go-yaml"
++)
++
++type guideline struct {
++	Name        string `yaml:"name"`
++	Description string `yaml:"description"` // Description is empty for leaves
++	// If items is empty, we're at a leaf in the tree
++	Items []guideline `yaml:"items"`
++}
++
++var (
++	gTypeGuidelineItem gobject.Type
++)
++
++const (
++	dataKeyGoInstance = "go_instance"
++
++	propertyGuidelineItemName = "name"
++
++	propertyIdGuidelineItemName uint32 = 1
++)
++
++type guidelineItem struct {
++	gobject.Object
++
++	guideline guideline
++}
++
++func main() {
++	rawGuidelines := flag.String("guidelines", "guidelines.yaml", "Guidelines file")
++
++	flag.Parse()
++
++	manifestFile, err := os.Open(*rawGuidelines)
++	if err != nil {
++		panic(err)
++	}
++	defer manifestFile.Close()
++
++	var guidelines []guideline
++	if err := yaml.NewDecoder(manifestFile).Decode(&guidelines); err != nil {
++		panic(err)
++	}
++
++	app := adw.NewApplication("com.pojtinger.felicitas.GatekeeperCreateResponse", gio.GApplicationDefaultFlagsValue)
++
++	var onActivate func(a gio.Application) = func(a gio.Application) {
++		win := adw.NewApplicationWindow(&app.Application)
++		win.SetDefaultSize(640, 480)
++		win.SetTitle("Gatekeeper Create Submission")
++
++		tb := adw.NewToolbarView()
++
++		hb := adw.NewHeaderBar()
++
++		wt := adw.NewWindowTitle("Gatekeeper Create Submission", "")
++
++		hb.SetTitleWidget(&wt.Widget)
++
++		tb.AddTopBar(&hb.Widget)
++
++		ts := gtk.NewScrolledWindow()
++
++		ls := gio.NewListStore(gTypeGuidelineItem)
++		for _, rawGuideline := range guidelines {
++			guideline := newGuidelineItem(rawGuideline)
++			ls.Append(&guideline.Object)
++			guideline.Unref()
++		}
++
++		var (
++			onMatch gtk.CustomFilterFunc = func(u1, u2 uintptr) bool {
++				return true
++			}
++
++			onUserDestroy glib.DestroyNotify = func(u uintptr) {}
++		)
++		sf := gtk.NewCustomFilter(&onMatch, 0, &onUserDestroy)
++
++		fm := gtk.NewFilterListModel(ls, &sf.Filter)
++
++		sl := gtk.NewSingleSelection(fm)
++
++		fi := gtk.NewSignalListItemFactory()
++
++		var (
++			onSetup func(gtk.SignalListItemFactory, uintptr) = func(_ gtk.SignalListItemFactory, u uintptr) {
++				li := gtk.ListItemNewFromInternalPtr(u)
++
++				row := gtk.NewBox(gtk.OrientationHorizontalValue, 8)
++
++				title := gtk.NewLabel("")
++
++				row.Append(&title.Widget)
++
++				li.SetChild(&row.Widget)
++			}
++			onBind func(gtk.SignalListItemFactory, uintptr) = func(_ gtk.SignalListItemFactory, u uintptr) {
++				li := gtk.ListItemNewFromInternalPtr(u)
++
++				row := gtk.BoxNewFromInternalPtr(li.GetChild().Ptr)
++
++				title := gtk.LabelNewFromInternalPtr(row.GetFirstChild().GoPointer())
++
++				obj := gobject.ObjectNewFromInternalPtr(li.GetItem().GoPointer())
++				item := (*guidelineItem)(unsafe.Pointer(obj.GetData(dataKeyGoInstance)))
++
++				title.SetLabel(item.GetName())
++			}
++		)
++		fi.ConnectSetup(&onSetup)
++		fi.ConnectBind(&onBind)
++
++		lw := gtk.NewListView(sl, &fi.ListItemFactory)
++		lw.AddCssClass("navigation-sidebar")
++
++		ts.SetChild(&lw.Widget)
++
++		tb.SetContent(&ts.Widget)
++
++		win.SetContent(&tb.Widget)
++
++		win.Present()
++	}
++	app.ConnectActivate(&onActivate)
++
++	os.Exit(int(app.Run(int32(len(os.Args)), os.Args)))
++}
++
++func newGuidelineItem(rawGuideline guideline) guidelineItem {
++	obj := gobject.NewObjectWithProperties(gTypeGuidelineItem, 0, nil, nil)
++
++	var g guidelineItem
++	obj.Cast(&g)
++
++	item := (*guidelineItem)(unsafe.Pointer(obj.GetData(dataKeyGoInstance)))
++	item.guideline = rawGuideline
++
++	return g
++}
++
++func (g *guidelineItem) GetName() string {
++	var val gobject.Value
++	val.Init(gobject.TypeStringVal)
++	g.GetProperty(propertyGuidelineItemName, &val)
++	title := val.GetString()
++	val.Unset()
++	return title
++}
++
++func init() {
++	var guidelineItemClassInit gobject.ClassInitFunc = func(tc *gobject.TypeClass, u uintptr) {
++		objClass := (*gobject.ObjectClass)(unsafe.Pointer(tc))
++
++		objClass.OverrideGetProperty(func(o *gobject.Object, u uint32, v *gobject.Value, ps *gobject.ParamSpec) {
++			item := (*guidelineItem)(unsafe.Pointer(o.GetData(dataKeyGoInstance)))
++			switch u {
++			case propertyIdGuidelineItemName:
++				v.SetString(item.guideline.Name)
++			}
++		})
++
++		objClass.InstallProperty(propertyIdGuidelineItemName, gobject.NewParamSpecString(
++			propertyGuidelineItemName,
++			"Name",
++			"Name of the guideline",
++			"",
++			gobject.GParamReadableValue,
++		))
++
++		objClass.OverrideConstructed(func(o *gobject.Object) {
++			parentObjClass := (*gobject.ObjectClass)(unsafe.Pointer(tc.PeekParent()))
++			parentObjClass.GetConstructed()(o)
++
++			var parent gobject.Object
++			o.Cast(&parent)
++
++			item := &guidelineItem{
++				Object: parent,
++			}
++
++			var pinner runtime.Pinner
++			pinner.Pin(item)
++
++			var cleanupCallback glib.DestroyNotify = func(data uintptr) {
++				pinner.Unpin()
++			}
++			o.SetDataFull(dataKeyGoInstance, uintptr(unsafe.Pointer(item)), &cleanupCallback)
++		})
++	}
++
++	var guidelineItemInstanceInit gobject.InstanceInitFunc = func(ti *gobject.TypeInstance, tc *gobject.TypeClass) {}
++
++	var guidelineItemParentQuery gobject.TypeQuery
++	gobject.NewTypeQuery(gobject.TypeObjectVal, &guidelineItemParentQuery)
++
++	gTypeGuidelineItem = gobject.TypeRegisterStaticSimple(
++		guidelineItemParentQuery.Type,
++		"GatekeeperCreateResponseGuidelineItem",
++		guidelineItemParentQuery.ClassSize,
++		&guidelineItemClassInit,
++		guidelineItemParentQuery.InstanceSize,
++		&guidelineItemInstanceInit,
++		0,
++	)
++}
+diff --git a/go.mod b/go.mod
+index 9f8197014ea4c8e3370bcb08df1daf67d1167ce9..0102b373cf09b1f1303cfd961e98a15310521a2e 100644
+--- a/go.mod
++++ b/go.mod
+@@ -4,6 +4,7 @@ go 1.25.0
+ 
+ require (
+ 	codeberg.org/mvdkleijn/forgejo-sdk/forgejo v1.2.0
++	codeberg.org/puregotk/puregotk v0.0.0-20260512093256-2a5b38c3a1c6
+ 	github.com/adrg/xdg v0.5.3
+ 	github.com/go-git/go-git/v6 v6.0.0-alpha.4
+ 	github.com/goccy/go-yaml v1.19.2
+@@ -13,6 +14,7 @@ 	github.com/yuin/goldmark v1.8.2
+ )
+ 
+ require (
++	codeberg.org/puregotk/purego v0.0.0-20260224095105-2513c838cb80 // indirect
+ 	github.com/42wim/httpsig v1.2.2 // indirect
+ 	github.com/Microsoft/go-winio v0.6.2 // indirect
+ 	github.com/ProtonMail/go-crypto v1.4.1 // indirect
+diff --git a/go.sum b/go.sum
+index 0bc81257317e87635de6b8a6c9c968f7d2e759a1..2f226aa5aceb62c607925f30433941679fd93baa 100644
+--- a/go.sum
++++ b/go.sum
+@@ -1,5 +1,9 @@
+ codeberg.org/mvdkleijn/forgejo-sdk/forgejo v1.2.0 h1:/z7iYYHgTuP+BnJY5qnWj6UjlA1YsAFYhi36JZY1S7Y=
+ codeberg.org/mvdkleijn/forgejo-sdk/forgejo v1.2.0/go.mod h1:qGzzS6EYParzgmXvnf1QANdnQmHFSyAlJN3SiRZp7e8=
++codeberg.org/puregotk/purego v0.0.0-20260224095105-2513c838cb80 h1:y5ZxMLLOjl4xc2tBl02olxZQ06xbbKiR+2ipBfDrVcs=
++codeberg.org/puregotk/purego v0.0.0-20260224095105-2513c838cb80/go.mod h1:hVVM4ddvYRlc3IcK3CXJPlMwd/vaLj7gdDBZ6oPgT8w=
++codeberg.org/puregotk/puregotk v0.0.0-20260512093256-2a5b38c3a1c6 h1:PzeVJOp//vLIyGJunyU4hT+xjiouvoFa7cseoc6U6OA=
++codeberg.org/puregotk/puregotk v0.0.0-20260512093256-2a5b38c3a1c6/go.mod h1:KDQjaDscQiL2OiLWuBFBF4l/x/1DW+M0lPcQTa0Id0o=
+ github.com/42wim/httpsig v1.2.2 h1:ofAYoHUNs/MJOLqQ8hIxeyz2QxOz8qdSVvp3PX/oPgA=
+ github.com/42wim/httpsig v1.2.2/go.mod h1:P/UYo7ytNBFwc+dg35IubuAUIs8zj5zzFIgUCEl55WY=
+ github.com/Microsoft/go-winio v0.6.2 h1:F2VQgta7ecxGYO8k3ZZz3RS8fVIXVxONVUPlNERoyfY=
+
