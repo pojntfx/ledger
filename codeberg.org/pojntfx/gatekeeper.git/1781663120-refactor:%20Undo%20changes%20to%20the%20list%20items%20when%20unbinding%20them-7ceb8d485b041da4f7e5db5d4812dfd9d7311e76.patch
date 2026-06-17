@@ -1,0 +1,63 @@
+From 7ceb8d485b041da4f7e5db5d4812dfd9d7311e76 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Tue, 16 Jun 2026 19:25:20 -0700
+Subject: [PATCH] refactor: Undo changes to the list items when unbinding them
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/cmd/gatekeeper-create-response/main.go b/cmd/gatekeeper-create-response/main.go
+index d84dd952b5edf7c6dee5ccf41e566ebdf81d8368..635cfe3c337b02e234379e553a20176ea9ef5e09 100644
+--- a/cmd/gatekeeper-create-response/main.go
++++ b/cmd/gatekeeper-create-response/main.go
+@@ -147,6 +147,7 @@ 				row.Append(&title.Widget)
+ 
+ 				li.SetChild(&row.Widget)
+ 			}
++
+ 			onBind func(gtk.SignalListItemFactory, uintptr) = func(_ gtk.SignalListItemFactory, u uintptr) {
+ 				li := gtk.ListItemNewFromInternalPtr(u)
+ 
+@@ -167,24 +168,31 @@ 					title.AddCssClass("heading")
+ 
+ 					if item.GetDepth() > 0 {
+ 						title.AddCssClass("dim-label")
+-					} else {
+-						title.RemoveCssClass("dim-label")
+ 					}
+-				} else {
+-					// GTK list models re-use widgets as we scroll, so we must make sure to always
+-					// overwrite even if the default state of a row is that it's already selectable etc.
+-					// See https://docs.gtk.org/gtk4/class.SignalListItemFactory.html
+-					li.SetSelectable(true)
+-					li.SetActivatable(true)
++				}
++			}
+ 
+-					title.RemoveCssClass("heading")
++			// GTK list models re-use widgets as we scroll, so we must make sure to always
++			// overwrite even if the default state of a row is that it's already selectable etc.
++			// See https://docs.gtk.org/gtk4/class.SignalListItemFactory.html
++			onUnbind = func(_ gtk.SignalListItemFactory, u uintptr) {
++				li := gtk.ListItemNewFromInternalPtr(u)
+ 
+-					title.RemoveCssClass("dim-label")
+-				}
++				row := gtk.BoxNewFromInternalPtr(li.GetChild().Ptr)
++
++				title := gtk.LabelNewFromInternalPtr(row.GetFirstChild().GoPointer())
++
++				li.SetSelectable(true)
++				li.SetActivatable(true)
++
++				title.RemoveCssClass("heading")
++
++				title.RemoveCssClass("dim-label")
+ 			}
+ 		)
+ 		fi.ConnectSetup(&onSetup)
+ 		fi.ConnectBind(&onBind)
++		fi.ConnectUnbind(&onUnbind)
+ 
+ 		lw := gtk.NewListView(sl, &fi.ListItemFactory)
+ 		lw.AddCssClass("navigation-sidebar")
+
