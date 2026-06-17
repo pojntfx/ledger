@@ -1,0 +1,80 @@
+From 5b285e0b67ce8fcf6f6c255dd12b18e2a9e435b5 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Tue, 16 Jun 2026 19:07:07 -0700
+Subject: [PATCH] feat: Make heading non-selectable and render them with the heading CSS class
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/cmd/gatekeeper-create-response/main.go b/cmd/gatekeeper-create-response/main.go
+index df68d1ae2cc8f2598b01aeb6901d1e9b1fb1f9d3..3c79130400a707d53a56208e74dafdba0f147e64 100644
+--- a/cmd/gatekeeper-create-response/main.go
++++ b/cmd/gatekeeper-create-response/main.go
+@@ -28,9 +28,11 @@
+ const (
+ 	dataKeyGoInstance = "go_instance"
+ 
+-	propertyGuidelineItemName = "name"
++	propertyGuidelineItemName    = "name"
++	propertyGuidelineItemHeading = "heading"
+ 
+-	propertyIdGuidelineItemName uint32 = 1
++	propertyIdGuidelineItemName    uint32 = 1
++	propertyIdGuidelineItemHeading uint32 = 2
+ )
+ 
+ type guidelineItem struct {
+@@ -153,6 +155,13 @@ 				obj := gobject.ObjectNewFromInternalPtr(li.GetItem().GoPointer())
+ 				item := (*guidelineItem)(unsafe.Pointer(obj.GetData(dataKeyGoInstance)))
+ 
+ 				title.SetLabel(item.GetName())
++
++				if item.GetHeading() {
++					li.SetSelectable(false)
++					li.SetActivatable(false)
++
++					title.AddCssClass("heading")
++				}
+ 			}
+ 		)
+ 		fi.ConnectSetup(&onSetup)
+@@ -195,6 +204,15 @@ 	val.Unset()
+ 	return title
+ }
+ 
++func (g *guidelineItem) GetHeading() bool {
++	var val gobject.Value
++	val.Init(gobject.TypeBooleanVal)
++	g.GetProperty(propertyGuidelineItemHeading, &val)
++	heading := val.GetBoolean()
++	val.Unset()
++	return heading
++}
++
+ func init() {
+ 	var guidelineItemClassInit gobject.ClassInitFunc = func(tc *gobject.TypeClass, u uintptr) {
+ 		objClass := (*gobject.ObjectClass)(unsafe.Pointer(tc))
+@@ -204,6 +222,8 @@ 			item := (*guidelineItem)(unsafe.Pointer(o.GetData(dataKeyGoInstance)))
+ 			switch u {
+ 			case propertyIdGuidelineItemName:
+ 				v.SetString(item.flatGuideline.name)
++			case propertyIdGuidelineItemHeading:
++				v.SetBoolean(item.flatGuideline.heading)
+ 			}
+ 		})
+ 
+@@ -212,6 +232,14 @@ 			propertyGuidelineItemName,
+ 			"Name",
+ 			"Name of the guideline",
+ 			"",
++			gobject.GParamReadableValue,
++		))
++
++		objClass.InstallProperty(propertyIdGuidelineItemHeading, gobject.NewParamSpecBoolean(
++			propertyGuidelineItemHeading,
++			"Heading",
++			"Whether the guideline is a heading",
++			false,
+ 			gobject.GParamReadableValue,
+ 		))
+ 
+
