@@ -1,0 +1,72 @@
+From 209330c9c1eb800f945e1d059c9cffde723e978e Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Tue, 16 Jun 2026 23:17:23 -0700
+Subject: [PATCH] feat: Add ability to show only pending guidelines
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/cmd/gatekeeper-create-response/main.go b/cmd/gatekeeper-create-response/main.go
+index b865c318f7550bac3afd889db09804358eded2f0..1343ad23f81efb8d7a0a4544bad2abbdba95046d 100644
+--- a/cmd/gatekeeper-create-response/main.go
++++ b/cmd/gatekeeper-create-response/main.go
+@@ -224,6 +224,21 @@ 		wt := adw.NewWindowTitle("Gatekeeper Create Submission", "")
+ 
+ 		hb.SetTitleWidget(&wt.Widget)
+ 
++		mm := gio.NewMenu()
++
++		som := gio.NewMenuItem("Show only pending guidelines", "app.togglePendingGuidelines")
++
++		mm.AppendItem(som)
++
++		mmb := gtk.NewMenuButton()
++		mmb.SetIconName("open-menu-symbolic")
++		mmb.SetTooltipText("Main Menu")
++		mmb.SetPrimary(true)
++
++		mmb.SetMenuModel(&mm.MenuModel)
++
++		hb.PackEnd(&mmb.Widget)
++
+ 		tb.AddTopBar(&hb.Widget)
+ 
+ 		sb := gtk.NewSearchBar()
+@@ -255,10 +270,21 @@ 			ls.Append(&guideline.Object)
+ 			guideline.Unref()
+ 		}
+ 
++		togglePendingGuidelinesAction := gio.NewSimpleActionStateful(
++			"togglePendingGuidelines",
++			nil,
++			glib.NewVariantBoolean(false),
++		)
++
+ 		var (
+ 			onMatch gtk.CustomFilterFunc = func(u1, u2 uintptr) bool {
+ 				obj := gobject.ObjectNewFromInternalPtr(u1)
+ 				item := (*guidelineItem)(unsafe.Pointer(obj.GetData(dataKeyGoInstance)))
++
++				// Consider only pending items if togglePendingGuidelines is enabled
++				if togglePendingGuidelinesAction.GetState().GetBoolean() && item.GetStatus() != statusIdPending {
++					return false
++				}
+ 
+ 				needle := strings.ToLower(se.GetText())
+ 
+@@ -274,6 +300,15 @@
+ 			onUserDestroy glib.DestroyNotify = func(u uintptr) {}
+ 		)
+ 		sf := gtk.NewCustomFilter(&onMatch, 0, &onUserDestroy)
++
++		onTogglePendingGuidelinesAction := func(action gio.SimpleAction, _ uintptr) {
++			action.SetState(glib.NewVariantBoolean(!action.GetState().GetBoolean()))
++
++			sf.Changed(gtk.FilterChangeDifferentValue)
++		}
++		togglePendingGuidelinesAction.ConnectActivate(&onTogglePendingGuidelinesAction)
++
++		app.AddAction(togglePendingGuidelinesAction)
+ 
+ 		onSearchChanged := func(se gtk.SearchEntry) {
+ 			sf.Changed(gtk.FilterChangeDifferentValue)
+
