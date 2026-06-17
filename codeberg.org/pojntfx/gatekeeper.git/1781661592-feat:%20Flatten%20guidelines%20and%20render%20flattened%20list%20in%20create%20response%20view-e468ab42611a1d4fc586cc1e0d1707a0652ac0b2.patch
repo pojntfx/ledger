@@ -1,0 +1,117 @@
+From e468ab42611a1d4fc586cc1e0d1707a0652ac0b2 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Tue, 16 Jun 2026 18:59:52 -0700
+Subject: [PATCH] feat: Flatten guidelines and render flattened list in create response view
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/cmd/gatekeeper-create-response/main.go b/cmd/gatekeeper-create-response/main.go
+index 020395f2ee036f49831e37a919fa21c7c6f928fa..df68d1ae2cc8f2598b01aeb6901d1e9b1fb1f9d3 100644
+--- a/cmd/gatekeeper-create-response/main.go
++++ b/cmd/gatekeeper-create-response/main.go
+@@ -16,7 +16,7 @@ )
+ 
+ type guideline struct {
+ 	Name        string `yaml:"name"`
+-	Description string `yaml:"description"` // Description is empty for leaves
++	Description string `yaml:"description"`
+ 	// If items is empty, we're at a leaf in the tree
+ 	Items []guideline `yaml:"items"`
+ }
+@@ -36,7 +36,36 @@
+ type guidelineItem struct {
+ 	gobject.Object
+ 
+-	guideline guideline
++	flatGuideline flatGuideline
++}
++
++type flatGuideline struct {
++	name        string
++	description string
++
++	heading bool
++	depth   int
++}
++
++func flattenGuidelines(rawGuidelines []guideline, depth int) []flatGuideline {
++	var flatGuidelines []flatGuideline
++	for _, rawGuideline := range rawGuidelines {
++		leaf := len(rawGuideline.Items) <= 0
++
++		flatGuidelines = append(flatGuidelines, flatGuideline{
++			name:        rawGuideline.Name,
++			description: rawGuideline.Description,
++
++			heading: !leaf,
++			depth:   depth,
++		})
++
++		if !leaf {
++			flatGuidelines = append(flatGuidelines, flattenGuidelines(rawGuideline.Items, depth+1)...)
++		}
++	}
++
++	return flatGuidelines
+ }
+ 
+ func main() {
+@@ -54,6 +83,8 @@ 	var guidelines []guideline
+ 	if err := yaml.NewDecoder(manifestFile).Decode(&guidelines); err != nil {
+ 		panic(err)
+ 	}
++
++	flatGuidelines := flattenGuidelines(guidelines, 0)
+ 
+ 	app := adw.NewApplication("com.pojtinger.felicitas.GatekeeperCreateResponse", gio.GApplicationDefaultFlagsValue)
+ 
+@@ -75,8 +106,8 @@
+ 		ts := gtk.NewScrolledWindow()
+ 
+ 		ls := gio.NewListStore(gTypeGuidelineItem)
+-		for _, rawGuideline := range guidelines {
+-			guideline := newGuidelineItem(rawGuideline)
++		for _, rawFlatGuideline := range flatGuidelines {
++			guideline := newGuidelineItem(rawFlatGuideline)
+ 			ls.Append(&guideline.Object)
+ 			guideline.Unref()
+ 		}
+@@ -101,8 +132,11 @@ 			onSetup func(gtk.SignalListItemFactory, uintptr) = func(_ gtk.SignalListItemFactory, u uintptr) {
+ 				li := gtk.ListItemNewFromInternalPtr(u)
+ 
+ 				row := gtk.NewBox(gtk.OrientationHorizontalValue, 8)
++				row.SetMarginTop(8)
++				row.SetMarginBottom(8)
+ 
+ 				title := gtk.NewLabel("")
++				title.SetWrap(true)
+ 
+ 				row.Append(&title.Widget)
+ 
+@@ -140,14 +174,14 @@
+ 	os.Exit(int(app.Run(int32(len(os.Args)), os.Args)))
+ }
+ 
+-func newGuidelineItem(rawGuideline guideline) guidelineItem {
++func newGuidelineItem(rawGuideline flatGuideline) guidelineItem {
+ 	obj := gobject.NewObjectWithProperties(gTypeGuidelineItem, 0, nil, nil)
+ 
+ 	var g guidelineItem
+ 	obj.Cast(&g)
+ 
+ 	item := (*guidelineItem)(unsafe.Pointer(obj.GetData(dataKeyGoInstance)))
+-	item.guideline = rawGuideline
++	item.flatGuideline = rawGuideline
+ 
+ 	return g
+ }
+@@ -169,7 +203,7 @@ 		objClass.OverrideGetProperty(func(o *gobject.Object, u uint32, v *gobject.Value, ps *gobject.ParamSpec) {
+ 			item := (*guidelineItem)(unsafe.Pointer(o.GetData(dataKeyGoInstance)))
+ 			switch u {
+ 			case propertyIdGuidelineItemName:
+-				v.SetString(item.guideline.Name)
++				v.SetString(item.flatGuideline.name)
+ 			}
+ 		})
+ 
+
