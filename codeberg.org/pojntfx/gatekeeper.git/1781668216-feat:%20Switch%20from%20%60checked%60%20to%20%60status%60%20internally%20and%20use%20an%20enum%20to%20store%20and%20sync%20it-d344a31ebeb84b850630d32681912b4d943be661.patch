@@ -1,0 +1,290 @@
+From d344a31ebeb84b850630d32681912b4d943be661 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Tue, 16 Jun 2026 20:50:16 -0700
+Subject: [PATCH] feat: Switch from `checked` to `status` internally and use an enum to store and sync it
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/cmd/gatekeeper-create-response/main.go b/cmd/gatekeeper-create-response/main.go
+index 4d996d549475bb9ecbc4d0e9adfb9a6346e5580b..ab19734d4ca070c896dd5b1ea6124b3972e860cb 100644
+--- a/cmd/gatekeeper-create-response/main.go
++++ b/cmd/gatekeeper-create-response/main.go
+@@ -23,22 +23,25 @@ 	Items []guideline `yaml:"items"`
+ }
+ 
+ var (
++	gTypeStatus        gobject.Type
+ 	gTypeGuidelineItem gobject.Type
+ )
++
++type propertyId uint32
+ 
+ const (
+-	dataKeyGoInstance      = "go_instance"
+-	dataKeyBindingInstance = "binding_instance"
++	dataKeyGoInstance             = "go_instance"
++	dataKeyConnectToggledCallback = "connect_toggled_callback"
+ 
+ 	propertyGuidelineItemName    = "name"
+ 	propertyGuidelineItemHeading = "heading"
+ 	propertyGuidelineItemDepth   = "depth"
+-	propertyGuidelineItemChecked = "checked"
++	propertyGuidelineItemStatus  = "status"
+ 
+-	propertyIdGuidelineItemName    uint32 = 1
+-	propertyIdGuidelineItemHeading uint32 = 2
+-	propertyIdGuidelineItemDepth   uint32 = 3
+-	propertyIdGuidelineItemChecked uint32 = 4
++	propertyIdGuidelineItemName propertyId = iota
++	propertyIdGuidelineItemHeading
++	propertyIdGuidelineItemDepth
++	propertyIdGuidelineItemStatus
+ )
+ 
+ type guidelineItem struct {
+@@ -54,7 +57,7 @@
+ 	heading bool
+ 	depth   int
+ 
+-	checked bool
++	status statusId
+ }
+ 
+ func flattenGuidelines(rawGuidelines []guideline, depth int) []flatGuideline {
+@@ -69,7 +72,7 @@
+ 			heading: !leaf,
+ 			depth:   depth,
+ 
+-			checked: false,
++			status: statusIdPending,
+ 		})
+ 
+ 		if !leaf {
+@@ -78,6 +81,24 @@ 		}
+ 	}
+ 
+ 	return flatGuidelines
++}
++
++func applyStatusToCheckbox(check *gtk.CheckButton, status statusId) {
++	switch status {
++	case statusIdPending:
++		fallthrough
++	case statusIdFail:
++		check.SetActive(false)
++		check.SetInconsistent(false)
++
++	case statusIdConditional:
++		check.SetActive(false)
++		check.SetInconsistent(true)
++
++	case statusIdPass:
++		check.SetActive(true)
++		check.SetInconsistent(false)
++	}
+ }
+ 
+ func main() {
+@@ -169,13 +190,29 @@
+ 				obj := gobject.ObjectNewFromInternalPtr(li.GetItem().GoPointer())
+ 				item := (*guidelineItem)(unsafe.Pointer(obj.GetData(dataKeyGoInstance)))
+ 
+-				bd := item.BindProperty(
+-					propertyGuidelineItemChecked,
+-					&check.Object,
+-					"active",
+-					gobject.GBindingBidirectionalValue|gobject.GBindingSyncCreateValue,
+-				)
+-				li.SetData(dataKeyBindingInstance, bd.Ptr)
++				syncing := false
++				applyStatusToCheckbox(check, item.GetStatus())
++				onToggled := func(gtk.CheckButton) {
++					// When we set the CheckButton status below, we emit another toggled signal
++					// This is a short-cut to prevent us from setting it twice
++					if syncing {
++						return
++					}
++
++					// Cycle through statuses
++					nextStatus := item.GetStatus() + 1
++					if nextStatus > statusIdPass {
++						nextStatus = statusIdPending
++					}
++
++					item.SetStatus(nextStatus)
++
++					syncing = true
++					applyStatusToCheckbox(check, nextStatus)
++					syncing = false
++				}
++				ct := check.ConnectToggled(&onToggled)
++				li.SetData(dataKeyConnectToggledCallback, uintptr(ct))
+ 
+ 				title.SetLabel(item.GetName())
+ 
+@@ -205,12 +242,14 @@ 				check := gtk.CheckButtonNewFromInternalPtr(row.GetFirstChild().GoPointer())
+ 				title := gtk.LabelNewFromInternalPtr(row.GetLastChild().GoPointer())
+ 
+ 				// We need to check against `0` since on the initial unbind data might not be set yet
+-				if bdPtr := li.StealData(dataKeyBindingInstance); bdPtr != 0 {
++				if ct := li.StealData(dataKeyConnectToggledCallback); ct != 0 {
+ 					// We need to unbind the binding here since the widgets are being re-used
+ 					// Usually the binding is cleaned up automatically when both source and target
+ 					// are finalized, but since we re-use the widgets here that doesn't work
+-					gobject.BindingNewFromInternalPtr(bdPtr).Unbind()
++					gobject.SignalHandlerDisconnect(&check.Object, uint32(ct))
+ 				}
++
++				applyStatusToCheckbox(check, statusIdPending)
+ 
+ 				check.SetVisible(true)
+ 
+@@ -281,50 +320,95 @@ 	val.Unset()
+ 	return depth
+ }
+ 
+-func (g *guidelineItem) SetChecked(checked bool) {
++func (g *guidelineItem) SetStatus(status statusId) {
+ 	var val gobject.Value
+-	val.Init(gobject.TypeBooleanVal)
+-	val.SetBoolean(checked)
+-	g.SetProperty(propertyGuidelineItemChecked, &val)
++	val.Init(gTypeStatus)
++	val.SetEnum(int32(status))
++	g.SetProperty(propertyGuidelineItemStatus, &val)
+ 	val.Unset()
+ }
+ 
+-func (g *guidelineItem) GetChecked() bool {
++func (g *guidelineItem) GetStatus() statusId {
+ 	var val gobject.Value
+-	val.Init(gobject.TypeBooleanVal)
+-	g.GetProperty(propertyGuidelineItemChecked, &val)
+-	checked := val.GetBoolean()
++	val.Init(gTypeStatus)
++	g.GetProperty(propertyGuidelineItemStatus, &val)
++	status := statusId(val.GetEnum())
+ 	val.Unset()
+-	return checked
++	return status
++}
++
++const NUL byte = 0
++
++var (
++	statusPending     = "pending" + string(NUL)
++	statusFail        = "fail" + string(NUL)
++	statusConditional = "conditional" + string(NUL)
++	statusPass        = "pass" + string(NUL)
++)
++
++type statusId int32
++
++const (
++	statusIdPending statusId = iota
++	statusIdFail
++	statusIdConditional
++	statusIdPass
++)
++
++var statusEnumValues = []gobject.EnumValue{
++	{
++		Value:     int32(statusIdPending),
++		ValueName: uintptr(unsafe.Pointer(unsafe.StringData(statusPending))),
++		ValueNick: uintptr(unsafe.Pointer(unsafe.StringData(statusPending))),
++	},
++	{
++		Value:     int32(statusIdFail),
++		ValueName: uintptr(unsafe.Pointer(unsafe.StringData(statusFail))),
++		ValueNick: uintptr(unsafe.Pointer(unsafe.StringData(statusFail))),
++	},
++	{
++		Value:     int32(statusIdConditional),
++		ValueName: uintptr(unsafe.Pointer(unsafe.StringData(statusConditional))),
++		ValueNick: uintptr(unsafe.Pointer(unsafe.StringData(statusConditional))),
++	},
++	{
++		Value:     int32(statusIdPass),
++		ValueName: uintptr(unsafe.Pointer(unsafe.StringData(statusPass))),
++		ValueNick: uintptr(unsafe.Pointer(unsafe.StringData(statusPass))),
++	},
++	// We need an empty value here at the end so that GLib doesn't read past the slice
++	{},
+ }
+ 
+ func init() {
++	gTypeStatus = gobject.EnumRegisterStatic("GatekeeperCreateResponseStatus", statusEnumValues)
++
+ 	var guidelineItemClassInit gobject.ClassInitFunc = func(tc *gobject.TypeClass, u uintptr) {
+ 		objClass := (*gobject.ObjectClass)(unsafe.Pointer(tc))
+ 
+ 		objClass.OverrideSetProperty(func(o *gobject.Object, u uint32, v *gobject.Value, ps *gobject.ParamSpec) {
+ 			item := (*guidelineItem)(unsafe.Pointer(o.GetData(dataKeyGoInstance)))
+-			switch u {
+-			case propertyIdGuidelineItemChecked:
+-				item.flatGuideline.checked = v.GetBoolean()
++			switch propertyId(u) {
++			case propertyIdGuidelineItemStatus:
++				item.flatGuideline.status = statusId(v.GetEnum())
+ 			}
+ 		})
+ 
+ 		objClass.OverrideGetProperty(func(o *gobject.Object, u uint32, v *gobject.Value, ps *gobject.ParamSpec) {
+ 			item := (*guidelineItem)(unsafe.Pointer(o.GetData(dataKeyGoInstance)))
+-			switch u {
++			switch propertyId(u) {
+ 			case propertyIdGuidelineItemName:
+ 				v.SetString(item.flatGuideline.name)
+ 			case propertyIdGuidelineItemHeading:
+ 				v.SetBoolean(item.flatGuideline.heading)
+ 			case propertyIdGuidelineItemDepth:
+ 				v.SetInt(int32(item.flatGuideline.depth))
+-			case propertyIdGuidelineItemChecked:
+-				v.SetBoolean(item.flatGuideline.checked)
++			case propertyIdGuidelineItemStatus:
++				v.SetEnum(int32(item.flatGuideline.status))
+ 			}
+ 		})
+ 
+-		objClass.InstallProperty(propertyIdGuidelineItemName, gobject.NewParamSpecString(
++		objClass.InstallProperty(uint32(propertyIdGuidelineItemName), gobject.NewParamSpecString(
+ 			propertyGuidelineItemName,
+ 			"Name",
+ 			"Name of the guideline",
+@@ -332,7 +416,7 @@ 			"",
+ 			gobject.GParamReadableValue,
+ 		))
+ 
+-		objClass.InstallProperty(propertyIdGuidelineItemHeading, gobject.NewParamSpecBoolean(
++		objClass.InstallProperty(uint32(propertyIdGuidelineItemHeading), gobject.NewParamSpecBoolean(
+ 			propertyGuidelineItemHeading,
+ 			"Heading",
+ 			"Whether the guideline is a heading",
+@@ -340,7 +424,7 @@ 			false,
+ 			gobject.GParamReadableValue,
+ 		))
+ 
+-		objClass.InstallProperty(propertyIdGuidelineItemDepth, gobject.NewParamSpecInt(
++		objClass.InstallProperty(uint32(propertyIdGuidelineItemDepth), gobject.NewParamSpecInt(
+ 			propertyGuidelineItemDepth,
+ 			"Depth",
+ 			"Nesting depth of the guideline",
+@@ -350,11 +434,12 @@ 			0,
+ 			gobject.GParamReadableValue,
+ 		))
+ 
+-		objClass.InstallProperty(propertyIdGuidelineItemChecked, gobject.NewParamSpecBoolean(
+-			propertyGuidelineItemChecked,
+-			"Checked",
+-			"Whether the guideline is checked",
+-			false,
++		objClass.InstallProperty(uint32(propertyIdGuidelineItemStatus), gobject.NewParamSpecEnum(
++			propertyGuidelineItemStatus,
++			"Status",
++			"Status of the guideline",
++			gTypeStatus,
++			int32(statusIdPending),
+ 			gobject.GParamReadwriteValue,
+ 		))
+ 
+
