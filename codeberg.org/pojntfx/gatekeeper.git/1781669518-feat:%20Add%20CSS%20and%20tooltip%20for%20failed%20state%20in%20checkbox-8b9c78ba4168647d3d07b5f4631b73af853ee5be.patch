@@ -1,0 +1,71 @@
+From 8b9c78ba4168647d3d07b5f4631b73af853ee5be Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Tue, 16 Jun 2026 21:11:58 -0700
+Subject: [PATCH] feat: Add CSS and tooltip for failed state in checkbox
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/cmd/gatekeeper-create-response/main.go b/cmd/gatekeeper-create-response/main.go
+index ab19734d4ca070c896dd5b1ea6124b3972e860cb..56ace9a650b1ecda025450bf39f7da31546f3557 100644
+--- a/cmd/gatekeeper-create-response/main.go
++++ b/cmd/gatekeeper-create-response/main.go
+@@ -86,18 +86,28 @@
+ func applyStatusToCheckbox(check *gtk.CheckButton, status statusId) {
+ 	switch status {
+ 	case statusIdPending:
+-		fallthrough
++		check.SetActive(false)
++		check.SetInconsistent(false)
++
++		check.RemoveCssClass("fail")
++
+ 	case statusIdFail:
+ 		check.SetActive(false)
+-		check.SetInconsistent(false)
++		check.SetInconsistent(true)
++
++		check.AddCssClass("fail")
+ 
+ 	case statusIdConditional:
+ 		check.SetActive(false)
+ 		check.SetInconsistent(true)
+ 
++		check.RemoveCssClass("fail")
++
+ 	case statusIdPass:
+ 		check.SetActive(true)
+ 		check.SetInconsistent(false)
++
++		check.RemoveCssClass("fail")
+ 	}
+ }
+ 
+@@ -119,12 +129,19 @@ 	}
+ 
+ 	flatGuidelines := flattenGuidelines(guidelines, 0)
+ 
++	csp := gtk.NewCssProvider()
++	csp.LoadFromString(`.fail check {
++  background-color: var(--error-bg-color);
++}`)
++
+ 	app := adw.NewApplication("com.pojtinger.felicitas.GatekeeperCreateResponse", gio.GApplicationDefaultFlagsValue)
+ 
+ 	var onActivate func(a gio.Application) = func(a gio.Application) {
+ 		win := adw.NewApplicationWindow(&app.Application)
+ 		win.SetDefaultSize(640, 480)
+ 		win.SetTitle("Gatekeeper Create Submission")
++
++		gtk.StyleContextAddProviderForDisplay(win.GetDisplay(), csp, uint32(gtk.STYLE_PROVIDER_PRIORITY_APPLICATION))
+ 
+ 		tb := adw.NewToolbarView()
+ 
+@@ -169,6 +186,7 @@ 				row.SetMarginTop(8)
+ 				row.SetMarginBottom(8)
+ 
+ 				check := gtk.NewCheckButton()
++				check.SetTooltipText("Toggle guideline state between pending, failed, conditional pass, and pass")
+ 
+ 				title := gtk.NewLabel("")
+ 				title.SetWrap(true)
+
