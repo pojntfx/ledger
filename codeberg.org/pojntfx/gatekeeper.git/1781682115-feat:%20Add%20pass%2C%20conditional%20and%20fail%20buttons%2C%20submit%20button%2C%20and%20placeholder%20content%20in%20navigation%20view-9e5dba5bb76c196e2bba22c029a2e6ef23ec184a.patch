@@ -1,0 +1,184 @@
+From 9e5dba5bb76c196e2bba22c029a2e6ef23ec184a Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Wed, 17 Jun 2026 00:41:55 -0700
+Subject: [PATCH] feat: Add pass, conditional and fail buttons, submit button, and placeholder content in navigation view
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/cmd/gatekeeper-create-response/main.go b/cmd/gatekeeper-create-response/main.go
+index 6318bfc730796d8df0504efc84fe5b614d7a24af..19e91c035106cfe9b17b5cd3e1e910cd99b2f0bc 100644
+--- a/cmd/gatekeeper-create-response/main.go
++++ b/cmd/gatekeeper-create-response/main.go
+@@ -203,16 +203,42 @@
+ .fail-check check {
+   background-color: var(--destructive-bg-color);
+ }
++  
++.pass-button {
++  background-color: var(--success-bg-color);
++  color: var(--success-fg-color);
++}
++
++.conditional-button {
++  background-color: var(--warning-bg-color);
++  color: var(--warning-fg-color);
++}
++
++.fail-button {
++  background-color: var(--destructive-bg-color);
++  color: var(--destructive-fg-color);
++}
+ `)
+ 
+ 	app := adw.NewApplication("com.pojtinger.felicitas.GatekeeperCreateResponse", gio.GApplicationDefaultFlagsValue)
+ 
+ 	var onActivate func(a gio.Application) = func(a gio.Application) {
+ 		win := adw.NewApplicationWindow(&app.Application)
+-		win.SetDefaultSize(640, 480)
++		win.SetDefaultSize(1024, 768)
+ 		win.SetTitle("Gatekeeper Create Submission")
+ 
+ 		gtk.StyleContextAddProviderForDisplay(win.GetDisplay(), csp, uint32(gtk.STYLE_PROVIDER_PRIORITY_APPLICATION))
++
++		br := adw.NewBreakpoint(adw.BreakpointConditionParse("max-width: 1000px"))
++
++		win.AddBreakpoint(br)
++
++		nsv := adw.NewNavigationSplitView()
++
++		var collapsedVal gobject.Value
++		collapsedVal.Init(gobject.TypeBooleanVal)
++		collapsedVal.SetBoolean(true)
++		br.AddSetter(&nsv.Object, "collapsed", &collapsedVal)
+ 
+ 		tb := adw.NewToolbarView()
+ 
+@@ -236,10 +262,6 @@
+ 		tbb.AddController(&sc.EventController)
+ 
+ 		hb.PackStart(&tbb.Widget)
+-
+-		wt := adw.NewWindowTitle("Gatekeeper Create Submission", "")
+-
+-		hb.SetTitleWidget(&wt.Widget)
+ 
+ 		mm := gio.NewMenu()
+ 
+@@ -502,7 +524,115 @@ 		emptyPage.SetName(string(pageNameEmpty))
+ 
+ 		tb.SetContent(&vs.Widget)
+ 
+-		win.SetContent(&tb.Widget)
++		snvp := adw.NewNavigationPage(&tb.Widget, "Guidelines")
++
++		nsv.SetSidebar(snvp)
++
++		// TODO: Always make sure that at least one (leaf) guideline is selected
++		// on the content nav page. We do not need a viewStack on the content nav page,
++		// there should never be an empty state.
++
++		ctb := adw.NewToolbarView()
++
++		chb := adw.NewHeaderBar()
++
++		// Spacing value here is copied from Epiphany's backwards/forwards navigation
++		nvr := gtk.NewBox(gtk.OrientationHorizontalValue, 6)
++
++		bbt := gtk.NewButtonFromIconName("go-previous-symbolic")
++		bbt.SetTooltipText("Previous")
++
++		fwb := gtk.NewButtonFromIconName("go-next-symbolic")
++		fwb.SetTooltipText("Next")
++
++		nvr.Append(&bbt.Widget)
++		nvr.Append(&fwb.Widget)
++
++		chb.PackStart(&nvr.Widget)
++
++		sbmb := gtk.NewButtonWithLabel("_Submit")
++		sbmb.AddCssClass("suggested-action")
++		sbmb.SetUseUnderline(true)
++
++		chb.PackEnd(&sbmb.Widget)
++
++		wt := adw.NewWindowTitle("Test title", "Test subtitle")
++
++		chb.SetTitleWidget(&wt.Widget)
++
++		ctb.AddTopBar(&chb.Widget)
++
++		scw := gtk.NewScrolledWindow()
++
++		cc := adw.NewClamp()
++		cc.SetMaximumSize(1024)
++
++		lrm := gtk.NewLabel(`Lorem ipsum dolor sit amet consectetur adipiscing elit. Quisque faucibus ex sapien vitae pellentesque sem placerat. In id cursus mi pretium tellus duis convallis. Tempus leo eu aenean sed diam urna tempor. Pulvinar vivamus fringilla lacus nec metus bibendum egestas. Iaculis massa nisl malesuada lacinia integer nunc posuere. Ut hendrerit semper vel class aptent taciti sociosqu. Ad litora torquent per conubia nostra inceptos himenaeos.
++
++Lorem ipsum dolor sit amet consectetur adipiscing elit. Quisque faucibus ex sapien vitae pellentesque sem placerat. In id cursus mi pretium tellus duis convallis. Tempus leo eu aenean sed diam urna tempor. Pulvinar vivamus fringilla lacus nec metus bibendum egestas. Iaculis massa nisl malesuada lacinia integer nunc posuere. Ut hendrerit semper vel class aptent taciti sociosqu. Ad litora torquent per conubia nostra inceptos himenaeos.
++
++Lorem ipsum dolor sit amet consectetur adipiscing elit. Quisque faucibus ex sapien vitae pellentesque sem placerat. In id cursus mi pretium tellus duis convallis. Tempus leo eu aenean sed diam urna tempor. Pulvinar vivamus fringilla lacus nec metus bibendum egestas. Iaculis massa nisl malesuada lacinia integer nunc posuere. Ut hendrerit semper vel class aptent taciti sociosqu. Ad litora torquent per conubia nostra inceptos himenaeos.
++
++Lorem ipsum dolor sit amet consectetur adipiscing elit. Quisque faucibus ex sapien vitae pellentesque sem placerat. In id cursus mi pretium tellus duis convallis. Tempus leo eu aenean sed diam urna tempor. Pulvinar vivamus fringilla lacus nec metus bibendum egestas. Iaculis massa nisl malesuada lacinia integer nunc posuere. Ut hendrerit semper vel class aptent taciti sociosqu. Ad litora torquent per conubia nostra inceptos himenaeos.
++
++Lorem ipsum dolor sit amet consectetur adipiscing elit. Quisque faucibus ex sapien vitae pellentesque sem placerat. In id cursus mi pretium tellus duis convallis. Tempus leo eu aenean sed diam urna tempor. Pulvinar vivamus fringilla lacus nec metus bibendum egestas. Iaculis massa nisl malesuada lacinia integer nunc posuere. Ut hendrerit semper vel class aptent taciti sociosqu. Ad litora torquent per conubia nostra inceptos himenaeos.
++
++Lorem ipsum dolor sit amet consectetur adipiscing elit. Quisque faucibus ex sapien vitae pellentesque sem placerat. In id cursus mi pretium tellus duis convallis. Tempus leo eu aenean sed diam urna tempor. Pulvinar vivamus fringilla lacus nec metus bibendum egestas. Iaculis massa nisl malesuada lacinia integer nunc posuere. Ut hendrerit semper vel class aptent taciti sociosqu. Ad litora torquent per conubia nostra inceptos himenaeos.
++
++Lorem ipsum dolor sit amet consectetur adipiscing elit. Quisque faucibus ex sapien vitae pellentesque sem placerat. In id cursus mi pretium tellus duis convallis. Tempus leo eu aenean sed diam urna tempor. Pulvinar vivamus fringilla lacus nec metus bibendum egestas. Iaculis massa nisl malesuada lacinia integer nunc posuere. Ut hendrerit semper vel class aptent taciti sociosqu. Ad litora torquent per conubia nostra inceptos himenaeos.
++
++Lorem ipsum dolor sit amet consectetur adipiscing elit. Quisque faucibus ex sapien vitae pellentesque sem placerat. In id cursus mi pretium tellus duis convallis. Tempus leo eu aenean sed diam urna tempor. Pulvinar vivamus fringilla lacus nec metus bibendum egestas. Iaculis massa nisl malesuada lacinia integer nunc posuere. Ut hendrerit semper vel class aptent taciti sociosqu. Ad litora torquent per conubia nostra inceptos himenaeos.
++
++Lorem ipsum dolor sit amet consectetur adipiscing elit. Quisque faucibus ex sapien vitae pellentesque sem placerat. In id cursus mi pretium tellus duis convallis. Tempus leo eu aenean sed diam urna tempor. Pulvinar vivamus fringilla lacus nec metus bibendum egestas. Iaculis massa nisl malesuada lacinia integer nunc posuere. Ut hendrerit semper vel class aptent taciti sociosqu. Ad litora torquent per conubia nostra inceptos himenaeos.
++
++Lorem ipsum dolor sit amet consectetur adipiscing elit. Quisque faucibus ex sapien vitae pellentesque sem placerat. In id cursus mi pretium tellus duis convallis. Tempus leo eu aenean sed diam urna tempor. Pulvinar vivamus fringilla lacus nec metus bibendum egestas. Iaculis massa nisl malesuada lacinia integer nunc posuere. Ut hendrerit semper vel class aptent taciti sociosqu. Ad litora torquent per conubia nostra inceptos himenaeos.`)
++		lrm.SetWrap(true)
++
++		cc.SetChild(&lrm.Widget)
++
++		scw.SetChild(&cc.Widget)
++
++		ctb.SetContent(&scw.Widget)
++
++		arc := adw.NewClamp()
++		arc.SetMaximumSize(720)
++
++		ar := gtk.NewBox(gtk.OrientationHorizontalValue, 0)
++		ar.SetHomogeneous(true)
++		ar.AddCssClass("linked")
++		ar.SetMarginStart(12)
++		ar.SetMarginEnd(12)
++		ar.SetMarginTop(12)
++		ar.SetMarginBottom(12)
++
++		passButton := gtk.NewButtonWithLabel("_Pass")
++		passButton.SetUseUnderline(true)
++		passButton.AddCssClass("opaque")
++		passButton.AddCssClass("pass-button")
++
++		conditionalButton := gtk.NewButtonWithLabel("_Conditional")
++		conditionalButton.SetUseUnderline(true)
++		conditionalButton.AddCssClass("opaque")
++		conditionalButton.AddCssClass("conditional-button")
++
++		failButton := gtk.NewButtonWithLabel("_Fail")
++		failButton.SetUseUnderline(true)
++		failButton.AddCssClass("opaque")
++		failButton.AddCssClass("fail-button")
++
++		ar.Append(&passButton.Widget)
++		ar.Append(&conditionalButton.Widget)
++		ar.Append(&failButton.Widget)
++
++		arc.SetChild(&ar.Widget)
++
++		ctb.AddBottomBar(&arc.Widget)
++
++		cnvp := adw.NewNavigationPage(&ctb.Widget, "Guideline details")
++
++		nsv.SetContent(cnvp)
++
++		win.SetContent(&nsv.Widget)
+ 
+ 		win.Present()
+ 	}
+
