@@ -1,0 +1,206 @@
+From 2379f41d4a85d9edefef8136b429aea3675d5ac9 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Tue, 16 Jun 2026 22:54:36 -0700
+Subject: [PATCH] feat: Add search function to filter guidelines by name and description, add empty state
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/cmd/gatekeeper-create-response/main.go b/cmd/gatekeeper-create-response/main.go
+index cbae5c17dfbb69c35a79a77c76ea6202dfcfc5c1..b865c318f7550bac3afd889db09804358eded2f0 100644
+--- a/cmd/gatekeeper-create-response/main.go
++++ b/cmd/gatekeeper-create-response/main.go
+@@ -5,6 +5,7 @@ 	"flag"
+ 	"math"
+ 	"os"
+ 	"runtime"
++	"strings"
+ 	"unsafe"
+ 
+ 	"codeberg.org/puregotk/puregotk/v4/adw"
+@@ -33,15 +34,24 @@ const (
+ 	dataKeyGoInstance             = "go_instance"
+ 	dataKeyConnectToggledCallback = "connect_toggled_callback"
+ 
+-	propertyGuidelineItemName    = "name"
+-	propertyGuidelineItemHeading = "heading"
+-	propertyGuidelineItemDepth   = "depth"
+-	propertyGuidelineItemStatus  = "status"
++	propertyGuidelineItemName        = "name"
++	propertyGuidelineItemDescription = "description"
++	propertyGuidelineItemHeading     = "heading"
++	propertyGuidelineItemDepth       = "depth"
++	propertyGuidelineItemStatus      = "status"
+ 
+ 	propertyIdGuidelineItemName propertyId = iota
++	propertyIdGuidelineItemDescription
+ 	propertyIdGuidelineItemHeading
+ 	propertyIdGuidelineItemDepth
+ 	propertyIdGuidelineItemStatus
++)
++
++type pageName string
++
++const (
++	pageNameContent pageName = "content"
++	pageNameEmpty   pageName = "empty"
+ )
+ 
+ type guidelineItem struct {
+@@ -189,14 +199,53 @@ 		gtk.StyleContextAddProviderForDisplay(win.GetDisplay(), csp, uint32(gtk.STYLE_PROVIDER_PRIORITY_APPLICATION))
+ 
+ 		tb := adw.NewToolbarView()
+ 
++		vs := adw.NewViewStack()
++		vs.SetEnableTransitions(true)
++
+ 		hb := adw.NewHeaderBar()
+ 
++		tbb := gtk.NewToggleButton()
++		tbb.SetIconName("edit-find-symbolic")
++		tbb.SetTooltipText("Search")
++
++		sc := gtk.NewShortcutController()
++		sc.SetScope(gtk.ShortcutScopeManagedValue)
++
++		sc.AddShortcut(gtk.NewShortcut(
++			gtk.ShortcutTriggerParseString("<Control>f"),
++			gtk.ShortcutActionParseString("activate"),
++		))
++
++		tbb.AddController(&sc.EventController)
++
++		hb.PackStart(&tbb.Widget)
++
+ 		wt := adw.NewWindowTitle("Gatekeeper Create Submission", "")
+ 
+ 		hb.SetTitleWidget(&wt.Widget)
+ 
+ 		tb.AddTopBar(&hb.Widget)
+ 
++		sb := gtk.NewSearchBar()
++		sb.SetKeyCaptureWidget(&win.Widget)
++
++		sb.BindProperty(
++			"search-mode-enabled",
++			&tbb.Object,
++			"active",
++			gobject.GBindingBidirectionalValue,
++		)
++
++		se := gtk.NewSearchEntry()
++		// In sidebars, the search bar is usually full-width
++		// See https://blogs.gnome.org/monster/ui-first-search-with-list-models/
++		se.SetHexpand(true)
++		se.SetPlaceholderText("Search guidelines")
++
++		sb.SetChild(&se.Widget)
++
++		tb.AddTopBar(&sb.Widget)
++
+ 		ts := gtk.NewScrolledWindow()
+ 
+ 		ls := gio.NewListStore(gTypeGuidelineItem)
+@@ -208,14 +257,41 @@ 		}
+ 
+ 		var (
+ 			onMatch gtk.CustomFilterFunc = func(u1, u2 uintptr) bool {
+-				return true
++				obj := gobject.ObjectNewFromInternalPtr(u1)
++				item := (*guidelineItem)(unsafe.Pointer(obj.GetData(dataKeyGoInstance)))
++
++				needle := strings.ToLower(se.GetText())
++
++				return strings.Contains(
++					strings.ToLower(item.GetName()),
++					needle,
++				) || strings.Contains(
++					strings.ToLower(item.GetDescription()),
++					needle,
++				)
+ 			}
+ 
+ 			onUserDestroy glib.DestroyNotify = func(u uintptr) {}
+ 		)
+ 		sf := gtk.NewCustomFilter(&onMatch, 0, &onUserDestroy)
+ 
++		onSearchChanged := func(se gtk.SearchEntry) {
++			sf.Changed(gtk.FilterChangeDifferentValue)
++		}
++		se.ConnectSearchChanged(&onSearchChanged)
++
+ 		fm := gtk.NewFilterListModel(ls, &sf.Filter)
++
++		onItemsChanged := func() {
++			if fm.GetNItems() > 0 {
++				vs.SetVisibleChildName(string(pageNameContent))
++
++				return
++			}
++
++			vs.SetVisibleChildName(string(pageNameEmpty))
++		}
++		fm.ConnectSignal("items-changed", &onItemsChanged)
+ 
+ 		sl := gtk.NewSingleSelection(fm)
+ 
+@@ -343,7 +419,18 @@ 		lw.AddCssClass("navigation-sidebar")
+ 
+ 		ts.SetChild(&lw.Widget)
+ 
+-		tb.SetContent(&ts.Widget)
++		contentPage := vs.Add(&ts.Widget)
++		contentPage.SetName(string(pageNameContent))
++
++		nrf := adw.NewStatusPage()
++		nrf.SetIconName("edit-find-symbolic")
++		nrf.SetTitle("No Guideline Found")
++		nrf.SetDescription("Try a different search")
++
++		emptyPage := vs.Add(&nrf.Widget)
++		emptyPage.SetName(string(pageNameEmpty))
++
++		tb.SetContent(&vs.Widget)
+ 
+ 		win.SetContent(&tb.Widget)
+ 
+@@ -373,6 +460,15 @@ 	g.GetProperty(propertyGuidelineItemName, &val)
+ 	title := val.GetString()
+ 	val.Unset()
+ 	return title
++}
++
++func (g *guidelineItem) GetDescription() string {
++	var val gobject.Value
++	val.Init(gobject.TypeStringVal)
++	g.GetProperty(propertyGuidelineItemDescription, &val)
++	description := val.GetString()
++	val.Unset()
++	return description
+ }
+ 
+ func (g *guidelineItem) GetHeading() bool {
+@@ -472,6 +568,8 @@ 			item := (*guidelineItem)(unsafe.Pointer(o.GetData(dataKeyGoInstance)))
+ 			switch propertyId(u) {
+ 			case propertyIdGuidelineItemName:
+ 				v.SetString(item.flatGuideline.name)
++			case propertyIdGuidelineItemDescription:
++				v.SetString(item.flatGuideline.description)
+ 			case propertyIdGuidelineItemHeading:
+ 				v.SetBoolean(item.flatGuideline.heading)
+ 			case propertyIdGuidelineItemDepth:
+@@ -485,6 +583,14 @@ 		objClass.InstallProperty(uint32(propertyIdGuidelineItemName), gobject.NewParamSpecString(
+ 			propertyGuidelineItemName,
+ 			"Name",
+ 			"Name of the guideline",
++			"",
++			gobject.GParamReadableValue,
++		))
++
++		objClass.InstallProperty(uint32(propertyIdGuidelineItemDescription), gobject.NewParamSpecString(
++			propertyGuidelineItemDescription,
++			"Description",
++			"Description of the guideline",
+ 			"",
+ 			gobject.GParamReadableValue,
+ 		))
+
