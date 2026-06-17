@@ -1,0 +1,97 @@
+From 6d2b6b2304c2ec7fcba00ba4234d80efa5cb2495 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Tue, 16 Jun 2026 19:22:21 -0700
+Subject: [PATCH] feat: Dim headlines that are nested
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/cmd/gatekeeper-create-response/main.go b/cmd/gatekeeper-create-response/main.go
+index 3c79130400a707d53a56208e74dafdba0f147e64..d84dd952b5edf7c6dee5ccf41e566ebdf81d8368 100644
+--- a/cmd/gatekeeper-create-response/main.go
++++ b/cmd/gatekeeper-create-response/main.go
+@@ -2,6 +2,7 @@ package main
+ 
+ import (
+ 	"flag"
++	"math"
+ 	"os"
+ 	"runtime"
+ 	"unsafe"
+@@ -30,9 +31,11 @@ 	dataKeyGoInstance = "go_instance"
+ 
+ 	propertyGuidelineItemName    = "name"
+ 	propertyGuidelineItemHeading = "heading"
++	propertyGuidelineItemDepth   = "depth"
+ 
+ 	propertyIdGuidelineItemName    uint32 = 1
+ 	propertyIdGuidelineItemHeading uint32 = 2
++	propertyIdGuidelineItemDepth   uint32 = 3
+ )
+ 
+ type guidelineItem struct {
+@@ -161,6 +164,22 @@ 					li.SetSelectable(false)
+ 					li.SetActivatable(false)
+ 
+ 					title.AddCssClass("heading")
++
++					if item.GetDepth() > 0 {
++						title.AddCssClass("dim-label")
++					} else {
++						title.RemoveCssClass("dim-label")
++					}
++				} else {
++					// GTK list models re-use widgets as we scroll, so we must make sure to always
++					// overwrite even if the default state of a row is that it's already selectable etc.
++					// See https://docs.gtk.org/gtk4/class.SignalListItemFactory.html
++					li.SetSelectable(true)
++					li.SetActivatable(true)
++
++					title.RemoveCssClass("heading")
++
++					title.RemoveCssClass("dim-label")
+ 				}
+ 			}
+ 		)
+@@ -213,6 +232,15 @@ 	val.Unset()
+ 	return heading
+ }
+ 
++func (g *guidelineItem) GetDepth() int32 {
++	var val gobject.Value
++	val.Init(gobject.TypeIntVal)
++	g.GetProperty(propertyGuidelineItemDepth, &val)
++	depth := val.GetInt()
++	val.Unset()
++	return depth
++}
++
+ func init() {
+ 	var guidelineItemClassInit gobject.ClassInitFunc = func(tc *gobject.TypeClass, u uintptr) {
+ 		objClass := (*gobject.ObjectClass)(unsafe.Pointer(tc))
+@@ -224,6 +252,8 @@ 			case propertyIdGuidelineItemName:
+ 				v.SetString(item.flatGuideline.name)
+ 			case propertyIdGuidelineItemHeading:
+ 				v.SetBoolean(item.flatGuideline.heading)
++			case propertyIdGuidelineItemDepth:
++				v.SetInt(int32(item.flatGuideline.depth))
+ 			}
+ 		})
+ 
+@@ -240,6 +270,16 @@ 			propertyGuidelineItemHeading,
+ 			"Heading",
+ 			"Whether the guideline is a heading",
+ 			false,
++			gobject.GParamReadableValue,
++		))
++
++		objClass.InstallProperty(propertyIdGuidelineItemDepth, gobject.NewParamSpecInt(
++			propertyGuidelineItemDepth,
++			"Depth",
++			"Nesting depth of the guideline",
++			0,
++			math.MaxInt32,
++			0,
+ 			gobject.GParamReadableValue,
+ 		))
+ 
+
