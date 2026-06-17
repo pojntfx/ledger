@@ -1,0 +1,109 @@
+From 8bb21313af4ba9c52ed185205e8c2ae38862ffcf Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Tue, 16 Jun 2026 22:04:40 -0700
+Subject: [PATCH] feat: Set accessible state of checkbox to a radio button and announce value accordingly
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/cmd/gatekeeper-create-response/main.go b/cmd/gatekeeper-create-response/main.go
+index 8699efc7985b970038d8e8e068e0955aef9a8f62..cbae5c17dfbb69c35a79a77c76ea6202dfcfc5c1 100644
+--- a/cmd/gatekeeper-create-response/main.go
++++ b/cmd/gatekeeper-create-response/main.go
+@@ -83,7 +83,49 @@
+ 	return flatGuidelines
+ }
+ 
++func setRadioState(a gtk.AccessibleBase, status statusId) {
++	var valLabel gobject.Value
++	valLabel.Init(gobject.TypeStringVal)
++
++	var valSelectedValue gobject.Value
++	valSelectedValue.Init(gobject.TypeIntVal)
++	valSelectedValue.SetInt(0)
++
++	switch status {
++	case statusIdPending:
++		valLabel.SetString("Pending")
++
++	case statusIdFail:
++		valLabel.SetString("Fail")
++
++	case statusIdConditional:
++		valLabel.SetString("Conditional")
++
++	case statusIdPass:
++		valLabel.SetString("Pass")
++
++		valSelectedValue.SetInt(1)
++	}
++
++	a.UpdatePropertyValue(
++		1,
++		[]gtk.AccessibleProperty{gtk.AccessiblePropertyLabelValue},
++		[]gobject.Value{valLabel},
++	)
++	valLabel.Unset()
++
++	a.UpdateStateValue(
++		1,
++		[]gtk.AccessibleState{gtk.AccessibleStateSelectedValue},
++		[]gobject.Value{valSelectedValue},
++	)
++	valSelectedValue.Unset()
++}
++
+ func applyStatusToCheckbox(check *gtk.CheckButton, status statusId) {
++	var a gtk.AccessibleBase
++	check.Cast(&a)
++
+ 	switch status {
+ 	case statusIdPending:
+ 		check.SetActive(false)
+@@ -109,6 +151,8 @@ 		check.SetInconsistent(false)
+ 
+ 		check.RemoveCssClass("fail")
+ 	}
++
++	setRadioState(a, status)
+ }
+ 
+ func main() {
+@@ -185,7 +229,18 @@ 				row := gtk.NewBox(gtk.OrientationHorizontalValue, 8)
+ 				row.SetMarginTop(8)
+ 				row.SetMarginBottom(8)
+ 
+-				check := gtk.NewCheckButton()
++				var role gobject.Value
++				role.Init(gobject.TypeIntVal)
++				role.SetInt(int32(gtk.AccessibleRoleRadioValue))
++				rawCheck := gobject.NewObjectWithProperties(
++					gtk.CheckButtonGLibType(),
++					1,
++					[]string{"accessible-role"},
++					[]gobject.Value{role},
++				)
++				role.Unset()
++
++				check := gtk.CheckButtonNewFromInternalPtr(rawCheck.GoPointer())
+ 				check.SetTooltipText("Toggle guideline state between pending, failed, conditional pass, and pass")
+ 
+ 				title := gtk.NewLabel("")
+@@ -200,7 +255,7 @@
+ 			onBind func(gtk.SignalListItemFactory, uintptr) = func(_ gtk.SignalListItemFactory, u uintptr) {
+ 				li := gtk.ListItemNewFromInternalPtr(u)
+ 
+-				row := gtk.BoxNewFromInternalPtr(li.GetChild().Ptr)
++				row := gtk.BoxNewFromInternalPtr(li.GetChild().GoPointer())
+ 
+ 				check := gtk.CheckButtonNewFromInternalPtr(row.GetFirstChild().GoPointer())
+ 				title := gtk.LabelNewFromInternalPtr(row.GetLastChild().GoPointer())
+@@ -254,7 +309,7 @@ 			// See https://docs.gtk.org/gtk4/class.SignalListItemFactory.html
+ 			onUnbind = func(_ gtk.SignalListItemFactory, u uintptr) {
+ 				li := gtk.ListItemNewFromInternalPtr(u)
+ 
+-				row := gtk.BoxNewFromInternalPtr(li.GetChild().Ptr)
++				row := gtk.BoxNewFromInternalPtr(li.GetChild().GoPointer())
+ 
+ 				check := gtk.CheckButtonNewFromInternalPtr(row.GetFirstChild().GoPointer())
+ 				title := gtk.LabelNewFromInternalPtr(row.GetLastChild().GoPointer())
+
