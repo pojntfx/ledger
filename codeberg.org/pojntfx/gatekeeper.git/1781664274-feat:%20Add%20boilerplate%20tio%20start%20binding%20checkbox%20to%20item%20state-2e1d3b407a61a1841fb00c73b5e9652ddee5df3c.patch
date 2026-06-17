@@ -1,0 +1,149 @@
+From 2e1d3b407a61a1841fb00c73b5e9652ddee5df3c Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Tue, 16 Jun 2026 19:44:34 -0700
+Subject: [PATCH] feat: Add boilerplate tio start binding checkbox to item state
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/cmd/gatekeeper-create-response/main.go b/cmd/gatekeeper-create-response/main.go
+index 635cfe3c337b02e234379e553a20176ea9ef5e09..4b90f455f385817952edadb70b62c353ef376e3d 100644
+--- a/cmd/gatekeeper-create-response/main.go
++++ b/cmd/gatekeeper-create-response/main.go
+@@ -32,10 +32,12 @@
+ 	propertyGuidelineItemName    = "name"
+ 	propertyGuidelineItemHeading = "heading"
+ 	propertyGuidelineItemDepth   = "depth"
++	propertyGuidelineItemChecked = "checked"
+ 
+ 	propertyIdGuidelineItemName    uint32 = 1
+ 	propertyIdGuidelineItemHeading uint32 = 2
+ 	propertyIdGuidelineItemDepth   uint32 = 3
++	propertyIdGuidelineItemChecked uint32 = 4
+ )
+ 
+ type guidelineItem struct {
+@@ -50,6 +52,8 @@ 	description string
+ 
+ 	heading bool
+ 	depth   int
++
++	checked bool
+ }
+ 
+ func flattenGuidelines(rawGuidelines []guideline, depth int) []flatGuideline {
+@@ -63,6 +67,8 @@ 			description: rawGuideline.Description,
+ 
+ 			heading: !leaf,
+ 			depth:   depth,
++
++			checked: false,
+ 		})
+ 
+ 		if !leaf {
+@@ -140,9 +146,12 @@ 				row := gtk.NewBox(gtk.OrientationHorizontalValue, 8)
+ 				row.SetMarginTop(8)
+ 				row.SetMarginBottom(8)
+ 
++				check := gtk.NewCheckButton()
++
+ 				title := gtk.NewLabel("")
+ 				title.SetWrap(true)
+ 
++				row.Append(&check.Widget)
+ 				row.Append(&title.Widget)
+ 
+ 				li.SetChild(&row.Widget)
+@@ -153,14 +162,19 @@ 				li := gtk.ListItemNewFromInternalPtr(u)
+ 
+ 				row := gtk.BoxNewFromInternalPtr(li.GetChild().Ptr)
+ 
+-				title := gtk.LabelNewFromInternalPtr(row.GetFirstChild().GoPointer())
++				check := gtk.CheckButtonNewFromInternalPtr(row.GetFirstChild().GoPointer())
++				title := gtk.LabelNewFromInternalPtr(row.GetLastChild().GoPointer())
+ 
+ 				obj := gobject.ObjectNewFromInternalPtr(li.GetItem().GoPointer())
+ 				item := (*guidelineItem)(unsafe.Pointer(obj.GetData(dataKeyGoInstance)))
++
++				// TODO: Bind check "active" value to item.checked
+ 
+ 				title.SetLabel(item.GetName())
+ 
+ 				if item.GetHeading() {
++					check.SetVisible(false)
++
+ 					li.SetSelectable(false)
+ 					li.SetActivatable(false)
+ 
+@@ -180,7 +194,10 @@ 				li := gtk.ListItemNewFromInternalPtr(u)
+ 
+ 				row := gtk.BoxNewFromInternalPtr(li.GetChild().Ptr)
+ 
+-				title := gtk.LabelNewFromInternalPtr(row.GetFirstChild().GoPointer())
++				check := gtk.CheckButtonNewFromInternalPtr(row.GetFirstChild().GoPointer())
++				title := gtk.LabelNewFromInternalPtr(row.GetLastChild().GoPointer())
++
++				check.SetVisible(true)
+ 
+ 				li.SetSelectable(true)
+ 				li.SetActivatable(true)
+@@ -249,10 +266,35 @@ 	val.Unset()
+ 	return depth
+ }
+ 
++func (g *guidelineItem) SetChecked(checked bool) {
++	var val gobject.Value
++	val.Init(gobject.TypeBooleanVal)
++	val.SetBoolean(checked)
++	g.SetProperty(propertyGuidelineItemChecked, &val)
++	val.Unset()
++}
++
++func (g *guidelineItem) GetChecked() bool {
++	var val gobject.Value
++	val.Init(gobject.TypeBooleanVal)
++	g.GetProperty(propertyGuidelineItemChecked, &val)
++	checked := val.GetBoolean()
++	val.Unset()
++	return checked
++}
++
+ func init() {
+ 	var guidelineItemClassInit gobject.ClassInitFunc = func(tc *gobject.TypeClass, u uintptr) {
+ 		objClass := (*gobject.ObjectClass)(unsafe.Pointer(tc))
+ 
++		objClass.OverrideSetProperty(func(o *gobject.Object, u uint32, v *gobject.Value, ps *gobject.ParamSpec) {
++			item := (*guidelineItem)(unsafe.Pointer(o.GetData(dataKeyGoInstance)))
++			switch u {
++			case propertyIdGuidelineItemChecked:
++				item.flatGuideline.checked = v.GetBoolean()
++			}
++		})
++
+ 		objClass.OverrideGetProperty(func(o *gobject.Object, u uint32, v *gobject.Value, ps *gobject.ParamSpec) {
+ 			item := (*guidelineItem)(unsafe.Pointer(o.GetData(dataKeyGoInstance)))
+ 			switch u {
+@@ -262,6 +304,8 @@ 			case propertyIdGuidelineItemHeading:
+ 				v.SetBoolean(item.flatGuideline.heading)
+ 			case propertyIdGuidelineItemDepth:
+ 				v.SetInt(int32(item.flatGuideline.depth))
++			case propertyIdGuidelineItemChecked:
++				v.SetBoolean(item.flatGuideline.checked)
+ 			}
+ 		})
+ 
+@@ -289,6 +333,14 @@ 			0,
+ 			math.MaxInt32,
+ 			0,
+ 			gobject.GParamReadableValue,
++		))
++
++		objClass.InstallProperty(propertyIdGuidelineItemChecked, gobject.NewParamSpecBoolean(
++			propertyGuidelineItemChecked,
++			"Checked",
++			"Whether the guideline is checked",
++			false,
++			gobject.GParamReadwriteValue,
+ 		))
+ 
+ 		objClass.OverrideConstructed(func(o *gobject.Object) {
+
