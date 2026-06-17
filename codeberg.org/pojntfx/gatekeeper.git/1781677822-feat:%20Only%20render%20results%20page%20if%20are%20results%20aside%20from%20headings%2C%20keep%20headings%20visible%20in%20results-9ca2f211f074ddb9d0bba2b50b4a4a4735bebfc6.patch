@@ -1,0 +1,70 @@
+From 9ca2f211f074ddb9d0bba2b50b4a4a4735bebfc6 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Tue, 16 Jun 2026 23:30:22 -0700
+Subject: [PATCH] feat: Only render results page if are results aside from headings, keep headings visible in results
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/cmd/gatekeeper-create-response/main.go b/cmd/gatekeeper-create-response/main.go
+index 1343ad23f81efb8d7a0a4544bad2abbdba95046d..ae2cc9cbbe30b5d7168bf29af560d69bcf668403 100644
+--- a/cmd/gatekeeper-create-response/main.go
++++ b/cmd/gatekeeper-create-response/main.go
+@@ -276,6 +276,7 @@ 			nil,
+ 			glib.NewVariantBoolean(false),
+ 		)
+ 
++		atLeastOneLeaf := false
+ 		var (
+ 			onMatch gtk.CustomFilterFunc = func(u1, u2 uintptr) bool {
+ 				obj := gobject.ObjectNewFromInternalPtr(u1)
+@@ -284,22 +285,37 @@
+ 				// Consider only pending items if togglePendingGuidelines is enabled
+ 				if togglePendingGuidelinesAction.GetState().GetBoolean() && item.GetStatus() != statusIdPending {
+ 					return false
++				}
++
++				// We always want to keep headings visible so that we know how an item is nested
++				if item.GetHeading() {
++					return true
+ 				}
+ 
+ 				needle := strings.ToLower(se.GetText())
+ 
+-				return strings.Contains(
++				match := strings.Contains(
+ 					strings.ToLower(item.GetName()),
+ 					needle,
+ 				) || strings.Contains(
+ 					strings.ToLower(item.GetDescription()),
+ 					needle,
+ 				)
++				if !atLeastOneLeaf {
++					atLeastOneLeaf = match
++				}
++
++				return match
+ 			}
+ 
+ 			onUserDestroy glib.DestroyNotify = func(u uintptr) {}
+ 		)
+ 		sf := gtk.NewCustomFilter(&onMatch, 0, &onUserDestroy)
++		onChanged := func(gtk.Filter, gtk.FilterChange) {
++			// When we reset the filter, we need to re-check whether we have any leaves
++			atLeastOneLeaf = false
++		}
++		sf.ConnectChanged(&onChanged)
+ 
+ 		onTogglePendingGuidelinesAction := func(action gio.SimpleAction, _ uintptr) {
+ 			action.SetState(glib.NewVariantBoolean(!action.GetState().GetBoolean()))
+@@ -318,7 +334,9 @@
+ 		fm := gtk.NewFilterListModel(ls, &sf.Filter)
+ 
+ 		onItemsChanged := func() {
+-			if fm.GetNItems() > 0 {
++			// We only want to show the results page if there is at least one results that is
++			// a leaf (non-heading) guideline
++			if fm.GetNItems() > 0 && atLeastOneLeaf {
+ 				vs.SetVisibleChildName(string(pageNameContent))
+ 
+ 				return
+
