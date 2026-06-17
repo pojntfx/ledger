@@ -1,0 +1,52 @@
+From 4ea80f93a975beba09f269a861e902f16754d27e Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Tue, 16 Jun 2026 19:51:25 -0700
+Subject: [PATCH] feat: Bind sidebar checkboxes to actual guideline item checked state
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/cmd/gatekeeper-create-response/main.go b/cmd/gatekeeper-create-response/main.go
+index 4b90f455f385817952edadb70b62c353ef376e3d..4d996d549475bb9ecbc4d0e9adfb9a6346e5580b 100644
+--- a/cmd/gatekeeper-create-response/main.go
++++ b/cmd/gatekeeper-create-response/main.go
+@@ -27,7 +27,8 @@ 	gTypeGuidelineItem gobject.Type
+ )
+ 
+ const (
+-	dataKeyGoInstance = "go_instance"
++	dataKeyGoInstance      = "go_instance"
++	dataKeyBindingInstance = "binding_instance"
+ 
+ 	propertyGuidelineItemName    = "name"
+ 	propertyGuidelineItemHeading = "heading"
+@@ -168,7 +169,13 @@
+ 				obj := gobject.ObjectNewFromInternalPtr(li.GetItem().GoPointer())
+ 				item := (*guidelineItem)(unsafe.Pointer(obj.GetData(dataKeyGoInstance)))
+ 
+-				// TODO: Bind check "active" value to item.checked
++				bd := item.BindProperty(
++					propertyGuidelineItemChecked,
++					&check.Object,
++					"active",
++					gobject.GBindingBidirectionalValue|gobject.GBindingSyncCreateValue,
++				)
++				li.SetData(dataKeyBindingInstance, bd.Ptr)
+ 
+ 				title.SetLabel(item.GetName())
+ 
+@@ -196,6 +203,14 @@ 				row := gtk.BoxNewFromInternalPtr(li.GetChild().Ptr)
+ 
+ 				check := gtk.CheckButtonNewFromInternalPtr(row.GetFirstChild().GoPointer())
+ 				title := gtk.LabelNewFromInternalPtr(row.GetLastChild().GoPointer())
++
++				// We need to check against `0` since on the initial unbind data might not be set yet
++				if bdPtr := li.StealData(dataKeyBindingInstance); bdPtr != 0 {
++					// We need to unbind the binding here since the widgets are being re-used
++					// Usually the binding is cleaned up automatically when both source and target
++					// are finalized, but since we re-use the widgets here that doesn't work
++					gobject.BindingNewFromInternalPtr(bdPtr).Unbind()
++				}
+ 
+ 				check.SetVisible(true)
+ 
+
