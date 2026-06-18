@@ -1,0 +1,92 @@
+From 5ff00680ce6f144136ba9b674ad6ec8824fdfa1b Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Wed, 17 Jun 2026 23:09:31 -0700
+Subject: [PATCH] feat: Add global submit button as overlay to guidelines sidebar and emulate disabled state properly
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/cmd/gatekeeper-create-response/main.go b/cmd/gatekeeper-create-response/main.go
+index f565ce32d621c8c17efd642dc47e7d8c0a30ddd8..50b92e87b73a0ba80408dda39c852cdfb651cb11 100644
+--- a/cmd/gatekeeper-create-response/main.go
++++ b/cmd/gatekeeper-create-response/main.go
+@@ -218,6 +218,12 @@ .fail-button {
+   background-color: var(--destructive-bg-color);
+   color: var(--destructive-fg-color);
+ }
++
++.submit-button:disabled {
++  filter: none;
++  background: color-mix(in srgb, var(--accent-bg-color), var(--window-bg-color));
++  color: color-mix(in srgb, var(--accent-fg-color), transparent var(--disabled-opacity));
++}
+ `)
+ 
+ 	app := adw.NewApplication("com.pojtinger.felicitas.GatekeeperCreateResponse", gio.GApplicationDefaultFlagsValue)
+@@ -516,7 +522,32 @@ 		lw.AddCssClass("navigation-sidebar")
+ 
+ 		ts.SetChild(&lw.Widget)
+ 
+-		contentPage := vs.Add(&ts.Widget)
++		ovl := gtk.NewOverlay()
++		ovl.SetChild(&ts.Widget)
++
++		smbox := gtk.NewBox(gtk.OrientationHorizontalValue, 0)
++		// We mirror the margins from the actions row below
++		smbox.SetMarginStart(12)
++		smbox.SetMarginEnd(12)
++		smbox.SetMarginTop(12)
++		smbox.SetMarginBottom(12)
++		smbox.SetValign(gtk.AlignEndValue)
++
++		smbtn := gtk.NewButtonWithLabel("_Submit")
++		smbtn.SetUseUnderline(true)
++		smbtn.AddCssClass("suggested-action")
++		smbtn.AddCssClass("pill")
++		smbtn.SetHexpand(true)
++		smbtn.AddCssClass("submit-button")
++
++		// We set sensitive to false here, but then wrap the button in
++		// a box so clicks are still captured
++		smbtn.SetSensitive(false)
++		smbox.Append(&smbtn.Widget)
++
++		ovl.AddOverlay(&smbox.Widget)
++
++		contentPage := vs.Add(&ovl.Widget)
+ 		contentPage.SetName(string(pageNameContent))
+ 
+ 		nrf := adw.NewStatusPage()
+@@ -555,12 +586,6 @@ 		nvr.Append(&fwb.Widget)
+ 
+ 		chb.PackStart(&nvr.Widget)
+ 
+-		sbmb := gtk.NewButtonWithLabel("_Submit")
+-		sbmb.AddCssClass("suggested-action")
+-		sbmb.SetUseUnderline(true)
+-
+-		chb.PackEnd(&sbmb.Widget)
+-
+ 		wt := adw.NewWindowTitle("Test title", "Test subtitle")
+ 
+ 		chb.SetTitleWidget(&wt.Widget)
+@@ -613,16 +638,19 @@
+ 		passButton := gtk.NewButtonWithLabel("_Pass")
+ 		passButton.SetUseUnderline(true)
+ 		passButton.AddCssClass("opaque")
++		passButton.AddCssClass("pill")
+ 		passButton.AddCssClass("pass-button")
+ 
+ 		conditionalButton := gtk.NewButtonWithLabel("_Conditional")
+ 		conditionalButton.SetUseUnderline(true)
+ 		conditionalButton.AddCssClass("opaque")
++		conditionalButton.AddCssClass("pill")
+ 		conditionalButton.AddCssClass("conditional-button")
+ 
+ 		failButton := gtk.NewButtonWithLabel("_Fail")
+ 		failButton.SetUseUnderline(true)
+ 		failButton.AddCssClass("opaque")
++		failButton.AddCssClass("pill")
+ 		failButton.AddCssClass("fail-button")
+ 
+ 		ar.Append(&passButton.Widget)
+
