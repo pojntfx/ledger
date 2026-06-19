@@ -1,0 +1,99 @@
+From 03b0e38355d73020687fb1c73f570d1e775b4922 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Thu, 18 Jun 2026 19:54:18 -0700
+Subject: [PATCH] feat: Set accessible label for progress buttons
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/cmd/gatekeeper-create-response/main.go b/cmd/gatekeeper-create-response/main.go
+index ed3257cdf736a571c39fea8b7a9127ddddb03813..a97d2daf4cf035c821c2812e0d5e8ecc727d1b33 100644
+--- a/cmd/gatekeeper-create-response/main.go
++++ b/cmd/gatekeeper-create-response/main.go
+@@ -174,8 +174,27 @@
+ 	setRadioState(a, status)
+ }
+ 
+-func getProgressStyle(progress int) string {
+-	return fmt.Sprintf(`* { --progress: %v%%; }`, progress)
++func updateButtonProgress(
++	button *gtk.Button,
++	cssProvider *gtk.CssProvider,
++	labelFormat string,
++	progress int,
++) {
++	cssProvider.LoadFromString(fmt.Sprintf(`* { --progress: %v%%; }`, progress))
++
++	var a gtk.AccessibleBase
++	button.Cast(&a)
++
++	var valLabel gobject.Value
++	valLabel.Init(gobject.TypeStringVal)
++	valLabel.SetString(fmt.Sprintf(labelFormat, progress))
++
++	a.UpdatePropertyValue(
++		1,
++		[]gtk.AccessibleProperty{gtk.AccessiblePropertyLabelValue},
++		[]gobject.Value{valLabel},
++	)
++	valLabel.Unset()
+ }
+ 
+ func main() {
+@@ -667,9 +686,15 @@ 		passButton.AddCssClass("pill")
+ 		passButton.AddCssClass("verdict-button")
+ 		passButton.AddCssClass("pass-button")
+ 
+-		passProgress := gtk.NewCssProvider()
+-		passButton.GetStyleContext().AddProvider(passProgress, uint32(gtk.STYLE_PROVIDER_PRIORITY_APPLICATION))
+-		passProgress.LoadFromString(getProgressStyle(33))
++		passProvider := gtk.NewCssProvider()
++		passButton.GetStyleContext().AddProvider(passProvider, uint32(gtk.STYLE_PROVIDER_PRIORITY_APPLICATION))
++
++		updateButtonProgress(
++			passButton,
++			passProvider,
++			`Pass (%v%% of guidelines passed so far)`,
++			33,
++		)
+ 
+ 		conditionalButton := gtk.NewButtonWithLabel("_Conditional")
+ 		conditionalButton.SetUseUnderline(true)
+@@ -678,9 +703,15 @@ 		conditionalButton.AddCssClass("pill")
+ 		conditionalButton.AddCssClass("verdict-button")
+ 		conditionalButton.AddCssClass("conditional-button")
+ 
+-		conditionalProgress := gtk.NewCssProvider()
+-		conditionalButton.GetStyleContext().AddProvider(conditionalProgress, uint32(gtk.STYLE_PROVIDER_PRIORITY_APPLICATION))
+-		conditionalProgress.LoadFromString(getProgressStyle(50))
++		conditionalProvider := gtk.NewCssProvider()
++		conditionalButton.GetStyleContext().AddProvider(conditionalProvider, uint32(gtk.STYLE_PROVIDER_PRIORITY_APPLICATION))
++
++		updateButtonProgress(
++			conditionalButton,
++			conditionalProvider,
++			`Conditional (%v%% of guidelines have passed conditionally so far)`,
++			50,
++		)
+ 
+ 		failButton := gtk.NewButtonWithLabel("_Fail")
+ 		failButton.SetUseUnderline(true)
+@@ -689,9 +720,15 @@ 		failButton.AddCssClass("pill")
+ 		failButton.AddCssClass("verdict-button")
+ 		failButton.AddCssClass("fail-button")
+ 
+-		failProgress := gtk.NewCssProvider()
+-		failButton.GetStyleContext().AddProvider(failProgress, uint32(gtk.STYLE_PROVIDER_PRIORITY_APPLICATION))
+-		failProgress.LoadFromString(getProgressStyle(66))
++		failProvider := gtk.NewCssProvider()
++		failButton.GetStyleContext().AddProvider(failProvider, uint32(gtk.STYLE_PROVIDER_PRIORITY_APPLICATION))
++
++		updateButtonProgress(
++			failButton,
++			failProvider,
++			`Fail (%v%% of guidelines have failed so far)`,
++			66,
++		)
+ 
+ 		ar.Append(&passButton.Widget)
+ 		ar.Append(&conditionalButton.Widget)
+
