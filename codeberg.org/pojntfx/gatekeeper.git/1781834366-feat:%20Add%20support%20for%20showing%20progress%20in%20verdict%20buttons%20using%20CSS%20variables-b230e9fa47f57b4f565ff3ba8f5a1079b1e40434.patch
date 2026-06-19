@@ -1,0 +1,138 @@
+From b230e9fa47f57b4f565ff3ba8f5a1079b1e40434 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Thu, 18 Jun 2026 18:59:26 -0700
+Subject: [PATCH] feat: Add support for showing progress in verdict buttons using CSS variables
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/cmd/gatekeeper-create-response/main.go b/cmd/gatekeeper-create-response/main.go
+index 50b92e87b73a0ba80408dda39c852cdfb651cb11..ed3257cdf736a571c39fea8b7a9127ddddb03813 100644
+--- a/cmd/gatekeeper-create-response/main.go
++++ b/cmd/gatekeeper-create-response/main.go
+@@ -2,6 +2,7 @@ package main
+ 
+ import (
+ 	"flag"
++	"fmt"
+ 	"math"
+ 	"os"
+ 	"runtime"
+@@ -173,6 +174,10 @@
+ 	setRadioState(a, status)
+ }
+ 
++func getProgressStyle(progress int) string {
++	return fmt.Sprintf(`* { --progress: %v%%; }`, progress)
++}
++
+ func main() {
+ 	rawGuidelines := flag.String("guidelines", "guidelines.yaml", "Guidelines file")
+ 
+@@ -203,26 +208,47 @@
+ .fail-check check {
+   background-color: var(--destructive-bg-color);
+ }
+-  
++
++.submit-button:disabled {
++  filter: none;
++  background: color-mix(in srgb, var(--accent-bg-color), var(--window-bg-color));
++  color: color-mix(in srgb, var(--accent-fg-color), transparent var(--disabled-opacity));
++}
++
++.verdict-button {
++  --color: var(--success-bg-color);
++  --progress: 30%;
++
++  background: linear-gradient(
++    to right,
++    var(--color) 0%,
++    var(--color) var(--progress),
++    alpha(var(--color), 0.25) var(--progress),
++    alpha(var(--color), 0.25) 100%
++  );
++  color: var(--view-fg-color);
++  transition: filter 150ms ease-in-out;
++}
++
++.verdict-button:hover {
++  filter: brightness(0.8);
++}
++
++.verdict-button:active,
++.verdict-button.keyboard-activating {
++  filter: brightness(0.7);
++}
++
+ .pass-button {
+-  background-color: var(--success-bg-color);
+-  color: var(--success-fg-color);
++  --color: var(--success-bg-color);
+ }
+ 
+ .conditional-button {
+-  background-color: var(--warning-bg-color);
+-  color: var(--warning-fg-color);
++  --color: var(--warning-bg-color);
+ }
+ 
+ .fail-button {
+-  background-color: var(--destructive-bg-color);
+-  color: var(--destructive-fg-color);
+-}
+-
+-.submit-button:disabled {
+-  filter: none;
+-  background: color-mix(in srgb, var(--accent-bg-color), var(--window-bg-color));
+-  color: color-mix(in srgb, var(--accent-fg-color), transparent var(--disabled-opacity));
++  --color: var(--destructive-bg-color);
+ }
+ `)
+ 
+@@ -627,9 +653,8 @@
+ 		arc := adw.NewClamp()
+ 		arc.SetMaximumSize(720)
+ 
+-		ar := gtk.NewBox(gtk.OrientationHorizontalValue, 0)
++		ar := gtk.NewBox(gtk.OrientationHorizontalValue, 12)
+ 		ar.SetHomogeneous(true)
+-		ar.AddCssClass("linked")
+ 		ar.SetMarginStart(12)
+ 		ar.SetMarginEnd(12)
+ 		ar.SetMarginTop(12)
+@@ -639,19 +664,34 @@ 		passButton := gtk.NewButtonWithLabel("_Pass")
+ 		passButton.SetUseUnderline(true)
+ 		passButton.AddCssClass("opaque")
+ 		passButton.AddCssClass("pill")
++		passButton.AddCssClass("verdict-button")
+ 		passButton.AddCssClass("pass-button")
+ 
++		passProgress := gtk.NewCssProvider()
++		passButton.GetStyleContext().AddProvider(passProgress, uint32(gtk.STYLE_PROVIDER_PRIORITY_APPLICATION))
++		passProgress.LoadFromString(getProgressStyle(33))
++
+ 		conditionalButton := gtk.NewButtonWithLabel("_Conditional")
+ 		conditionalButton.SetUseUnderline(true)
+ 		conditionalButton.AddCssClass("opaque")
+ 		conditionalButton.AddCssClass("pill")
++		conditionalButton.AddCssClass("verdict-button")
+ 		conditionalButton.AddCssClass("conditional-button")
+ 
++		conditionalProgress := gtk.NewCssProvider()
++		conditionalButton.GetStyleContext().AddProvider(conditionalProgress, uint32(gtk.STYLE_PROVIDER_PRIORITY_APPLICATION))
++		conditionalProgress.LoadFromString(getProgressStyle(50))
++
+ 		failButton := gtk.NewButtonWithLabel("_Fail")
+ 		failButton.SetUseUnderline(true)
+ 		failButton.AddCssClass("opaque")
+ 		failButton.AddCssClass("pill")
++		failButton.AddCssClass("verdict-button")
+ 		failButton.AddCssClass("fail-button")
++
++		failProgress := gtk.NewCssProvider()
++		failButton.GetStyleContext().AddProvider(failProgress, uint32(gtk.STYLE_PROVIDER_PRIORITY_APPLICATION))
++		failProgress.LoadFromString(getProgressStyle(66))
+ 
+ 		ar.Append(&passButton.Widget)
+ 		ar.Append(&conditionalButton.Widget)
+
