@@ -1,0 +1,219 @@
+From d2bd79f313e44ba0d10287ec467ec3cc59102c1d Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Fri, 19 Jun 2026 23:44:30 -0700
+Subject: [PATCH] feat: Add bottom sheet with comments for verdict buttons
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/cmd/gatekeeper-create-response/main.go b/cmd/gatekeeper-create-response/main.go
+index a97d2daf4cf035c821c2812e0d5e8ecc727d1b33..8ad6f188f817b795a399e18b40ae8300da12370c 100644
+--- a/cmd/gatekeeper-create-response/main.go
++++ b/cmd/gatekeeper-create-response/main.go
+@@ -197,6 +197,91 @@ 	)
+ 	valLabel.Unset()
+ }
+ 
++func newVerdictButtons(bs *adw.BottomSheet, open bool) *gtk.Box {
++	row := gtk.NewBox(gtk.OrientationHorizontalValue, 12)
++
++	verdictBox := gtk.NewBox(gtk.OrientationHorizontalValue, 12)
++	verdictBox.SetHomogeneous(true)
++
++	passButton := gtk.NewButtonWithLabel("_Pass")
++	passButton.SetUseUnderline(true)
++	passButton.AddCssClass("opaque")
++	passButton.AddCssClass("pill")
++	passButton.AddCssClass("verdict-button")
++	passButton.AddCssClass("pass-button")
++
++	passProvider := gtk.NewCssProvider()
++	passButton.GetStyleContext().AddProvider(passProvider, uint32(gtk.STYLE_PROVIDER_PRIORITY_APPLICATION))
++
++	updateButtonProgress(
++		passButton,
++		passProvider,
++		`Pass (%v%% of guidelines passed so far)`,
++		33,
++	)
++
++	conditionalButton := gtk.NewButtonWithLabel("_Conditional")
++	conditionalButton.SetUseUnderline(true)
++	conditionalButton.AddCssClass("opaque")
++	conditionalButton.AddCssClass("pill")
++	conditionalButton.AddCssClass("verdict-button")
++	conditionalButton.AddCssClass("conditional-button")
++
++	conditionalProvider := gtk.NewCssProvider()
++	conditionalButton.GetStyleContext().AddProvider(conditionalProvider, uint32(gtk.STYLE_PROVIDER_PRIORITY_APPLICATION))
++
++	updateButtonProgress(
++		conditionalButton,
++		conditionalProvider,
++		`Conditional (%v%% of guidelines have passed conditionally so far)`,
++		50,
++	)
++
++	failButton := gtk.NewButtonWithLabel("_Fail")
++	failButton.SetUseUnderline(true)
++	failButton.AddCssClass("opaque")
++	failButton.AddCssClass("pill")
++	failButton.AddCssClass("verdict-button")
++	failButton.AddCssClass("fail-button")
++
++	failProvider := gtk.NewCssProvider()
++	failButton.GetStyleContext().AddProvider(failProvider, uint32(gtk.STYLE_PROVIDER_PRIORITY_APPLICATION))
++
++	updateButtonProgress(
++		failButton,
++		failProvider,
++		`Fail (%v%% of guidelines have failed so far)`,
++		66,
++	)
++
++	verdictBox.Append(&passButton.Widget)
++	verdictBox.Append(&conditionalButton.Widget)
++	verdictBox.Append(&failButton.Widget)
++
++	row.Append(&verdictBox.Widget)
++
++	commentButton := gtk.NewToggleButton()
++	if open {
++		commentButton.SetIconName("go-down-symbolic")
++	} else {
++		commentButton.SetIconName("go-up-symbolic")
++	}
++	commentButton.SetTooltipText("Open comment section")
++	commentButton.AddCssClass("circular")
++	commentButton.SetValign(gtk.AlignCenterValue)
++
++	commentButton.BindProperty(
++		"active",
++		&bs.Object,
++		"open",
++		gobject.GBindingBidirectionalValue,
++	)
++
++	row.Append(&commentButton.Widget)
++
++	return row
++}
++
+ func main() {
+ 	rawGuidelines := flag.String("guidelines", "guidelines.yaml", "Guidelines file")
+ 
+@@ -667,76 +752,57 @@ 		cc.SetChild(&lrm.Widget)
+ 
+ 		scw.SetChild(&cc.Widget)
+ 
+-		ctb.SetContent(&scw.Widget)
++		bottomSheet := adw.NewBottomSheet()
++		bottomSheet.SetModal(false)
++		bottomSheet.SetFullWidth(false)
++		bottomSheet.SetContent(&scw.Widget)
+ 
+-		arc := adw.NewClamp()
+-		arc.SetMaximumSize(720)
++		closedVerdictButtons := newVerdictButtons(bottomSheet, false)
++		closedVerdictButtons.SetMarginStart(12)
++		closedVerdictButtons.SetMarginEnd(12)
++		closedVerdictButtons.SetMarginTop(12)
++		closedVerdictButtons.SetMarginBottom(12)
+ 
+-		ar := gtk.NewBox(gtk.OrientationHorizontalValue, 12)
+-		ar.SetHomogeneous(true)
+-		ar.SetMarginStart(12)
+-		ar.SetMarginEnd(12)
+-		ar.SetMarginTop(12)
+-		ar.SetMarginBottom(12)
++		bottomBox := gtk.NewBox(gtk.OrientationVerticalValue, 12)
++		bottomBox.SetMarginStart(12)
++		bottomBox.SetMarginEnd(12)
++		bottomBox.SetMarginTop(12)
++		bottomBox.SetMarginBottom(12)
+ 
+-		passButton := gtk.NewButtonWithLabel("_Pass")
+-		passButton.SetUseUnderline(true)
+-		passButton.AddCssClass("opaque")
+-		passButton.AddCssClass("pill")
+-		passButton.AddCssClass("verdict-button")
+-		passButton.AddCssClass("pass-button")
++		openVerdictButtons := newVerdictButtons(bottomSheet, true)
+ 
+-		passProvider := gtk.NewCssProvider()
+-		passButton.GetStyleContext().AddProvider(passProvider, uint32(gtk.STYLE_PROVIDER_PRIORITY_APPLICATION))
++		commentLabel := gtk.NewLabel("Comment")
++		commentLabel.SetXalign(0)
++		commentLabel.AddCssClass("heading")
+ 
+-		updateButtonProgress(
+-			passButton,
+-			passProvider,
+-			`Pass (%v%% of guidelines passed so far)`,
+-			33,
+-		)
++		bottomBox.Append(&commentLabel.Widget)
+ 
+-		conditionalButton := gtk.NewButtonWithLabel("_Conditional")
+-		conditionalButton.SetUseUnderline(true)
+-		conditionalButton.AddCssClass("opaque")
+-		conditionalButton.AddCssClass("pill")
+-		conditionalButton.AddCssClass("verdict-button")
+-		conditionalButton.AddCssClass("conditional-button")
++		commentScroll := gtk.NewScrolledWindow()
++		commentScroll.AddCssClass("card")
++		// To prevent the square text view from clipping into
++		// the card's rounded corners
++		commentScroll.SetOverflow(gtk.OverflowHiddenValue)
++		commentScroll.SetMinContentHeight(106) // ~5 lines
+ 
+-		conditionalProvider := gtk.NewCssProvider()
+-		conditionalButton.GetStyleContext().AddProvider(conditionalProvider, uint32(gtk.STYLE_PROVIDER_PRIORITY_APPLICATION))
++		commentView := gtk.NewTextView()
++		commentView.SetWrapMode(gtk.WrapWordCharValue)
++		commentView.SetTopMargin(8)
++		commentView.SetBottomMargin(8)
++		commentView.SetLeftMargin(8)
++		commentView.SetRightMargin(8)
+ 
+-		updateButtonProgress(
+-			conditionalButton,
+-			conditionalProvider,
+-			`Conditional (%v%% of guidelines have passed conditionally so far)`,
+-			50,
+-		)
++		// TODO: Auto-focus the comment text view when opening the bottom sheet
+ 
+-		failButton := gtk.NewButtonWithLabel("_Fail")
+-		failButton.SetUseUnderline(true)
+-		failButton.AddCssClass("opaque")
+-		failButton.AddCssClass("pill")
+-		failButton.AddCssClass("verdict-button")
+-		failButton.AddCssClass("fail-button")
++		commentScroll.SetChild(&commentView.Widget)
+ 
+-		failProvider := gtk.NewCssProvider()
+-		failButton.GetStyleContext().AddProvider(failProvider, uint32(gtk.STYLE_PROVIDER_PRIORITY_APPLICATION))
++		bottomBox.Append(&commentScroll.Widget)
+ 
+-		updateButtonProgress(
+-			failButton,
+-			failProvider,
+-			`Fail (%v%% of guidelines have failed so far)`,
+-			66,
+-		)
++		bottomBox.Append(&openVerdictButtons.Widget)
+ 
+-		ar.Append(&passButton.Widget)
+-		ar.Append(&conditionalButton.Widget)
+-		ar.Append(&failButton.Widget)
++		bottomSheet.SetBottomBar(&closedVerdictButtons.Widget)
++		bottomSheet.SetSheet(&bottomBox.Widget)
+ 
+-		arc.SetChild(&ar.Widget)
+-
+-		ctb.AddBottomBar(&arc.Widget)
++		ctb.SetContent(&bottomSheet.Widget)
+ 
+ 		cnvp := adw.NewNavigationPage(&ctb.Widget, "Guideline details")
+ 
+
