@@ -1,0 +1,68 @@
+From a4790087bea34373dacf6e56eabcfe6d57433a5e Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Thu, 25 Jun 2026 10:11:06 -0700
+Subject: [PATCH] feat: Skip items that are headings when navigating with the back/forward buttons
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/cmd/gatekeeper-create-response/main.go b/cmd/gatekeeper-create-response/main.go
+index 79c1c71b69ec12e166cc5277ed26df687116e2aa..cbca20e4036eccb04479bd0a577f4d3bd08af172 100644
+--- a/cmd/gatekeeper-create-response/main.go
++++ b/cmd/gatekeeper-create-response/main.go
+@@ -729,15 +729,24 @@ 		var (
+ 			isFirstLeafSelected = func(pos int) bool {
+ 				return pos <= indexOfFirstLeaf
+ 			}
++			getPrecedingLeafPos = func(currentPos uint32) uint32 {
++				for pos := currentPos - 1; int(pos) > indexOfFirstLeaf; pos-- {
++					if !flatGuidelines[pos].heading {
++						return pos
++					}
++				}
++
++				// indexOfFirstLeaf is never < 0 unless we have no leaves,
++				// which is not an expected state
++				return uint32(indexOfFirstLeaf)
++			}
+ 			onPrevious = func(gtk.Button) {
+-				// TODO: Skip items that are headings
+-
+ 				pos := sl.GetSelected()
+ 				if isFirstLeafSelected(int(pos)) {
+ 					return
+ 				}
+ 
+-				sl.SelectItem(sl.GetSelected()-1, true)
++				sl.SelectItem(getPrecedingLeafPos(sl.GetSelected()), true)
+ 			}
+ 		)
+ 		bbt.ConnectClicked(&onPrevious)
+@@ -751,15 +760,24 @@ 				// No need to check for whether the last item
+ 				// is a leaf here, it always is one
+ 				return pos >= len(flatGuidelines)-1
+ 			}
++			getNextLeafPos = func(currentPos uint32) uint32 {
++				for pos := currentPos + 1; int(pos) < len(flatGuidelines)-1; pos++ {
++					if !flatGuidelines[pos].heading {
++						return pos
++					}
++				}
++
++				// This is never < 0 unless we have no leaves,
++				// which is not an expected state
++				return uint32(len(flatGuidelines)) - 1
++			}
+ 			onNext = func(gtk.Button) {
+-				// TODO: Skip items that are headings
+-
+ 				pos := sl.GetSelected()
+ 				if isLastItemSelected(int(pos)) {
+ 					return
+ 				}
+ 
+-				sl.SelectItem(sl.GetSelected()+1, true)
++				sl.SelectItem(getNextLeafPos(sl.GetSelected()), true)
+ 			}
+ 		)
+ 		fwb.ConnectClicked(&onNext)
+
