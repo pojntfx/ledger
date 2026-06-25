@@ -1,0 +1,37 @@
+From 71d7f0fd598b7fd6de3473c0aab21488d6fd5279 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Thu, 25 Jun 2026 09:18:42 -0700
+Subject: [PATCH] feat: Select first leaf that isn't a heading by default
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/cmd/gatekeeper-create-response/main.go b/cmd/gatekeeper-create-response/main.go
+index e4c6d3bfe8888741088b05f61f9ac6292556ef5d..46c94f44ebf5725461f1d12f836a6588b064fc91 100644
+--- a/cmd/gatekeeper-create-response/main.go
++++ b/cmd/gatekeeper-create-response/main.go
+@@ -439,7 +439,12 @@
+ 		ts := gtk.NewScrolledWindow()
+ 
+ 		ls := gio.NewListStore(gTypeGuidelineItem)
+-		for _, rawFlatGuideline := range flatGuidelines {
++		indexOfFirstLeaf := -1
++		for i, rawFlatGuideline := range flatGuidelines {
++			if indexOfFirstLeaf < 0 && !rawFlatGuideline.heading {
++				indexOfFirstLeaf = i
++			}
++
+ 			guideline := newGuidelineItem(rawFlatGuideline)
+ 			ls.Append(&guideline.Object)
+ 			guideline.Unref()
+@@ -820,6 +825,10 @@
+ 		win.SetContent(&nsv.Widget)
+ 
+ 		win.Present()
++
++		// We run this after we present the window so that
++		// the item actually gets selected
++		sl.SelectItem(uint32(indexOfFirstLeaf), true)
+ 	}
+ 	app.ConnectActivate(&onActivate)
+ 
+
