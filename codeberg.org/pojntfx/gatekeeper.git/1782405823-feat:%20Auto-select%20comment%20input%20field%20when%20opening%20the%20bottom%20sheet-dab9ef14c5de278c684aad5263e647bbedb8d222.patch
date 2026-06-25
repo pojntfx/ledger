@@ -1,0 +1,45 @@
+From dab9ef14c5de278c684aad5263e647bbedb8d222 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Thu, 25 Jun 2026 09:43:43 -0700
+Subject: [PATCH] feat: Auto-select comment input field when opening the bottom sheet
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/cmd/gatekeeper-create-response/main.go b/cmd/gatekeeper-create-response/main.go
+index 3fab783fdf3039f0c3ca0ced2dc2ed1340c6d2d8..79c1c71b69ec12e166cc5277ed26df687116e2aa 100644
+--- a/cmd/gatekeeper-create-response/main.go
++++ b/cmd/gatekeeper-create-response/main.go
+@@ -785,9 +785,6 @@ 		lrm.SetWrap(true)
+ 		lrm.AddCssClass("title-1")
+ 
+ 		onConnectNotify := func(gobject.Object, uintptr) {
+-			// TODO: Make previous button non-sensitive if we're at the first leaf's index
+-			// and the next button non-sensitive if we're at the last index
+-
+ 			pos := sl.GetSelected()
+ 
+ 			if isFirstLeafSelected(int(pos)) {
+@@ -852,8 +849,6 @@ 		commentView.SetBottomMargin(8)
+ 		commentView.SetLeftMargin(8)
+ 		commentView.SetRightMargin(8)
+ 
+-		// TODO: Auto-focus the comment text view when opening the bottom sheet
+-
+ 		commentScroll.SetChild(&commentView.Widget)
+ 
+ 		bottomBox.Append(&commentScroll.Widget)
+@@ -862,6 +857,13 @@ 		bottomBox.Append(&openVerdictButtons.Widget)
+ 
+ 		bottomSheet.SetBottomBar(&closedVerdictButtons.Widget)
+ 		bottomSheet.SetSheet(&bottomBox.Widget)
++
++		onBottomSheetOpen := func() {
++			if bottomSheet.GetOpen() {
++				commentView.GrabFocus()
++			}
++		}
++		bottomSheet.ConnectSignal("notify::open", &onBottomSheetOpen)
+ 
+ 		ctb.SetContent(&bottomSheet.Widget)
+ 
+
