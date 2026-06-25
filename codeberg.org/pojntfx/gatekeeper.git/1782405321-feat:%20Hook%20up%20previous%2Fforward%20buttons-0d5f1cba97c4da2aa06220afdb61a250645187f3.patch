@@ -1,0 +1,92 @@
+From 0d5f1cba97c4da2aa06220afdb61a250645187f3 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Thu, 25 Jun 2026 09:35:21 -0700
+Subject: [PATCH] feat: Hook up previous/forward buttons
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/cmd/gatekeeper-create-response/main.go b/cmd/gatekeeper-create-response/main.go
+index 46c94f44ebf5725461f1d12f836a6588b064fc91..3fab783fdf3039f0c3ca0ced2dc2ed1340c6d2d8 100644
+--- a/cmd/gatekeeper-create-response/main.go
++++ b/cmd/gatekeeper-create-response/main.go
+@@ -715,10 +715,6 @@ 		snvp := adw.NewNavigationPage(&tb.Widget, "Guidelines")
+ 
+ 		nsv.SetSidebar(snvp)
+ 
+-		// TODO: Always make sure that at least one (leaf) guideline is selected
+-		// on the content nav page. We do not need a viewStack on the content nav page,
+-		// there should never be an empty state.
+-
+ 		ctb := adw.NewToolbarView()
+ 
+ 		chb := adw.NewHeaderBar()
+@@ -729,9 +725,45 @@
+ 		bbt := gtk.NewButtonFromIconName("go-previous-symbolic")
+ 		bbt.SetTooltipText("Previous")
+ 
++		var (
++			isFirstLeafSelected = func(pos int) bool {
++				return pos <= indexOfFirstLeaf
++			}
++			onPrevious = func(gtk.Button) {
++				// TODO: Skip items that are headings
++
++				pos := sl.GetSelected()
++				if isFirstLeafSelected(int(pos)) {
++					return
++				}
++
++				sl.SelectItem(sl.GetSelected()-1, true)
++			}
++		)
++		bbt.ConnectClicked(&onPrevious)
++
+ 		fwb := gtk.NewButtonFromIconName("go-next-symbolic")
+ 		fwb.SetTooltipText("Next")
+ 
++		var (
++			isLastItemSelected = func(pos int) bool {
++				// No need to check for whether the last item
++				// is a leaf here, it always is one
++				return pos >= len(flatGuidelines)-1
++			}
++			onNext = func(gtk.Button) {
++				// TODO: Skip items that are headings
++
++				pos := sl.GetSelected()
++				if isLastItemSelected(int(pos)) {
++					return
++				}
++
++				sl.SelectItem(sl.GetSelected()+1, true)
++			}
++		)
++		fwb.ConnectClicked(&onNext)
++
+ 		nvr.Append(&bbt.Widget)
+ 		nvr.Append(&fwb.Widget)
+ 
+@@ -753,7 +785,22 @@ 		lrm.SetWrap(true)
+ 		lrm.AddCssClass("title-1")
+ 
+ 		onConnectNotify := func(gobject.Object, uintptr) {
++			// TODO: Make previous button non-sensitive if we're at the first leaf's index
++			// and the next button non-sensitive if we're at the last index
++
+ 			pos := sl.GetSelected()
++
++			if isFirstLeafSelected(int(pos)) {
++				bbt.SetSensitive(false)
++			} else {
++				bbt.SetSensitive(true)
++			}
++
++			if isLastItemSelected(int(pos)) {
++				fwb.SetSensitive(false)
++			} else {
++				fwb.SetSensitive(true)
++			}
+ 
+ 			obj := gobject.ObjectNewFromInternalPtr(ls.GetItem(pos))
+ 			item := (*guidelineItem)(unsafe.Pointer(obj.GetData(dataKeyGoInstance)))
+
