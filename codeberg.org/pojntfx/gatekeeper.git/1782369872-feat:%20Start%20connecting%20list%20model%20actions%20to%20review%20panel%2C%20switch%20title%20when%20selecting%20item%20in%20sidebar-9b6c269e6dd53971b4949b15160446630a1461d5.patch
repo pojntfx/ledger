@@ -1,0 +1,164 @@
+From 9b6c269e6dd53971b4949b15160446630a1461d5 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Wed, 24 Jun 2026 23:44:32 -0700
+Subject: [PATCH] feat: Start connecting list model actions to review panel, switch title when selecting item in sidebar
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/cmd/gatekeeper-create-response/main.go b/cmd/gatekeeper-create-response/main.go
+index 8ad6f188f817b795a399e18b40ae8300da12370c..e4c6d3bfe8888741088b05f61f9ac6292556ef5d 100644
+--- a/cmd/gatekeeper-create-response/main.go
++++ b/cmd/gatekeeper-create-response/main.go
+@@ -133,7 +133,7 @@ 	)
+ 	valSelectedValue.Unset()
+ }
+ 
+-func applyStatusToCheckbox(check *gtk.CheckButton, status statusId) {
++func applyStatusToCheckbox(check gtk.CheckButton, status statusId) {
+ 	var a gtk.AccessibleBase
+ 	check.Cast(&a)
+ 
+@@ -522,10 +522,13 @@ 		}
+ 		fm.ConnectSignal("items-changed", &onItemsChanged)
+ 
+ 		sl := gtk.NewSingleSelection(fm)
++		sl.SetCanUnselect(false)
+ 
+ 		fi := gtk.NewSignalListItemFactory()
+ 
+ 		var (
++			syncing bool
++
+ 			onSetup func(gtk.SignalListItemFactory, uintptr) = func(_ gtk.SignalListItemFactory, u uintptr) {
+ 				li := gtk.ListItemNewFromInternalPtr(u)
+ 
+@@ -556,6 +559,31 @@
+ 				li.SetChild(&row.Widget)
+ 			}
+ 
++			cycleStatus = func(item *guidelineItem, check gtk.CheckButton) {
++				// When we set the CheckButton status below, we emit another toggled signal
++				// This is a short-cut to prevent us from setting it twice
++				if syncing {
++					return
++				}
++
++				// Cycle through statuses
++				nextStatus := item.GetStatus() - 1
++				if nextStatus < statusIdPending {
++					nextStatus = statusIdPass
++				}
++
++				item.SetStatus(nextStatus)
++
++				syncing = true
++				applyStatusToCheckbox(check, nextStatus)
++				syncing = false
++
++				// We also want to update the filter list so that if we switch out of pending
++				// state but only show pending items, we re-run onMatch to actually hide the
++				// newly non-pending item
++				sf.Changed(gtk.FilterChangeDifferentValue)
++			}
++
+ 			onBind func(gtk.SignalListItemFactory, uintptr) = func(_ gtk.SignalListItemFactory, u uintptr) {
+ 				li := gtk.ListItemNewFromInternalPtr(u)
+ 
+@@ -567,31 +595,10 @@
+ 				obj := gobject.ObjectNewFromInternalPtr(li.GetItem().GoPointer())
+ 				item := (*guidelineItem)(unsafe.Pointer(obj.GetData(dataKeyGoInstance)))
+ 
+-				syncing := false
+-				applyStatusToCheckbox(check, item.GetStatus())
+-				onToggled := func(gtk.CheckButton) {
+-					// When we set the CheckButton status below, we emit another toggled signal
+-					// This is a short-cut to prevent us from setting it twice
+-					if syncing {
+-						return
+-					}
++				applyStatusToCheckbox(*check, item.GetStatus())
+ 
+-					// Cycle through statuses
+-					nextStatus := item.GetStatus() - 1
+-					if nextStatus < statusIdPending {
+-						nextStatus = statusIdPass
+-					}
+-
+-					item.SetStatus(nextStatus)
+-
+-					syncing = true
+-					applyStatusToCheckbox(check, nextStatus)
+-					syncing = false
+-
+-					// We also want to update the filter list so that if we switch out of pending
+-					// state but only show pending items, we re-run onMatch to actually hide the
+-					// newly non-pending item
+-					sf.Changed(gtk.FilterChangeDifferentValue)
++				onToggled := func(check gtk.CheckButton) {
++					cycleStatus(item, check)
+ 				}
+ 				ct := check.ConnectToggled(&onToggled)
+ 				li.SetData(dataKeyConnectToggledCallback, uintptr(ct))
+@@ -631,7 +638,7 @@ 					// are finalized, but since we re-use the widgets here that doesn't work
+ 					gobject.SignalHandlerDisconnect(&check.Object, uint32(ct))
+ 				}
+ 
+-				applyStatusToCheckbox(check, statusIdPending)
++				applyStatusToCheckbox(*check, statusIdPending)
+ 
+ 				check.SetVisible(true)
+ 
+@@ -649,6 +656,15 @@ 		fi.ConnectUnbind(&onUnbind)
+ 
+ 		lw := gtk.NewListView(sl, &fi.ListItemFactory)
+ 		lw.AddCssClass("navigation-sidebar")
++
++		onConnectActivate := func(_ gtk.ListView, pos uint32) {
++			obj := gobject.ObjectNewFromInternalPtr(ls.GetItem(pos))
++			item := (*guidelineItem)(unsafe.Pointer(obj.GetData(dataKeyGoInstance)))
++
++			// TODO: Get actual CheckButton here and cycle through status
++			cycleStatus(item, gtk.CheckButton{})
++		}
++		lw.ConnectActivate(&onConnectActivate)
+ 
+ 		ts.SetChild(&lw.Widget)
+ 
+@@ -727,26 +743,19 @@
+ 		cc := adw.NewClamp()
+ 		cc.SetMaximumSize(1024)
+ 
+-		lrm := gtk.NewLabel(`Lorem ipsum dolor sit amet consectetur adipiscing elit. Quisque faucibus ex sapien vitae pellentesque sem placerat. In id cursus mi pretium tellus duis convallis. Tempus leo eu aenean sed diam urna tempor. Pulvinar vivamus fringilla lacus nec metus bibendum egestas. Iaculis massa nisl malesuada lacinia integer nunc posuere. Ut hendrerit semper vel class aptent taciti sociosqu. Ad litora torquent per conubia nostra inceptos himenaeos.
+-
+-Lorem ipsum dolor sit amet consectetur adipiscing elit. Quisque faucibus ex sapien vitae pellentesque sem placerat. In id cursus mi pretium tellus duis convallis. Tempus leo eu aenean sed diam urna tempor. Pulvinar vivamus fringilla lacus nec metus bibendum egestas. Iaculis massa nisl malesuada lacinia integer nunc posuere. Ut hendrerit semper vel class aptent taciti sociosqu. Ad litora torquent per conubia nostra inceptos himenaeos.
+-
+-Lorem ipsum dolor sit amet consectetur adipiscing elit. Quisque faucibus ex sapien vitae pellentesque sem placerat. In id cursus mi pretium tellus duis convallis. Tempus leo eu aenean sed diam urna tempor. Pulvinar vivamus fringilla lacus nec metus bibendum egestas. Iaculis massa nisl malesuada lacinia integer nunc posuere. Ut hendrerit semper vel class aptent taciti sociosqu. Ad litora torquent per conubia nostra inceptos himenaeos.
++		lrm := gtk.NewLabel("")
++		lrm.SetWrap(true)
++		lrm.AddCssClass("title-1")
+ 
+-Lorem ipsum dolor sit amet consectetur adipiscing elit. Quisque faucibus ex sapien vitae pellentesque sem placerat. In id cursus mi pretium tellus duis convallis. Tempus leo eu aenean sed diam urna tempor. Pulvinar vivamus fringilla lacus nec metus bibendum egestas. Iaculis massa nisl malesuada lacinia integer nunc posuere. Ut hendrerit semper vel class aptent taciti sociosqu. Ad litora torquent per conubia nostra inceptos himenaeos.
++		onConnectNotify := func(gobject.Object, uintptr) {
++			pos := sl.GetSelected()
+ 
+-Lorem ipsum dolor sit amet consectetur adipiscing elit. Quisque faucibus ex sapien vitae pellentesque sem placerat. In id cursus mi pretium tellus duis convallis. Tempus leo eu aenean sed diam urna tempor. Pulvinar vivamus fringilla lacus nec metus bibendum egestas. Iaculis massa nisl malesuada lacinia integer nunc posuere. Ut hendrerit semper vel class aptent taciti sociosqu. Ad litora torquent per conubia nostra inceptos himenaeos.
++			obj := gobject.ObjectNewFromInternalPtr(ls.GetItem(pos))
++			item := (*guidelineItem)(unsafe.Pointer(obj.GetData(dataKeyGoInstance)))
+ 
+-Lorem ipsum dolor sit amet consectetur adipiscing elit. Quisque faucibus ex sapien vitae pellentesque sem placerat. In id cursus mi pretium tellus duis convallis. Tempus leo eu aenean sed diam urna tempor. Pulvinar vivamus fringilla lacus nec metus bibendum egestas. Iaculis massa nisl malesuada lacinia integer nunc posuere. Ut hendrerit semper vel class aptent taciti sociosqu. Ad litora torquent per conubia nostra inceptos himenaeos.
+-
+-Lorem ipsum dolor sit amet consectetur adipiscing elit. Quisque faucibus ex sapien vitae pellentesque sem placerat. In id cursus mi pretium tellus duis convallis. Tempus leo eu aenean sed diam urna tempor. Pulvinar vivamus fringilla lacus nec metus bibendum egestas. Iaculis massa nisl malesuada lacinia integer nunc posuere. Ut hendrerit semper vel class aptent taciti sociosqu. Ad litora torquent per conubia nostra inceptos himenaeos.
+-
+-Lorem ipsum dolor sit amet consectetur adipiscing elit. Quisque faucibus ex sapien vitae pellentesque sem placerat. In id cursus mi pretium tellus duis convallis. Tempus leo eu aenean sed diam urna tempor. Pulvinar vivamus fringilla lacus nec metus bibendum egestas. Iaculis massa nisl malesuada lacinia integer nunc posuere. Ut hendrerit semper vel class aptent taciti sociosqu. Ad litora torquent per conubia nostra inceptos himenaeos.
+-
+-Lorem ipsum dolor sit amet consectetur adipiscing elit. Quisque faucibus ex sapien vitae pellentesque sem placerat. In id cursus mi pretium tellus duis convallis. Tempus leo eu aenean sed diam urna tempor. Pulvinar vivamus fringilla lacus nec metus bibendum egestas. Iaculis massa nisl malesuada lacinia integer nunc posuere. Ut hendrerit semper vel class aptent taciti sociosqu. Ad litora torquent per conubia nostra inceptos himenaeos.
+-
+-Lorem ipsum dolor sit amet consectetur adipiscing elit. Quisque faucibus ex sapien vitae pellentesque sem placerat. In id cursus mi pretium tellus duis convallis. Tempus leo eu aenean sed diam urna tempor. Pulvinar vivamus fringilla lacus nec metus bibendum egestas. Iaculis massa nisl malesuada lacinia integer nunc posuere. Ut hendrerit semper vel class aptent taciti sociosqu. Ad litora torquent per conubia nostra inceptos himenaeos.`)
+-		lrm.SetWrap(true)
++			lrm.SetText(item.flatGuideline.name)
++		}
++		sl.ConnectNotify(&onConnectNotify)
+ 
+ 		cc.SetChild(&lrm.Widget)
+ 
+
