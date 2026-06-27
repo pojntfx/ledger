@@ -1,0 +1,92 @@
+From 7d65e020a44df9da38654e3b6482ddc83bbce79b Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Fri, 26 Jun 2026 19:44:03 -0700
+Subject: [PATCH] feat: Don't mark bottom sheet as active if we're hovering over a child button
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/cmd/gatekeeper-create-response/main.go b/cmd/gatekeeper-create-response/main.go
+index ab705502aec571f9cc0eb6069259f5ba2026312f..792d09939dcd727dba041de282b5c58d7ef7d0ef 100644
+--- a/cmd/gatekeeper-create-response/main.go
++++ b/cmd/gatekeeper-create-response/main.go
+@@ -201,6 +201,23 @@
+ func newVerdictButtons(bs *adw.BottomSheet, open bool) *gtk.Box {
+ 	row := gtk.NewBox(gtk.OrientationHorizontalValue, 12)
+ 
++	var (
++		onConnectEnter = func(gtk.EventControllerMotion, float64, float64) {
++			if open {
++				return
++			}
++
++			row.GetParent().AddCssClass("inert")
++		}
++		onConnectLeave = func(gtk.EventControllerMotion) {
++			if open {
++				return
++			}
++
++			row.GetParent().RemoveCssClass("inert")
++		}
++	)
++
+ 	verdictBox := gtk.NewBox(gtk.OrientationHorizontalValue, 12)
+ 	verdictBox.SetHomogeneous(true)
+ 
+@@ -221,6 +238,13 @@ 		`Pass (%v%% of guidelines passed so far)`,
+ 		33,
+ 	)
+ 
++	passButtonMC := gtk.NewEventControllerMotion()
++
++	passButtonMC.ConnectEnter(&onConnectEnter)
++	passButtonMC.ConnectLeave(&onConnectLeave)
++
++	passButton.AddController(&passButtonMC.EventController)
++
+ 	conditionalButton := gtk.NewButtonWithLabel("_Conditional")
+ 	conditionalButton.SetUseUnderline(true)
+ 	conditionalButton.AddCssClass("opaque")
+@@ -238,6 +262,13 @@ 		`Conditional (%v%% of guidelines have passed conditionally so far)`,
+ 		50,
+ 	)
+ 
++	conditionalButtonMC := gtk.NewEventControllerMotion()
++
++	conditionalButtonMC.ConnectEnter(&onConnectEnter)
++	conditionalButtonMC.ConnectLeave(&onConnectLeave)
++
++	conditionalButton.AddController(&conditionalButtonMC.EventController)
++
+ 	failButton := gtk.NewButtonWithLabel("_Fail")
+ 	failButton.SetUseUnderline(true)
+ 	failButton.AddCssClass("opaque")
+@@ -255,6 +286,13 @@ 		`Fail (%v%% of guidelines have failed so far)`,
+ 		66,
+ 	)
+ 
++	failButtonMC := gtk.NewEventControllerMotion()
++
++	failButtonMC.ConnectEnter(&onConnectEnter)
++	failButtonMC.ConnectLeave(&onConnectLeave)
++
++	failButton.AddController(&failButtonMC.EventController)
++
+ 	verdictBox.Append(&passButton.Widget)
+ 	verdictBox.Append(&conditionalButton.Widget)
+ 	verdictBox.Append(&failButton.Widget)
+@@ -277,6 +315,13 @@ 		&bs.Object,
+ 		"open",
+ 		gobject.GBindingBidirectionalValue,
+ 	)
++
++	commentButtonMC := gtk.NewEventControllerMotion()
++
++	commentButtonMC.ConnectEnter(&onConnectEnter)
++	commentButtonMC.ConnectLeave(&onConnectLeave)
++
++	commentButton.AddController(&commentButtonMC.EventController)
+ 
+ 	row.Append(&commentButton.Widget)
+ 
+
