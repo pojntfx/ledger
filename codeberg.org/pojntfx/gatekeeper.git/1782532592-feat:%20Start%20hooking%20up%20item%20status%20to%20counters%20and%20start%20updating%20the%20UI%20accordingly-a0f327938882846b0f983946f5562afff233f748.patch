@@ -1,0 +1,93 @@
+From a0f327938882846b0f983946f5562afff233f748 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Fri, 26 Jun 2026 20:56:32 -0700
+Subject: [PATCH] feat: Start hooking up item status to counters and start updating the UI accordingly
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/cmd/gatekeeper-create-response/main.go b/cmd/gatekeeper-create-response/main.go
+index 92e55bc7e3fa86c27196b1367f2b5fc04c0fe75c..706d52bf9bc4717b2937b3320118802c7bf71b66 100644
+--- a/cmd/gatekeeper-create-response/main.go
++++ b/cmd/gatekeeper-create-response/main.go
+@@ -501,14 +501,43 @@ 		tb.AddTopBar(&sb.Widget)
+ 
+ 		ts := gtk.NewScrolledWindow()
+ 
++		wt := adw.NewWindowTitle("", getWindowSubtitle(0, leavesCount))
++
++		var sl *gtk.SingleSelection
+ 		ls := gio.NewListStore(gTypeGuidelineItem)
++		// TODO: Also call this when we click the verdict buttons
++		updateGuidelineState := func() {
++			// It would be more efficient to get notified about the specific
++			// item being changed here, but we don't have enough purego slots
++			// to capture the position for each one in a callback, and there
++			// aren't enough guidelines for it to matter
++			var done int
++			for pos := uint32(0); pos < uint32(ls.GetNItems()); pos++ {
++				obj := gobject.ObjectNewFromInternalPtr(ls.GetItem(pos))
++				item := (*guidelineItem)(unsafe.Pointer(obj.GetData(dataKeyGoInstance)))
++
++				if item.GetStatus() != statusIdPending {
++					done++
++				}
++
++				if pos == sl.GetSelected() {
++					// TODO: Update pass/conditional/fail buttons
++				}
++			}
++
++			wt.SetSubtitle(getWindowSubtitle(done, leavesCount))
++
++			// TODO: Update submit button sensitive state if done >= leavesCount
++			// (& make non-sensitive if not)
++		}
++
+ 		indexOfFirstLeaf := -1
+ 		for i, rawFlatGuideline := range flatGuidelines {
+ 			if indexOfFirstLeaf < 0 && !rawFlatGuideline.heading {
+ 				indexOfFirstLeaf = i
+ 			}
+ 
+-			guideline := newGuidelineItem(rawFlatGuideline)
++			guideline := newGuidelineItem(rawFlatGuideline, &updateGuidelineState)
+ 			ls.Append(&guideline.Object)
+ 			guideline.Unref()
+ 		}
+@@ -589,7 +618,7 @@ 			vs.SetVisibleChildName(string(pageNameEmpty))
+ 		}
+ 		fm.ConnectSignal("items-changed", &onItemsChanged)
+ 
+-		sl := gtk.NewSingleSelection(fm)
++		sl = gtk.NewSingleSelection(fm)
+ 		sl.SetCanUnselect(false)
+ 
+ 		fi := gtk.NewSignalListItemFactory()
+@@ -860,8 +889,6 @@ 		nvr.Append(&fwb.Widget)
+ 
+ 		chb.PackStart(&nvr.Widget)
+ 
+-		wt := adw.NewWindowTitle("", getWindowSubtitle(0, leavesCount))
+-
+ 		chb.SetTitleWidget(&wt.Widget)
+ 
+ 		ctb.AddTopBar(&chb.Widget)
+@@ -983,7 +1010,7 @@
+ 	os.Exit(int(app.Run(int32(len(os.Args)), os.Args)))
+ }
+ 
+-func newGuidelineItem(rawGuideline flatGuideline) guidelineItem {
++func newGuidelineItem(rawGuideline flatGuideline, onChangeStatus *func()) guidelineItem {
+ 	obj := gobject.NewObjectWithProperties(gTypeGuidelineItem, 0, nil, nil)
+ 
+ 	var g guidelineItem
+@@ -991,6 +1018,8 @@ 	obj.Cast(&g)
+ 
+ 	item := (*guidelineItem)(unsafe.Pointer(obj.GetData(dataKeyGoInstance)))
+ 	item.flatGuideline = rawGuideline
++
++	item.ConnectSignal("notify::status", onChangeStatus)
+ 
+ 	return g
+ }
+
