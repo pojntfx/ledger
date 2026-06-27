@@ -1,0 +1,134 @@
+From 449daeb827e2ad0839debd66c79f691c66a20e68 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Fri, 26 Jun 2026 20:10:30 -0700
+Subject: [PATCH] feat: Set title and subtitle to parent path of guideline
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/cmd/gatekeeper-create-response/main.go b/cmd/gatekeeper-create-response/main.go
+index 792d09939dcd727dba041de282b5c58d7ef7d0ef..33d8bb810b6acfaf35bdeb8074b38f755273bc6d 100644
+--- a/cmd/gatekeeper-create-response/main.go
++++ b/cmd/gatekeeper-create-response/main.go
+@@ -66,14 +66,18 @@ type flatGuideline struct {
+ 	name        string
+ 	description string
+ 
+-	heading bool
+-	depth   int
++	heading        bool
++	parentHeadings []string
++	depth          int
+ 
+ 	status statusId
+ }
+ 
+-func flattenGuidelines(rawGuidelines []guideline, depth int) []flatGuideline {
+-	var flatGuidelines []flatGuideline
++func flattenGuidelines(rawGuidelines []guideline, depth int, parentHeadings []string) ([]flatGuideline, int) {
++	var (
++		flatGuidelines []flatGuideline
++		leavesCount    int
++	)
+ 	for _, rawGuideline := range rawGuidelines {
+ 		leaf := len(rawGuideline.Items) <= 0
+ 
+@@ -81,18 +85,24 @@ 		flatGuidelines = append(flatGuidelines, flatGuideline{
+ 			name:        rawGuideline.Name,
+ 			description: rawGuideline.Description,
+ 
+-			heading: !leaf,
+-			depth:   depth,
++			heading:        !leaf,
++			depth:          depth,
++			parentHeadings: parentHeadings,
+ 
+ 			status: statusIdPending,
+ 		})
+ 
+-		if !leaf {
+-			flatGuidelines = append(flatGuidelines, flattenGuidelines(rawGuideline.Items, depth+1)...)
++		if leaf {
++			leavesCount++
++		} else {
++			nestedFlatGuidelines, nestedLeavesCount := flattenGuidelines(rawGuideline.Items, depth+1, append(parentHeadings, rawGuideline.Name))
++
++			flatGuidelines = append(flatGuidelines, nestedFlatGuidelines...)
++			leavesCount += nestedLeavesCount
+ 		}
+ 	}
+ 
+-	return flatGuidelines
++	return flatGuidelines, leavesCount
+ }
+ 
+ func setRadioState(a gtk.AccessibleBase, status statusId) {
+@@ -221,7 +231,7 @@
+ 	verdictBox := gtk.NewBox(gtk.OrientationHorizontalValue, 12)
+ 	verdictBox.SetHomogeneous(true)
+ 
+-	passButton := gtk.NewButtonWithLabel("_Pass")
++	passButton := gtk.NewButtonWithLabel("_Pass (33)")
+ 	passButton.SetUseUnderline(true)
+ 	passButton.AddCssClass("opaque")
+ 	passButton.AddCssClass("pill")
+@@ -245,7 +255,7 @@ 	passButtonMC.ConnectLeave(&onConnectLeave)
+ 
+ 	passButton.AddController(&passButtonMC.EventController)
+ 
+-	conditionalButton := gtk.NewButtonWithLabel("_Conditional")
++	conditionalButton := gtk.NewButtonWithLabel("_Conditional (50)")
+ 	conditionalButton.SetUseUnderline(true)
+ 	conditionalButton.AddCssClass("opaque")
+ 	conditionalButton.AddCssClass("pill")
+@@ -269,7 +279,7 @@ 	conditionalButtonMC.ConnectLeave(&onConnectLeave)
+ 
+ 	conditionalButton.AddController(&conditionalButtonMC.EventController)
+ 
+-	failButton := gtk.NewButtonWithLabel("_Fail")
++	failButton := gtk.NewButtonWithLabel("_Fail (66)")
+ 	failButton.SetUseUnderline(true)
+ 	failButton.AddCssClass("opaque")
+ 	failButton.AddCssClass("pill")
+@@ -328,6 +338,10 @@
+ 	return row
+ }
+ 
++func getWindowSubtitle(done, total int) string {
++	return fmt.Sprintf("%v/%v Done", done, total)
++}
++
+ func main() {
+ 	rawGuidelines := flag.String("guidelines", "guidelines.yaml", "Guidelines file")
+ 
+@@ -344,7 +358,7 @@ 	if err := yaml.NewDecoder(manifestFile).Decode(&guidelines); err != nil {
+ 		panic(err)
+ 	}
+ 
+-	flatGuidelines := flattenGuidelines(guidelines, 0)
++	flatGuidelines, leavesCount := flattenGuidelines(guidelines, 0, []string{})
+ 
+ 	csp := gtk.NewCssProvider()
+ 	csp.LoadFromString(`.pass-check check {
+@@ -843,7 +857,7 @@ 		nvr.Append(&fwb.Widget)
+ 
+ 		chb.PackStart(&nvr.Widget)
+ 
+-		wt := adw.NewWindowTitle("Test title", "Test subtitle")
++		wt := adw.NewWindowTitle("", getWindowSubtitle(0, leavesCount))
+ 
+ 		chb.SetTitleWidget(&wt.Widget)
+ 
+@@ -876,7 +890,11 @@
+ 			obj := gobject.ObjectNewFromInternalPtr(ls.GetItem(pos))
+ 			item := (*guidelineItem)(unsafe.Pointer(obj.GetData(dataKeyGoInstance)))
+ 
+-			lrm.SetText(item.flatGuideline.name)
++			lrm.SetText(item.GetName())
++
++			// There are no top-level leaves, so we're safe to always assume
++			// that len(parentHeadings) > 1
++			wt.SetTitle(strings.Join(item.flatGuideline.parentHeadings, " › "))
+ 		}
+ 		sl.ConnectNotify(&onConnectNotify)
+ 
+
