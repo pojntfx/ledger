@@ -1,0 +1,94 @@
+From 9f49682860475ee16e38f0c8e151ffb4dbcebd1f Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Fri, 26 Jun 2026 20:20:03 -0700
+Subject: [PATCH] feat: Make parent headings a GObject property
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/cmd/gatekeeper-create-response/main.go b/cmd/gatekeeper-create-response/main.go
+index 33d8bb810b6acfaf35bdeb8074b38f755273bc6d..1d00165c2a50a2b7635bf196fd9b8894754e0c7b 100644
+--- a/cmd/gatekeeper-create-response/main.go
++++ b/cmd/gatekeeper-create-response/main.go
+@@ -9,6 +9,7 @@ 	"runtime"
+ 	"strings"
+ 	"unsafe"
+ 
++	"codeberg.org/puregotk/puregotk/pkg/core"
+ 	"codeberg.org/puregotk/puregotk/v4/adw"
+ 	"codeberg.org/puregotk/puregotk/v4/gio"
+ 	"codeberg.org/puregotk/puregotk/v4/glib"
+@@ -36,17 +37,19 @@ 	dataKeyGoInstance             = "go_instance"
+ 	dataKeyConnectToggledCallback = "connect_toggled_callback"
+ 	dataKeyCheckButton            = "check_button"
+ 
+-	propertyGuidelineItemName        = "name"
+-	propertyGuidelineItemDescription = "description"
+-	propertyGuidelineItemHeading     = "heading"
+-	propertyGuidelineItemDepth       = "depth"
+-	propertyGuidelineItemStatus      = "status"
++	propertyGuidelineItemName           = "name"
++	propertyGuidelineItemDescription    = "description"
++	propertyGuidelineItemHeading        = "heading"
++	propertyGuidelineItemDepth          = "depth"
++	propertyGuidelineItemStatus         = "status"
++	propertyGuidelineItemParentHeadings = "parent-headings"
+ 
+ 	propertyIdGuidelineItemName propertyId = iota
+ 	propertyIdGuidelineItemDescription
+ 	propertyIdGuidelineItemHeading
+ 	propertyIdGuidelineItemDepth
+ 	propertyIdGuidelineItemStatus
++	propertyIdGuidelineItemParentHeadings
+ )
+ 
+ type pageName string
+@@ -894,7 +897,7 @@ 			lrm.SetText(item.GetName())
+ 
+ 			// There are no top-level leaves, so we're safe to always assume
+ 			// that len(parentHeadings) > 1
+-			wt.SetTitle(strings.Join(item.flatGuideline.parentHeadings, " › "))
++			wt.SetTitle(strings.Join(item.GetParentHeadings(), " › "))
+ 		}
+ 		sl.ConnectNotify(&onConnectNotify)
+ 
+@@ -1041,6 +1044,15 @@ 	val.Unset()
+ 	return status
+ }
+ 
++func (g *guidelineItem) GetParentHeadings() []string {
++	var val gobject.Value
++	val.Init(glib.StrvGetType())
++	g.GetProperty(propertyGuidelineItemParentHeadings, &val)
++	result := core.GoStringSlice(val.GetBoxed())
++	val.Unset()
++	return result
++}
++
+ const NUL byte = 0
+ 
+ var (
+@@ -1111,6 +1123,8 @@ 			case propertyIdGuidelineItemDepth:
+ 				v.SetInt(int32(item.flatGuideline.depth))
+ 			case propertyIdGuidelineItemStatus:
+ 				v.SetEnum(int32(item.flatGuideline.status))
++			case propertyIdGuidelineItemParentHeadings:
++				v.SetBoxed(uintptr(unsafe.Pointer(core.ByteSlice(item.flatGuideline.parentHeadings))))
+ 			}
+ 		})
+ 
+@@ -1155,6 +1169,14 @@ 			"Status of the guideline",
+ 			gTypeStatus,
+ 			int32(statusIdPending),
+ 			gobject.GParamReadwriteValue,
++		))
++
++		objClass.InstallProperty(uint32(propertyIdGuidelineItemParentHeadings), gobject.NewParamSpecBoxed(
++			propertyGuidelineItemParentHeadings,
++			"Parent headings",
++			"Parent headings of the guideline",
++			glib.StrvGetType(),
++			gobject.GParamReadableValue,
+ 		))
+ 
+ 		objClass.OverrideConstructed(func(o *gobject.Object) {
+
