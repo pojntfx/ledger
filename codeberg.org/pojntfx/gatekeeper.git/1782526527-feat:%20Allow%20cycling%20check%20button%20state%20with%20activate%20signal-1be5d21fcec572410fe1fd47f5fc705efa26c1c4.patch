@@ -1,0 +1,56 @@
+From 1be5d21fcec572410fe1fd47f5fc705efa26c1c4 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Fri, 26 Jun 2026 19:15:27 -0700
+Subject: [PATCH] feat: Allow cycling check button state with activate signal
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/cmd/gatekeeper-create-response/main.go b/cmd/gatekeeper-create-response/main.go
+index cbca20e4036eccb04479bd0a577f4d3bd08af172..ab705502aec571f9cc0eb6069259f5ba2026312f 100644
+--- a/cmd/gatekeeper-create-response/main.go
++++ b/cmd/gatekeeper-create-response/main.go
+@@ -34,6 +34,7 @@
+ const (
+ 	dataKeyGoInstance             = "go_instance"
+ 	dataKeyConnectToggledCallback = "connect_toggled_callback"
++	dataKeyCheckButton            = "check_button"
+ 
+ 	propertyGuidelineItemName        = "name"
+ 	propertyGuidelineItemDescription = "description"
+@@ -608,6 +609,14 @@ 				}
+ 				ct := check.ConnectToggled(&onToggled)
+ 				li.SetData(dataKeyConnectToggledCallback, uintptr(ct))
+ 
++				var pinner runtime.Pinner
++				pinner.Pin(check)
++
++				var cleanupCallback glib.DestroyNotify = func(data uintptr) {
++					pinner.Unpin()
++				}
++				obj.SetDataFull(dataKeyCheckButton, uintptr(unsafe.Pointer(check)), &cleanupCallback)
++
+ 				title.SetLabel(item.GetName())
+ 
+ 				if item.GetHeading() {
+@@ -634,6 +643,8 @@ 				row := gtk.BoxNewFromInternalPtr(li.GetChild().GoPointer())
+ 
+ 				check := gtk.CheckButtonNewFromInternalPtr(row.GetFirstChild().GoPointer())
+ 				title := gtk.LabelNewFromInternalPtr(row.GetLastChild().GoPointer())
++
++				li.SetData(dataKeyCheckButton, 0)
+ 
+ 				// We need to check against `0` since on the initial unbind data might not be set yet
+ 				if ct := li.StealData(dataKeyConnectToggledCallback); ct != 0 {
+@@ -665,9 +676,9 @@
+ 		onConnectActivate := func(_ gtk.ListView, pos uint32) {
+ 			obj := gobject.ObjectNewFromInternalPtr(ls.GetItem(pos))
+ 			item := (*guidelineItem)(unsafe.Pointer(obj.GetData(dataKeyGoInstance)))
++			check := (*gtk.CheckButton)(unsafe.Pointer(obj.GetData(dataKeyCheckButton)))
+ 
+-			// TODO: Get actual CheckButton here and cycle through status
+-			cycleStatus(item, gtk.CheckButton{})
++			cycleStatus(item, *check)
+ 		}
+ 		lw.ConnectActivate(&onConnectActivate)
+ 
+
