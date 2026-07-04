@@ -1,0 +1,174 @@
+From fe2db51be85407e3685ecfb95a9c5330efc6e0f3 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Fri, 03 Jul 2026 23:58:59 -0700
+Subject: [PATCH] feat: Add initial prototype of `IntersectionObserver`-based back to top button for home page
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/assets/scss/main.scss b/assets/scss/main.scss
+index 2eda32f6526002136d842bcd18d346fdb6f9368c..0d3d906e2cd0cda957eaed485cb8e8cdd0e0dcfc 100644
+--- a/assets/scss/main.scss
++++ b/assets/scss/main.scss
+@@ -589,3 +589,8 @@
+ .portfolio-section--striped {
+   background: var(--pf-t--global--background--color--secondary--default);
+ }
++
++.pf-v6-c-back-to-top--home {
++  // We made the whole home page scroll, so we can't use the regular back to top button positioning anymore
++  position: fixed;
++}
+diff --git a/layouts/_partials/footer.html b/layouts/_partials/footer.html
+index 513262eea258ffaed8f34bd8b8dc2e2ac60ae7c2..8f3011a3b5c3d36ba62d676caa1d4b6181aa0ce9 100644
+--- a/layouts/_partials/footer.html
++++ b/layouts/_partials/footer.html
+@@ -1,4 +1,7 @@
+-<footer class="pf-v6-c-page__main-section pf-m-limit-width pf-m-align-center pf-m-no-fill {{ if .IsHome }}footer--home{{ end }}">
++<footer
++  class="pf-v6-c-page__main-section pf-m-limit-width pf-m-align-center pf-m-no-fill {{ if .IsHome }}footer--home{{ end }}"
++  id="footer"
++>
+   <div class="pf-v6-c-page__main-body">
+     <div
+       class="pf-v6-l-grid pf-m-gutter pf-v6-u-py-xl-on-sm pf-v6-u-py-0-on-md pf-v6-u-align-items-center"
+@@ -11,7 +14,9 @@         class="pf-v6-l-grid__item pf-m-12-col pf-m-6-col-on-xl"
+       >
+         © {{ now.Year }} {{ hugo.Data.site.author }}
+       </a>
+-      <div class="pf-v6-l-grid__item pf-m-12-col pf-m-6-col-on-xl pf-v6-u-text-align-end-on-xl">
++      <div
++        class="pf-v6-l-grid__item pf-m-12-col pf-m-6-col-on-xl pf-v6-u-text-align-end-on-xl"
++      >
+         <a href="{{ hugo.Data.site.source }}" target="_blank" rel="noopener"
+           >Quelltext</a
+         >
+diff --git a/layouts/_partials/section-home.html b/layouts/_partials/section-home.html
+index b01522923c0852686443e8e8bcf5bdffb2d5992b..67226502048a223d9a5ee7071f669beb929e666d 100644
+--- a/layouts/_partials/section-home.html
++++ b/layouts/_partials/section-home.html
+@@ -6,6 +6,7 @@     <div class="pf-v6-c-page__main-body">
+       <nav
+         class="pf-v6-c-nav pf-m-horizontal nav--hero"
+         aria-label="Globale Navigation"
++        id="nav--header"
+       >
+         <ul class="pf-v6-c-nav__list" role="list">
+           <li class="pf-v6-c-nav__item">
+@@ -226,35 +227,66 @@   </section>
+ </div>
+ 
+ <script>
+-  const tabs = document.querySelectorAll(".pf-v6-c-tabs__list[role='tablist']");
+-  const panels = document.querySelectorAll(
+-    ".pf-v6-c-tab-content[role='tabpanel']",
+-  );
++  document.addEventListener("DOMContentLoaded", () => {
++    const tabs = document.querySelectorAll(
++      ".pf-v6-c-tabs__list[role='tablist']",
++    );
++    const panels = document.querySelectorAll(
++      ".pf-v6-c-tab-content[role='tabpanel']",
++    );
++
++    tabs.forEach((tab) =>
++      tab.addEventListener("click", (e) => {
++        const btn = e.target.closest(".pf-v6-c-tabs__link");
++        if (!btn) return; // Ignore events that don't originate from a button
++
++        const panel = document.querySelector(
++          `#${btn.getAttribute("aria-controls")}`,
++        );
++
++        tab.querySelectorAll(".pf-v6-c-tabs__link").forEach((tab) => {
++          tab.setAttribute("aria-selected", tab.id === btn.id);
++
++          if (tab.id === btn.id) {
++            tab.closest(".pf-v6-c-tabs__item").classList.add("pf-m-current");
++          } else {
++            tab.closest(".pf-v6-c-tabs__item").classList.remove("pf-m-current");
++          }
++        });
+ 
+-  tabs.forEach((tab) =>
+-    tab.addEventListener("click", (e) => {
+-      const btn = e.target.closest(".pf-v6-c-tabs__link");
+-      if (!btn) return; // Ignore events that don't originate from a button
++        panels.forEach(
++          (candidate) =>
++            candidate.dataset.group === panel.dataset.group &&
++            (candidate.hidden = candidate.id != panel.id),
++        );
++      }),
++    );
+ 
+-      const panel = document.querySelector(
+-        `#${btn.getAttribute("aria-controls")}`,
+-      );
++    const navHeader = document.querySelector("#nav--header");
++    const footer = document.querySelector("#footer");
++    const btnBackToTop = document.querySelector("#back-to-top");
+ 
+-      tab.querySelectorAll(".pf-v6-c-tabs__link").forEach((tab) => {
+-        tab.setAttribute("aria-selected", tab.id === btn.id);
++    const observer = new IntersectionObserver((entries) =>
++      entries.forEach((entry) => {
++        switch (entry.target.id) {
++          case navHeader.id:
++            if (entry.isIntersecting) {
++              btnBackToTop.classList.add("pf-m-hidden");
++            } else {
++              btnBackToTop.classList.remove("pf-m-hidden");
++            }
+ 
+-        if (tab.id === btn.id) {
+-          tab.closest(".pf-v6-c-tabs__item").classList.add("pf-m-current");
+-        } else {
+-          tab.closest(".pf-v6-c-tabs__item").classList.remove("pf-m-current");
++          case footer.id:
++            if (entry.isIntersecting) {
++              btnBackToTop.classList.add("pf-m-hidden");
++            } else {
++              btnBackToTop.classList.remove("pf-m-hidden");
++            }
+         }
+-      });
++      }),
++    );
+ 
+-      panels.forEach(
+-        (candidate) =>
+-          candidate.dataset.group === panel.dataset.group &&
+-          (candidate.hidden = candidate.id != panel.id),
+-      );
+-    }),
+-  );
++    observer.observe(navHeader);
++    observer.observe(footer);
++  });
+ </script>
+diff --git a/layouts/home.html b/layouts/home.html
+index 56d2f2342c0b11ecab9e1da99003c4e48fdc6c09..3379d7760e49991212d3a10ccad17e7fbbefe4d0 100644
+--- a/layouts/home.html
++++ b/layouts/home.html
+@@ -1,7 +1,15 @@
+ {{ define "main" }}
+-  <main class="pf-v6-u-flex-1 pf-v6-u-display-flex pf-v6-u-flex-direction-column main--home">
+-    {{ partial "section-home" . }}
+-  </main>
++<main
++  class="pf-v6-u-flex-1 pf-v6-u-display-flex pf-v6-u-flex-direction-column main--home"
++>
++  {{ partial "section-home" . }}
+ 
+-  {{ partial "footer" . }}
+-{{ end }}
++  <div class="pf-v6-c-back-to-top pf-v6-c-back-to-top--home pf-m-hidden" id="back-to-top">
++    <a class="pf-v6-c-button pf-m-primary" href="#">
++      <span class="pf-v6-c-button__text">Zurück nach oben</span>
++      <span class="pf-v6-c-button__icon pf-m-end fas fa-angle-up"> </span>
++    </a>
++  </div>
++</main>
++
++{{ partial "footer" . }} {{ end }}
+
