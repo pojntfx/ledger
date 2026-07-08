@@ -1,0 +1,340 @@
+From eb407759b3e41b84549f64059fe4dc36c0054a09 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Tue, 07 Jul 2026 23:39:14 -0700
+Subject: [PATCH] feat: Add ad-hoc modal when selecting an element in the portfolio, generate image URLs at generation time
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/assets/scss/main.scss b/assets/scss/main.scss
+index c63b9cd985d583093eb4abf0f945ee1b1bcb6751..9950d9cf5676049a82a0fcc3601363758ddb9eea 100644
+--- a/assets/scss/main.scss
++++ b/assets/scss/main.scss
+@@ -613,3 +613,7 @@   > img {
+     width: 100%;
+   }
+ }
++
++.modal-pagination {
++  font-variant-numeric: tabular-nums;
++}
+diff --git a/layouts/_partials/section-home.html b/layouts/_partials/section-home.html
+index f6161a7fc15f6f19e05bbec1518a95086fad2e27..48d68664c76307bda9bfd044bd2a29a61fb702b8 100644
+--- a/layouts/_partials/section-home.html
++++ b/layouts/_partials/section-home.html
+@@ -31,7 +31,13 @@         </ul>
+       </nav>
+ 
+       <div class="hero">
+-        <img alt="NetteART Logo" src="{{ $icon.RelPermalink }}" width="{{ $icon.Width }}" height="{{ $icon.Height }}" class="logo--home" />
++        <img
++          alt="NetteART Logo"
++          src="{{ $icon.RelPermalink }}"
++          width="{{ $icon.Width }}"
++          height="{{ $icon.Height }}"
++          class="logo--home"
++        />
+ 
+         <div class="hero__details">
+           <h1 class="pf-v6-c-title pf-m-4xl pf-m-page-title pf-v6-u-mb-sm">
+@@ -149,11 +155,23 @@           >
+             <div class="pf-v6-c-card__header">
+               <div class="pf-v6-c-card__actions pf-m-no-offset">
+                 <div class="pf-v6-c-card__selectable-actions">
+-                  <a
+-                    class="pf-v6-c-card__clickable-action"
++                  {{ $images := slice }}
++                  {{ range (slice . | append (default slice .items)) }}
++                    {{ $image := resources.Get .src }}
++                    {{ $images = $images | append (dict
++                      "title" .title
++                      "year" .year
++                      "alt" .alt
++                      "src" $image.RelPermalink
++                      "width" $image.Width
++                      "height" $image.Height
++                    ) }}
++                  {{ end }}
++                  <button
++                    class="pf-v6-c-card__clickable-action modal-item-source"
+                     aria-labelledby="{{ .id }}"
+-                    href="#"
+-                  ></a>
++                    data-item="{{ (dict "title" .title "year" .year "images" $images) | jsonify }}"
++                  ></button>
+                 </div>
+               </div>
+               <div class="pf-v6-c-card__header-main">
+@@ -214,7 +232,13 @@         </ul>
+       </nav>
+ 
+       <div class="outro">
+-        <img alt="NetteART Logo" src="{{ $icon.RelPermalink }}" width="{{ $icon.Width }}" height="{{ $icon.Height }}" class="logo--outro" />
++        <img
++          alt="NetteART Logo"
++          src="{{ $icon.RelPermalink }}"
++          width="{{ $icon.Width }}"
++          height="{{ $icon.Height }}"
++          class="logo--outro"
++        />
+ 
+         <h2 class="pf-v6-c-title pf-m-4xl pf-m-page-title pf-v6-u-mb-sm">
+           Ihr Projekt mit meiner Gestaltung
+@@ -304,5 +328,153 @@     );
+ 
+     observer.observe(navHeader);
+     observer.observe(footer);
++
++    const body = document.body;
++
++    document.querySelectorAll(".modal-item-source").forEach((el) =>
++      el.addEventListener("click", (e) => {
++        const item = JSON.parse(e.target.dataset.item);
++
++        const modal = Document.parseHTMLUnsafe(`<div class="pf-v6-c-backdrop">
++      <div class="pf-v6-l-bullseye">
++        <div
++          class="pf-v6-c-modal-box pf-m-sm"
++          role="dialog"
++          aria-modal="true"
++        >
++          <div class="pf-v6-c-modal-box__close">
++            <button
++              class="pf-v6-c-button pf-m-plain"
++              type="button"
++              aria-label="Close"
++            >
++              <span class="pf-v6-c-button__icon">
++                <svg
++                  class="pf-v6-svg"
++                  fill="currentColor"
++                  viewBox="0 0 20 20"
++                  aria-hidden="true"
++                  role="img"
++                  width="1em"
++                  height="1em"
++                >
++                  <path
++                    d="M17.8 16.2 11.59 10l6.21-6.21c.42-.46.39-1.17-.07-1.59-.43-.4-1.09-.4-1.52 0l-6.2 6.2-6.22-6.19c-.44-.44-1.15-.44-1.59 0-.44.44-.44 1.15 0 1.59l6.2 6.21-6.2 6.2c-.42.46-.39 1.17.07 1.59.43.4 1.09.4 1.52 0L10 11.59l6.2 6.2c.44.44 1.15.44 1.59 0 .44-.45.44-1.16 0-1.6Z"
++                  ></path>
++                </svg>
++              </span>
++            </button>
++          </div>
++          <header class="pf-v6-c-modal-box__header">
++            <div class="pf-v6-c-modal-box__header-main">
++              <h1
++                class="pf-v6-c-modal-box__title"
++                tabindex="-1"
++              >
++              </h1>
++            </div>
++          </header>
++          <div
++            class="pf-v6-c-modal-box__body modal-actions-body"
++          >
++          <img loading="lazy" class="modal-img" />
++          </div>
++          <footer class="pf-v6-c-modal-box__footer modal-actions-footer">
++            <button
++              type="button"
++              aria-label="Previous"
++              class="pf-v6-c-button pf-m-control modal-previous-button"
++              disabled
++              aria-disabled="true"
++            >
++              <span class="pf-v6-c-button__icon fas fa-angle-left" aria-hidden="true"> </span>
++            </button>
++
++            <span class="pf-v6-u-text-color-subtle pf-v6-u-mb-xs modal-pagination"
++              ></span
++            ><button
++              type="button"
++              aria-label="Next"
++              class="pf-v6-c-button pf-m-control pf-v6-u-ml-sm modal-next-button"
++              disabled
++              aria-disabled="true"
++            >
++              <span class="pf-v6-c-button__icon fas fa-angle-right" aria-hidden="true"> </span>
++            </button>
++          </footer>
++        </div>
++      </div>
++    </div>`).body.firstElementChild;
++
++        const title = modal.querySelector(".pf-v6-c-modal-box__title");
++        const description = modal.querySelector(".pf-v6-c-modal-box__body");
++
++        const modalBox = modal.querySelector(".pf-v6-c-modal-box");
++        modalBox.ariaLabelledByElements = [title];
++        modalBox.ariaDescribedByElements = [description];
++
++        title.textContent = `${item.title} (${item.year})`;
++
++        const lastFocus = e.currentTarget
++
++        const closeModal = () => {
++          modal.remove()
++          lastFocus.focus()
++        }
++        
++        const onKeyDown = (e) => {
++          if (e.key === "Escape") {
++            closeModal()
++            document.removeEventListener("keydown", onKeyDown)
++          }
++        }
++        document.addEventListener("keydown", onKeyDown)
++
++        const closeButton = modal.querySelector(
++          ".pf-v6-c-modal-box__close > button",
++        );
++        closeButton.addEventListener("click", closeModal);
++
++        const img = modal.querySelector(".modal-img")
++        const pagination = modal.querySelector(".modal-pagination")
++        const previousButton = modal.querySelector(".modal-previous-button")
++        const nextButton = modal.querySelector(".modal-next-button")
++
++        let currentIndex = 0
++        const selectImage = (index) => {
++          currentIndex = index
++          const image = item.images[index]
++
++          img.src = image.src
++          img.width = image.width
++          img.height = image.height
++          img.alt = image.title
++
++          pagination.textContent = `${index + 1}/${item.images.length}`
++
++          const atStart = index === 0
++          previousButton.disabled = atStart
++          previousButton.ariaDisabled = String(atStart)
++
++          const atEnd = index === item.images.length - 1
++          nextButton.disabled = atEnd
++          nextButton.ariaDisabled = String(atEnd)
++        }
++
++        previousButton.addEventListener("click", () => {
++          if (currentIndex > 0) selectImage(currentIndex - 1)
++        })
++
++        nextButton.addEventListener("click", () => {
++          if (currentIndex < item.images.length - 1) selectImage(currentIndex + 1)
++        })
++
++        selectImage(0)
++
++        document.body.appendChild(modal);
++
++        title.focus();
++      }),
++    );
+   });
+ </script>
+diff --git a/layouts/baseof.html b/layouts/baseof.html
+index 8c9f19240c0749968b40b10fd0fd601fda1a4649..46c47a2fd4e5007bdc59d0a57098d70629100e06 100644
+--- a/layouts/baseof.html
++++ b/layouts/baseof.html
+@@ -137,98 +137,7 @@         </div>
+       </div>
+     </div>
+ 
+-    {{ range hugo.Data.portfolioitems }} {{ range .items }} {{ range .items }}
+-    <div class="pf-v6-c-backdrop" style="display: none">
+-      <div class="pf-v6-l-bullseye">
+-        <div
+-          class="pf-v6-c-modal-box pf-m-sm"
+-          role="dialog"
+-          aria-modal="true"
+-          aria-labelledby="lightbox-modal-title-{{ .id }}"
+-          aria-describedby="lightbox-modal-description-{{ .id }}"
+-        >
+-          <div class="pf-v6-c-modal-box__close">
+-            <button
+-              class="pf-v6-c-button pf-m-plain"
+-              type="button"
+-              aria-label="Close"
+-            >
+-              <span class="pf-v6-c-button__icon">
+-                <svg
+-                  class="pf-v6-svg"
+-                  fill="currentColor"
+-                  viewBox="0 0 20 20"
+-                  aria-hidden="true"
+-                  role="img"
+-                  width="1em"
+-                  height="1em"
+-                >
+-                  <path
+-                    d="M17.8 16.2 11.59 10l6.21-6.21c.42-.46.39-1.17-.07-1.59-.43-.4-1.09-.4-1.52 0l-6.2 6.2-6.22-6.19c-.44-.44-1.15-.44-1.59 0-.44.44-.44 1.15 0 1.59l6.2 6.21-6.2 6.2c-.42.46-.39 1.17.07 1.59.43.4 1.09.4 1.52 0L10 11.59l6.2 6.2c.44.44 1.15.44 1.59 0 .44-.45.44-1.16 0-1.6Z"
+-                  ></path>
+-                </svg>
+-              </span>
+-            </button>
+-          </div>
+-          <header class="pf-v6-c-modal-box__header">
+-            <div class="pf-v6-c-modal-box__header-main">
+-              <h1
+-                class="pf-v6-c-modal-box__title"
+-                id="lightbox-modal-title-{{ .id }}"
+-              >
+-                {{ .title }} ({{ .year }})
+-              </h1>
+-            </div>
+-          </header>
+-          <div
+-            class="pf-v6-c-modal-box__body modal-actions-body"
+-            id="lightbox-modal-description-{{ .id }}"
+-          >
+-            {{ $image := resources.Get .src }}
+-            <img
+-              src="{{ $image.RelPermalink }}"
+-              width="{{ $image.Width }}"
+-              height="{{ $image.Height }}"
+-              alt="{{ .alt }}"
+-              loading="lazy"
+-            />
+-            {{ range .items }} {{ $image := resources.Get .src }}
+-            <img
+-              src="{{ $image.RelPermalink }}"
+-              width="{{ $image.Width }}"
+-              height="{{ $image.Height }}"
+-              alt="{{ .alt }}"
+-              loading="lazy"
+-            />
+-            {{ end }}
+-          </div>
+-          <footer class="pf-v6-c-modal-box__footer modal-actions-footer">
+-            <button
+-              type="button"
+-              aria-label="Previous"
+-              class="pf-v6-c-button pf-m-control"
+-              disabled
+-              aria-disabled="true"
+-            >
+-              <span class="pf-v6-c-button__icon fas fa-angle-left"> </span>
+-            </button>
+-
+-            <span class="pf-v6-u-text-color-subtle pf-v6-u-mb-xs"
+-              >1/{{ add (len (default slice .items)) 1 }}</span
+-            ><button
+-              type="button"
+-              aria-label="Next"
+-              class="pf-v6-c-button pf-m-control pf-v6-u-ml-sm"
+-              disabled
+-              aria-disabled="true"
+-            >
+-              <span class="pf-v6-c-button__icon fas fa-angle-right"> </span>
+-            </button>
+-          </footer>
+-        </div>
+-      </div>
+-    </div>
+-    {{ end }} {{ end }} {{ end }} {{ with resources.Get "js/main.js" }} {{ $opts
++    {{ with resources.Get "js/main.js" }} {{ $opts
+     := dict "minify" (not hugo.IsDevelopment) "sourceMap" (cond
+     hugo.IsDevelopment "linked" "none") }} {{ with . | js.Build $opts }} {{ if
+     hugo.IsDevelopment }}
+
