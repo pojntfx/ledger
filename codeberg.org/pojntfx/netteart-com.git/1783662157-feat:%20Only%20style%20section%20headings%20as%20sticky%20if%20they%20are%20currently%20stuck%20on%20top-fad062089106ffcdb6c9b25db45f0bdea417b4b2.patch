@@ -1,0 +1,98 @@
+From fad062089106ffcdb6c9b25db45f0bdea417b4b2 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Thu, 09 Jul 2026 22:42:37 -0700
+Subject: [PATCH] feat: Only style section headings as sticky if they are currently stuck on top
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/assets/scss/main.scss b/assets/scss/main.scss
+index e7d689069f517f67630ad297910b1479e59ad07a..db7b09e7be4cd07bb7a178ea46b8985153f40846 100644
+--- a/assets/scss/main.scss
++++ b/assets/scss/main.scss
+@@ -602,11 +602,15 @@     width: 100%;
+   }
+ }
+ 
+-.portfolio-section--striped {
++.portfolio-section--striped,
++.portfolio-tabs-content-section--striped,
++.portfolio-group--striped {
+   --pf-v6-c-page--section--m-sticky-top--BackgroundColor: var(
+     --pf-t--global--background--color--secondary--default
+   );
+-  background: var(--pf-t--global--background--color--secondary--default);
++  background: var(
++    --pf-t--global--background--color--secondary--default
++  ) !important;
+ }
+ 
+ .pf-v6-c-back-to-top--home {
+@@ -633,3 +637,7 @@
+ .modal-pagination {
+   font-variant-numeric: tabular-nums;
+ }
++
++.portfolio-section.pf-m-sticky-top:not(.pf-m-stuck) {
++  box-shadow: none;
++}
+diff --git a/layouts/_partials/section-home.html b/layouts/_partials/section-home.html
+index 4886e6cc9ec27c97723d13f2d31a3955dfc80954..e57aab0090c0718be86faddee8d33cbbdb6d0f18 100644
+--- a/layouts/_partials/section-home.html
++++ b/layouts/_partials/section-home.html
+@@ -74,11 +74,10 @@     </div>
+   </section>
+ </div>
+ 
+-{{ range $i, $group := hugo.Data.portfolioitems }} {{ if not ( eq $i 0 ) }}
++{{ range $i, $group := hugo.Data.portfolioitems }}
+ <hr class="pf-v6-c-divider" />
+-{{ end }}
+ 
+-<div class="portfolio-group">
++<div class="portfolio-group {{ if eq (mod $i 2 ) 0 }}portfolio-group--striped{{ end }}">
+ <section
+   class="pf-v6-c-page__main-section pf-v6-c-page__main-section--home pf-m-limit-width pf-m-align-center pf-m-sticky-top pf-v6-u-pt-lg pf-v6-u-pb-lg portfolio-section pf-v6-u-px-0 {{ if eq (mod $i 2 ) 0 }}portfolio-section--striped{{ end }}"
+   id="{{ $group.id }}"
+@@ -126,7 +125,7 @@   </div>
+ </section>
+ 
+ <section
+-  class="pf-v6-c-page__main-section pf-v6-u-pb-lg pf-v6-u-pt-lg pf-m-limit-width portfolio-tabs-content-section"
++  class="pf-v6-c-page__main-section pf-v6-u-pb-lg pf-v6-u-pt-sm pf-m-limit-width portfolio-tabs-content-section {{ if eq (mod $i 2 ) 0 }}portfolio-tabs-content-section--striped{{ end }}"
+ >
+   <div class="pf-v6-c-page__main-body">
+     {{ range $i, $tab := .items }}
+@@ -203,6 +202,8 @@ </section>
+ </div>
+ {{ end }}
+ 
++<hr class="pf-v6-c-divider" />
++
+ <div class="section--full-width">
+   <section
+     class="pf-v6-c-page__main-section pf-v6-c-page__main-section--home pf-m-limit-width pf-m-align-center pf-v6-c-page__main-section--outro"
+@@ -330,6 +331,23 @@     );
+ 
+     observer.observe(navHeader);
+     observer.observe(footer);
++
++
++    const stickySections = document.querySelectorAll(".portfolio-section.pf-m-sticky-top")
++    
++    const syncStuck = () => stickySections.forEach(section => {
++      const stickyTop = parseFloat(getComputedStyle(section).top) || 0
++      const rect = section.getBoundingClientRect()
++
++      section.classList.toggle(
++        "pf-m-stuck", 
++        rect.top <= stickyTop + 1 && rect.bottom > stickyTop,
++      )
++    })
++
++    syncStuck()
++    addEventListener("scroll", syncStuck)
++    addEventListener("resize", syncStuck)
+ 
+     const body = document.body;
+ 
+
