@@ -1,0 +1,686 @@
+From 9cdb383206f9465e4b87d74ad2a71a8d9f043abd Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Fri, 10 Jul 2026 21:59:29 -0700
+Subject: [PATCH] refactor: Pull scripts into body script instead of inlining them
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/assets/js/body.js b/assets/js/body.js
+new file mode 100644
+index 0000000000000000000000000000000000000000..d40d643c4c1c0e916dbd734001db2e50d167789e
+--- /dev/null
++++ b/assets/js/body.js
+@@ -0,0 +1,306 @@
++document.addEventListener("DOMContentLoaded", () => {
++  // Back to top button (single page)
++  (() => {
++    const firstContentElement = document.querySelector(
++      ".pf-v6-c-content > *:first-child",
++    );
++    const btnBackToTop = document.querySelector("#back-to-top");
++
++    if (!firstContentElement || !btnBackToTop) {
++      return;
++    }
++
++    const observer = new IntersectionObserver((entries) =>
++      entries.forEach((entry) => {
++        if (entry.isIntersecting) {
++          btnBackToTop.classList.add("pf-m-hidden");
++        } else {
++          btnBackToTop.classList.remove("pf-m-hidden");
++        }
++      }),
++    );
++
++    observer.observe(firstContentElement);
++  })();
++
++  // Back to top button (home page)
++  (() => {
++    const navHeader = document.querySelector("#nav--header");
++    const footer = document.querySelector("#footer");
++    const btnBackToTop = document.querySelector("#back-to-top");
++
++    if (!navHeader || !footer || !btnBackToTop) {
++      return;
++    }
++
++    let navHeaderVisible = false;
++    let footerVisible = false;
++
++    const syncState = () => {
++      if (navHeaderVisible || footerVisible) {
++        btnBackToTop.classList.add("pf-m-hidden");
++      } else {
++        btnBackToTop.classList.remove("pf-m-hidden");
++      }
++    };
++
++    const observer = new IntersectionObserver((entries) =>
++      entries.forEach((entry) => {
++        switch (entry.target.id) {
++          case navHeader.id:
++            navHeaderVisible = entry.isIntersecting;
++
++            break;
++
++          case footer.id:
++            footerVisible = entry.isIntersecting;
++        }
++
++        syncState();
++      }),
++    );
++
++    observer.observe(navHeader);
++    observer.observe(footer);
++  })();
++
++  // Tabs
++  (() => {
++    const tabs = document.querySelectorAll(
++      ".pf-v6-c-tabs__list[role='tablist']",
++    );
++    const panels = document.querySelectorAll(
++      ".pf-v6-c-tab-content[role='tabpanel']",
++    );
++
++    tabs.forEach((tab) =>
++      tab.addEventListener("click", (e) => {
++        const btn = e.target.closest(".pf-v6-c-tabs__link");
++        if (!btn) return; // Ignore events that don't originate from a button
++
++        const panel = document.querySelector(
++          `#${btn.getAttribute("aria-controls")}`,
++        );
++
++        tab.querySelectorAll(".pf-v6-c-tabs__link").forEach((tab) => {
++          tab.setAttribute("aria-selected", tab.id === btn.id);
++
++          if (tab.id === btn.id) {
++            tab.closest(".pf-v6-c-tabs__item").classList.add("pf-m-current");
++          } else {
++            tab.closest(".pf-v6-c-tabs__item").classList.remove("pf-m-current");
++          }
++        });
++
++        panels.forEach(
++          (candidate) =>
++            candidate.dataset.group === panel.dataset.group &&
++            (candidate.hidden = candidate.id != panel.id),
++        );
++      }),
++    );
++  })();
++
++  // Sticky sections
++  (() => {
++    const stickySections = document.querySelectorAll(
++      ".portfolio-section.pf-m-sticky-top",
++    );
++
++    const SHRINK_DISTANCE = 120;
++
++    const sectionTops = new Map();
++
++    const measure = () =>
++      stickySections.forEach((section) => {
++        section.classList.remove("pf-m-stuck");
++        section.style.removeProperty("--stuck-progress");
++
++        sectionTops.set(section, section.getBoundingClientRect().top + scrollY);
++      });
++
++    const syncStuck = () =>
++      stickySections.forEach((section) => {
++        const stickyTop = parseFloat(getComputedStyle(section).top) || 0;
++        const rect = section.getBoundingClientRect();
++
++        const overshoot = scrollY + stickyTop - sectionTops.get(section);
++        const progress = Math.min(Math.max(overshoot / SHRINK_DISTANCE, 0), 1);
++
++        section.style.setProperty("--stuck-progress", progress);
++        section.classList.toggle("pf-m-stuck", progress > 0);
++      });
++
++    measure();
++    syncStuck();
++    addEventListener("scroll", syncStuck);
++    addEventListener("resize", () => {
++      measure();
++      syncStuck();
++    });
++  })();
++
++  // Modals
++  (() => {
++    const body = document.body;
++
++    document.querySelectorAll(".modal-item-source").forEach((el) =>
++      el.addEventListener("click", (e) => {
++        const item = JSON.parse(e.target.dataset.item);
++
++        const modal = Document.parseHTMLUnsafe(`<div class="pf-v6-c-backdrop">
++      <div class="pf-v6-l-bullseye">
++        <div
++          class="pf-v6-c-modal-box pf-m-sm"
++          role="dialog"
++          aria-modal="true"
++        >
++          <div class="pf-v6-c-modal-box__close">
++            <button
++              class="pf-v6-c-button pf-m-plain"
++              type="button"
++              aria-label="Close"
++            >
++              <span class="pf-v6-c-button__icon">
++                <svg
++                  class="pf-v6-svg"
++                  fill="currentColor"
++                  viewBox="0 0 20 20"
++                  aria-hidden="true"
++                  role="img"
++                  width="1em"
++                  height="1em"
++                >
++                  <path
++                    d="M17.8 16.2 11.59 10l6.21-6.21c.42-.46.39-1.17-.07-1.59-.43-.4-1.09-.4-1.52 0l-6.2 6.2-6.22-6.19c-.44-.44-1.15-.44-1.59 0-.44.44-.44 1.15 0 1.59l6.2 6.21-6.2 6.2c-.42.46-.39 1.17.07 1.59.43.4 1.09.4 1.52 0L10 11.59l6.2 6.2c.44.44 1.15.44 1.59 0 .44-.45.44-1.16 0-1.6Z"
++                  ></path>
++                </svg>
++              </span>
++            </button>
++          </div>
++          <header class="pf-v6-c-modal-box__header">
++            <div class="pf-v6-c-modal-box__header-main">
++              <h1
++                class="pf-v6-c-modal-box__title"
++                tabindex="-1"
++              >
++              </h1>
++            </div>
++          </header>
++          <div
++            class="pf-v6-c-modal-box__body modal-actions-body"
++          >
++          <img loading="lazy" class="modal-img" />
++          </div>
++          <footer class="pf-v6-c-modal-box__footer modal-actions-footer">
++            <button
++              type="button"
++              aria-label="Previous"
++              class="pf-v6-c-button pf-m-control modal-previous-button"
++              disabled
++              aria-disabled="true"
++            >
++              <span class="pf-v6-c-button__icon fas fa-angle-left" aria-hidden="true"> </span>
++            </button>
++
++            <span class="pf-v6-u-text-color-subtle pf-v6-u-mb-xs modal-pagination"
++              ></span
++            ><button
++              type="button"
++              aria-label="Next"
++              class="pf-v6-c-button pf-m-control pf-v6-u-ml-sm modal-next-button"
++              disabled
++              aria-disabled="true"
++            >
++              <span class="pf-v6-c-button__icon fas fa-angle-right" aria-hidden="true"> </span>
++            </button>
++          </footer>
++        </div>
++      </div>
++    </div>`).body.firstElementChild;
++
++        const title = modal.querySelector(".pf-v6-c-modal-box__title");
++        const description = modal.querySelector(".pf-v6-c-modal-box__body");
++
++        const modalBox = modal.querySelector(".pf-v6-c-modal-box");
++        modalBox.ariaLabelledByElements = [title];
++        modalBox.ariaDescribedByElements = [description];
++
++        title.textContent = `${item.title} (${item.year})`;
++
++        const lastFocus = e.currentTarget;
++
++        const closeModal = () => {
++          document.removeEventListener("keydown", onKeyDown);
++          modal.remove();
++          lastFocus.focus();
++        };
++
++        const onKeyDown = (e) => {
++          switch (e.key) {
++            case "Escape":
++              closeModal();
++              break;
++            case "ArrowLeft":
++              selectPrevious();
++              break;
++            case "ArrowRight":
++              selectNext();
++              break;
++          }
++        };
++        document.addEventListener("keydown", onKeyDown);
++
++        const closeButton = modal.querySelector(
++          ".pf-v6-c-modal-box__close > button",
++        );
++        closeButton.addEventListener("click", closeModal);
++
++        const img = modal.querySelector(".modal-img");
++        const pagination = modal.querySelector(".modal-pagination");
++        const previousButton = modal.querySelector(".modal-previous-button");
++        const nextButton = modal.querySelector(".modal-next-button");
++
++        let currentIndex = 0;
++        const selectImage = (index) => {
++          currentIndex = index;
++          const image = item.images[index];
++
++          img.src = image.src;
++          img.width = image.width;
++          img.height = image.height;
++          img.alt = image.title;
++
++          pagination.textContent = `${index + 1}/${item.images.length}`;
++
++          const atStart = index === 0;
++          previousButton.disabled = atStart;
++          previousButton.ariaDisabled = String(atStart);
++
++          const atEnd = index === item.images.length - 1;
++          nextButton.disabled = atEnd;
++          nextButton.ariaDisabled = String(atEnd);
++        };
++
++        const selectPrevious = () => {
++          if (currentIndex > 0) selectImage(currentIndex - 1);
++        };
++
++        const selectNext = () => {
++          if (currentIndex < item.images.length - 1)
++            selectImage(currentIndex + 1);
++        };
++
++        previousButton.addEventListener("click", selectPrevious);
++
++        nextButton.addEventListener("click", selectNext);
++
++        selectImage(0);
++
++        document.body.appendChild(modal);
++
++        title.focus();
++      }),
++    );
++  })();
++});
+diff --git a/assets/js/main.js b/assets/js/main.js
+deleted file mode 100644
+index e69de29bb2d1d6434b8b29ae775ad8c2e48c5391..0000000000000000000000000000000000000000
+Binary files a/assets/js/main.js and /dev/null differ
+diff --git a/layouts/_partials/section-home.html b/layouts/_partials/section-home.html
+index 8cc657c965e8b894a7d97a567c11a29fe061936f..d6011faef59f416d13f5e2c726f17c47f8081d47 100644
+--- a/layouts/_partials/section-home.html
++++ b/layouts/_partials/section-home.html
+@@ -263,269 +263,3 @@       </div>
+     </div>
+   </section>
+ </div>
+-
+-<script>
+-  document.addEventListener("DOMContentLoaded", () => {
+-    const tabs = document.querySelectorAll(
+-      ".pf-v6-c-tabs__list[role='tablist']",
+-    );
+-    const panels = document.querySelectorAll(
+-      ".pf-v6-c-tab-content[role='tabpanel']",
+-    );
+-
+-    tabs.forEach((tab) =>
+-      tab.addEventListener("click", (e) => {
+-        const btn = e.target.closest(".pf-v6-c-tabs__link");
+-        if (!btn) return; // Ignore events that don't originate from a button
+-
+-        const panel = document.querySelector(
+-          `#${btn.getAttribute("aria-controls")}`,
+-        );
+-
+-        tab.querySelectorAll(".pf-v6-c-tabs__link").forEach((tab) => {
+-          tab.setAttribute("aria-selected", tab.id === btn.id);
+-
+-          if (tab.id === btn.id) {
+-            tab.closest(".pf-v6-c-tabs__item").classList.add("pf-m-current");
+-          } else {
+-            tab.closest(".pf-v6-c-tabs__item").classList.remove("pf-m-current");
+-          }
+-        });
+-
+-        panels.forEach(
+-          (candidate) =>
+-            candidate.dataset.group === panel.dataset.group &&
+-            (candidate.hidden = candidate.id != panel.id),
+-        );
+-      }),
+-    );
+-
+-    const navHeader = document.querySelector("#nav--header");
+-    const footer = document.querySelector("#footer");
+-
+-    const btnBackToTop = document.querySelector("#back-to-top");
+-
+-    let navHeaderVisible = false;
+-    let footerVisible = false;
+-
+-    const syncState = () => {
+-      if (navHeaderVisible || footerVisible) {
+-        btnBackToTop.classList.add("pf-m-hidden");
+-      } else {
+-        btnBackToTop.classList.remove("pf-m-hidden");
+-      }
+-    };
+-
+-    const observer = new IntersectionObserver((entries) =>
+-      entries.forEach((entry) => {
+-        switch (entry.target.id) {
+-          case navHeader.id:
+-            navHeaderVisible = entry.isIntersecting;
+-
+-            break;
+-
+-          case footer.id:
+-            footerVisible = entry.isIntersecting;
+-        }
+-
+-        syncState();
+-      }),
+-    );
+-
+-    observer.observe(navHeader);
+-    observer.observe(footer);
+-
+-
+-    const stickySections = document.querySelectorAll(".portfolio-section.pf-m-sticky-top")
+-    
+-    const SHRINK_DISTANCE = 120
+-
+-    const sectionTops = new Map()
+-
+-    const measure = () => stickySections.forEach(section => {
+-      section.classList.remove("pf-m-stuck")
+-      section.style.removeProperty("--stuck-progress")
+-
+-      sectionTops.set(section, section.getBoundingClientRect().top + scrollY)
+-    })
+-
+-    const syncStuck = () => stickySections.forEach(section => {
+-      const stickyTop = parseFloat(getComputedStyle(section).top) || 0
+-      const rect = section.getBoundingClientRect()
+-
+-      const overshoot = scrollY + stickyTop - sectionTops.get(section)
+-      const progress = Math.min(Math.max(overshoot / SHRINK_DISTANCE, 0), 1)
+-
+-      section.style.setProperty("--stuck-progress", progress)
+-      section.classList.toggle("pf-m-stuck", progress > 0)
+-    })
+-
+-    measure()
+-    syncStuck()
+-    addEventListener("scroll", syncStuck)
+-    addEventListener("resize", () => {
+-      measure()
+-      syncStuck()
+-    })
+-
+-    const body = document.body;
+-
+-    document.querySelectorAll(".modal-item-source").forEach((el) =>
+-      el.addEventListener("click", (e) => {
+-        const item = JSON.parse(e.target.dataset.item);
+-
+-        const modal = Document.parseHTMLUnsafe(`<div class="pf-v6-c-backdrop">
+-      <div class="pf-v6-l-bullseye">
+-        <div
+-          class="pf-v6-c-modal-box pf-m-sm"
+-          role="dialog"
+-          aria-modal="true"
+-        >
+-          <div class="pf-v6-c-modal-box__close">
+-            <button
+-              class="pf-v6-c-button pf-m-plain"
+-              type="button"
+-              aria-label="Close"
+-            >
+-              <span class="pf-v6-c-button__icon">
+-                <svg
+-                  class="pf-v6-svg"
+-                  fill="currentColor"
+-                  viewBox="0 0 20 20"
+-                  aria-hidden="true"
+-                  role="img"
+-                  width="1em"
+-                  height="1em"
+-                >
+-                  <path
+-                    d="M17.8 16.2 11.59 10l6.21-6.21c.42-.46.39-1.17-.07-1.59-.43-.4-1.09-.4-1.52 0l-6.2 6.2-6.22-6.19c-.44-.44-1.15-.44-1.59 0-.44.44-.44 1.15 0 1.59l6.2 6.21-6.2 6.2c-.42.46-.39 1.17.07 1.59.43.4 1.09.4 1.52 0L10 11.59l6.2 6.2c.44.44 1.15.44 1.59 0 .44-.45.44-1.16 0-1.6Z"
+-                  ></path>
+-                </svg>
+-              </span>
+-            </button>
+-          </div>
+-          <header class="pf-v6-c-modal-box__header">
+-            <div class="pf-v6-c-modal-box__header-main">
+-              <h1
+-                class="pf-v6-c-modal-box__title"
+-                tabindex="-1"
+-              >
+-              </h1>
+-            </div>
+-          </header>
+-          <div
+-            class="pf-v6-c-modal-box__body modal-actions-body"
+-          >
+-          <img loading="lazy" class="modal-img" />
+-          </div>
+-          <footer class="pf-v6-c-modal-box__footer modal-actions-footer">
+-            <button
+-              type="button"
+-              aria-label="Previous"
+-              class="pf-v6-c-button pf-m-control modal-previous-button"
+-              disabled
+-              aria-disabled="true"
+-            >
+-              <span class="pf-v6-c-button__icon fas fa-angle-left" aria-hidden="true"> </span>
+-            </button>
+-
+-            <span class="pf-v6-u-text-color-subtle pf-v6-u-mb-xs modal-pagination"
+-              ></span
+-            ><button
+-              type="button"
+-              aria-label="Next"
+-              class="pf-v6-c-button pf-m-control pf-v6-u-ml-sm modal-next-button"
+-              disabled
+-              aria-disabled="true"
+-            >
+-              <span class="pf-v6-c-button__icon fas fa-angle-right" aria-hidden="true"> </span>
+-            </button>
+-          </footer>
+-        </div>
+-      </div>
+-    </div>`).body.firstElementChild;
+-
+-        const title = modal.querySelector(".pf-v6-c-modal-box__title");
+-        const description = modal.querySelector(".pf-v6-c-modal-box__body");
+-
+-        const modalBox = modal.querySelector(".pf-v6-c-modal-box");
+-        modalBox.ariaLabelledByElements = [title];
+-        modalBox.ariaDescribedByElements = [description];
+-
+-        title.textContent = `${item.title} (${item.year})`;
+-
+-        const lastFocus = e.currentTarget
+-
+-        const closeModal = () => {
+-          document.removeEventListener("keydown", onKeyDown)
+-          modal.remove()
+-          lastFocus.focus()
+-        }
+-
+-        const onKeyDown = (e) => {
+-          switch (e.key) {
+-            case "Escape":
+-              closeModal()
+-              break
+-            case "ArrowLeft":
+-              selectPrevious()
+-              break
+-            case "ArrowRight":
+-              selectNext()
+-              break
+-          }
+-        }
+-        document.addEventListener("keydown", onKeyDown)
+-
+-        const closeButton = modal.querySelector(
+-          ".pf-v6-c-modal-box__close > button",
+-        );
+-        closeButton.addEventListener("click", closeModal);
+-
+-        const img = modal.querySelector(".modal-img")
+-        const pagination = modal.querySelector(".modal-pagination")
+-        const previousButton = modal.querySelector(".modal-previous-button")
+-        const nextButton = modal.querySelector(".modal-next-button")
+-
+-        let currentIndex = 0
+-        const selectImage = (index) => {
+-          currentIndex = index
+-          const image = item.images[index]
+-
+-          img.src = image.src
+-          img.width = image.width
+-          img.height = image.height
+-          img.alt = image.title
+-
+-          pagination.textContent = `${index + 1}/${item.images.length}`
+-
+-          const atStart = index === 0
+-          previousButton.disabled = atStart
+-          previousButton.ariaDisabled = String(atStart)
+-
+-          const atEnd = index === item.images.length - 1
+-          nextButton.disabled = atEnd
+-          nextButton.ariaDisabled = String(atEnd)
+-        }
+-
+-        const selectPrevious = () => {
+-          if (currentIndex > 0) selectImage(currentIndex - 1)
+-        }
+-
+-        const selectNext = () => {
+-          if (currentIndex < item.images.length - 1) selectImage(currentIndex + 1)
+-        }
+-
+-        previousButton.addEventListener("click", selectPrevious)
+-
+-        nextButton.addEventListener("click", selectNext)
+-
+-        selectImage(0)
+-
+-        document.body.appendChild(modal);
+-
+-        title.focus();
+-      }),
+-    );
+-  });
+-</script>
+diff --git a/layouts/baseof.html b/layouts/baseof.html
+index 2334fa781982a8c1363b8f9d0b333e2179a5a50a..411896441f269f4f2134c5d801e6b6573e7f9f42 100644
+--- a/layouts/baseof.html
++++ b/layouts/baseof.html
+@@ -9,12 +9,13 @@       {{ if eq .Title .Site.Title }} {{ .Title }} {{ else }} {{ .Title }} | {{
+       .Site.Title }} {{ end }}
+     </title>
+ 
+-    {{ $bg := resources.Get "img/bg.webp" }} {{ $bg := $bg.Process "webp" }} {{ $opts := dict "transpiler"
+-    "dartsass" "includePaths" (slice "node_modules") "outputStyle" (cond
+-    hugo.IsDevelopment "expanded" "compressed") "silenceDeprecations" (slice
+-    "import" "if-function") "silenceDependencyDeprecations" true "vars" (dict
+-    "bg_url" $bg.RelPermalink) }} {{ with resources.Get "scss/main.scss" | toCSS
+-    $opts }} {{ if hugo.IsDevelopment }}
++    {{ $bg := resources.Get "img/bg.webp" }} {{ $bg := $bg.Process "webp" }} {{
++    $opts := dict "transpiler" "dartsass" "includePaths" (slice "node_modules")
++    "outputStyle" (cond hugo.IsDevelopment "expanded" "compressed")
++    "silenceDeprecations" (slice "import" "if-function")
++    "silenceDependencyDeprecations" true "vars" (dict "bg_url" $bg.RelPermalink)
++    }} {{ with resources.Get "scss/main.scss" | toCSS $opts }} {{ if
++    hugo.IsDevelopment }}
+     <link rel="stylesheet" href="{{ .RelPermalink }}" />
+     {{ else }} {{ with . | fingerprint }}
+     <link
+@@ -23,7 +24,8 @@       href="{{ .RelPermalink }}"
+       integrity="{{ .Data.Integrity }}"
+       crossorigin="anonymous"
+     />
+-    {{ end }} {{ end }} {{ end }} {{ $icon := resources.Get "img/icon.png" }} {{ $icon := $icon.Process "webp" }}
++    {{ end }} {{ end }} {{ end }} {{ $icon := resources.Get "img/icon.png" }} {{
++    $icon := $icon.Process "webp" }}
+     <link rel="icon" href="{{ $icon.RelPermalink }}" />
+ 
+     <!-- Keep these in sync with the <html> element's background colour -->
+@@ -54,7 +56,8 @@     <meta
+       property="og:description"
+       content="{{ hugo.Data.site.description }}"
+     />
+-    {{ $header := resources.Get "img/header.png" }} {{ $header := $header.Process "webp" }}
++    {{ $header := resources.Get "img/header.png" }} {{ $header :=
++    $header.Process "webp" }}
+     <meta property="og:image" content="{{ $header.RelPermalink }}" />
+     <meta property="og:url" content="{{ .Site.BaseURL }}" />
+     <meta property="og:type" content="website" />
+@@ -137,10 +140,9 @@         </div>
+       </div>
+     </div>
+ 
+-    {{ with resources.Get "js/main.js" }} {{ $opts
+-    := dict "minify" (not hugo.IsDevelopment) "sourceMap" (cond
+-    hugo.IsDevelopment "linked" "none") }} {{ with . | js.Build $opts }} {{ if
+-    hugo.IsDevelopment }}
++    {{ with resources.Get "js/body.js" }} {{ $opts := dict "minify" (not
++    hugo.IsDevelopment) "sourceMap" (cond hugo.IsDevelopment "linked" "none") }}
++    {{ with . | js.Build $opts }} {{ if hugo.IsDevelopment }}
+     <script src="{{ .RelPermalink }}"></script>
+     {{ else }} {{ with . | fingerprint }}
+     <script
+diff --git a/layouts/single.html b/layouts/single.html
+index 3b98bb5dfa490c996ac06fbbc6407058e8413a22..348c147d75a690c274e815cf57ec87b1aa8a364c 100644
+--- a/layouts/single.html
++++ b/layouts/single.html
+@@ -19,25 +19,4 @@     </a>
+   </div>
+ </main>
+ 
+-<script>
+-  document.addEventListener("DOMContentLoaded", () => {
+-    const firstContentElement = document.querySelector(
+-      ".pf-v6-c-content > *:first-child",
+-    );
+-    const btnBackToTop = document.querySelector("#back-to-top");
+-
+-    const observer = new IntersectionObserver((entries) =>
+-      entries.forEach((entry) => {
+-        if (entry.isIntersecting) {
+-          btnBackToTop.classList.add("pf-m-hidden");
+-        } else {
+-          btnBackToTop.classList.remove("pf-m-hidden");
+-        }
+-      }),
+-    );
+-
+-    observer.observe(firstContentElement);
+-  });
+-</script>
+-
+ {{ partial "footer" . }} {{ end }}
+
