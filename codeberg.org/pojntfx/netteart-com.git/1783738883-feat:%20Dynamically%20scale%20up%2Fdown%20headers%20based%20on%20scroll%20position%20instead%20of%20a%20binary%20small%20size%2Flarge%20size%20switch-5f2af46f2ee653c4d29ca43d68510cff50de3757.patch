@@ -1,0 +1,123 @@
+From 5f2af46f2ee653c4d29ca43d68510cff50de3757 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Fri, 10 Jul 2026 20:01:23 -0700
+Subject: [PATCH] feat: Dynamically scale up/down headers based on scroll position instead of a binary small size/large size switch
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/assets/scss/main.scss b/assets/scss/main.scss
+index 8d5d436cb2e98ce4d8a3941ca8be29642806263a..6f18e34565c911de6280a76230d2d78c016d9ef4 100644
+--- a/assets/scss/main.scss
++++ b/assets/scss/main.scss
+@@ -647,35 +647,43 @@   &:not(.pf-m-stuck) {
+     box-shadow: none;
+   }
+ 
+-  // See https://www.patternfly.org/foundations-and-styles/motion/development-guide
+-  // --pf-t--global--motion-timing-function--default seems to be undefined outside of
+-  // specific components
+-  .portfolio-tabs-wrapper > .pf-v6-c-title {
+-    transition: all var(--pf-t--global--motion--duration--fade--default, 200ms)
+-      var(
+-        --pf-t--global--motion-timing-function--default,
+-        cubic-bezier(0.4, 0, 0.2, 1)
+-      );
+-  }
+-
+   .portfolio-tabs-wrapper .pf-v6-c-title {
+     text-align: center;
+   }
+ 
+-  &.pf-m-stuck {
+-    @extend .pf-v6-u-py-md;
++  $progress: var(--stuck-progress, 0);
++  @function lerp($full, $compact) {
++    @return calc(#{$full} + (#{$compact} - #{$full}) * #{$progress});
++  }
+ 
+-    .portfolio-tabs-wrapper {
+-      > h2.pf-v6-c-title {
+-        @extend .pf-m-lg;
+-      }
++  padding-block-start: lerp(
++    var(--pf-t--global--spacer--lg),
++    var(--pf-t--global--spacer--md)
++  ) !important;
++  padding-block-end: lerp(
++    var(--pf-t--global--spacer--lg),
++    var(--pf-t--global--spacer--md)
++  ) !important;
+ 
+-      > p.pf-v6-c-title {
+-        // We can't overwrite a larger size by @extend-ing with a smaller size
+-        font-size: var(--pf-t--global--font--size--sm);
++  .portfolio-tabs-wrapper {
++    > h2.pf-v6-c-title {
++      font-size: lerp(
++        var(--pf-t--global--font--size--heading--lg),
++        var(--pf-t--global--font--size--heading--sm)
++      );
++    }
+ 
+-        @extend .pf-v6-u-mb-sm;
+-      }
++    > p.pf-v6-c-title {
++      font-size: lerp(
++        var(--pf-t--global--font--size--heading--xs),
++        var(--pf-t--global--font--size--sm)
++      );
++
++      // We can't overwrite a larger size by @extend-ing with a smaller size
++      margin-block-end: lerp(
++        var(--pf-t--global--spacer--md),
++        var(--pf-t--global--spacer--sm)
++      ) !important;
+     }
+   }
+ }
+diff --git a/layouts/_partials/section-home.html b/layouts/_partials/section-home.html
+index 44db7fdfa0da0eba28f62e0923d926be798f7005..262d3e2b10521c79e32f813824b899d04472509f 100644
+--- a/layouts/_partials/section-home.html
++++ b/layouts/_partials/section-home.html
+@@ -335,19 +335,35 @@
+ 
+     const stickySections = document.querySelectorAll(".portfolio-section.pf-m-sticky-top")
+     
++    const SHRINK_DISTANCE = 120
++
++    const sectionTops = new Map()
++
++    const measure = () => stickySections.forEach(section => {
++      section.classList.remove("pf-m-stuck")
++      section.style.removeProperty("--stuck-progress")
++
++      sectionTops.set(section, section.getBoundingClientRect().top + scrollY)
++    })
++
+     const syncStuck = () => stickySections.forEach(section => {
+       const stickyTop = parseFloat(getComputedStyle(section).top) || 0
+       const rect = section.getBoundingClientRect()
+ 
+-      section.classList.toggle(
+-        "pf-m-stuck", 
+-        rect.top <= stickyTop + 1 && rect.bottom > stickyTop,
+-      )
++      const overshoot = scrollY + stickyTop - sectionTops.get(section)
++      const progress = Math.min(Math.max(overshoot / SHRINK_DISTANCE, 0), 1)
++
++      section.style.setProperty("--stuck-progress", progress)
++      section.classList.toggle("pf-m-stuck", progress > 0)
+     })
+ 
++    measure()
+     syncStuck()
+     addEventListener("scroll", syncStuck)
+-    addEventListener("resize", syncStuck)
++    addEventListener("resize", () => {
++      measure()
++      syncStuck()
++    })
+ 
+     const body = document.body;
+ 
+
