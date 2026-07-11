@@ -1,0 +1,65 @@
+From 359a5a473426b1b0f062f47b7aca5d455c6e5927 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Fri, 10 Jul 2026 21:43:02 -0700
+Subject: [PATCH] refactor: Resize and process all images
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/layouts/_partials/section-home.html b/layouts/_partials/section-home.html
+index afd938b10be20c231bf8016fd6cb64d0b73d0714..8cc657c965e8b894a7d97a567c11a29fe061936f 100644
+--- a/layouts/_partials/section-home.html
++++ b/layouts/_partials/section-home.html
+@@ -1,4 +1,5 @@
+ {{ $icon := resources.Get "img/icon.png" }}
++{{ $icon := $icon.Process "resize x512 webp" }}
+ <div class="section--full-width">
+   <section
+     class="pf-v6-c-page__main-section pf-v6-c-page__main-section--home pf-m-limit-width pf-m-align-center pf-v6-c-page__main-section--hero pf-v6-u-pb-lg"
+@@ -158,6 +159,7 @@                 <div class="pf-v6-c-card__selectable-actions">
+                   {{ $images := slice }}
+                   {{ range (slice . | append (default slice .items)) }}
+                     {{ $image := resources.Get .src }}
++                    {{ $image := $image.Process "webp" }}
+                     {{ $images = $images | append (dict
+                       "title" .title
+                       "year" .year
+@@ -182,6 +184,7 @@               </div>
+             </div>
+             <div class="pf-v6-c-card__body">
+               {{ $image := resources.Get .src }}
++              {{ $image := $image.Process "resize x512 q75 webp" }}
+               <img
+                 src="{{ $image.RelPermalink }}"
+                 width="{{ $image.Width }}"
+diff --git a/layouts/baseof.html b/layouts/baseof.html
+index 46c47a2fd4e5007bdc59d0a57098d70629100e06..2334fa781982a8c1363b8f9d0b333e2179a5a50a 100644
+--- a/layouts/baseof.html
++++ b/layouts/baseof.html
+@@ -9,7 +9,7 @@       {{ if eq .Title .Site.Title }} {{ .Title }} {{ else }} {{ .Title }} | {{
+       .Site.Title }} {{ end }}
+     </title>
+ 
+-    {{ $bg := resources.Get "img/bg.webp" }} {{ $opts := dict "transpiler"
++    {{ $bg := resources.Get "img/bg.webp" }} {{ $bg := $bg.Process "webp" }} {{ $opts := dict "transpiler"
+     "dartsass" "includePaths" (slice "node_modules") "outputStyle" (cond
+     hugo.IsDevelopment "expanded" "compressed") "silenceDeprecations" (slice
+     "import" "if-function") "silenceDependencyDeprecations" true "vars" (dict
+@@ -23,7 +23,7 @@       href="{{ .RelPermalink }}"
+       integrity="{{ .Data.Integrity }}"
+       crossorigin="anonymous"
+     />
+-    {{ end }} {{ end }} {{ end }} {{ $icon := resources.Get "img/icon.png" }}
++    {{ end }} {{ end }} {{ end }} {{ $icon := resources.Get "img/icon.png" }} {{ $icon := $icon.Process "webp" }}
+     <link rel="icon" href="{{ $icon.RelPermalink }}" />
+ 
+     <!-- Keep these in sync with the <html> element's background colour -->
+@@ -54,7 +54,7 @@     <meta
+       property="og:description"
+       content="{{ hugo.Data.site.description }}"
+     />
+-    {{ $header := resources.Get "img/header.png" }}
++    {{ $header := resources.Get "img/header.png" }} {{ $header := $header.Process "webp" }}
+     <meta property="og:image" content="{{ $header.RelPermalink }}" />
+     <meta property="og:url" content="{{ .Site.BaseURL }}" />
+     <meta property="og:type" content="website" />
+
