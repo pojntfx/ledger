@@ -1,0 +1,192 @@
+From f1ad585b9542ef4b0883915b6e0cb1c9bde25df7 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Mon, 13 Jul 2026 23:55:46 -0700
+Subject: [PATCH] feat: Start implementation of action/context suggestion tool
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/cmd/gatekeeper-suggest-actions/main.go b/cmd/gatekeeper-suggest-actions/main.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..e2611e3f9db182de7f2ab1a583f980b8dd344e9b
+--- /dev/null
++++ b/cmd/gatekeeper-suggest-actions/main.go
+@@ -0,0 +1,140 @@
++package main
++
++import (
++	"bufio"
++	"errors"
++	"flag"
++	"fmt"
++	"os"
++	"strconv"
++	"strings"
++
++	"codeberg.org/pojntfx/gatekeeper/internal/config"
++	"github.com/goccy/go-yaml"
++)
++
++type guidelineLeaf struct {
++	Name        string
++	Description string
++	Actions     []config.Action
++}
++
++func getGuidelineLeaves(guidelines []config.Guideline) []guidelineLeaf {
++	var guidelineLeaves []guidelineLeaf
++	for _, guideline := range guidelines {
++		leaf := len(guideline.Items) <= 0
++
++		if leaf {
++			guidelineLeaves = append(guidelineLeaves, guidelineLeaf{
++				Name:        guideline.Name,
++				Description: guideline.Description,
++				Actions:     guideline.Actions,
++			})
++		} else {
++			guidelineLeaves = append(guidelineLeaves, getGuidelineLeaves(guideline.Items)...)
++		}
++	}
++
++	return guidelineLeaves
++}
++
++type runtimeContext struct {
++	ID      string `yaml:"id"`
++	Version string `yaml:"version"`
++}
++
++// TODO: This actually refers to extensions, not SDK extensions
++// See e.g. https://docs.flatpak.org/en/latest/extension.html#extension-manifest
++type extensionsContext struct {
++	IDs     []string `yaml:"ids"`
++	Version string   `yaml:"version"`
++}
++
++type baseContext struct {
++	ID      string `yaml:"id"`
++	Version string `yaml:"version"`
++}
++
++func main() {
++	rawGuidelines := flag.String("guidelines", "guidelines.yaml", "Guidelines file")
++
++	input := flag.String("input", "", "Path to local repo of submission to use")
++
++	flag.Parse()
++
++	guidelines, err := config.ParseGuidelines(*rawGuidelines)
++	if err != nil {
++		panic(err)
++	}
++
++	guidelineLeaves := getGuidelineLeaves(guidelines)
++
++	_, manifest, err := config.FindAndParseManifestInRepo(*input)
++	if err != nil {
++		panic(err)
++	}
++
++	var (
++		decoder = bufio.NewReader(os.Stdin)
++		encoder = yaml.NewEncoder(os.Stdout)
++	)
++	for _, leaf := range guidelineLeaves {
++		if err := encoder.Encode(leaf); err != nil {
++			panic(err)
++		}
++
++	action:
++		fmt.Println("Enter an action's index followed by Enter, or press Enter without an index to skip to the next guideline")
++
++		line, err := decoder.ReadString('\n')
++		if err != nil {
++			panic(err)
++		}
++
++		if line[0] == '\n' {
++			continue
++		}
++
++		actionIndex, err := strconv.Atoi(strings.TrimSuffix(line, "\n"))
++		if err != nil {
++			panic(err)
++		}
++
++		if actionIndex >= len(leaf.Actions) {
++			panic(errors.New("invalid action index"))
++		}
++
++		action := leaf.Actions[actionIndex]
++
++		switch action {
++		case config.ActionShowRuntime:
++			if err := encoder.Encode(runtimeContext{
++				ID:      manifest.Runtime,
++				Version: manifest.RuntimeVersion,
++			}); err != nil {
++				panic(err)
++			}
++
++		case config.ActionShowExtensions:
++			if err := encoder.Encode(extensionsContext{
++				IDs:     manifest.SDKExtensions,
++				Version: manifest.RuntimeVersion,
++			}); err != nil {
++				panic(err)
++			}
++
++		case config.ActionShowBaseApp:
++			if err := encoder.Encode(baseContext{
++				ID:      manifest.Base,
++				Version: manifest.BaseVersion,
++			}); err != nil {
++				panic(err)
++			}
++
++		default:
++			panic(errors.New("unknown or unimplemented action"))
++		}
++
++		goto action
++	}
++}
+diff --git a/guidelines.yaml b/guidelines.yaml
+index 5d69f1093def64aabe41440a1e03f1be63ee4a5d..a33d65b6440b139233fcaba9ff1b1404b738d9e7 100644
+--- a/guidelines.yaml
++++ b/guidelines.yaml
+@@ -23,6 +23,8 @@
+             The following non-exhaustive categories of submissions will not be accepted.
+           items:
+             - name: Submission is fully functional and has no easily visible issues at the time of submission.
++              actions:
++                - RUN_SUBMISSION
+             - name: Submission is not a console-only software (exceptions may be given to Flatpak or Flathub related tooling).
+             - name:
+                 Submission does not offer only minimal functionality such as simple scripts, single or simple sources, or exist
+@@ -46,9 +48,13 @@                 Flatpak.
+             - name:
+                 Submission is not a duplicate of an existing application differing only in framework or toolkit, nor a fork
+                 with minimal changes in terms of functionality, content, visuals, or user experience.
++              actions:
++                - SHOW_POTENTIAL_DUPLICATE_SUBMISSIONS
+             - name:
+                 Submission does not conflict with an existing Flatpak provided by the upstream author or developers outside
+                 of Flathub.
++              actions:
++                - SHOW_POTENTIAL_DUPLICATE_SUBMISSIONS
+             - name:
+                 Submission is not Windows software using Wine, nor any other software that is not native to the Linux desktop
+                 and uses an emulation or translation layer — unless submitted officially by upstream with intent to maintain it
+@@ -58,6 +64,10 @@           description: |
+             Submissions must not depend on end-of-life software components.
+           items:
+             - name: Submission does not use an end-of-life runtime, extension, or baseapp.
++              actions:
++                - SHOW_RUNTIME
++                - SHOW_EXTENSIONS
++                - SHOW_BASEAPP
+             - name:
+                 Submission does not use high-risk, end-of-life software (e.g. OpenSSL 1.x, Python 2, Qt5 WebKit) while requesting
+                 the network or any other invasive permissions.
+
