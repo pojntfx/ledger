@@ -1,0 +1,334 @@
+From 8dab176dd2baa7df9e07db42e22964cf761786d5 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Mon, 13 Jul 2026 23:54:13 -0700
+Subject: [PATCH] refactor: Start decomposing manifest parsing logic
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/cmd/gatekeeper-create-response/main.go b/cmd/gatekeeper-create-response/main.go
+index 706d52bf9bc4717b2937b3320118802c7bf71b66..c65d20f2aa7f5b5f2d4759b7011f467a41249f32 100644
+--- a/cmd/gatekeeper-create-response/main.go
++++ b/cmd/gatekeeper-create-response/main.go
+@@ -9,21 +9,14 @@ 	"runtime"
+ 	"strings"
+ 	"unsafe"
+ 
++	"codeberg.org/pojntfx/gatekeeper/internal/config"
+ 	"codeberg.org/puregotk/puregotk/pkg/core"
+ 	"codeberg.org/puregotk/puregotk/v4/adw"
+ 	"codeberg.org/puregotk/puregotk/v4/gio"
+ 	"codeberg.org/puregotk/puregotk/v4/glib"
+ 	"codeberg.org/puregotk/puregotk/v4/gobject"
+ 	"codeberg.org/puregotk/puregotk/v4/gtk"
+-	"github.com/goccy/go-yaml"
+ )
+-
+-type guideline struct {
+-	Name        string `yaml:"name"`
+-	Description string `yaml:"description"`
+-	// If items is empty, we're at a leaf in the tree
+-	Items []guideline `yaml:"items"`
+-}
+ 
+ var (
+ 	gTypeStatus        gobject.Type
+@@ -76,7 +69,7 @@
+ 	status statusId
+ }
+ 
+-func flattenGuidelines(rawGuidelines []guideline, depth int, parentHeadings []string) ([]flatGuideline, int) {
++func flattenGuidelines(rawGuidelines []config.Guideline, depth int, parentHeadings []string) ([]flatGuideline, int) {
+ 	var (
+ 		flatGuidelines []flatGuideline
+ 		leavesCount    int
+@@ -350,14 +343,8 @@ 	rawGuidelines := flag.String("guidelines", "guidelines.yaml", "Guidelines file")
+ 
+ 	flag.Parse()
+ 
+-	manifestFile, err := os.Open(*rawGuidelines)
++	guidelines, err := config.ParseGuidelines(*rawGuidelines)
+ 	if err != nil {
+-		panic(err)
+-	}
+-	defer manifestFile.Close()
+-
+-	var guidelines []guideline
+-	if err := yaml.NewDecoder(manifestFile).Decode(&guidelines); err != nil {
+ 		panic(err)
+ 	}
+ 
+diff --git a/cmd/gatekeeper-try-submission/main.go b/cmd/gatekeeper-try-submission/main.go
+index 3d82e40e77ded77a243a691f037b987b46b97ea7..71ef825573a6bea025b81d7b63f24fd8034e1dde 100644
+--- a/cmd/gatekeeper-try-submission/main.go
++++ b/cmd/gatekeeper-try-submission/main.go
+@@ -8,32 +8,14 @@ 	"fmt"
+ 	"os"
+ 	"os/exec"
+ 	"path/filepath"
+-	"slices"
+-	"strings"
+ 
+ 	"codeberg.org/pojntfx/gatekeeper/internal/config"
+ 	"codeberg.org/pojntfx/gatekeeper/internal/forges"
+ 	"github.com/adrg/xdg"
+-	"github.com/goccy/go-yaml"
+ 
+ 	"github.com/go-git/go-git/v6"
+ 	"github.com/go-git/go-git/v6/plumbing"
+ )
+-
+-var (
+-	// See https://github.com/flathub-infra/vorarbeiter/blob/7d8a593b65a38646310e5cd18b1959b5e3f839f2/app/routes/webhooks.py#L735
+-	manifestExtensions = []string{".yml", ".yaml", ".json"}
+-)
+-
+-type manifestCandidate struct {
+-	Extension string
+-	AppID     string
+-}
+-
+-type flatpakManifest struct {
+-	AppID string `yaml:"app-id"`
+-	ID    string `yaml:"id"`
+-}
+ 
+ func main() {
+ 	ctx, cancel := context.WithCancel(context.Background())
+@@ -160,61 +142,11 @@ 			}
+ 		}
+ 	}
+ 
+-	repoFiles, err := os.ReadDir(repoPath)
++	manifestName, manifest, err := config.FindAndParseManifestInRepo(repoPath)
+ 	if err != nil {
+ 		panic(err)
+ 	}
+ 
+-	manifestCandidates := []manifestCandidate{}
+-	for _, file := range repoFiles {
+-		var (
+-			extension = filepath.Ext(file.Name())
+-			appID     = strings.TrimSuffix(file.Name(), extension)
+-		)
+-		if slices.Contains(manifestExtensions, extension) {
+-			manifestCandidates = append(manifestCandidates, manifestCandidate{
+-				Extension: extension,
+-				AppID:     appID,
+-			})
+-		}
+-	}
+-
+-	if len(manifestCandidates) <= 0 {
+-		panic(errors.New("could not find any manifest files in the submission repo"))
+-	}
+-
+-	var (
+-		manifestName,
+-		appID string
+-	)
+-	for _, manifestCandidate := range manifestCandidates {
+-		manifestCandidateName := manifestCandidate.AppID + manifestCandidate.Extension
+-
+-		manifestFile, err := os.Open(filepath.Join(repoPath, manifestCandidateName))
+-		if err != nil {
+-			panic(err)
+-		}
+-		defer manifestFile.Close()
+-
+-		var manifest flatpakManifest
+-		if err := yaml.NewDecoder(manifestFile).Decode(&manifest); err != nil {
+-			panic(err)
+-		}
+-
+-		// See https://github.com/flathub-infra/vorarbeiter/blob/7d8a593b65a38646310e5cd18b1959b5e3f839f2/app/utils/manifest.py#L55
+-		if manifest.AppID == manifestCandidate.AppID ||
+-			manifest.ID == manifestCandidate.AppID {
+-			manifestName = manifestCandidateName
+-			appID = manifestCandidate.AppID
+-
+-			break
+-		}
+-	}
+-
+-	if manifestName == "" {
+-		panic(errors.New("the manifest file name and app-id/id in the manifest don't match"))
+-	}
+-
+ 	if *lintManifest {
+ 		manifestLintCmd := exec.CommandContext(
+ 			ctx,
+@@ -223,7 +155,7 @@ 			"run",
+ 			"--command=flatpak-builder-lint",
+ 			"org.flatpak.Builder",
+ 			"manifest",
+-			manifestName,
++			manifest.AppID,
+ 		)
+ 		manifestLintCmd.Dir = repoPath
+ 		manifestLintCmd.Stdout = os.Stdout
+@@ -277,7 +209,7 @@ 			"flatpak",
+ 			append(
+ 				[]string{
+ 					"run",
+-					appID,
++					manifest.AppID,
+ 				},
+ 				flag.Args()..., // Any arguments after `--`, see https://pkg.go.dev/flag#hdr-Command_line_flag_syntax
+ 			)...,
+@@ -300,7 +232,7 @@ 			"org.flatpak.Builder",
+ 			"build-bundle",
+ 			filepath.Join(repoPath, "repo"),
+ 			*output,
+-			appID,
++			manifest.AppID,
+ 		)
+ 		exportCmd.Stdout = os.Stdout
+ 		exportCmd.Stderr = os.Stderr
+diff --git a/internal/config/guideline.go b/internal/config/guideline.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..b69c8699af67fbb3e97a65517e0fbef34940c9a3
+--- /dev/null
++++ b/internal/config/guideline.go
+@@ -0,0 +1,42 @@
++package config
++
++import (
++	"errors"
++	"os"
++
++	"github.com/goccy/go-yaml"
++)
++
++type Action string
++
++const (
++	ActionRunSubmission                     = "RUN_SUBMISSION"
++	ActionShowPotentialDuplicateSubmissions = "SHOW_POTENTIAL_DUPLICATE_SUBMISSIONS"
++	ActionShowRuntime                       = "SHOW_RUNTIME"
++	ActionShowExtensions                    = "SHOW_EXTENSIONS"
++	ActionShowBaseApp                       = "SHOW_BASEAPP"
++)
++
++type Guideline struct {
++	Name        string `yaml:"name"`
++	Description string `yaml:"description"`
++	// If items is empty, we're at a leaf in the tree
++	Items []Guideline `yaml:"items"`
++	// Actions is empty we're at a leaf
++	Actions []Action
++}
++
++func ParseGuidelines(guidelinesFilePath string) ([]Guideline, error) {
++	guidelinesFile, err := os.Open(guidelinesFilePath)
++	if err != nil {
++		return []Guideline{}, errors.Join(errors.New("could not open guidelines file"), err)
++	}
++	defer guidelinesFile.Close()
++
++	var guidelines []Guideline
++	if err := yaml.NewDecoder(guidelinesFile).Decode(&guidelines); err != nil {
++		return []Guideline{}, errors.Join(errors.New("could not parse guidelines file"), err)
++	}
++
++	return guidelines, nil
++}
+diff --git a/internal/config/manifest.go b/internal/config/manifest.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..a394777742a4876de14a8ffa7d6f6c10b518bb7a
+--- /dev/null
++++ b/internal/config/manifest.go
+@@ -0,0 +1,93 @@
++package config
++
++import (
++	"errors"
++	"os"
++	"path/filepath"
++	"slices"
++	"strings"
++
++	"github.com/goccy/go-yaml"
++)
++
++var (
++	// See https://github.com/flathub-infra/vorarbeiter/blob/7d8a593b65a38646310e5cd18b1959b5e3f839f2/app/routes/webhooks.py#L735
++	manifestExtensions = []string{".yml", ".yaml", ".json"}
++)
++
++type manifestCandidate struct {
++	Extension string
++	AppID     string
++}
++
++type FlatpakManifest struct {
++	AppID string `yaml:"app-id"`
++	ID    string `yaml:"id"`
++
++	Runtime        string `yaml:"runtime"`
++	RuntimeVersion string `yaml:"runtime-version"`
++
++	SDKExtensions []string `yaml:"sdk-extensions"`
++
++	Base        string `yaml:"base"`
++	BaseVersion string `yaml:"base-version"`
++}
++
++func FindAndParseManifestInRepo(repoPath string) (string, *FlatpakManifest, error) {
++	repoFiles, err := os.ReadDir(repoPath)
++	if err != nil {
++		return "", nil, errors.Join(errors.New("could not read repo files"), err)
++	}
++
++	manifestCandidates := []manifestCandidate{}
++	for _, file := range repoFiles {
++		var (
++			extension = filepath.Ext(file.Name())
++			appID     = strings.TrimSuffix(file.Name(), extension)
++		)
++		if slices.Contains(manifestExtensions, extension) {
++			manifestCandidates = append(manifestCandidates, manifestCandidate{
++				Extension: extension,
++				AppID:     appID,
++			})
++		}
++	}
++
++	if len(manifestCandidates) <= 0 {
++		return "", nil, errors.New("could not find any manifest files in the submission repo")
++	}
++
++	var (
++		manifestName string
++		manifest     *FlatpakManifest
++	)
++	for _, manifestCandidate := range manifestCandidates {
++		manifestCandidateName := manifestCandidate.AppID + manifestCandidate.Extension
++
++		manifestFile, err := os.Open(filepath.Join(repoPath, manifestCandidateName))
++		if err != nil {
++			return "", nil, errors.Join(errors.New("could not open manifest file"), err)
++		}
++		defer manifestFile.Close()
++
++		var parsedManifestCandidate FlatpakManifest
++		if err := yaml.NewDecoder(manifestFile).Decode(&parsedManifestCandidate); err != nil {
++			return "", nil, errors.Join(errors.New("could not parse manifest file"), err)
++		}
++
++		// See https://github.com/flathub-infra/vorarbeiter/blob/7d8a593b65a38646310e5cd18b1959b5e3f839f2/app/utils/manifest.py#L55
++		if parsedManifestCandidate.AppID == manifestCandidate.AppID ||
++			parsedManifestCandidate.ID == manifestCandidate.AppID {
++			manifestName = manifestCandidateName
++			manifest = &parsedManifestCandidate
++
++			break
++		}
++	}
++
++	if manifest == nil {
++		return "", nil, errors.New("the manifest file name and app-id/id in the manifest don't match")
++	}
++
++	return manifestName, manifest, nil
++}
+
