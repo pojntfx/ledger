@@ -1,0 +1,132 @@
+From 21fd53c6ee28360944f812965329b2f0a7043df0 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Tue, 14 Jul 2026 22:23:22 -0700
+Subject: [PATCH] feat: Implement basic similar apps search action via Flathub API
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/cmd/gatekeeper-suggest-actions/main.go b/cmd/gatekeeper-suggest-actions/main.go
+index e2611e3f9db182de7f2ab1a583f980b8dd344e9b..4c614cc3f5c66d0df9d4bf2dd6802e1aeef0c12f 100644
+--- a/cmd/gatekeeper-suggest-actions/main.go
++++ b/cmd/gatekeeper-suggest-actions/main.go
+@@ -2,15 +2,19 @@ package main
+ 
+ import (
+ 	"bufio"
++	"context"
+ 	"errors"
+ 	"flag"
+ 	"fmt"
++	"net/http"
+ 	"os"
+ 	"strconv"
+ 	"strings"
+ 
++	v2 "codeberg.org/pojntfx/gatekeeper/internal/api/openapi/flathub/v2"
+ 	"codeberg.org/pojntfx/gatekeeper/internal/config"
+ 	"github.com/goccy/go-yaml"
++	"github.com/jeandeaual/go-locale"
+ )
+ 
+ type guidelineLeaf struct {
+@@ -56,6 +60,9 @@ 	Version string `yaml:"version"`
+ }
+ 
+ func main() {
++	ctx, cancel := context.WithCancel(context.Background())
++	defer cancel()
++
+ 	rawGuidelines := flag.String("guidelines", "guidelines.yaml", "Guidelines file")
+ 
+ 	input := flag.String("input", "", "Path to local repo of submission to use")
+@@ -74,6 +81,16 @@ 	if err != nil {
+ 		panic(err)
+ 	}
+ 
++	fc, err := v2.NewClientWithResponses("https://flathub.org/api/v2/")
++	if err != nil {
++		panic(err)
++	}
++
++	lang, err := locale.GetLocale()
++	if err != nil {
++		panic(err)
++	}
++
+ 	var (
+ 		decoder = bufio.NewReader(os.Stdin)
+ 		encoder = yaml.NewEncoder(os.Stdout)
+@@ -128,6 +145,29 @@ 			if err := encoder.Encode(baseContext{
+ 				ID:      manifest.Base,
+ 				Version: manifest.BaseVersion,
+ 			}); err != nil {
++				panic(err)
++			}
++
++		case config.ActionShowSimilarFlathubSubmissions:
++			res, err := fc.PostSearchSearchPostWithResponse(
++				ctx,
++				&v2.PostSearchSearchPostParams{
++					Locale: &lang,
++				},
++				v2.SearchQuery{
++					// TODO: We want to use the name and maybe keywords from the .desktop & metainfo files here
++					Query: manifest.AppID,
++				},
++			)
++			if err != nil {
++				panic(err)
++			}
++
++			if res.StatusCode() != http.StatusOK {
++				panic(errors.New(res.Status()))
++			}
++
++			if err := encoder.Encode(res.JSON200); err != nil {
+ 				panic(err)
+ 			}
+ 
+diff --git a/guidelines.yaml b/guidelines.yaml
+index a33d65b6440b139233fcaba9ff1b1404b738d9e7..6dd0edcbaf973a280bd0429299da314043083a78 100644
+--- a/guidelines.yaml
++++ b/guidelines.yaml
+@@ -23,8 +23,6 @@
+             The following non-exhaustive categories of submissions will not be accepted.
+           items:
+             - name: Submission is fully functional and has no easily visible issues at the time of submission.
+-              actions:
+-                - RUN_SUBMISSION
+             - name: Submission is not a console-only software (exceptions may be given to Flatpak or Flathub related tooling).
+             - name:
+                 Submission does not offer only minimal functionality such as simple scripts, single or simple sources, or exist
+@@ -49,7 +47,7 @@             - name:
+                 Submission is not a duplicate of an existing application differing only in framework or toolkit, nor a fork
+                 with minimal changes in terms of functionality, content, visuals, or user experience.
+               actions:
+-                - SHOW_POTENTIAL_DUPLICATE_SUBMISSIONS
++                - SHOW_SIMILAR_FLATHUB_SUBMISSIONS
+             - name:
+                 Submission does not conflict with an existing Flatpak provided by the upstream author or developers outside
+                 of Flathub.
+diff --git a/internal/config/guideline.go b/internal/config/guideline.go
+index b69c8699af67fbb3e97a65517e0fbef34940c9a3..723d7972a5be75a5903e148f71c6b85f4e3c4e40 100644
+--- a/internal/config/guideline.go
++++ b/internal/config/guideline.go
+@@ -10,11 +10,11 @@
+ type Action string
+ 
+ const (
+-	ActionRunSubmission                     = "RUN_SUBMISSION"
+-	ActionShowPotentialDuplicateSubmissions = "SHOW_POTENTIAL_DUPLICATE_SUBMISSIONS"
+-	ActionShowRuntime                       = "SHOW_RUNTIME"
+-	ActionShowExtensions                    = "SHOW_EXTENSIONS"
+-	ActionShowBaseApp                       = "SHOW_BASEAPP"
++	ActionShowRuntime    = "SHOW_RUNTIME"
++	ActionShowExtensions = "SHOW_EXTENSIONS"
++	ActionShowBaseApp    = "SHOW_BASEAPP"
++
++	ActionShowSimilarFlathubSubmissions = "SHOW_SIMILAR_FLATHUB_SUBMISSIONS"
+ )
+ 
+ type Guideline struct {
+
