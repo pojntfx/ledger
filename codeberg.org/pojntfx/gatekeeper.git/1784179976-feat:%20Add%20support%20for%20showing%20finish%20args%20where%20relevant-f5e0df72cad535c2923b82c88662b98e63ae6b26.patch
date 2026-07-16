@@ -1,0 +1,62 @@
+From f5e0df72cad535c2923b82c88662b98e63ae6b26 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Wed, 15 Jul 2026 22:32:56 -0700
+Subject: [PATCH] feat: Add support for showing finish args where relevant
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/cmd/gatekeeper-suggest-actions/main.go b/cmd/gatekeeper-suggest-actions/main.go
+index 4c614cc3f5c66d0df9d4bf2dd6802e1aeef0c12f..141bf37b367bdc01bd84ea0ae45e0cebdaafb8b5 100644
+--- a/cmd/gatekeeper-suggest-actions/main.go
++++ b/cmd/gatekeeper-suggest-actions/main.go
+@@ -148,6 +148,11 @@ 			}); err != nil {
+ 				panic(err)
+ 			}
+ 
++		case config.ActionShowFinishArgs:
++			if err := encoder.Encode(manifest.FinishArgs); err != nil {
++				panic(err)
++			}
++
+ 		case config.ActionShowSimilarFlathubSubmissions:
+ 			res, err := fc.PostSearchSearchPostWithResponse(
+ 				ctx,
+diff --git a/guidelines.yaml b/guidelines.yaml
+index 6dd0edcbaf973a280bd0429299da314043083a78..3d61bae6524034519df2dcbaced666a77b9cc39c 100644
+--- a/guidelines.yaml
++++ b/guidelines.yaml
+@@ -43,6 +43,8 @@             - name:
+                 Submission is not a development tool, file manager, terminal, or IDE with a broad scope unsuited to the Flatpak
+                 sandbox — unless officially submitted by upstream developers or upstream has explicitly committed to supporting
+                 Flatpak.
++              actions:
++                - SHOW_FINISH_ARGS
+             - name:
+                 Submission is not a duplicate of an existing application differing only in framework or toolkit, nor a fork
+                 with minimal changes in terms of functionality, content, visuals, or user experience.
+diff --git a/internal/config/guideline.go b/internal/config/guideline.go
+index 723d7972a5be75a5903e148f71c6b85f4e3c4e40..408f5954d62dfa44bd0af8140b7384cee6c6be4b 100644
+--- a/internal/config/guideline.go
++++ b/internal/config/guideline.go
+@@ -13,6 +13,7 @@ const (
+ 	ActionShowRuntime    = "SHOW_RUNTIME"
+ 	ActionShowExtensions = "SHOW_EXTENSIONS"
+ 	ActionShowBaseApp    = "SHOW_BASEAPP"
++	ActionShowFinishArgs = "SHOW_FINISH_ARGS"
+ 
+ 	ActionShowSimilarFlathubSubmissions = "SHOW_SIMILAR_FLATHUB_SUBMISSIONS"
+ )
+diff --git a/internal/config/manifest.go b/internal/config/manifest.go
+index a394777742a4876de14a8ffa7d6f6c10b518bb7a..9a79ee76a9f7374c0f358ef6e43433e492d9508e 100644
+--- a/internal/config/manifest.go
++++ b/internal/config/manifest.go
+@@ -31,6 +31,8 @@ 	SDKExtensions []string `yaml:"sdk-extensions"`
+ 
+ 	Base        string `yaml:"base"`
+ 	BaseVersion string `yaml:"base-version"`
++
++	FinishArgs []string `yaml:"finish-args"`
+ }
+ 
+ func FindAndParseManifestInRepo(repoPath string) (string, *FlatpakManifest, error) {
+
