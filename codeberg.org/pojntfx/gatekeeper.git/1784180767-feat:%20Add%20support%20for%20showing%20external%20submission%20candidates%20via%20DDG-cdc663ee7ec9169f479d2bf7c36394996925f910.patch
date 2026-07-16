@@ -1,0 +1,114 @@
+From cdc663ee7ec9169f479d2bf7c36394996925f910 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Wed, 15 Jul 2026 22:46:07 -0700
+Subject: [PATCH] feat: Add support for showing external submission candidates via DDG
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/cmd/gatekeeper-suggest-actions/main.go b/cmd/gatekeeper-suggest-actions/main.go
+index 141bf37b367bdc01bd84ea0ae45e0cebdaafb8b5..4010b197039afbdd801886c18e91379112d8c6df 100644
+--- a/cmd/gatekeeper-suggest-actions/main.go
++++ b/cmd/gatekeeper-suggest-actions/main.go
+@@ -7,6 +7,7 @@ 	"errors"
+ 	"flag"
+ 	"fmt"
+ 	"net/http"
++	"net/url"
+ 	"os"
+ 	"strconv"
+ 	"strings"
+@@ -15,6 +16,7 @@ 	v2 "codeberg.org/pojntfx/gatekeeper/internal/api/openapi/flathub/v2"
+ 	"codeberg.org/pojntfx/gatekeeper/internal/config"
+ 	"github.com/goccy/go-yaml"
+ 	"github.com/jeandeaual/go-locale"
++	"github.com/rymdport/portal/openuri"
+ )
+ 
+ type guidelineLeaf struct {
+@@ -173,6 +175,16 @@ 				panic(errors.New(res.Status()))
+ 			}
+ 
+ 			if err := encoder.Encode(res.JSON200); err != nil {
++				panic(err)
++			}
++
++		case config.ActionShowSimilarExternalSubmissions:
++			u, err := url.Parse(fmt.Sprintf("https://duckduckgo.com/?q=%v+Flatpak+repo", manifest.AppID))
++			if err != nil {
++				panic(err)
++			}
++
++			if err := openuri.OpenURI("", u.String(), &openuri.Options{}); err != nil {
+ 				panic(err)
+ 			}
+ 
+diff --git a/go.mod b/go.mod
+index 7955776897befdcdb0a2d2a9ca4def2e27207d33..47b1633b7c59393f19bd8f29e8d19431f2e9e8e2 100644
+--- a/go.mod
++++ b/go.mod
+@@ -12,6 +12,7 @@ 	github.com/google/go-github/v88 v88.0.0
+ 	github.com/jeandeaual/go-locale v0.0.0-20250612000132-0ef82f21eade
+ 	github.com/microcosm-cc/bluemonday v1.0.27
+ 	github.com/oapi-codegen/runtime v1.5.0
++	github.com/rymdport/portal v0.4.2
+ 	github.com/yuin/goldmark v1.8.2
+ )
+ 
+@@ -32,6 +33,7 @@ 	github.com/go-git/gcfg/v2 v2.0.2 // indirect
+ 	github.com/go-git/go-billy/v6 v6.0.0-alpha.1 // indirect
+ 	github.com/go-openapi/jsonpointer v0.23.1 // indirect
+ 	github.com/go-openapi/swag/jsonname v0.26.0 // indirect
++	github.com/godbus/dbus/v5 v5.1.0 // indirect
+ 	github.com/google/go-querystring v1.2.0 // indirect
+ 	github.com/google/uuid v1.6.0 // indirect
+ 	github.com/gorilla/css v1.0.1 // indirect
+diff --git a/go.sum b/go.sum
+index e960547c898c07f27121aac41bfbfadb5ea80f7e..8adf364aa278481ae4c3d3d9708c9371a3c30a8b 100644
+--- a/go.sum
++++ b/go.sum
+@@ -66,6 +66,8 @@ github.com/go-openapi/testify/v2 v2.4.2/go.mod h1:SgsVHtfooshd0tublTtJ50FPKhujf47YRqauXXOUxfw=
+ github.com/go-task/slim-sprig v0.0.0-20210107165309-348f09dbbbc0/go.mod h1:fyg7847qk6SyHyPtNmDHnmrv/HOrqktSC+C9fM+CJOE=
+ github.com/goccy/go-yaml v1.19.2 h1:PmFC1S6h8ljIz6gMRBopkjP1TVT7xuwrButHID66PoM=
+ github.com/goccy/go-yaml v1.19.2/go.mod h1:XBurs7gK8ATbW4ZPGKgcbrY1Br56PdM69F7LkFRi1kA=
++github.com/godbus/dbus/v5 v5.1.0 h1:4KLkAxT3aOY8Li4FRJe/KvhoNFFxo0m6fNuFUO8QJUk=
++github.com/godbus/dbus/v5 v5.1.0/go.mod h1:xhWf0FNVPg57R7Z0UbKHbJfkEywrmjJnf7w5xrFpKfA=
+ github.com/golang/protobuf v1.2.0/go.mod h1:6lQm79b+lXiMfvg/cZm0SGofjICqVBUtrP5yJMmIC1U=
+ github.com/golang/protobuf v1.4.0-rc.1/go.mod h1:ceaxUfeHdC40wWswd/P6IGgMaK3YpKi5j83Wpe3EHw8=
+ github.com/golang/protobuf v1.4.0-rc.1.0.20200221234624-67d41d38c208/go.mod h1:xKAWHe0F5eneWXFV3EuXVDTCmh+JuBKY0li0aMyXATA=
+@@ -143,6 +145,8 @@ github.com/pmezard/go-difflib v1.0.1-0.20181226105442-5d4384ee4fb2 h1:Jamvg5psRIccs7FGNTlIRMkT8wgtp5eCXdBlqhYGL6U=
+ github.com/pmezard/go-difflib v1.0.1-0.20181226105442-5d4384ee4fb2/go.mod h1:iKH77koFhYxTK1pcRnkKkqfTogsbg7gZNVY4sRDYZ/4=
+ github.com/rogpeppe/go-internal v1.14.1 h1:UQB4HGPB6osV0SQTLymcB4TgvyWu6ZyliaW0tI/otEQ=
+ github.com/rogpeppe/go-internal v1.14.1/go.mod h1:MaRKkUm5W0goXpeCfT7UZI6fk/L7L7so1lCWt35ZSgc=
++github.com/rymdport/portal v0.4.2 h1:7jKRSemwlTyVHHrTGgQg7gmNPJs88xkbKcIL3NlcmSU=
++github.com/rymdport/portal v0.4.2/go.mod h1:kFF4jslnJ8pD5uCi17brj/ODlfIidOxlgUDTO5ncnC4=
+ github.com/santhosh-tekuri/jsonschema/v6 v6.0.2 h1:KRzFb2m7YtdldCEkzs6KqmJw4nqEVZGK7IN2kJkjTuQ=
+ github.com/santhosh-tekuri/jsonschema/v6 v6.0.2/go.mod h1:JXeL+ps8p7/KNMjDQk3TCwPpBy0wYklyWTfbkIzdIFU=
+ github.com/sergi/go-diff v1.1.0/go.mod h1:STckp+ISIX8hZLjrqAeVduY0gWCT9IjLuqbuNXdaHfM=
+diff --git a/guidelines.yaml b/guidelines.yaml
+index 3d61bae6524034519df2dcbaced666a77b9cc39c..15eafd511fbe947aa761a4c966e9b7e9012a7abb 100644
+--- a/guidelines.yaml
++++ b/guidelines.yaml
+@@ -54,7 +54,7 @@             - name:
+                 Submission does not conflict with an existing Flatpak provided by the upstream author or developers outside
+                 of Flathub.
+               actions:
+-                - SHOW_POTENTIAL_DUPLICATE_SUBMISSIONS
++                - SHOW_SIMILAR_EXTERNAL_SUBMISSIONS
+             - name:
+                 Submission is not Windows software using Wine, nor any other software that is not native to the Linux desktop
+                 and uses an emulation or translation layer — unless submitted officially by upstream with intent to maintain it
+diff --git a/internal/config/guideline.go b/internal/config/guideline.go
+index 408f5954d62dfa44bd0af8140b7384cee6c6be4b..8b52d03df8ec53184477b11da48ac8d83bf78207 100644
+--- a/internal/config/guideline.go
++++ b/internal/config/guideline.go
+@@ -15,7 +15,8 @@ 	ActionShowExtensions = "SHOW_EXTENSIONS"
+ 	ActionShowBaseApp    = "SHOW_BASEAPP"
+ 	ActionShowFinishArgs = "SHOW_FINISH_ARGS"
+ 
+-	ActionShowSimilarFlathubSubmissions = "SHOW_SIMILAR_FLATHUB_SUBMISSIONS"
++	ActionShowSimilarFlathubSubmissions  = "SHOW_SIMILAR_FLATHUB_SUBMISSIONS"
++	ActionShowSimilarExternalSubmissions = "SHOW_SIMILAR_EXTERNAL_SUBMISSIONS"
+ )
+ 
+ type Guideline struct {
+
