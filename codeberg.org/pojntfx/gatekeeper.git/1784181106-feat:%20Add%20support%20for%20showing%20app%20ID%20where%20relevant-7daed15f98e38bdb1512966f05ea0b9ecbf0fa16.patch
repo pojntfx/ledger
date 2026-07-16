@@ -1,0 +1,55 @@
+From 7daed15f98e38bdb1512966f05ea0b9ecbf0fa16 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Wed, 15 Jul 2026 22:51:46 -0700
+Subject: [PATCH] feat: Add support for showing app ID where relevant
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/cmd/gatekeeper-suggest-actions/main.go b/cmd/gatekeeper-suggest-actions/main.go
+index 4010b197039afbdd801886c18e91379112d8c6df..9df939d8446d7b91db28f681c27fc67585f3076f 100644
+--- a/cmd/gatekeeper-suggest-actions/main.go
++++ b/cmd/gatekeeper-suggest-actions/main.go
+@@ -155,6 +155,11 @@ 			if err := encoder.Encode(manifest.FinishArgs); err != nil {
+ 				panic(err)
+ 			}
+ 
++		case config.ActionShowAppID:
++			if err := encoder.Encode(manifest.AppID); err != nil {
++				panic(err)
++			}
++
+ 		case config.ActionShowSimilarFlathubSubmissions:
+ 			res, err := fc.PostSearchSearchPostWithResponse(
+ 				ctx,
+diff --git a/guidelines.yaml b/guidelines.yaml
+index 15eafd511fbe947aa761a4c966e9b7e9012a7abb..a5935ec1c0e8089437e8c4251f324a51f55bedd8 100644
+--- a/guidelines.yaml
++++ b/guidelines.yaml
+@@ -206,8 +206,14 @@           description: |
+             Certain ID prefixes are restricted and reserved for specific projects.
+           items:
+             - name: org.gnome. is only used by apps in the official allow-list (restriction applies to the toplevel namespace).
++              actions:
++                - SHOW_APP_ID
+             - name: org.kde. is only used for projects hosted in a group on KDE Invent.
++              actions:
++                - SHOW_APP_ID
+             - name: com.system76. is only used for projects hosted in the pop-os organization on GitHub.
++              actions:
++                - SHOW_APP_ID
+         - name: Extensions and BaseApps
+           description: |
+             BaseApps must have BaseApp as the last component of the Flatpak ID and for the rest of the ID, the above rules apply.
+diff --git a/internal/config/guideline.go b/internal/config/guideline.go
+index 8b52d03df8ec53184477b11da48ac8d83bf78207..0c0671c09da5bd043761d934aa9adfa5823bef31 100644
+--- a/internal/config/guideline.go
++++ b/internal/config/guideline.go
+@@ -14,6 +14,7 @@ 	ActionShowRuntime    = "SHOW_RUNTIME"
+ 	ActionShowExtensions = "SHOW_EXTENSIONS"
+ 	ActionShowBaseApp    = "SHOW_BASEAPP"
+ 	ActionShowFinishArgs = "SHOW_FINISH_ARGS"
++	ActionShowAppID      = "SHOW_APPID"
+ 
+ 	ActionShowSimilarFlathubSubmissions  = "SHOW_SIMILAR_FLATHUB_SUBMISSIONS"
+ 	ActionShowSimilarExternalSubmissions = "SHOW_SIMILAR_EXTERNAL_SUBMISSIONS"
+
