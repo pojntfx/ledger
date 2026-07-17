@@ -1,0 +1,178 @@
+From 921cb6f32af4f14c4fff01fab76ff7437b76d4c9 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Thu, 16 Jul 2026 21:32:23 -0700
+Subject: [PATCH] feat: Start manually adding actions to each review guideline
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/guidelines.yaml b/guidelines.yaml
+index a5935ec1c0e8089437e8c4251f324a51f55bedd8..6d7d514c1bfdfdeede482efdd2203eb6415e7ba3 100644
+--- a/guidelines.yaml
++++ b/guidelines.yaml
+@@ -23,57 +23,106 @@
+             The following non-exhaustive categories of submissions will not be accepted.
+           items:
+             - name: Submission is fully functional and has no easily visible issues at the time of submission.
++              actions:
++                - RUN_SUBMISSION # To visually check
+             - name: Submission is not a console-only software (exceptions may be given to Flatpak or Flathub related tooling).
++              actions:
++                - RUN_SUBMISSION # To visually check
++                - SHOW_APP_ID # To see if it's Flatpak-related
++                - SHOW_METAINFO # To see if it's Flatpak-related
++                - SHOW_DESKTOP_FILE # To see if it's marked as console-only software
+             - name:
+                 Submission does not offer only minimal functionality such as simple scripts, single or simple sources, or exist
+                 as a thin wrapper or launcher around other tools.
++              actions:
++                - RUN_SUBMISSION # To visually check
++                - SHOW_METAINFO # To see if it's advertised as a wrapper
++                - SHOW_COMMAND # To see if it simply launches an external script
+             - name:
+                 Submission is not a simple web wrapper application that embeds local or remote content in a web engine without
+                 significant polish, functionality, or meaningful desktop integration.
++              actions:
++                - RUN_SUBMISSION # To visually check
++                - SHOW_METAINFO # To see if it's advertised as a wrapper
++                - SHOW_BASEAPP # To see if it's based on a browser BaseApp
+             - name: Submission is not a shell, window manager, or desktop environment extension.
++              actions:
++                - RUN_SUBMISSION # To visually check
++                - SHOW_METAINFO # To see if it's advertised as shell, window manager etc.
++                - SHOW_FINISH_ARGS # To check if we have broad permissions typical of a shell, window manager etc.
+             - name: Submission is not a tray-only application that operates exclusively as a tray applet.
++              actions:
++                - RUN_SUBMISSION # To visually check
++                - SHOW_METAINFO # To see if it's advertised as a tray applet
++                - SHOW_FINISH_ARGS # To check if we have broad permissions typical of a tray applet (e.g. `xdg-run/tray-icon:create`)
+             - name: Submission is not a system utility that is generally used on the host.
++              actions:
++                - RUN_SUBMISSION # To visually check
++                - SHOW_METAINFO # To see if it's advertised as a host utility
++                - SHOW_FINISH_ARGS # To check if we have broad permissions typical of a host utility
+             - name:
+                 Submission does not function only in highly specific environments such as requiring a particular desktop environment
+                 or distribution (exceptions considered case by case, e.g. a desktop settings application).
++              actions:
++                - RUN_SUBMISSION # To manually check (assuming a generic FreeDesktop SDK host that's not particular to a desktop env etc.)
++                - SHOW_METAINFO # To see if it's advertised as having a depdendency on a particular desktop environment
++                - SHOW_FINISH_ARGS # To check if we have broad permissions typical of something that's not using portals
+             - name:
+                 Submission does not rely on host components or complicated post-installation setups for core functionality (exceptions
+                 considered case by case).
++              actions:
++                - RUN_SUBMISSION # To manually check for complicated post-installations teps
++                - SHOW_METAINFO # To see if it's advertised as having a dependency on to host components
++                - SHOW_FINISH_ARGS # To check if we have broad permissions typical of something that's not using portals
+             - name:
+                 Submission is not a development tool, file manager, terminal, or IDE with a broad scope unsuited to the Flatpak
+                 sandbox — unless officially submitted by upstream developers or upstream has explicitly committed to supporting
+                 Flatpak.
+               actions:
+-                - SHOW_FINISH_ARGS
++                - SHOW_METAINFO # To see if it's advertised as an IDE
++                - SHOW_FINISH_ARGS # To check if we have broad permissions typical of an IDE
++                - SHOW_DESKTOP_FILE # To see if it's marked as a development tool
+             - name:
+                 Submission is not a duplicate of an existing application differing only in framework or toolkit, nor a fork
+                 with minimal changes in terms of functionality, content, visuals, or user experience.
+               actions:
+-                - SHOW_SIMILAR_FLATHUB_SUBMISSIONS
++                - SHOW_SIMILAR_FLATHUB_SUBMISSIONS # Check if this was previously published to Flathub
+             - name:
+                 Submission does not conflict with an existing Flatpak provided by the upstream author or developers outside
+                 of Flathub.
+               actions:
+-                - SHOW_SIMILAR_EXTERNAL_SUBMISSIONS
++                - SHOW_SIMILAR_EXTERNAL_SUBMISSIONS # Check if this was already published by upstream outside of Flathub
+             - name:
+                 Submission is not Windows software using Wine, nor any other software that is not native to the Linux desktop
+                 and uses an emulation or translation layer — unless submitted officially by upstream with intent to maintain it
+                 in an official capacity.
++              actions:
++                - SHOW_BASEAPP # To see if it's based on a WINE or ATL BaseApp (e.g. https://github.com/flathub/net.newpipe.NewPipe/blob/master/net.newpipe.NewPipe.yml#L5)
++                - SHOW_COMMAND # To see if it launches with wine64 or something similar
++                - SHOW_MODULES # To see if we download e.g. an APK or something similar
++                - SHOW_APP_ID # To see if the project claims an upstream's FQDN
++                - SHOW_IS_SUBMITTER_CONTRIBUTOR # To see if the submitter is an upstream contributor (by resolving upstream project's contribution list and checking if contributor's username shows up in log)
+         - name: End-of-life dependency policy
+           description: |
+             Submissions must not depend on end-of-life software components.
+           items:
+             - name: Submission does not use an end-of-life runtime, extension, or baseapp.
+               actions:
+-                - SHOW_RUNTIME
+-                - SHOW_EXTENSIONS
+-                - SHOW_BASEAPP
++                - SHOW_RUNTIME # To check if the runtime is EOL
++                - SHOW_EXTENSIONS # To check if extensions are EOL
++                - SHOW_BASEAPP # To check if the baseapp is EOL
+             - name:
+                 Submission does not use high-risk, end-of-life software (e.g. OpenSSL 1.x, Python 2, Qt5 WebKit) while requesting
+                 the network or any other invasive permissions.
++              actions:
++                - SHOW_FINISH_ARGS # To check if we have network permission
++                - SHOW_MODULES # To see if we depend on known EOL dependencies
+             - name:
+                 The main application itself is not end-of-life — unless the submitter can demonstrate their ability to maintain
+                 it for the foreseeable future and perform runtime upgrades.
++              actions:
++                - SHOW_IS_APPLICATION_ACTIVELY_BEING_DEVELOPED # Resolve app's main source/module's history and check if it's being actively developed
++                - SHOW_IS_SUBMITTER_CONTRIBUTOR # To see if the submitter is an upstream contributor (by resolving upstream project's contribution list and checking if contributor's username shows up in log)
+         - name: Software design and distribution policy
+           description: |
+             Applications that include insecure or harmful design choices, such as disabling or bypassing security mechanisms, using insecure cryptographic practices, exposing or accessing sensitive information, or shipping overly permissive configurations will not be accepted.
+@@ -85,12 +134,26 @@           items:
+             - name:
+                 Submission does not include insecure or harmful design choices (e.g. disabling or bypassing security mechanisms,
+                 insecure cryptographic practices, exposing or accessing sensitive information, overly permissive configurations).
++              actions:
++                - RUN_SUBMISSION # To manually check if the app requests e.g. broad portal permissions
++                - SHOW_FINISH_ARGS # To check if we have a broad range of permissions
+             - name: Submission does not employ unethical, manipulative, or exploitative design patterns.
++              actions:
++                - RUN_SUBMISSION # To manually check (e.g. infinite scroll by default, consent banners with dark patterns etc.)
+             - name: Submission does not promote gambling or games of chance involving real-world money.
++              actions:
++                - SHOW_METAINFO # To see if the submission advertises gambling etc. as features in the description
+             - name:
+                 Project demonstrates reasonable structure, organization, maintainability, and is distributed in a verifiable
+                 manner.
++              actions:
++                - SHOW_IS_APPLICATION_ACTIVELY_BEING_DEVELOPED # Resolve app's main source/module's history and check if it's being actively developed
++                - SHOW_MODULES # To see how external dependencies are vendored
++                - SHOW_REPO_TREE # To see how project is laid out by resolving the main module
+             - name: Open source and source-available projects follow established conventions of their respective ecosystem.
++              actions:
++                - SHOW_FLATHUB_SUBMISSIONS_WITH_SIMILAR_STACK # Check if there are other submissions which use the same technologies (e.g. same runtime, SDK, extensions etc.)
++                - SHOW_MODULES # To see how external dependencies are vendored
+         - name: Insufficient development history
+           description: |
+             Submissions must demonstrate a meaningful history of development or existence, evidence of real-world use and a clear commitment to ongoing maintenance.
+@@ -98,12 +161,25 @@
+             Exceptions may be granted on a case by case basis.
+           items:
+             - name: Submission demonstrates a meaningful history of development or existence.
++              actions:
++                - SHOW_APPLICATION_AGE # Resolve app's main source/module's history and check, via server timestamps where trustworthy (e.g. public GitHub, public GitLab, Codeberg), and check how it's been running
++                - SHOW_MEDIA_COVERAGE # Check if the app has been talked about for a while
+             - name: Submission shows evidence of real-world use.
++              actions:
++                - SHOW_MEDIA_COVERAGE # Check if people talk about the submission on fedi/Atmosphere/blogs etc. as signals it's being actively used in the real world
+             - name: Submission shows a clear commitment to ongoing maintenance.
++              actions:
++                - SHOW_IS_APPLICATION_ACTIVELY_BEING_DEVELOPED # Resolve app's main source/module's history and check if it's being actively developed
++                - SHOW_IS_SUBMITTER_CONTRIBUTOR # To see if the submitter is an upstream contributor (by resolving upstream project's contribution list and checking if contributor's username shows up in log)
+             - name:
+                 For source-available projects, there is a sustained commit history and standard release practices such as tagged
+                 versions.
++              actions:
++                - SHOW_PROJECT_ACTIVITY_GRAPH # Resolve app's main source/module's history over time and plot how much churn there is
++                - SHOW_PROJECT_RELEASES # Via resolved app's sources, check for GitHub/GitLab/Forgejo release tags, git tags, changelogs etc.
+             - name: Application has existed for more than a very short period of time.
++              actions:
++                - SHOW_APPLICATION_AGE # Resolve app's main source/module's history and check, via server timestamps where trustworthy (e.g. public GitHub, public GitLab, Codeberg), and check how it's been running
+         - name: Extensions or BaseApps
+           description: |
+             Flatpak extensions that add support for new languages, language specific tooling etc. or BaseApps will need a clear use case defined and prospective users to be accepted.
+
