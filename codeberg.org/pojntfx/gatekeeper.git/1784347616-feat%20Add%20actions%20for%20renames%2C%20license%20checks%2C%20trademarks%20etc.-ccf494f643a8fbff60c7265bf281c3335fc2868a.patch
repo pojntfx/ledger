@@ -1,0 +1,160 @@
+From ccf494f643a8fbff60c7265bf281c3335fc2868a Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Fri, 17 Jul 2026 21:06:56 -0700
+Subject: [PATCH] feat Add actions for renames, license checks, trademarks etc.
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/guidelines.yaml b/guidelines.yaml
+index f9d379d9c9d366d5414d4d4a24febf8dc1d25089..8bc636d8b7ebff1bf6730d3c17c358ad6840cca2 100644
+--- a/guidelines.yaml
++++ b/guidelines.yaml
+@@ -367,23 +367,39 @@           items:
+             - name:
+                 For code-hosting IDs, the username or repository name portion does not contain '.' (since that serves as a component
+                 delimiter).
++              actions:
++                - SHOW_APP_ID # To check if the ID and the repo URL match
++                - SHOW_MODULES # To check if the ID and the repo URL match
+             - name:
+                 The repository URL calculated from the code hosting ID is reachable (or an exception has been granted after
+                 manual checking).
++              actions:
++                - SHOW_APP_ID # To check if the ID and the repo URL match
++                - SHOW_MODULES # To check if the ID and the repo URL match
++                - FETCH_FQDN_HTTPS # Reverse FQDN and check via HTTPS whether it's reachable; we need special rules here for e.g. `io.github` to resolve to the repo path, not just GH pages
+             - name: Case sensitivity of the hosting platform's namespace (e.g. GitLab) has been respected in the ID.
++              actions:
++                - SHOW_APP_ID # To check if the ID and the repo URL match
++                - SHOW_MODULES # To check if the ID and the repo URL match
+         - name: Protected ID prefixes
+           description: |
+             Certain ID prefixes are restricted and reserved for specific projects.
+           items:
+             - name: org.gnome. is only used by apps in the official allow-list (restriction applies to the toplevel namespace).
+               actions:
+-                - SHOW_APP_ID
++                - SHOW_APP_ID # To check if the ID is the specificed allow list-specific reserved prefix
++                - SHOW_MODULES # To check where the sources are hosted
++                - SHOW_IS_SUBMITTER_CONTRIBUTOR # To see if the submitter is an upstream contributor, but we need to be careful to validate if the project is an official project too here
+             - name: org.kde. is only used for projects hosted in a group on KDE Invent.
+               actions:
+-                - SHOW_APP_ID
++                - SHOW_APP_ID # To check if the ID is the specificed allow list-specific reserved prefix
++                - SHOW_MODULES # To check where the sources are hosted
++                - SHOW_IS_SUBMITTER_CONTRIBUTOR # To see if the submitter is an upstream contributor, but we need to be careful to validate if the project is an official project too here
+             - name: com.system76. is only used for projects hosted in the pop-os organization on GitHub.
+               actions:
+-                - SHOW_APP_ID
++                - SHOW_APP_ID # To check if the ID is the specificed allow list-specific reserved prefix
++                - SHOW_MODULES # To check where the sources are hosted
++                - SHOW_IS_SUBMITTER_CONTRIBUTOR # To see if the submitter is an upstream contributor, but we need to be careful to validate if the project is an official project too here
+         - name: Extensions and BaseApps
+           description: |
+             BaseApps must have BaseApp as the last component of the Flatpak ID and for the rest of the ID, the above rules apply.
+@@ -391,9 +407,14 @@
+             Flatpak extensions must prefix their ID with the extension point ID, which is either defined in one of the runtimes or in an app. If the extension point is defined in an app, it must use the app's ID as a prefix. They are exempt from the domain control rules.
+           items:
+             - name: BaseApp submissions have "BaseApp" as the last component of the Flatpak ID.
++              actions:
++                - SHOW_APP_ID # To check if we match the format
+             - name:
+                 Flatpak extensions are prefixed with the extension point ID (defined in a runtime or app); if defined in an
+                 app, the app's ID is used as the prefix.
++              actions:
++                - SHOW_RUNTIME # To check if the runtime is EOL
++                - SHOW_APP_ID # To check if we match the format
+         - name: Renaming Flatpak ID
+           description: |
+             Flatpak ID renames are reviewed and accepted on a conservative basis provided justified reasons for the rename are provided.
+@@ -401,9 +422,24 @@
+             Exceptions may be considered on a case by case basis.
+           items:
+             - name: Rename request changes the domain portion of the Flatpak ID.
++              actions:
++                - SHOW_APP_ID # New app ID
++                - SHOW_OLD_APP_ID # Previous app ID (by looking into git history for submission's repo in flathub GH org)
+             - name: Rename request that changes the domain portion includes a clear intention to verify the new ID.
++              actions:
++                - SHOW_APP_ID # New app ID
++                - SHOW_OLD_APP_ID # Previous app ID (by looking into git history for submission's repo in flathub GH org)
++                - SHOW_SUBMISSION_DESCRIPTION # We need to manually check if there is a comment about this from the submission author
+             - name: Rename was not requested immediately after the initial submission was accepted.
++              actions:
++                - SHOW_APP_ID # New app ID
++                - SHOW_OLD_APP_ID # Previous app ID (by looking into git history for submission's repo in flathub GH org)
++                - SHOW_SUBMISSION_DATE # Check when the new submission was made, the one that does the rename
++                - SHOW_OLD_SUBMISSION_DATE # Check when the initial (or latest, before this one) submission was made and compare the date
+             - name: Rename requests have not been made frequently for this application.
++              actions:
++                - SHOW_RENAME_REQUEST_FREQUENCY # Show a calculated frequency for past rename requests
++                - SHOW_RENAME_REQUEST_HISTORY # Get a list of the past rename requests
+     - name: License
+       description: |
+         All content hosted on Flathub must allow legal redistribution, and the license must be correctly specified in the app's MetaInfo file.
+@@ -413,15 +449,37 @@       items:
+         - name: License allows legal redistribution of all content hosted on Flathub.
+           description: null
+           items: null
++          actions:
++            - SHOW_METAINFO # To see license
++            - SHOW_MODULES # To see which (potentially license-incompatible) modules this app depends on
++            - SHOW_SUBMISSION_REPO_SOURCE # To manually sweep the _submission_ repo (not main module) for blobs, SPDX headers etc. that are license-incompatible
++            - SHOW_APP_REPO_SOURCE # To manually sweep the _application_ repo for blobs, SPDX headers etc. that are license-incompatible
+         - name: License is correctly declared in the MetaInfo file and matches the license information available in the source.
+           description: null
+           items: null
++          actions:
++            - SHOW_METAINFO # To see license as declared in metainfo
++            - SHOW_SUBMISSION_REPO_LICENSE_CANDIDATES # To see tree and contents of license file candidates in the submission's repo, plus SPDX headers
++            - SHOW_APP_REPO_LICENSE_CANDIDATES # To see tree and contents of license file candidates in the application/main module's repo
+         - name: Non-redistributable sources use the extra-data source type.
+           description: null
+           items: null
++          actions:
++            - SHOW_METAINFO # To see license
++            - SHOW_MODULES # To see which (potentially license-incompatible) modules this app depends on
++            - SHOW_SUBMISSION_REPO_SOURCE # To manually sweep the _submission_ repo (not main module) for blobs, SPDX headers etc. that are license-incompatible
++            - SHOW_APP_REPO_SOURCE # To manually sweep the _application_ repo for blobs, SPDX headers etc. that are license-incompatible
++            - SHOW_EXTRA_DATA # To show anything that's explicitly marked as extra data and can be under a non-redistributable license
+         - name: No part of the application (name, icon, etc.) violates any trademarks; all such parts are distinct.
+           description: null
+           items: null
++          actions:
++            - SHOW_METAINFO # To see name, description etc.
++            - SHOW_REPO_MEDIA_CANDIDATES # Find any potential media files in the submission repo that could infringe on trademarks
++            - SHOW_APP_MEDIA_CANDIDATES # Find any potential media files in the app repo that could infringe on trademarks
++            - SHOW_EUIPO_MATCHES # Get EUIPO trademark search results for name and potentially images
++            - SHOW_USPTO_MATCHES # Get USPTO trademark search results for name and potentially images
++            - SHOW_REVERSE_IMAGE_SEARCH_MATCHES # Check, via reverse-image search, whether any media is in use by somebody else
+         - name: License of contents in Flathub repository
+           description: |
+             The use of a specific license is not mandated or required, and including a license in the repository is optional. However, submitters and maintainers may choose to apply a license if desired.
+@@ -431,9 +489,15 @@           items:
+             - name:
+                 Repository does not use a restrictive license for the manifest or build scripts (permissive licenses such as
+                 MIT, 0BSD, or the Unlicense are recommended).
++              actions:
++                - SHOW_METAINFO # To see license as declared in metainfo, and license for metainfo itself
++                - SHOW_SUBMISSION_REPO_LICENSE_CANDIDATES # To see tree and contents of license file candidates in the submission's repo, plus SPDX headers
+             - name:
+                 If included, license file is part of the pull request, or individual files are annotated with a license at the
+                 top level.
++              actions:
++                - SHOW_METAINFO # To see license as declared in metainfo, and license for metainfo itself
++                - SHOW_SUBMISSION_REPO_LICENSE_CANDIDATES # To see tree and contents of license file candidates in the submission's repo, plus SPDX headers
+         - name: Installing license files
+           description: |
+             Application maintainers and submitters must ensure that license files for each module in the Flatpak manifest is installed to $FLATPAK_DEST/share/licenses/$FLATPAK_ID.
+@@ -443,6 +507,10 @@           items:
+             - name:
+                 License files for each module in the Flatpak manifest are installed to $FLATPAK_DEST/share/licenses/$FLATPAK_ID
+                 (either automatically by Flatpak builder or manually via install/post-install commands).
++              actions:
++                - SHOW_METAINFO # To see license as declared in metainfo
++                - SHOW_MODULES # To see if we manually install any licenses
++                - SHOW_STAGED_LICENSE_FILES # Sweep the built Flatpak's content for installed licenses
+     - name: Permissions
+       description: |
+         Static permissions must be kept to an absolute minimum. Applications should rely on XDG Portals and follow established XDG standards wherever possible.
+
