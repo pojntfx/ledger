@@ -1,0 +1,110 @@
+From 9e402daaf40f8b5ed118b2ee8a240c40d2d7d9b2 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Fri, 17 Jul 2026 19:45:55 -0700
+Subject: [PATCH] feat: Start adding actions for GenAI policy and application ID
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/guidelines.yaml b/guidelines.yaml
+index f23c2c0c5d0101415611f7bab153855633636278..f9d379d9c9d366d5414d4d4a24febf8dc1d25089 100644
+--- a/guidelines.yaml
++++ b/guidelines.yaml
+@@ -258,12 +258,27 @@
+             Repeatedly violating these policies may result in a permanent ban from future submissions and activities. Exceptions may be granted for mature, well-maintained projects.
+           items:
+             - name: Submission pull request was not generated, opened, or automated using AI tools or agents.
++              actions:
++                - CHECK_PR_DESCRIPTION_HAS_CHECKLIST # Most AI slop apps don't have these, see https://github.com/flathub/flathub/pulls?q=is%3Apr+is%3Aclosed+label%3A%22AI+Slop%22
++                - SHOW_SUBMISSION_CONTRIBUTION_HISTORY # Agents often times generate lots of small commits in the submission as they try and pass CI/CD
+             - name: Review comments, replies, and descriptions on the PR are not LLM-generated.
++              actions:
++                - SHOW_SUBMISSION_COMMENTS_AND_REPLIES # This is subjective and there is no known way to detect LLM-generated prose anymore in 2026; this needs a manual check
+             - name: No review has been requested from AI tools in the submission PR (e.g. automated Copilot reviews are disabled).
+-            - name: Application does not contain AI-generated or AI-assisted code, documentation, or any other content.
++              actions:
++                - SHOW_REVIEWERS # Copilot would show up here as a reviewer
++                - SHOW_SUBMISSION_COMMENTS_AND_REPLIES # Other tools, e.g. Claude Code, show up via comments
++            - name: Application does not contain AI-generated or AI-assisted code, documentation, or any other content. # This is a slop gate, not a complete ban. See https://github.com/flathub/flathub/pull/9248
++              actions:
++                - SHOW_CONTRIBUTORS # To see if an agent is named as a contributor in the repo
++                - SHOW_ASSISTED_BY_TAGS # To see if an agent used the `assisted-by` tag
+             - name:
+                 Submission does not contain unauthorised copyrighted material, license-incompatible, or ethically questionable
+                 code.
++              actions:
++                - SHOW_METAINFO # To see license
++                - SHOW_MODULES # To see which (potentially license-incompatible) modules this app depends on
++                - SHOW_REPO_SOURCE # To manually sweep the repo for blobs, SPDX headers etc. that are license-incompatible
+     - name: Application ID
+       description: |
+         Please choose the ID carefully and don't hesitate to ask the reviewers for help as it will determine the type of verification method available, if any.
+@@ -283,30 +298,68 @@           description: |
+             The following rules must be followed when creating application IDs.
+           items:
+             - name: ID does not exceed 255 characters and has at least 3 components (and no more than 5 components).
++              actions:
++                - SHOW_APP_ID # Linters probably catch this already, but double-check
+             - name: Each component contains only the characters [A-Z][a-z][0-9]_; a dash (-) is only used in the last component.
++              actions:
++                - SHOW_APP_ID # Linters probably catch this already, but double-check
+             - name:
+                 The domain portion is in lowercase and converts dash (-) to underscore (_); any component with an initial digit
+                 is prefixed with an underscore.
++              actions:
++                - SHOW_APP_ID # Linters probably catch this already, but double-check
+             - name: The ID does not end in generic terms like .desktop, .app, or .linux.
++              actions:
++                - SHOW_APP_ID # Linters probably catch this already, but double-check
+             - name: The ID exactly matches the ID tag in the Metainfo file.
++              actions:
++                - SHOW_METAINFO # To check if the ID matches
++                - SHOW_APP_ID # To check if the ID matches
+             - name:
+                 Applications hosted on github.com, gitlab.com, codeberg.org, framagit.org use io.github., io.gitlab., page.codeberg.,
+                 io.frama. prefixes respectively and have at least 4 components.
++              actions:
++                - SHOW_APP_ID # To check if the ID the specificed forge-specific prefix
++                - SHOW_MODULES # To check where the sources are hosted
+             - name:
+                 com.github., com.gitlab., org.codeberg., org.framagit. prefixes are reserved for official projects of the code
+                 hosting platform (not used by third-party submissions).
++              actions:
++                - SHOW_APP_ID # To check if the ID is the specificed forge-specific reserved prefix
++                - SHOW_MODULES # To check where the sources are hosted
++                - SHOW_IS_SUBMITTER_CONTRIBUTOR # To see if the submitter is an upstream contributor, but we need to be careful to validate if the project is an official project too here
+             - name: Applications hosted on Sourceforge use io.sourceforge. or net.sourceforge. prefixes.
++              actions:
++                - SHOW_APP_ID # To check if the ID the specificed forge-specific prefix
++                - SHOW_MODULES # To check where the sources are hosted
+         - name: Control over domain or repository
+           description: |
+             The domain must be directly related to the project or the application being submitted and the author or the developer or the project must have control over the domain.
+           items:
+             - name: The domain is directly related to the project or application being submitted.
++              actions:
++                - SHOW_APP_ID # To see the FQDN itself
++                - SHOW_DOMAIN_IN_WEBVIEW # Reverse FQDN and check visually if site is related to project; we need special rules here for e.g. `io.github` to resolve to the repo path, not just GH pages
++                - SHOW_METAINFO_URLS_IN_WEBVIEW # We should also check the metainfo URLs here
+             - name: The author, developer, or project has control over the domain.
++              actions:
++                - SHOW_APP_ID # To see the FQDN itself
++                - ADD_CLARIFICATION_COMMENT_UNLESS_KNOWN_FORGE_FQDN # We verify that the author has control over the repo earlier already; if we're not using a known forge FQDN (e.g. GitHub) then we need to manually confirm with them whether they control it; see e.g. https://github.com/flathub/flathub/pull/6793
+             - name: The corresponding URL is reachable over HTTPS (or an exception has been granted after manual checking).
++              actions:
++                - SHOW_APP_ID # To see the FQDN itself
++                - FETCH_FQDN_HTTPS # Reverse FQDN and check via HTTPS whether it's reachable; we need special rules here for e.g. `io.github` to resolve to the repo path, not just GH pages
+             - name: If required, a verification token has been placed under https://{domain name}/.well-known/org.flathub.VerifiedApps.txt.
++              actions:
++                - SHOW_APP_ID # To see the FQDN itself
++                - CHECK_FQDN_VERIFICATION # Reverse FQDN and check for verification token via HTTPS; we need special rules here for e.g. `io.github`, where verification isn't done via these verification tokens
+             - name:
+                 There is visible proof on the webpage linking the application, developer, or project to the domain calculated
+                 from the ID (preferable).
++              actions:
++                - SHOW_APP_ID # To see the FQDN itself
++                - SHOW_DOMAIN_IN_WEBVIEW # Reverse FQDN and check visually if site has links related to project; we need special rules here for e.g. `io.github` to resolve to the repo path, not just GH pages
++                - SHOW_METAINFO_URLS_IN_WEBVIEW # We should also check the metainfo URLs here
+         - name: Code hosting
+           description: |
+             A repository URL (or project URL) is calculated for code hosting IDs by using the domain and by taking the last component of the ID as-is (except when the last component starts with a leading underscore and then a digit, in which case following Appstream conventions, the leading underscore is stripped from that component).
+
