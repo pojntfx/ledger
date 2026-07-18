@@ -1,0 +1,101 @@
+From 4b2ea9a5f213eac6bb5034dc07e359097559df68 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Fri, 17 Jul 2026 19:17:14 -0700
+Subject: [PATCH] feat: Add remaining actions for rest of inclusion guide
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/cmd/gatekeeper-suggest-actions/main.go b/cmd/gatekeeper-suggest-actions/main.go
+index 9df939d8446d7b91db28f681c27fc67585f3076f..4fd24173fec5ba2c99123c27142bacf923cf0aae 100644
+--- a/cmd/gatekeeper-suggest-actions/main.go
++++ b/cmd/gatekeeper-suggest-actions/main.go
+@@ -51,6 +51,7 @@ }
+ 
+ // TODO: This actually refers to extensions, not SDK extensions
+ // See e.g. https://docs.flatpak.org/en/latest/extension.html#extension-manifest
++// and also see https://github.com/flathub/org.gimp.GIMP/blob/master/org.gimp.GIMP.json#L56C6-L71
+ type extensionsContext struct {
+ 	IDs     []string `yaml:"ids"`
+ 	Version string   `yaml:"version"`
+diff --git a/guidelines.yaml b/guidelines.yaml
+index 6d7d514c1bfdfdeede482efdd2203eb6415e7ba3..f23c2c0c5d0101415611f7bab153855633636278 100644
+--- a/guidelines.yaml
++++ b/guidelines.yaml
+@@ -180,6 +180,8 @@                 - SHOW_PROJECT_RELEASES # Via resolved app's sources, check for GitHub/GitLab/Forgejo release tags, git tags, changelogs etc.
+             - name: Application has existed for more than a very short period of time.
+               actions:
+                 - SHOW_APPLICATION_AGE # Resolve app's main source/module's history and check, via server timestamps where trustworthy (e.g. public GitHub, public GitLab, Codeberg), and check how it's been running
++        # BaseApp example: https://github.com/flathub/org.electronjs.Electron2.BaseApp/blob/branch/25.08/org.electronjs.Electron2.BaseApp.yml
++        # Extension example: https://github.com/flathub/org.freedesktop.Sdk.Extension.golang/blob/branch/25.08/org.freedesktop.Sdk.Extension.golang.yaml
+         - name: Extensions or BaseApps
+           description: |
+             Flatpak extensions that add support for new languages, language specific tooling etc. or BaseApps will need a clear use case defined and prospective users to be accepted.
+@@ -188,28 +190,67 @@             - name: Extension or BaseApp has a clear use case defined and prospective users identified.
+             - name:
+                 BaseApp or Extension is built against a runtime that provides a stable ABI and performs ABI checks as part of
+                 their releases.
++              actions:
++                - SHOW_RUNTIME # To check the runtime's ID and version
+             - name: BaseApp or Extension itself maintains a stable ABI in a given branch.
++              actions:
++                - SHOW_MODULES # To see how modules are built
++                - SHOW_PROJECT_RELEASES # To check how versioning is handled and whether any ABI breakage is mentioned
++                - SHOW_REPO_SOURCE # We need to check this one manually by resolving the main module's source and sweeping it
+             - name:
+                 BaseApp or Extension does not depend on or use any private ABI from the runtime for its contents (extensions
+                 providing themes etc. may be exempt).
++              actions:
++                - SHOW_MODULES # To see how modules are built
++                - SHOW_REPO_SOURCE # We need to check this one manually by resolving the main module's source and sweeping it
+         - name: Trust and history
+           description: |
+             Submission decisions may take a submitter's prior conduct into account.
+           items:
+             - name: Submitter does not have a pattern of policy violations.
++              actions:
++                - SHOW_THREADS_RELATED_TO_SUBMITTER # Check how the submitter has previously acted
+             - name: Submitter has not exhibited uncooperative behaviour.
++              actions:
++                - SHOW_THREADS_RELATED_TO_SUBMITTER # Check how the submitter has previously acted
+             - name: Submitter does not have multiple abandoned or poorly maintained apps.
++              actions:
++                - SHOW_SUBMITTERS_PREVIOUS_SUBMISSIONS_ACTIVELY_BEING_DEVELOPED # Resolve submitter's previous submissions and check, same as we do for the singular version of this action, whether they are being actively developed
+             - name: Submitter has not engaged in misleading practices.
++              actions:
++                - SHOW_THREADS_RELATED_TO_SUBMITTER # Check how the submitter has previously acted
+             - name: Submitter has not failed to address security and compliance issues in the past.
++              actions:
++                - SHOW_THREADS_RELATED_TO_SUBMITTER # Check how the submitter has previously acted
+         - name: Misleading, malicious or illegal submissions
+           description: |
+             In most cases such submissions are liable to be outright rejected or removed from the store.
+           items:
+             - name: Submission does not impersonate another project, vendor, or person.
++              actions:
++                - SHOW_APP_ID # To check what app ID is being claimed
++                - SHOW_MODULES # To check if sources are being fetched from upstream
++                - SHOW_IS_SUBMITTER_CONTRIBUTOR # To see if the submitter is an upstream contributor (by resolving upstream project's contribution list and checking if contributor's username shows up in log)
++                - SHOW_SIMILAR_FLATHUB_SUBMISSIONS # Check if this was previously published to Flathub
+             - name: Submission does not engage in or encourage unlawful activities.
++              actions:
++                - SHOW_METAINFO # To see if the app's description encourages unlawful activities
++                - RUN_SUBMISSION # To manually check if the app matches the description
+             - name: Submission does not provide false or misleading information or functionality.
++              actions:
++                - SHOW_METAINFO # To see what the app advertises
++                - RUN_SUBMISSION # To manually check if the app matches the description
+             - name: Submission does not attempt to deceive users or violate any laws, trademarks, or copyrights.
++              actions:
++                - SHOW_METAINFO # To see if the app's description attempts to deceive users etc.
++                - RUN_SUBMISSION # To manually check if the app matches the description
+             - name: Submission does not act in a malicious manner and does not contain malicious code.
++              actions:
++                - SHOW_FINISH_ARGS # To check if we have broad permissions typical of an app that acts in a malicious manner
++                - SHOW_MODULES # To see which (potentially malicious) modules this app depends on
++                - SHOW_REPO_SOURCE # We need to check this one manually by resolving the main module's source and sweeping it
++                - RUN_CLAMAV_SCAN # Run a basic virus scan against the app
++                - RUN_SUBMISSION # To manually check and inspect the app (assuming this can be done safely, in a sandbox)
+         - name: Generative AI policy
+           description: |
+             This policy applies to both the application being submitted to Flathub and the Flathub submission itself, including the manifest, metadata, patches, build scripts, and pull request. For the purpose of this policy, "applications" include Flatpak apps, BaseApps, extensions, runtimes and any other artifacts that can be produced by flatpak-builder.
+
