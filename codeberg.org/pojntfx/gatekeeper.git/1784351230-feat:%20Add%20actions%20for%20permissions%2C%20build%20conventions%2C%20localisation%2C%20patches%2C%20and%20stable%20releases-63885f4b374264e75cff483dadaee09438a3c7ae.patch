@@ -1,0 +1,158 @@
+From 63885f4b374264e75cff483dadaee09438a3c7ae Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Fri, 17 Jul 2026 22:07:10 -0700
+Subject: [PATCH] feat: Add actions for permissions, build conventions, localisation, patches, and stable releases
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/guidelines.yaml b/guidelines.yaml
+index 8bc636d8b7ebff1bf6730d3c17c358ad6840cca2..4c7086973113c8ed238690369c64a9dc1cdd02df 100644
+--- a/guidelines.yaml
++++ b/guidelines.yaml
+@@ -520,14 +520,24 @@       items:
+         - name: Static permissions are kept to an absolute minimum.
+           description: null
+           items: null
++          actions:
++            - SHOW_FINISH_ARGS # To check which static permissions are being requested
++            - SHOW_LIST_OF_AVAILABLE_PORTALS # See https://flatpak.github.io/xdg-desktop-portal/docs/api-reference.html; we should suggest using a portal for something that currently uses a static permission where possible
+         - name: Application relies on XDG Portals and follows established XDG standards wherever possible.
+           description: null
+           items: null
++          actions:
++            - SHOW_FINISH_ARGS # To check which static permissions are being requested
++            - SHOW_LIST_OF_AVAILABLE_PORTALS # See https://flatpak.github.io/xdg-desktop-portal/docs/api-reference.html; we should suggest using a portal for something that currently uses a static permission where possible
+         - name:
+             Where a suitable XDG portal exists, is supported across the ecosystem, and covers the use case (or can be implemented
+             in the application), the portal is used instead of static permissions.
+           description: null
+           items: null
++          actions:
++            - SHOW_FINISH_ARGS # To check which static permissions are being requested
++            - SHOW_LIST_OF_AVAILABLE_PORTALS # See https://flatpak.github.io/xdg-desktop-portal/docs/api-reference.html; we should suggest using a portal for something that currently uses a static permission where possible
++            - SHOW_PORTAL_LIBRARIES_FOR_ECOSYSTEM # Get main language and framework for submission from runtime, language stats etc. from resolved main module, then search the web for relevant libraries; for example, for Go: https://github.com/rymdport/portal
+     - name: No network access during build
+       description: |
+         All dependencies needed to build and run the application must be present in the manifest as sources with publicly accessible URLs or must be included as local sources in the submission pull request. Binary or precompiled files must not be present in the submission pull request.
+@@ -539,12 +549,19 @@             All dependencies needed to build and run the application are present in the manifest as sources with publicly
+             accessible URLs, or are included as local sources in the submission PR.
+           description: null
+           items: null
++          actions:
++            - SHOW_SUBMISSION_REPO_SOURCE # To manually sweep the _submission_ repo (not main module) for dependency source files (see e.g. https://github.com/nstbayless/flathub/blob/crankboy-manager-submission/python3-requirements-flatpak.json)
++            - SHOW_MODULES # To list any sources directly listed in the Flatpak manifest
+         - name: No binary or precompiled files are present in the submission pull request.
+           description: null
+           items: null
++          actions:
++            - SHOW_SUBMISSION_REPO_SOURCE_BLOBS # To manually sweep the _submission_ repo for blobs of any kind and flag them
+         - name: The manifest does not use --share=network inside build-args.
+           description: null
+           items: null
++          actions:
++            - SHOW_BUILD_ARGS # The linter should already have caught this, but double-check
+     - name: Building from source
+       description: |
+         All source available submissions must be built entirely from source code. This requirement applies to the main application component defined in the manifest, as well as any runtime dependencies included in the manifest.
+@@ -554,9 +571,15 @@       items:
+         - name: The main application component is built entirely from source code.
+           description: null
+           items: null
++          actions:
++            - SHOW_METAINFO # To get the license to check if it's a source-available submission
++            - SHOW_APPLICATION_REPO_SOURCE_BLOBS # To manually sweep the _application_ repo for blobs of any kind and flag them
+         - name: All runtime dependencies included in the manifest are built entirely from source code.
+           description: null
+           items: null
++          actions:
++            - SHOW_MODULES # To get the license to check if it's a source-available submission
++            - SHOW_MODULES_REPO_SOURCE_BLOBS # To manually sweep the _depdency_ repos for blobs of any kind and flag them (same as we do for the application and submission repo)
+     - name: Localisation policy
+       description: |
+         All submissions must include a complete English localisation for their user interface, user-facing content, desktop file, metainfo and any readme or documentation. Low quality, automated or machine-generated or mixed translations cannot be used.
+@@ -566,20 +589,43 @@       items:
+         - name: Submission includes a complete English localisation for the user interface.
+           description: null
+           items: null
++          actions:
++            - SHOW_METAINFO # To see if it's region-specific (see e.g. https://flathub.org/en/apps/br.gov.fazenda.receita.irpf2026)
++            - SHOW_CONTRIBUTOR_PROFILE # To check the contributor's location via GitHub/GitLab/Forgejo and whether they are likely to be proficient in English
++            - SHOW_SCREENSHOTS # To visually check the screenshots for whether they have an English translation
++            - RUN_SUBMISSION # To visually check if there is an English localisation by setting the LANG etc. env vars when launching
++            - SHOW_APPLICATION_REPO_I18N # To manually sweep the _application_ repo for i18n-related files (`.po` extensions etc.) of any kind and show their contents to check if the English translation is complete
+         - name: Submission includes a complete English localisation for user-facing content.
+           description: null
+           items: null
++          actions:
++            - SHOW_METAINFO # To see if it's region-specific (see e.g. https://flathub.org/en/apps/br.gov.fazenda.receita.irpf2026)
++            - SHOW_CONTRIBUTOR_PROFILE # To check the contributor's location via GitHub/GitLab/Forgejo and whether they are likely to be proficient in English
++            - SHOW_SCREENSHOTS # To visually check the screenshots for whether they have an English translation
++            - RUN_SUBMISSION # To visually check if there is an English localisation by setting the LANG etc. env vars when launching
++            - SHOW_APPLICATION_REPO_I18N # To manually sweep the _application_ repo for i18n-related files (`.po` extensions etc.) of any kind and show their contents to check if the English translation is complete
+         - name: Submission includes a complete English localisation for the desktop file, metainfo, and any readme or documentation.
+           description: null
+           items: null
++          actions:
++            - SHOW_METAINFO # To see if it's region-specific (see e.g. https://flathub.org/en/apps/br.gov.fazenda.receita.irpf2026) and translated to English
++            - SHOW_DESKTOP_FILE # To see if it's translated to English
++            - SHOW_APPLICATION_REPO_DOCUMENTATION_FILES # To manually sweep the _application_ repo for documentation files (`.md`, `.rst`, `.adoc`, `.txt` etc.) of any kind and show their contents to check if the English translation is complete
+         - name: Translations are not low quality, automated, machine-generated, or mixed.
+           description: null
+           items: null
++          actions:
++            - SHOW_METAINFO # To see if it's region-specific (see e.g. https://flathub.org/en/apps/br.gov.fazenda.receita.irpf2026) and translated to English
++            - SHOW_APPLICATION_REPO_I18N # To manually sweep the _application_ repo for i18n-related files (`.po` extensions etc.) of any kind and show their contents to check if translations (including other than English) pass the vibe check
++            - SHOW_CONTRIBUTORS # To see if an agent is named as a contributor in the repo
++            - SHOW_ASSISTED_BY_TAGS # To see if an agent used the `assisted-by` tag
+         - name:
+             If the submission is available only in one or more non-English locales, this is stated in its metadata using description
+             notes.
+           description: null
+           items: null
++          actions:
++            - SHOW_METAINFO # To see if it's region-specific (see e.g. https://flathub.org/en/apps/br.gov.fazenda.receita.irpf2026) and marked as non-translated in the metadata description or is translated to English
+     - name: Patches
+       description: |
+         Submissions must aim to distribute the application with minimal modifications and must closely follow the upstream source.
+@@ -587,9 +633,16 @@       items:
+         - name: Submission distributes the application with minimal modifications and closely follows the upstream source.
+           description: null
+           items: null
++          actions:
++            - SHOW_MODULES # To see how we build the app from the upsteram source
++            - SHOW_IS_SUBMITTER_CONTRIBUTOR # To see if the submitter is an upstream contributor (by resolving upstream project's contribution list and checking if contributor's username shows up in log), which would make it more likely that they do minimal modifications
++            - SHOW_SUBMISSION_REPO_SOURCE # To manually sweep the _submission_ repo (not main module) for any patch files etc. that would make it differ from the upstream source
+         - name: All patches required for the modifications are included in the submission along with the manifest.
+           description: null
+           items: null
++          actions:
++            - SHOW_MODULES # To see how we build the app from the upsteram source and whether we fetch patches in funky ways instead of proper patch files
++            - SHOW_SUBMISSION_REPO_SOURCE # To manually sweep the _submission_ repo (not main module) for any patch files etc. that would make it differ from the upstream source
+     - name: Stable releases
+       description: |
+         The Flathub stable repository is dedicated to hosting only stable software. The Flathub beta repository can be used to publish beta software, though it will not be listed on the website and users must be manually migrated if switched to the stable repo later.
+@@ -599,12 +652,23 @@       items:
+         - name: Submission targets the Flathub stable repository and contains only stable software.
+           description: null
+           items: null
++          actions:
++            - SHOW_PR_TARGET # We should check whether the merge target is the `new-pr` branch, see https://github.com/flathub/flathub/pull/9248
++            - SHOW_METAINFO # To see changelog and current app version
++            - SHOW_PROJECT_RELEASES # Via resolved app's sources, check for GitHub/GitLab/Forgejo release tags, git tags, changelogs etc.
+         - name: Submission is not a nightly release, development snapshot, or software requiring daily updates.
+           description: null
+           items: null
++          actions:
++            - SHOW_METAINFO # To see changelog and current app version
++            - SHOW_METAINFO_CHANGELOG_FREQUENCY # To see frequency of releases
++            - SHOW_PROJECT_RELEASES # Via resolved app's sources, check for GitHub/GitLab/Forgejo release tags, git tags, changelogs etc.
++            - SHOW_PROJECT_RELEASES_FREQUENCY # To see frequency of releases
+         - name: Submission is not a new submission to the Flathub beta repository.
+           description: null
+           items: null
++          actions:
++            - SHOW_PR_TARGET # We should check whether the merge target is the `new-pr` branch, see https://github.com/flathub/flathub/pull/9248
+     - name: Required files
+       description: |
+         Under no circumstances should source code nor build artifacts be included in the submission. Flathub is not intended to host application source code nor binaries, including that of any dependencies.
+
