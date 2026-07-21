@@ -1,0 +1,123 @@
+From f63258f1722c8ce875ea87a183c7f259b9279ec7 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Mon, 20 Jul 2026 23:06:23 -0700
+Subject: [PATCH] feat: Add actions for required metadata, trademarks icons etc.
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/guidelines.yaml b/guidelines.yaml
+index a1b02c92b3d12047fb66282869904f7cf6658de3..f3ab31fe439533ce7a22d9452c12494c9f7b14af 100644
+--- a/guidelines.yaml
++++ b/guidelines.yaml
+@@ -479,6 +479,8 @@             - SHOW_REPO_MEDIA_CANDIDATES # Find any potential media files in the submission repo that could infringe on trademarks
+             - SHOW_APP_MEDIA_CANDIDATES # Find any potential media files in the app repo that could infringe on trademarks
+             - SHOW_EUIPO_MATCHES # Get EUIPO trademark search results for name and potentially images
+             - SHOW_USPTO_MATCHES # Get USPTO trademark search results for name and potentially images
++            - SHOW_EUIPO_MATCHES # Get EUIPO trademark search results for icon (see https://euipo.europa.eu/eSearch/)
++            - SHOW_USPTO_MATCHES # Get USPTO trademark search results for icon (see https://www.uspto.gov/subscription-center/2026/trademarks-introduces-ai-features-make-your-experience-easier)
+             - SHOW_REVERSE_IMAGE_SEARCH_MATCHES # Check, via reverse-image search, whether any media is in use by somebody else
+         - name: License of contents in Flathub repository
+           description: |
+@@ -862,6 +864,9 @@             Required metadata files are integrated in the upstream project (not copied into the submission PR), unless the
+             application uses an extra-data source.
+           description: null
+           items: null
++          actions:
++            - SHOW_EXTRA_DATA # To show whether there is any extra data sources
++            - SHOW_SUBMISSION_REPO_METADATA_FILES # To manually sweep the _submission_ repo (not main module) for metadata files (e.g. .desktop file, metainfo etc.)
+         - name: Name and Icon
+           description: |
+             The application name and icon as presented to the Flathub website and to users must be distinct and must not violate any trademarks.
+@@ -873,12 +878,36 @@
+             Vendor-specific policies (e.g. GNOME, COSMIC) must also be respected where applicable.
+           items:
+             - name: Application name as presented to Flathub and users is distinct and does not violate any trademarks.
++              actions:
++                - SHOW_METAINFO_NAME # To see name
++                - SHOW_EUIPO_MATCHES # Get EUIPO trademark search results for name
++                - SHOW_USPTO_MATCHES # Get USPTO trademark search results for name
+             - name: Application icon as presented to Flathub and users is distinct and does not violate any trademarks.
++              actions:
++                - SHOW_METAINFO_ICON # To resolve icon to actual asset
++                - SHOW_EUIPO_MATCHES # Get EUIPO trademark search results for icon (see https://euipo.europa.eu/eSearch/)
++                - SHOW_USPTO_MATCHES # Get USPTO trademark search results for icon (see https://www.uspto.gov/subscription-center/2026/trademarks-introduces-ai-features-make-your-experience-easier)
++                - SHOW_REVERSE_IMAGE_SEARCH_MATCHES # Check, via reverse-image search, whether any media is in use by somebody else
+             - name:
+                 Official affiliation is not implied by using a vendor's name in the application name or icon (unless the application
+                 is actually part of that vendor's project).
++              actions:
++                - SHOW_METAINFO_NAME # To see name and whether it claims to be official
++                - SHOW_METAINFO_ICON # To resolve icon to actual asset and whether it claims to be official
++                - SHOW_METAINFO # To see if it's advertised as official (e.g. description)
++                - SHOW_APP_ID # To see if app claims to be official (e.g. org.gnome)
++                - SHOW_MODULES # To see if we download from upstream/vendor's sources
++                - SHOW_IS_SUBMITTER_CONTRIBUTOR # To see if the submitter is an upstream contributor (by resolving upstream project's contribution list and checking if contributor's username shows up in log)
+             - name: Icon is sufficiently distinct to convey the project's own identity and prevent user confusion.
++              actions:
++                - SHOW_METAINFO # To see what the app advertises itself as
++                - SHOW_METAINFO_ICON # To resolve icon to actual asset and see whether it matches the advertisement
+             - name: Submission complies with relevant vendor policies (e.g. GNOME, COSMIC) where applicable.
++              actions:
++                - SHOW_METAINFO # To see what the app advertises itself as (e.g. whether it's a GNOME-associated app)
++                - SHOW_METAINFO_ICON # To resolve icon to actual asset
++                - SHOW_GNOME_ICON_GUIDELINES # To show the app icon HIG guidelines for GNOME (see https://developer.gnome.org/hig/guidelines/app-icons.html)
++                - SHOW_KDE_ICON_GUIDELINES # To show the app icon HIG guidelines for KDE (see https://develop.kde.org/hig/icons/colorful/)
+         - name: Appstream
+           description: |
+             All submissions must provide a Metainfo file that passes validation.
+@@ -890,6 +919,9 @@           items:
+             - name:
+                 Submission provides a Metainfo file that passes validation (mandatory for apps appearing on the Flathub website;
+                 optional for runtimes, extensions, and BaseApps).
++              actions:
++                - SHOW_SUBMISSION_TYPE # Whether it's a regular app or a runtime, extension or BaseApp
++                - SHOW_METAINFO # The linter should already have checked this, but double-check
+             - name: Description notes
+               description: |
+                 Special notes that must be added to the Metainfo description in specific circumstances.
+@@ -900,26 +932,44 @@                     of APP NAME and not officially supported by UPSTREAM NAME." is added as the first <p> tag of the description (unofficially
+                     packaged open source submissions may also follow this).
+                   description: null
+                   items: null
++                  actions:
++                    - SHOW_METAINFO # To see license as declared in metainfo and description of submission
++                    - SHOW_SUBMISSION_REPO_LICENSE_CANDIDATES # To see tree and contents of license file candidates in the submission's repo, plus SPDX headers
++                    - SHOW_IS_SUBMITTER_CONTRIBUTOR # To see if the submitter is an upstream contributor (by resolving upstream project's contribution list and checking if contributor's username shows up in log), which would make it more likely that it's an official contribution
+                 - name:
+                     If the submission is unavailable in English and only exists in a small number of select locales, a note like
+                     "This app is only available in LANG NAME." is added.
+                   description: null
+                   items: null
++                  actions:
++                    - SHOW_METAINFO # To see if it's region-specific (see e.g. https://flathub.org/en/apps/br.gov.fazenda.receita.irpf2026) and marked as non-translated in the metadata description or is translated to English
+                 - name:
+                     If the user needs to perform additional post-installation steps to run the submission, they are mentioned
+                     or linked in the description.
+                   description: null
+                   items: null
++                  actions:
++                    - RUN_SUBMISSION # To manually check for complicated post-installations teps
++                    - SHOW_METAINFO # To see if it's advertised as having a dependency on to host components
++                    - SHOW_FINISH_ARGS # To check if we have broad permissions typical of something that's not using portals
+         - name: Desktop file
+           description: |
+             All graphical applications must include a desktop file.
+           items:
+             - name: All graphical applications include a desktop file.
++              actions:
++                - SHOW_FINISH_ARGS # To check if we have permissions for this to be a graphical app
++                - SHOW_DESKTOP_FILE # To see if we have a desktop file
+         - name: Icons
+           description: |
+             Graphical applications must provide, preferably a SVG icon or at least a 256x256 PNG icon, properly named and installed.
+           items:
+             - name: Graphical application provides an icon (preferably SVG, or at minimum a 256x256 PNG), properly named and installed.
++              actions:
++                - SHOW_METAINFO_ICON # To resolve icon to actual asset and see whether it matches the advertisement
++                - SHOW_METAINFO_ICON_METADATA # To resolve icon to actual asset and see what it's metadata (permission etc.) is
++                - SHOW_METAINFO_ICON_PATH # To resolve icon path and see what the icon is named
++                - SHOW_APP_ID # To see what the icon path should be
+ - name: MetaInfo guidelines # Generated from https://docs.flathub.org/docs/for-app-authors/metainfo-guidelines
+   description: |
+     These are a set of guidelines for MetaInfo that should be followed for submission on Flathub.
+
