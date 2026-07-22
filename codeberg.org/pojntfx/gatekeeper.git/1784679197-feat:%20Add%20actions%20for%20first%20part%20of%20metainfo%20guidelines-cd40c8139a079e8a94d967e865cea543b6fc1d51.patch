@@ -1,0 +1,270 @@
+From cd40c8139a079e8a94d967e865cea543b6fc1d51 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Tue, 21 Jul 2026 17:13:17 -0700
+Subject: [PATCH] feat: Add actions for first part of metainfo guidelines
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/guidelines.yaml b/guidelines.yaml
+index f3ab31fe439533ce7a22d9452c12494c9f7b14af..5f1a129c2fc37f530b568e502df0af69f677730f 100644
+--- a/guidelines.yaml
++++ b/guidelines.yaml
+@@ -991,6 +991,8 @@       items:
+         - name: MetaInfo file passes validation via flatpak-builder-lint appstream (no errors or warnings).
+           description: null
+           items: null
++          actions:
++            - SHOW_METAINFO # The linter should already have caught this, but double-check
+     - name: Path and filename
+       description: |
+         /app/share/appdata and %{id}.appdata.xml are considered to be the legacy path and filename, respectively.
+@@ -1000,11 +1002,16 @@       items:
+         - name: MetaInfo file is placed in /app/share/metainfo/ (not the legacy /app/share/appdata path).
+           description: null
+           items: null
++          actions:
++            - SHOW_METAINFO_PATH # The linter should already have caught this, but double-check
+         - name:
+             MetaInfo file is named %{id}.metainfo.xml (not the legacy %{id}.appdata.xml form) and the filename matches the
+             id set in the Flatpak manifest exactly.
+           description: null
+           items: null
++          actions:
++            - SHOW_APP_ID # To see what the icon path should be
++            - SHOW_METAINFO_FILE_NAME # The linter should already have caught this, but double-check
+     - name: Header
+       description: |
+         All MetaInfo files must start with a standard XML header and a component tag whose type matches the kind of submission (desktop-application, console-application, addon, runtime).
+@@ -1012,11 +1019,17 @@       items:
+         - name: MetaInfo file starts with the standard XML declaration and a copyright comment.
+           description: null
+           items: null
++          actions:
++            - SHOW_METAINFO # The linter should already have caught this, but double-check
+         - name:
+             component type matches the kind of submission (desktop-application for GUI apps, console-application for console
+             apps, addon for extensions, runtime for SDK extensions/runtimes).
+           description: null
+           items: null
++          actions:
++            - SHOW_METAINFO # To show the component type and title/description to see what the type is/what it declares itself as
++            - SHOW_MANIFEST # To check how the Flatpak component looks like/which kind it is
++            - SHOW_FINISH_ARGS # To check if we have permissions for this to be a graphical app
+     - name: ID
+       description: |
+         The ID must be exactly the same as the Application ID and must not include trailing components like .desktop.
+@@ -1024,9 +1037,15 @@       items:
+         - name: <id> tag value is exactly the same as the Application ID.
+           description: null
+           items: null
++          actions:
++            - SHOW_APP_ID # To see what the app ID is
++            - SHOW_METAINFO_ID # To see if the metainfo id tag matches the app ID
+         - name: <id> tag value does not contain a trailing component like .desktop.
+           description: null
+           items: null
++          actions:
++            - SHOW_APP_ID # To see what the app ID is
++            - SHOW_METAINFO_ID # To see if the metainfo has a trailing component that's not also in the app ID
+     - name: Renaming ID tag
+       description: |
+         The ID tag must exactly match the Flatpak ID. If it has to be renamed completely, the application needs to be resubmitted.
+@@ -1042,11 +1061,21 @@             If the ID has been renamed, the old ID is present in both a <provides> tag and a <replaces> tag in the MetaInfo
+             file.
+           description: null
+           items: null
++          actions:
++            - SHOW_APP_ID # New app ID
++            - SHOW_OLD_APP_ID # Previous app ID (by looking into git history for submission's repo in flathub GH org)
++            - SHOW_METAINFO_PROVIDES # To check if the old app ID is in provides tag
++            - SHOW_METAINFO_REPLACES # To check if the old app ID is in replaces tag
+         - name:
+             If rename-appdata-file is used in the manifest, the ID tag in the MetaInfo file is updated automatically and the
+             old ID added to <provides>.
+           description: null
+           items: null
++          actions:
++            - SHOW_METAINFO_RENAME_APPDATA_FILE # To show any rename-appdata-file tags in the manifest
++            - SHOW_APP_ID # New app ID
++            - SHOW_OLD_APP_ID # Previous app ID (by looking into git history for submission's repo in flathub GH org)
++            - SHOW_METAINFO_PROVIDES # To check if the old app ID is in provides tag
+     - name: License
+       description: |
+         All MetaInfo must have a metadata license tag that is the license of the MetaInfo file itself.
+@@ -1058,23 +1087,42 @@       items:
+         - name: MetaInfo file has a <metadata_license> tag representing the license of the MetaInfo file itself.
+           description: null
+           items: null
++          actions:
++            - SHOW_METAINFO_METADATA_LICENSE # To see license for metainfo itself
++            - SHOW_SUBMISSION_REPO_LICENSE_CANDIDATES # To see tree and contents of license file candidates in the submission's repo, plus SPDX headers
+         - name: If the metadata was not provided by upstream, it is licensed with FSFAP or CC0-1.0 (or another recommended license).
+           description: null
+           items: null
++          actions:
++            - SHOW_METAINFO_METADATA_LICENSE # To see license for metainfo itself
++            - SHOW_SUBMISSION_REPO_LICENSE_CANDIDATES # To see tree and contents of license file candidates in the submission's repo, plus SPDX headers
++            - SHOW_IS_SUBMITTER_CONTRIBUTOR # To see if the submitter is an upstream contributor (by resolving upstream project's contribution list and checking if contributor's username shows up in log), which would make it more likely that the metadata is provided by the upstream as well
+         - name: MetaInfo file has a mandatory <project_license> tag.
+           description: null
+           items: null
++          actions:
++            - SHOW_METAINFO_PROJECT_LICENSE # To see project license as declared in metainfo
++            - SHOW_SUBMISSION_REPO_LICENSE_CANDIDATES # To see tree and contents of license file candidates in the submission's repo, plus SPDX headers
+         - name:
+             <project_license> value is a valid SPDX license identifier or SPDX license expression (AND/OR/WITH operators may
+             be used).
+           description: null
+           items: null
+-        - name: Proprietary licenses use the LicenseRef-proprietary=<URL> form.
++          actions:
++            - SHOW_METAINFO_PROJECT_LICENSE # To see project license as declared in metainfo
++            - SHOW_SUBMISSION_REPO_LICENSE_CANDIDATES # To see tree and contents of license file candidates in the submission's repo, plus SPDX headers
++        - name: Proprietary licenses use the LicenseRef-proprietary=<URL> form. # See https://spdx.github.io/spdx-spec/v3.0.1/annexes/spdx-license-expressions/
+           description: null
+           items: null
++          actions:
++            - SHOW_METAINFO_ALL_LICENSES # To see project and metadata licenses as declared in metainfo
++            - SHOW_SUBMISSION_REPO_LICENSE_CANDIDATES # To see tree and contents of license file candidates in the submission's repo, plus SPDX headers
+         - name: Custom licenses use the LicenseRef-<identifier> form with a valid identifier.
+           description: null
+           items: null
++          actions:
++            - SHOW_METAINFO_ALL_LICENSES # To see project and metadata licenses as declared in metainfo
++            - SHOW_SUBMISSION_REPO_LICENSE_CANDIDATES # To see tree and contents of license file candidates in the submission's repo, plus SPDX headers
+     - name: Name and summary
+       description: |
+         The name should not violate any trademarks.
+@@ -1084,12 +1132,22 @@       items:
+         - name: <name> and <summary> tags are present.
+           description: null
+           items: null
++          actions:
++            - SHOW_METAINFO_NAME # To see the name tag
++            - SHOW_METAINFO_SUMMARY # To see the summary tag
+         - name: <name> does not violate any trademarks.
+           description: null
+           items: null
++          actions:
++            - SHOW_EUIPO_MATCHES # Get EUIPO trademark search results for name tag
++            - SHOW_USPTO_MATCHES # Get USPTO trademark search results for name tag
+         - name: Name and summary follow the quality guidelines.
+           description: null
+           items: null
++          actions:
++            - SHOW_METAINFO_NAME # To see the name tag
++            - SHOW_METAINFO_SUMMARY # To see the summary tag
++            - SHOW_QUALITY_GUIDELINES_LINK # We'll check for this further down
+     - name: Developer Name
+       description: |
+         A developer tag with an id attribute and a name child tag must be present. The name must be the author or developer of the application.
+@@ -1101,15 +1159,23 @@       items:
+         - name: <developer> tag with an id attribute and a <name> child tag is present.
+           description: null
+           items: null
++          actions:
++            - SHOW_DEVELOPER_TAG # To see developer tag and it's children
+         - name: <developer> id is a reverse DNS (e.g. org.example).
+           description: null
+           items: null
++          actions:
++            - SHOW_DEVELOPER_TAG_ID # To see developer tag's ID
+         - name: <name> inside <developer> is the author or developer of the application.
+           description: null
+           items: null
++          actions:
++            - SHOW_DEVELOPER_TAG_NAME # To see developer tag's name child
+         - name: Only one <developer> tag exists, and only one untranslated <name> child tag inside it.
+           description: null
+           items: null
++          actions:
++            - SHOW_DEVELOPER_TAG_COUNT # To see the count of all developer tags
+     - name: Description
+       description: |
+         A short and informative description must be present.
+@@ -1121,12 +1187,18 @@       items:
+         - name: A short and informative <description> tag is present.
+           description: null
+           items: null
++          actions:
++            - SHOW_METAINFO_DESCRIPTION # To see the description tag
+         - name: <description> only contains supported child tags (p, ol, ul with li, em, code).
+           description: null
+           items: null
++          actions:
++            - SHOW_METAINFO_DESCRIPTION_CHILD_TYPES # To see the description tag's children
+         - name: <description> has at least one non-empty p, ol, or ul tag.
+           description: null
+           items: null
++          actions:
++            - SHOW_METAINFO_DESCRIPTION # To see the description tag's children
+         - name: Website specific formatting
+           description: |
+             The Flathub website will make the content of any p tag bold, if it is enclosed inside ** like below. Some new submissions may need to use this in some cases, please see the requirements.
+@@ -1134,6 +1206,8 @@           items:
+             - name:
+                 Where needed (e.g. unofficial packaging notes), bold text in <p> tags is enclosed with ** to render bold on
+                 the Flathub website.
++              actions:
++                - SHOW_METAINFO_DESCRIPTION # To see the description tag's children
+     - name: Launchable
+       description: |
+         All graphical applications having a desktop file must have this tag in the MetaInfo. If this is present, appstreamcli compose will pull icons, keywords and categories from the desktop file.
+@@ -1147,12 +1221,22 @@       items:
+         - name: Graphical applications with a desktop file include a <launchable type="desktop-id"> tag in the MetaInfo.
+           description: null
+           items: null
++          actions:
++            - SHOW_FINISH_ARGS # To check if we have permissions for this to be a graphical app
++            - SHOW_DESKTOP_FILE # To see if we have a desktop file
++            - SHOW_METAINFO_LAUNCHABLE # To see the the launchable tag in metainfo
+         - name: <launchable> value corresponds to an installed desktop file and adheres to the permitted exportable patterns.
+           description: null
+           items: null
++          actions:
++            - SHOW_APP_ID # To see the ID that's expected for the launchable tag's child/value
++            - SHOW_DESKTOP_FILE # To see if we have a desktop file
++            - SHOW_METAINFO_LAUNCHABLE # To see the the launchable tag in metainfo
+         - name: Only a single <launchable> tag is used.
+           description: null
+           items: null
++          actions:
++            - SHOW_METAINFO_LAUNCHABLE_TAG_COUNT # To see the count of all launchable tags
+     - name: Provides
+       description: |
+         This can be used to link to other instances of the application using a different ID. It also prevents ODRS reviews to be "lost" on a rename.
+@@ -1164,9 +1248,21 @@       items:
+         - name: When the application has been renamed, <provides> contains an <id> entry for the previous ID(s).
+           description: null
+           items: null
++          actions:
++            - SHOW_METAINFO_RENAME_DESKTOP_FILE # To show any rename-desktop-file tags in the manifest
++            - SHOW_APP_ID # New app ID
++            - SHOW_OLD_APP_ID # Previous app ID (by looking into git history for submission's repo in flathub GH org)
++            - SHOW_METAINFO_PROVIDES # To check if the old app ID is in provides tag
+         - name: Console applications add their main binary name to <provides> using a <binary> entry.
+           description: null
+           items: null
++          actions:
++            - SHOW_METAINFO_RENAME_DESKTOP_FILE # To show any rename-desktop-file tags in the manifest
++            - SHOW_APP_ID # New app ID
++            - SHOW_OLD_APP_ID # Previous app ID (by looking into git history for submission's repo in flathub GH org)
++            - SHOW_FINISH_ARGS # To check if we have permissions for this to be a graphical app
++            - SHOW_COMMAND # To see how the app is launched (which is usually the binary)
++            - SHOW_METAINFO_PROVIDES_BINARY # To check if the old app ID is in provides tag
+     - name: Replaces
+       description: |
+         In general renaming the application ID should be avoided, but if it was renamed at some point, this tag can be used to indicate that the application in current id tag replaces the one in this tag.
+@@ -1176,6 +1272,11 @@             If the application was renamed, a <replaces><id>old-id</id></replaces> entry is present pointing to the previous
+             ID.
+           description: null
+           items: null
++          actions:
++            - SHOW_APP_ID # New app ID
++            - SHOW_OLD_APP_ID # Previous app ID (by looking into git history for submission's repo in flathub GH org)
++            - SHOW_METAINFO_PROVIDES # To check if the old app ID is in provides tag
++            - SHOW_METAINFO_REPLACES # To check if the old app ID is in replaces tag
+     - name: Categories and keywords
+       description: |
+         If there's a launchable defined for a desktop application, categories and keywords are pulled from the desktop file. Defining them separately in the Metainfo file will override the contents of the desktop file.
+
