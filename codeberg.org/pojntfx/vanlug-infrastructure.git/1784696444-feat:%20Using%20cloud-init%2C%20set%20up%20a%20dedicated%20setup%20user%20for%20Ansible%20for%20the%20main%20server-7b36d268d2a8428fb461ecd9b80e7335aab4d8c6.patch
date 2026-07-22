@@ -1,0 +1,103 @@
+From 7b36d268d2a8428fb461ecd9b80e7335aab4d8c6 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Tue, 21 Jul 2026 22:00:44 -0700
+Subject: [PATCH] feat: Using cloud-init, set up a dedicated setup user for Ansible for the main server
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/cloud-init.yaml b/cloud-init.yaml
+new file mode 100644
+index 0000000000000000000000000000000000000000..9c53f3e1c2b4873e723c1887129d43833f244d85
+--- /dev/null
++++ b/cloud-init.yaml
+@@ -0,0 +1,15 @@
++#cloud-config
++# Adapted from https://eshlox.net/hetzner-opentofu
++users:
++  - name: ${ssh_setup_user}
++    groups: wheel
++    shell: /bin/bash
++    sudo: ALL=(ALL) NOPASSWD:ALL
++    ssh_authorized_keys:
++      - ${ssh_public_key}
++
++ssh_pwauth: false
++disable_root: true
++
++runcmd:
++  - systemctl restart sshd
+diff --git a/main.tofu b/main.tofu
+index 3db9045a15a0f8c05784373b259b8b25cd12e8b9..801fd5b8abb7d2ea4e56d09fe720ae1312182e99 100644
+--- a/main.tofu
++++ b/main.tofu
+@@ -57,15 +57,21 @@   firewall_ids = [hcloud_firewall.vanlug_main.id]
+ 
+   backups = true
+ 
+-  # Data is stored on the server's volume directly; we should not destroy it
+-  delete_protection  = true
+-  rebuild_protection = true
++  # # Data is stored on the server's volume directly; we should not destroy it
++  # delete_protection  = true
++  # rebuild_protection = true
+ 
+-  lifecycle {
+-    prevent_destroy = true # Data is stored on the server's volume directly; we should not destroy it
++  user_data = templatefile("cloud-init.yaml", {
++    ssh_setup_user = var.ssh_setup_user
++    ssh_public_key = var.ssh_public_key
++  })
+ 
+-    ignore_changes = [
+-      ssh_keys # We can't update SSH keys without destroying the server and restarting it
+-    ]
+-  }
++  # lifecycle {
++  #   prevent_destroy = true # Data is stored on the server's volume directly; we should not destroy it
++
++  #   ignore_changes = [
++  #     ssh_keys, # We can't update SSH keys without destroying the server and recreating it
++  #     user_data # We can't update cloud-init user data without destroying the server and recreating it
++  #   ]
++  # }
+ }
+diff --git a/outputs.tofu b/outputs.tofu
+index a5282948d747a42d3705f3e52e5bf04550bc3e3c..9f5dc62c71f00518e95dbdf09da6b6755e1a018e 100644
+--- a/outputs.tofu
++++ b/outputs.tofu
+@@ -8,7 +8,7 @@   description = "IPv4 address of the server"
+   value       = hcloud_server.vanlug_main.ipv4_address
+ }
+ 
+-output "user" {
+-  description = "User of the server"
+-  value       = "root"
++output "ssh_setup_user" {
++  description = "SSH setup user of the server"
++  value       = var.ssh_setup_user
+ }
+\ No newline at end of file
+diff --git a/variables.tofu b/variables.tofu
+index b3aed66ab64836c1487b2e4b76bb816d8f043d1b..9d65c3a856427e41f50e5ee106995935daa69469 100644
+--- a/variables.tofu
++++ b/variables.tofu
+@@ -1,10 +1,16 @@
+ variable "ssh_public_key" {
+-  description = "SSH Public Key"
++  description = "SSH public key"
+   type        = string
+ }
+ 
++variable "ssh_setup_user" {
++  description = "SSH setup user"
++  type        = string
++  default     = "setup"
++}
++
+ variable "hetzner_api_key" {
+-  description = "Hetzner API Key"
++  description = "Hetzner API key"
+   type        = string
+   sensitive   = true
+ }
+
