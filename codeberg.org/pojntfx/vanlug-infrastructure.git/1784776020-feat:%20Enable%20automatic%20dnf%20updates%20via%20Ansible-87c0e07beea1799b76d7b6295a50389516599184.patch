@@ -1,0 +1,48 @@
+From 87c0e07beea1799b76d7b6295a50389516599184 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Wed, 22 Jul 2026 20:07:00 -0700
+Subject: [PATCH] feat: Enable automatic dnf updates via Ansible
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/site.yaml b/site.yaml
+index 31946771ca94f6e8f761e6d310f865988048cb66..44fb409270f61a22e93d5cfa82efc36f1f628c44 100644
+--- a/site.yaml
++++ b/site.yaml
+@@ -1,2 +1,4 @@
+ - name: Configure firewall
+   ansible.builtin.import_playbook: firewall.yaml
++- name: Configure automatic updates
++  ansible.builtin.import_playbook: updates.yaml
+diff --git a/updates.yaml b/updates.yaml
+new file mode 100644
+index 0000000000000000000000000000000000000000..e0d55656b09e13f591eaca808b2d1d6fce9766a1
+--- /dev/null
++++ b/updates.yaml
+@@ -0,0 +1,25 @@
++- name: Configure automatic updates
++  hosts: all
++  gather_facts: false
++  tasks:
++    - name: Install dnf-automatic
++      become: true
++      ansible.builtin.package:
++        name:
++          - dnf-automatic
++        state: present
++    - name: Write dnf-automatic config
++      become: true
++      ansible.builtin.copy:
++        content: | # See https://docs.fedoraproject.org/en-US/quick-docs/autoupdates/
++          [commands]
++          apply_updates=True
++          reboot=when-changed
++        dest: /etc/dnf/automatic.conf
++        mode: '644'
++    - name: Enable dnf-automatic
++      become: true
++      ansible.builtin.systemd_service:
++        name: dnf-automatic.timer
++        state: started
++        enabled: true
+
