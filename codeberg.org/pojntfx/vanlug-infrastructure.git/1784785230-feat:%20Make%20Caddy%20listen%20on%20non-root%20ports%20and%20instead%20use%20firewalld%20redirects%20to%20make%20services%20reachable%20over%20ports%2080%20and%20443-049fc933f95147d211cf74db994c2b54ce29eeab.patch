@@ -1,0 +1,47 @@
+From 049fc933f95147d211cf74db994c2b54ce29eeab Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Wed, 22 Jul 2026 22:40:30 -0700
+Subject: [PATCH] feat: Make Caddy listen on non-root ports and instead use firewalld redirects to make services reachable over ports 80 and 443
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/caddy.container b/caddy.container
+index bd64ccbd8d9c09f788a21b6cda77066d2054903e..8425a7fc5a798cdb88ed75bdf540d2fde5517997 100644
+--- a/caddy.container
++++ b/caddy.container
+@@ -2,9 +2,9 @@ [Container]
+ ContainerName=caddy
+ Image=docker.io/caddy/caddy:latest
+ Label=io.containers.autoupdate=registry
+-PublishPort=80:80
+-PublishPort=443:443
+-PublishPort=443:443/udp
++PublishPort=8080:80
++PublishPort=8443:443
++PublishPort=8443:443/udp
+ Volume=caddy_data:/data
+ 
+ [Service]
+diff --git a/caddy.yaml b/caddy.yaml
+index b82220d24c82bcfb6fb21fa896d33d6319d4ab8e..95130e56c1fe55490b2982db0596fda7cdc5f6b0 100644
+--- a/caddy.yaml
++++ b/caddy.yaml
+@@ -56,3 +56,17 @@         enabled: true
+         scope: user
+       environment:
+         XDG_RUNTIME_DIR: "/run/user/{{ caddy_user.uid }}"
++    - name: Create port forwarding rules
++      become: true
++      ansible.posix.firewalld:
++        rich_rule: "{{ item }}"
++        permanent: true
++        immediate: true
++        state: enabled
++      loop:
++        - rule family=ipv6 forward-port port=80 protocol=tcp to-port=8080
++        - rule family=ipv4 forward-port port=80 protocol=tcp to-port=8080
++        - rule family=ipv6 forward-port port=443 protocol=tcp to-port=8443
++        - rule family=ipv4 forward-port port=443 protocol=tcp to-port=8443
++        - rule family=ipv6 forward-port port=443 protocol=udp to-port=8443 # HTTP/3
++        - rule family=ipv4 forward-port port=443 protocol=udp to-port=8443 # HTTP/3
+
