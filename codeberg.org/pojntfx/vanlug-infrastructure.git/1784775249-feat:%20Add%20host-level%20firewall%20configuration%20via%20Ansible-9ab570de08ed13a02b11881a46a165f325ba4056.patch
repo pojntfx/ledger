@@ -1,0 +1,75 @@
+From 9ab570de08ed13a02b11881a46a165f325ba4056 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Wed, 22 Jul 2026 19:54:09 -0700
+Subject: [PATCH] feat: Add host-level firewall configuration via Ansible
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/README.md b/README.md
+index a30a9fbc009f239b3158f5a0f87619fe01f03743..30aebd7dd900125e23438457408fe3c9d6a8985c 100644
+--- a/README.md
++++ b/README.md
+@@ -18,7 +18,7 @@ $ cd vanlug-infrastructure
+ $ source .env.local # See `.env` for required secrets; ask `@pojntfx:beeper.com` for access
+ $ tofu init
+ $ tofu apply
+-$ ansible-galaxy collection install cloud.terraform
++$ ansible-galaxy collection install cloud.terraform ansible.posix
+ $ ansible-playbook site.yaml # You might want to change `binary_path` in `inventory.yaml` first
+ ```
+ 
+diff --git a/firewall.yaml b/firewall.yaml
+new file mode 100644
+index 0000000000000000000000000000000000000000..99364a4cce76fe24812181d72d1e85fcc2b96a53
+--- /dev/null
++++ b/firewall.yaml
+@@ -0,0 +1,30 @@
++- name: Configure firewall
++  hosts: all
++  gather_facts: false
++  tasks:
++    - name: Install firewalld and Python bindings
++      become: true
++      ansible.builtin.package:
++        name:
++          - firewalld
++          - python3-firewall
++        state: present
++    - name: Enable firewalld
++      become: true
++      ansible.builtin.service:
++        name: firewalld
++        state: started
++        enabled: true
++    - name: Open required ports
++      become: true
++      ansible.posix.firewalld:
++        port: "{{ item }}"
++        permanent: true
++        immediate: true
++        state: enabled
++      loop:
++        - 22/tcp
++        - 220/tcp # Forgejo SSH port
++        - 80/tcp
++        - 443/tcp
++        - 443/udp # HTTP/3
+diff --git a/site.yaml b/site.yaml
+index 2351866769dd29c991d30921dab61013edc7837e..31946771ca94f6e8f761e6d310f865988048cb66 100644
+--- a/site.yaml
++++ b/site.yaml
+@@ -1,11 +1,2 @@
+-- name: Configure all hosts
+-  hosts: all
+-  gather_facts: false
+-  tasks:
+-    - name: Get hostname
+-      ansible.builtin.command: hostname
+-      changed_when: false
+-      register: hostname
+-    - name: Show hostname
+-      ansible.builtin.debug:
+-        msg: "{{ hostname.stdout }}"
++- name: Configure firewall
++  ansible.builtin.import_playbook: firewall.yaml
+
