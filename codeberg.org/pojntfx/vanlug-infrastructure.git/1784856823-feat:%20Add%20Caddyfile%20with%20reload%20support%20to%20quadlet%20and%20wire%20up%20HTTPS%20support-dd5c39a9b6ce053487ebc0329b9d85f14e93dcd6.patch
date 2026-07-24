@@ -1,0 +1,85 @@
+From dd5c39a9b6ce053487ebc0329b9d85f14e93dcd6 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Thu, 23 Jul 2026 18:33:43 -0700
+Subject: [PATCH] feat: Add Caddyfile with reload support to quadlet and wire up HTTPS support
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/Caddyfile b/Caddyfile
+new file mode 100644
+index 0000000000000000000000000000000000000000..e773688ceb5257f507189a6239ce037ac9b4a089
+--- /dev/null
++++ b/Caddyfile
+@@ -0,0 +1,7 @@
++{
++	email felicitas@pojtinger.com
++}
++
++vanlug.p8.lu {
++	redir https://vanlug.ca{uri}
++}
+diff --git a/caddy.container b/caddy.container
+index 8425a7fc5a798cdb88ed75bdf540d2fde5517997..86bdc101153a614c87c9f4a0281062542d08644f 100644
+--- a/caddy.container
++++ b/caddy.container
+@@ -6,6 +6,7 @@ PublishPort=8080:80
+ PublishPort=8443:443
+ PublishPort=8443:443/udp
+ Volume=caddy_data:/data
++Volume=/home/caddy/.config/caddy:/etc/caddy:ro,Z
+ 
+ [Service]
+ Restart=always
+diff --git a/caddy.yaml b/caddy.yaml
+index 95130e56c1fe55490b2982db0596fda7cdc5f6b0..76f844b7adc9f6d0ae1641f1aeb1b8b730bc119a 100644
+--- a/caddy.yaml
++++ b/caddy.yaml
+@@ -35,6 +35,8 @@         dest: /home/caddy/.config/containers/systemd/caddy.container
+         owner: caddy
+         group: caddy
+         mode: "0644"
++      # This will only run on changes to the file; see https://docs.ansible.com/projects/ansible/latest/playbook_guide/playbooks_handlers.html#id1
++      notify: Restart Caddy user service
+     - name: Enable Caddy user service
+       become: true
+       become_user: caddy
+@@ -70,3 +72,38 @@         - rule family=ipv6 forward-port port=443 protocol=tcp to-port=8443
+         - rule family=ipv4 forward-port port=443 protocol=tcp to-port=8443
+         - rule family=ipv6 forward-port port=443 protocol=udp to-port=8443 # HTTP/3
+         - rule family=ipv4 forward-port port=443 protocol=udp to-port=8443 # HTTP/3
++    - name: Create config directory for Caddyfile
++      become: true
++      ansible.builtin.file:
++        dest: /home/caddy/.config/caddy
++        state: directory
++        owner: caddy
++        group: caddy
++        mode: "0755"
++    - name: Write Caddyfile
++      become: true
++      ansible.builtin.copy:
++        src: Caddyfile
++        dest: /home/caddy/.config/caddy/Caddyfile
++        owner: caddy
++        group: caddy
++        mode: "0644"
++      notify: Reload Caddy configuration
++  handlers:
++    - name: Restart Caddy user service
++      become: true
++      become_user: caddy
++      ansible.builtin.systemd_service:
++        name: caddy.service
++        state: restarted
++        daemon_reload: true
++        scope: user
++      environment:
++        XDG_RUNTIME_DIR: "/run/user/{{ caddy_user.uid }}"
++    - name: Reload Caddy configuration
++      become: true
++      become_user: caddy
++      ansible.builtin.command: podman exec -w /etc/caddy caddy caddy reload # See https://hub.docker.com/_/caddy#graceful-reloads
++      changed_when: true
++      environment:
++        XDG_RUNTIME_DIR: "/run/user/{{ caddy_user.uid }}"
+
