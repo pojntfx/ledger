@@ -1,0 +1,91 @@
+From 1d6039465837a9f31a8235649fe831e7ad71d979 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Sat, 25 Jul 2026 16:05:29 -0700
+Subject: [PATCH] feat: Add basic initial hardened Forgejo auto-installation scripts
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/.env b/.env
+index 6eca2d25572f7a4fd0ae98b0bbd31a711548672a..eec5cc215addfba2eb8213ef67804762839b326f 100644
+--- a/.env
++++ b/.env
+@@ -1,4 +1,7 @@
+ export AWS_ACCESS_KEY_ID=
+ export AWS_SECRET_ACCESS_KEY=
+ export TF_VAR_hetzner_api_key=
+-export TF_VAR_ssh_public_key="ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEwIx/dRJkK0xPD15TRAPOEsklWV/JguGpf+p9h4dQUj pojntfx@fels-asus-proart-px13"
+\ No newline at end of file
++export TF_VAR_ssh_public_key="ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEwIx/dRJkK0xPD15TRAPOEsklWV/JguGpf+p9h4dQUj pojntfx@fels-asus-proart-px13"
++export FORGEJO_ADMIN_USERNAME="pojntfx"
++export FORGEJO_ADMIN_EMAIL="felicitas@pojtinger.com"
++export FORGEJO_ADMIN_INITIAL_PASSWORD=""
+diff --git a/forgejo.container b/forgejo.container
+index c6bf80123fd1ff429d20640a64c342d2e2518fa1..fdba09f64fb7e1ddad6230724540a6246b5783a3 100644
+--- a/forgejo.container
++++ b/forgejo.container
+@@ -3,10 +3,23 @@ ContainerName=forgejo
+ Image=codeberg.org/forgejo/forgejo:16-rootless
+ Label=io.containers.autoupdate=registry
+ PublishPort=3000:3000
+-PublishPort=2022:22
+-Volume=forgejo_data:/data
+-# Forgejo runs rootless, we use DNAT on the host to redirect 220 to 2022
++PublishPort=2222:22
++Volume=forgejo_data:/var/lib/gitea
++Environment=FORGEJO__security__INSTALL_LOCK=true
++Environment=FORGEJO__security__GLOBAL_TWO_FACTOR_REQUIREMENT=all
++Environment=FORGEJO____APP_NAME="VanLUG Forge"
++Environment=FORGEJO____RUN_USER=forgejo
++# Forgejo runs rootless, we use DNAT on the host to redirect 220 to 2222
+ Environment=FORGEJO__server__SSH_PORT=220
++# Else Forgejo will try to start via HTTPS without having a cert (we use Caddy for that)
++Environment=FORGEJO__server__PROTOCOL=http
++# Forgejo runs rootless, we use Caddy, but we still need to tell Forgejo where it is accessible from
++Environment=FORGEJO__server__DOMAIN=git.vanlug.p8.lu
++Environment=FORGEJO__server__SSH_DOMAIN=git.vanlug.p8.lu
++Environment=FORGEJO__server__ROOT_URL=https://git.vanlug.p8.lu/
++# We're not open for registration, and do not need email support
++Environment=FORGEJO__service__DISABLE_REGISTRATION=true
++Environment=FORGEJO__mailer__ENABLED=false
+ LogDriver=journald
+ NoNewPrivileges=true
+ ReadOnly=true
+diff --git a/forgejo.yaml b/forgejo.yaml
+index a4832d611fd8e7e55d1b981ad3932f5163077bfe..bdb8ce9a026c415e14317c85d892edb967a14cd8 100644
+--- a/forgejo.yaml
++++ b/forgejo.yaml
+@@ -60,8 +60,31 @@         immediate: true
+         state: enabled
+       loop:
+         # Caddy can't route SSH, so we bypass it
+-        - rule family=ipv6 forward-port port=220 protocol=tcp to-port=2022
+-        - rule family=ipv4 forward-port port=220 protocol=tcp to-port=2022
++        - rule family=ipv6 forward-port port=220 protocol=tcp to-port=2222
++        - rule family=ipv4 forward-port port=220 protocol=tcp to-port=2222
++    - name: List existing Forgejo users
++      become: true
++      become_user: forgejo
++      register: forgejo_users
++      changed_when: false
++      ansible.builtin.command: podman exec forgejo forgejo admin user list
++      environment:
++        XDG_RUNTIME_DIR: "/run/user/{{ forgejo_user.uid }}"
++    - name: Set up Forgejo admin user
++      become: true
++      become_user: forgejo
++      # This is a bit brittle since we could also match a column, but that's fine for a one-time setup task
++      when: lookup('ansible.builtin.env', 'FORGEJO_ADMIN_USERNAME') not in forgejo_users.stdout
++      changed_when: true
++      ansible.builtin.command: |
++        podman exec forgejo forgejo admin user create \
++          --admin \
++          --username '{{ lookup("ansible.builtin.env", "FORGEJO_ADMIN_USERNAME") }}' \
++          --email '{{ lookup("ansible.builtin.env", "FORGEJO_ADMIN_EMAIL") }}' \
++          --password '{{ lookup("ansible.builtin.env", "FORGEJO_ADMIN_INITIAL_PASSWORD") }}' \
++          --must-change-password
++      environment:
++        XDG_RUNTIME_DIR: "/run/user/{{ forgejo_user.uid }}"
+   handlers:
+     - name: Restart Forgejo user service
+       become: true
+
