@@ -1,0 +1,186 @@
+From 6e954d5c0d8441cc56064198f1531da48c9b2375 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Sat, 25 Jul 2026 14:30:13 -0700
+Subject: [PATCH] feat: Add simple Forgejo deployment prototype behind Caddy
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/Caddyfile b/Caddyfile
+index 13ceeeb23aee6f392d537d772066b4a1da8bd2dc..b5b62a11d1c9d01cc463c9c8cc3f1235e6c56549 100644
+--- a/Caddyfile
++++ b/Caddyfile
+@@ -44,8 +44,8 @@
+ 	respond "Hello, world from the VanLUG test root domain!"
+ }
+ 
+-test.vanlug.p8.lu {
++git.vanlug.p8.lu {
+ 	import workarounds
+ 
+-	respond "Hello, world from the VanLUG test subdomain!"
++	reverse_proxy host.containers.internal:3000
+ }
+diff --git a/README.md b/README.md
+index 20b008b0dc98af68ff43f1ea9a8681c40072d3db..430e82c648d40ecfa91332f14bb92bab40921cd0 100644
+--- a/README.md
++++ b/README.md
+@@ -23,6 +23,7 @@ $ ansible-playbook site.yaml # You might want to change `binary_path` in `inventory.yaml` first
+ # To get logs for quadlets
+ $ ssh setup@vanlug.p8.lu
+ [setup@vanlug-main ~]$ sudo journalctl _SYSTEMD_USER_UNIT=caddy.service -f
++[setup@vanlug-main ~]$ sudo journalctl _SYSTEMD_USER_UNIT=forgejo.service -f
+ ```
+ 
+ ## License
+diff --git a/caddy.yaml b/caddy.yaml
+index 0535374f758a7189df79bd2c02ef8cfbc955907d..436c516ae74618c4de70b8ffc90193ce05ebc99b 100644
+--- a/caddy.yaml
++++ b/caddy.yaml
+@@ -2,13 +2,6 @@ - name: Configure Caddy # See https://major.io/p/podman-quadlet-automatic-updates/
+   hosts: all
+   gather_facts: false
+   tasks:
+-    - name: Install Podman
+-      become: true
+-      ansible.builtin.package:
+-        name:
+-          - podman
+-          - acl # For become_user
+-        state: present
+     - name: Create user for Caddy
+       become: true
+       register: caddy_user
+diff --git a/forgejo.container b/forgejo.container
+new file mode 100644
+index 0000000000000000000000000000000000000000..c6bf80123fd1ff429d20640a64c342d2e2518fa1
+--- /dev/null
++++ b/forgejo.container
+@@ -0,0 +1,15 @@
++[Container]
++ContainerName=forgejo
++Image=codeberg.org/forgejo/forgejo:16-rootless
++Label=io.containers.autoupdate=registry
++PublishPort=3000:3000
++PublishPort=2022:22
++Volume=forgejo_data:/data
++# Forgejo runs rootless, we use DNAT on the host to redirect 220 to 2022
++Environment=FORGEJO__server__SSH_PORT=220
++LogDriver=journald
++NoNewPrivileges=true
++ReadOnly=true
++
++[Install]
++WantedBy=default.target
+diff --git a/forgejo.yaml b/forgejo.yaml
+new file mode 100644
+index 0000000000000000000000000000000000000000..a4832d611fd8e7e55d1b981ad3932f5163077bfe
+--- /dev/null
++++ b/forgejo.yaml
+@@ -0,0 +1,75 @@
++- name: Configure Forgejo # See https://forgejo.org/docs/latest/admin/installation/docker/#using-rootless-image
++  hosts: all
++  gather_facts: false
++  tasks:
++    - name: Create user for Forgejo
++      become: true
++      register: forgejo_user
++      ansible.builtin.user:
++        name: forgejo
++    - name: Enable linger for Forgejo user # See https://old.reddit.com/r/systemd/comments/suaa5x/proper_way_to_enable_lingering_ansible/
++      become: true
++      ansible.builtin.command: loginctl enable-linger forgejo
++      args:
++        creates: /var/lib/systemd/linger/forgejo
++    - name: Create container directory for Forgejo
++      become: true
++      ansible.builtin.file:
++        path: /home/forgejo/.config/containers/systemd
++        state: directory
++        owner: forgejo
++        group: forgejo
++        mode: "0755"
++    - name: Write container file for Forgejo
++      become: true
++      ansible.builtin.copy:
++        src: forgejo.container
++        dest: /home/forgejo/.config/containers/systemd/forgejo.container
++        owner: forgejo
++        group: forgejo
++        mode: "0644"
++      # This will only run on changes to the file; see https://docs.ansible.com/projects/ansible/latest/playbook_guide/playbooks_handlers.html#id1
++      notify: Restart Forgejo user service
++    - name: Enable Forgejo user service
++      become: true
++      become_user: forgejo
++      ansible.builtin.systemd_service:
++        name: forgejo.service
++        state: started
++        enabled: true
++        daemon_reload: true
++        scope: user
++      environment:
++        XDG_RUNTIME_DIR: "/run/user/{{ forgejo_user.uid }}"
++    - name: Enable Podman auto-update user service
++      become: true
++      become_user: forgejo
++      ansible.builtin.systemd_service:
++        name: podman-auto-update.timer
++        state: started
++        enabled: true
++        scope: user
++      environment:
++        XDG_RUNTIME_DIR: "/run/user/{{ forgejo_user.uid }}"
++    - name: Create port forwarding rules
++      become: true
++      ansible.posix.firewalld:
++        rich_rule: "{{ item }}"
++        permanent: true
++        immediate: true
++        state: enabled
++      loop:
++        # Caddy can't route SSH, so we bypass it
++        - rule family=ipv6 forward-port port=220 protocol=tcp to-port=2022
++        - rule family=ipv4 forward-port port=220 protocol=tcp to-port=2022
++  handlers:
++    - name: Restart Forgejo user service
++      become: true
++      become_user: forgejo
++      ansible.builtin.systemd_service:
++        name: forgejo.service
++        state: restarted
++        daemon_reload: true
++        scope: user
++      environment:
++        XDG_RUNTIME_DIR: "/run/user/{{ forgejo_user.uid }}"
+diff --git a/podman.yaml b/podman.yaml
+new file mode 100644
+index 0000000000000000000000000000000000000000..55b9b6dbc24322388047f88146a13ae1fca5747d
+--- /dev/null
++++ b/podman.yaml
+@@ -0,0 +1,11 @@
++- name: Configure Podman
++  hosts: all
++  gather_facts: false
++  tasks:
++    - name: Install Podman
++      become: true
++      ansible.builtin.package:
++        name:
++          - podman
++          - acl # For become_user
++        state: present
+diff --git a/site.yaml b/site.yaml
+index cf7f28432d663e4ea760ebd077f87fbde68e276a..920402e10e04ecc0e3e8d5ee48310ce532a84707 100644
+--- a/site.yaml
++++ b/site.yaml
+@@ -2,5 +2,9 @@ - name: Configure firewall
+   ansible.builtin.import_playbook: firewall.yaml
+ - name: Configure automatic updates
+   ansible.builtin.import_playbook: updates.yaml
++- name: Configure Podman
++  ansible.builtin.import_playbook: podman.yaml
+ - name: Configure Caddy
+   ansible.builtin.import_playbook: caddy.yaml
++- name: Configure Forgejo
++  ansible.builtin.import_playbook: forgejo.yaml
+
