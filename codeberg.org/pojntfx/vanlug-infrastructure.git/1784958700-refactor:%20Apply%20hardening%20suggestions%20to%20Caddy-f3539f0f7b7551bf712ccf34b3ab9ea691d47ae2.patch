@@ -1,0 +1,49 @@
+From f3539f0f7b7551bf712ccf34b3ab9ea691d47ae2 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Fri, 24 Jul 2026 22:51:40 -0700
+Subject: [PATCH] refactor: Apply hardening suggestions to Caddy
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/Caddyfile b/Caddyfile
+index e49ebc25891032ceec509909a5574a69132dda4a..13ceeeb23aee6f392d537d772066b4a1da8bd2dc 100644
+--- a/Caddyfile
++++ b/Caddyfile
+@@ -4,6 +4,9 @@ 	email felicitas@pojtinger.com
+ 
+ 	# For HTTP/3 with socket activation we need to do this manually
+ 	auto_https disable_redirects
++
++	# We have a read-only file system
++	persist_config off
+ }
+ 
+ # These are supposed to be default_bind in the global block, but due to caddy#7525
+diff --git a/caddy.container b/caddy.container
+index 57c733757c4afd316e09b97361ae4035daae98a4..8230d42b8f2b8d874d4bb30d58d0e9f95a385ac4 100644
+--- a/caddy.container
++++ b/caddy.container
+@@ -4,14 +4,21 @@ Requires=caddy.socket
+ 
+ [Container]
+ ContainerName=caddy
++Exec=/usr/bin/caddy run --config /etc/caddy/Caddyfile
+ Image=docker.io/library/caddy:latest
+ Label=io.containers.autoupdate=registry
+ Volume=caddy_data:/data
+ Volume=/home/caddy/.config/caddy:/etc/caddy:ro,Z
+ LogDriver=journald
++# Uncomment the line below when #7526 is fixed; until
++# then, we can't enable it, since we can't reach out to ACME otherwise
++# Network=none
++NoNewPrivileges=true
++Notify=true
++ReadOnly=true
+ 
+ [Service]
+-ExecReload=podman exec -w /etc/caddy caddy caddy reload # See https://hub.docker.com/_/caddy#graceful-reloads
++ExecReload=podman exec -w /etc/caddy caddy /usr/bin/caddy reload --config /etc/caddy/Caddyfile # See https://hub.docker.com/_/caddy#graceful-reloads
+ 
+ [Install]
+ WantedBy=default.target
+
