@@ -1,0 +1,170 @@
+From 7dd1d0a40cd8eae019c761b67eacf284996f4660 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Fri, 24 Jul 2026 21:30:21 -0700
+Subject: [PATCH] feat: Add HTTP/3-compatible socket activation and improve config load logic
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/Caddyfile b/Caddyfile
+index e773688ceb5257f507189a6239ce037ac9b4a089..fbd61c8c90b3a527a407c98b634afdbf5379b0bd 100644
+--- a/Caddyfile
++++ b/Caddyfile
+@@ -1,5 +1,26 @@
++# See https://github.com/eriksjolund/podman-caddy-socket-activation/blob/main/examples/example4/Caddyfile
+ {
+ 	email felicitas@pojtinger.com
++
++	default_bind fd/4 {
++		protocols h1 h2
++	}
++
++	# HTTP/3
++	default_bind fdgram/5 {
++		protocols h3
++	}
++
++	# For HTTP/3 with socket activation we need to do this manually
++	auto_https disable_redirects
++}
++
++http:// {
++	bind fd/3 {
++		protocols h1
++	}
++
++	redir https://{host}{uri}
+ }
+ 
+ vanlug.p8.lu {
+diff --git a/caddy.container b/caddy.container
+index 70ae25d57b77a5a33c6248c6d040f2391544602f..57c733757c4afd316e09b97361ae4035daae98a4 100644
+--- a/caddy.container
++++ b/caddy.container
+@@ -1,16 +1,17 @@
++[Unit]
++After=caddy.socket
++Requires=caddy.socket
++
+ [Container]
+ ContainerName=caddy
+-Image=docker.io/caddy/caddy:latest
++Image=docker.io/library/caddy:latest
+ Label=io.containers.autoupdate=registry
+-PublishPort=8080:80
+-PublishPort=8443:443
+-PublishPort=8443:443/udp
+ Volume=caddy_data:/data
+ Volume=/home/caddy/.config/caddy:/etc/caddy:ro,Z
+ LogDriver=journald
+ 
+ [Service]
+-Restart=always
++ExecReload=podman exec -w /etc/caddy caddy caddy reload # See https://hub.docker.com/_/caddy#graceful-reloads
+ 
+ [Install]
+-WantedBy=default.target
+\ No newline at end of file
++WantedBy=default.target
+diff --git a/caddy.socket b/caddy.socket
+new file mode 100644
+index 0000000000000000000000000000000000000000..7a7de50d8016417bcbe4c8d85d6f61ad8f8b229b
+--- /dev/null
++++ b/caddy.socket
+@@ -0,0 +1,8 @@
++[Socket]
++ListenStream=8080
++ListenStream=8443
++# HTTP/3
++ListenDatagram=8443
++
++[Install]
++WantedBy=sockets.target
+diff --git a/caddy.yaml b/caddy.yaml
+index 76f844b7adc9f6d0ae1641f1aeb1b8b730bc119a..0535374f758a7189df79bd2c02ef8cfbc955907d 100644
+--- a/caddy.yaml
++++ b/caddy.yaml
+@@ -19,7 +19,36 @@       become: true
+       ansible.builtin.command: loginctl enable-linger caddy
+       args:
+         creates: /var/lib/systemd/linger/caddy
+-    - name: Create quadlet directory for Caddy
++    - name: Create socket directory for Caddy
++      become: true
++      ansible.builtin.file:
++        path: /home/caddy/.config/systemd/user
++        state: directory
++        owner: caddy
++        group: caddy
++        mode: "0755"
++    - name: Write socket file for Caddy
++      become: true
++      ansible.builtin.copy:
++        src: caddy.socket
++        dest: /home/caddy/.config/systemd/user/caddy.socket
++        owner: caddy
++        group: caddy
++        mode: "0644"
++      # This will only run on changes to the file; see https://docs.ansible.com/projects/ansible/latest/playbook_guide/playbooks_handlers.html#id1
++      notify: Restart Caddy user socket
++    - name: Enable Caddy user socket
++      become: true
++      become_user: caddy
++      ansible.builtin.systemd_service:
++        name: caddy.socket
++        state: started
++        enabled: true
++        daemon_reload: true
++        scope: user
++      environment:
++        XDG_RUNTIME_DIR: "/run/user/{{ caddy_user.uid }}"
++    - name: Create container directory for Caddy
+       become: true
+       ansible.builtin.file:
+         path: /home/caddy/.config/containers/systemd
+@@ -27,7 +56,7 @@         state: directory
+         owner: caddy
+         group: caddy
+         mode: "0755"
+-    - name: Write quadlet file for Caddy
++    - name: Write container file for Caddy
+       become: true
+       ansible.builtin.copy:
+         src: caddy.container
+@@ -88,8 +117,18 @@         dest: /home/caddy/.config/caddy/Caddyfile
+         owner: caddy
+         group: caddy
+         mode: "0644"
+-      notify: Reload Caddy configuration
++      notify: Reload Caddy user service
+   handlers:
++    - name: Restart Caddy user socket
++      become: true
++      become_user: caddy
++      ansible.builtin.systemd_service:
++        name: caddy.socket
++        state: restarted
++        daemon_reload: true
++        scope: user
++      environment:
++        XDG_RUNTIME_DIR: "/run/user/{{ caddy_user.uid }}"
+     - name: Restart Caddy user service
+       become: true
+       become_user: caddy
+@@ -100,10 +139,13 @@         daemon_reload: true
+         scope: user
+       environment:
+         XDG_RUNTIME_DIR: "/run/user/{{ caddy_user.uid }}"
+-    - name: Reload Caddy configuration
++    - name: Reload Caddy user service
+       become: true
+       become_user: caddy
+-      ansible.builtin.command: podman exec -w /etc/caddy caddy caddy reload # See https://hub.docker.com/_/caddy#graceful-reloads
+-      changed_when: true
++      ansible.builtin.systemd_service:
++        name: caddy.service
++        state: reloaded
++        daemon_reload: true
++        scope: user
+       environment:
+         XDG_RUNTIME_DIR: "/run/user/{{ caddy_user.uid }}"
+
