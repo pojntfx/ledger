@@ -1,0 +1,61 @@
+From 5571a98f62fe7e1cdcee5c717f78b73ffc7ab595 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Fri, 24 Jul 2026 22:23:59 -0700
+Subject: [PATCH] feat: Support ACME with socket activation and advertise correct `Alt-Svc` for HTTP/3
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/Caddyfile b/Caddyfile
+index fbd61c8c90b3a527a407c98b634afdbf5379b0bd..e49ebc25891032ceec509909a5574a69132dda4a 100644
+--- a/Caddyfile
++++ b/Caddyfile
+@@ -2,17 +2,29 @@ # See https://github.com/eriksjolund/podman-caddy-socket-activation/blob/main/examples/example4/Caddyfile
+ {
+ 	email felicitas@pojtinger.com
+ 
+-	default_bind fd/4 {
++	# For HTTP/3 with socket activation we need to do this manually
++	auto_https disable_redirects
++}
++
++# These are supposed to be default_bind in the global block, but due to caddy#7525
++# using that currently breaks ACME, so we instead have this block we import everywhere below.
++(workarounds) {
++	# Switch this to default_bind when #7526 is fixed
++	bind fd/4 {
+ 		protocols h1 h2
+ 	}
+ 
+ 	# HTTP/3
+-	default_bind fdgram/5 {
++	# Switch this to default_bind when #7526 is fixed
++	bind fdgram/5 {
+ 		protocols h3
+ 	}
+ 
+-	# For HTTP/3 with socket activation we need to do this manually
+-	auto_https disable_redirects
++	# Caddy runs rootless, we use DNAT on the host to redirect 443 to 8443
++	# Caddy however doesn't know this, so it advertises 8443 as Alt-Svc, which
++	# makes browser never select HTTP/3. To fix this, we just manually rewrite
++	# Alt-Svc to 443.	
++	header >Alt-Svc `h3=":443"; ma=2592000`
+ }
+ 
+ http:// {
+@@ -24,5 +36,13 @@ 	redir https://{host}{uri}
+ }
+ 
+ vanlug.p8.lu {
+-	redir https://vanlug.ca{uri}
++	import workarounds
++
++	respond "Hello, world from the VanLUG test root domain!"
++}
++
++test.vanlug.p8.lu {
++	import workarounds
++
++	respond "Hello, world from the VanLUG test subdomain!"
+ }
+
