@@ -1,0 +1,164 @@
+From 56fa809cbabdef8e1ce56f0f10bd2c3f5819e13d Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Sat, 25 Jul 2026 17:23:14 -0700
+Subject: [PATCH] feat: Add systemd socket activation to all Forgejo services, including SSH
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/forgejo-http.service b/forgejo-http.service
+new file mode 100644
+index 0000000000000000000000000000000000000000..8ad8e495d8f5ea4610a83b1401a005237731ee09
+--- /dev/null
++++ b/forgejo-http.service
+@@ -0,0 +1,11 @@
++[Unit]
++Requires=forgejo-http.socket
++After=forgejo-http.socket
++Requires=forgejo.service
++After=forgejo.service
++
++[Service]
++ExecStart=/usr/lib/systemd/systemd-socket-proxyd localhost:3001
++
++[Install]
++WantedBy=default.target
+diff --git a/forgejo-http.socket b/forgejo-http.socket
+new file mode 100644
+index 0000000000000000000000000000000000000000..ff60daee769e29d76039573a8b85befc238e5254
+--- /dev/null
++++ b/forgejo-http.socket
+@@ -0,0 +1,6 @@
++[Socket]
++ListenStream=3000
++# No HTTP/3 here, Forgejo listens on a raw TCP socket
++
++[Install]
++WantedBy=sockets.target
+diff --git a/forgejo-ssh.service b/forgejo-ssh.service
+new file mode 100644
+index 0000000000000000000000000000000000000000..0df15b0f5e2c6774d2d93c6ffe794a8aca75d474
+--- /dev/null
++++ b/forgejo-ssh.service
+@@ -0,0 +1,11 @@
++[Unit]
++Requires=forgejo-ssh.socket
++After=forgejo-ssh.socket
++Requires=forgejo.service
++After=forgejo.service
++
++[Service]
++ExecStart=/usr/lib/systemd/systemd-socket-proxyd localhost:2223
++
++[Install]
++WantedBy=default.target
+diff --git a/forgejo-ssh.socket b/forgejo-ssh.socket
+new file mode 100644
+index 0000000000000000000000000000000000000000..a9ab45534cb0ee24fe880dfc8a3add567b0b47d2
+--- /dev/null
++++ b/forgejo-ssh.socket
+@@ -0,0 +1,5 @@
++[Socket]
++ListenStream=2222
++
++[Install]
++WantedBy=sockets.target
+diff --git a/forgejo.container b/forgejo.container
+index e3867ea143681ce7ef968c93258c595b254a3f0a..f0daf286caf7cc4c2b7337681ef2a132a4d84ea4 100644
+--- a/forgejo.container
++++ b/forgejo.container
+@@ -2,8 +2,9 @@ [Container]
+ ContainerName=forgejo
+ Image=codeberg.org/forgejo/forgejo:16-rootless
+ Label=io.containers.autoupdate=registry
+-PublishPort=3000:3000
+-PublishPort=2222:2222
++# We use systemd-socket-proxyd on 3000/2222, so we listen on 3001/2223 instead
++PublishPort=3001:3000
++PublishPort=2223:2222
+ Volume=forgejo_data:/var/lib/gitea
+ Environment=FORGEJO__security__INSTALL_LOCK=true
+ Environment=FORGEJO__security__GLOBAL_TWO_FACTOR_REQUIREMENT=all
+diff --git a/forgejo.yaml b/forgejo.yaml
+index bdb8ce9a026c415e14317c85d892edb967a14cd8..98f9325748ea8b96f05361b4304756cc27941887 100644
+--- a/forgejo.yaml
++++ b/forgejo.yaml
+@@ -12,6 +12,52 @@       become: true
+       ansible.builtin.command: loginctl enable-linger forgejo
+       args:
+         creates: /var/lib/systemd/linger/forgejo
++    - name: Create socket directory for Forgejo
++      become: true
++      ansible.builtin.file:
++        path: /home/forgejo/.config/systemd/user
++        state: directory
++        owner: forgejo
++        group: forgejo
++        mode: "0755"
++    - name: Write socket activation service files for Forgejo
++      become: true
++      ansible.builtin.copy:
++        src: "{{ item }}"
++        dest: "/home/forgejo/.config/systemd/user/{{ item }}"
++        owner: forgejo
++        group: forgejo
++        mode: "0644"
++      loop:
++        - forgejo-http.service
++        - forgejo-ssh.service
++    - name: Write socket files for Forgejo
++      become: true
++      ansible.builtin.copy:
++        src: "{{ item }}"
++        dest: "/home/forgejo/.config/systemd/user/{{ item }}"
++        owner: forgejo
++        group: forgejo
++        mode: "0644"
++      # This will only run on changes to the file; see https://docs.ansible.com/projects/ansible/latest/playbook_guide/playbooks_handlers.html#id1
++      notify: Restart Forgejo user sockets
++      loop:
++        - forgejo-http.socket
++        - forgejo-ssh.socket
++    - name: Enable Forgejo user sockets
++      become: true
++      become_user: forgejo
++      ansible.builtin.systemd_service:
++        name: "{{ item }}"
++        state: started
++        enabled: true
++        daemon_reload: true
++        scope: user
++      environment:
++        XDG_RUNTIME_DIR: "/run/user/{{ forgejo_user.uid }}"
++      loop:
++        - forgejo-http.socket
++        - forgejo-ssh.socket
+     - name: Create container directory for Forgejo
+       become: true
+       ansible.builtin.file:
+@@ -59,7 +105,7 @@         permanent: true
+         immediate: true
+         state: enabled
+       loop:
+-        # Caddy can't route SSH, so we bypass it
++        # Forgejo can't route SSH, so we bypass it
+         - rule family=ipv6 forward-port port=220 protocol=tcp to-port=2222
+         - rule family=ipv4 forward-port port=220 protocol=tcp to-port=2222
+     - name: List existing Forgejo users
+@@ -96,3 +142,16 @@         daemon_reload: true
+         scope: user
+       environment:
+         XDG_RUNTIME_DIR: "/run/user/{{ forgejo_user.uid }}"
++    - name: Restart Forgejo user sockets
++      become: true
++      become_user: forgejo
++      ansible.builtin.systemd_service:
++        name: "{{ item }}"
++        state: restarted
++        daemon_reload: true
++        scope: user
++      environment:
++        XDG_RUNTIME_DIR: "/run/user/{{ forgejo_user.uid }}"
++      loop:
++        - forgejo-http.socket
++        - forgejo-ssh.socket
+
