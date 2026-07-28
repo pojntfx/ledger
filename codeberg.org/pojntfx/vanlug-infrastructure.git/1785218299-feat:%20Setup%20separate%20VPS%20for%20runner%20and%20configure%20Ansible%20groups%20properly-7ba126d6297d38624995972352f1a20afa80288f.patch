@@ -1,0 +1,213 @@
+From 7ba126d6297d38624995972352f1a20afa80288f Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Mon, 27 Jul 2026 22:58:19 -0700
+Subject: [PATCH] feat: Setup separate VPS for runner and configure Ansible groups properly
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/ansible.cfg b/ansible.cfg
+index dc6a777dc71fc5788e4cb74188bba6a8f204e22f..f3a9a5f136531cefc8c5a6ed7d961f17cad47a7a 100644
+--- a/ansible.cfg
++++ b/ansible.cfg
+@@ -3,3 +3,5 @@ inventory = inventory.yaml
+ 
+ [ssh_connection]
+ pipelining = true
++# On the first connection, we need to be able to connect to the hosts with the new host keys
++ssh_args = -o StrictHostKeyChecking=accept-new
+diff --git a/caddy.yaml b/caddy.yaml
+index 436c516ae74618c4de70b8ffc90193ce05ebc99b..f1c9d029daf7f8e6676254d41a0b2d5066ffb867 100644
+--- a/caddy.yaml
++++ b/caddy.yaml
+@@ -1,5 +1,6 @@
+ - name: Configure Caddy # See https://major.io/p/podman-quadlet-automatic-updates/
+-  hosts: all
++  hosts:
++    - vanlug_mains
+   gather_facts: false
+   tasks:
+     - name: Create user for Caddy
+diff --git a/firewall.yaml b/firewall.yaml
+index 99364a4cce76fe24812181d72d1e85fcc2b96a53..4765ec829b3fc3199bac4a898b7cac255c27ec87 100644
+--- a/firewall.yaml
++++ b/firewall.yaml
+@@ -1,5 +1,7 @@
+ - name: Configure firewall
+-  hosts: all
++  hosts:
++    - vanlug_mains
++    - vanlug_forgejo_runners
+   gather_facts: false
+   tasks:
+     - name: Install firewalld and Python bindings
+diff --git a/forgejo.yaml b/forgejo.yaml
+index 98f9325748ea8b96f05361b4304756cc27941887..79da494fe1fe639c444de081e1c095f3673ac895 100644
+--- a/forgejo.yaml
++++ b/forgejo.yaml
+@@ -1,5 +1,6 @@
+ - name: Configure Forgejo # See https://forgejo.org/docs/latest/admin/installation/docker/#using-rootless-image
+-  hosts: all
++  hosts:
++    - vanlug_mains
+   gather_facts: false
+   tasks:
+     - name: Create user for Forgejo
+diff --git a/main.tofu b/main.tofu
+index e912ff804f9e34901d56beadb403a243b6e293b8..55b6078d51da3a9984ade360283b9c453fd1d8e4 100644
+--- a/main.tofu
++++ b/main.tofu
+@@ -39,6 +39,17 @@     source_ips = ["::/0", "0.0.0.0/0"]
+   }
+ }
+ 
++resource "hcloud_firewall" "vanlug_forgejo_runner" {
++  name = "vanlug-forgejo-runner"
++
++  rule {
++    direction  = "in"
++    protocol   = "tcp"
++    port       = "22"
++    source_ips = ["::/0", "0.0.0.0/0"]
++  }
++}
++
+ resource "hcloud_ssh_key" "pojntfx" {
+   name = "pojntfx"
+ 
+@@ -76,16 +87,55 @@     ]
+   }
+ }
+ 
+-resource "ansible_group" "group" {
+-  name = "vanlug"
++resource "hcloud_server" "vanlug_forgejo_runner" {
++  name     = "vanlug-forgejo-runner"
++  location = "fsn1"
++
++  image       = "alma-10"
++  server_type = "cpx22"
++
++  ssh_keys     = [hcloud_ssh_key.pojntfx.id]
++  firewall_ids = [hcloud_firewall.vanlug_main.id]
++
++  # No backups or deletion protection for the Forgejo runner
++
++  user_data = templatefile("cloud-init.yaml", {
++    ssh_setup_user = var.ssh_setup_user
++    ssh_public_key = var.ssh_public_key
++  })
++
++  lifecycle {
++    ignore_changes = [
++      ssh_keys, # We can't update SSH keys without destroying the server and recreating it
++      user_data # We can't update cloud-init user data without destroying the server and recreating it
++    ]
++  }
++}
++
++resource "ansible_group" "vanlug_mains" {
++  name = "vanlug_mains"
++}
++
++resource "ansible_group" "vanlug_forgejo_runners" {
++  name = "vanlug_forgejo_runners"
+ }
+ 
+ resource "ansible_host" "vanlug_main" {
+   name   = "vanlug_main"
+-  groups = ["vanlug"]
++  groups = ["vanlug_mains"]
+ 
+   variables = {
+     ansible_host = hcloud_server.vanlug_main.ipv6_address
+     ansible_user = var.ssh_setup_user
+   }
+ }
++
++resource "ansible_host" "vanlug_forgejo_runner" {
++  name   = "vanlug_forgejo_runner"
++  groups = ["vanlug_forgejo_runners"]
++
++  variables = {
++    ansible_host = hcloud_server.vanlug_forgejo_runner.ipv6_address
++    ansible_user = var.ssh_setup_user
++  }
++}
+diff --git a/outputs.tofu b/outputs.tofu
+index 9f5dc62c71f00518e95dbdf09da6b6755e1a018e..8c282ff503e421da4bd55205ce21f51187d8dfaf 100644
+--- a/outputs.tofu
++++ b/outputs.tofu
+@@ -1,14 +1,24 @@
+-output "ipv6_address" {
+-  description = "IPv6 address of the server"
++output "vanlug_main_ipv6_address" {
++  description = "IPv6 address of the main VanLUG server"
+   value       = hcloud_server.vanlug_main.ipv6_address
+ }
+ 
+-output "ipv4_address" {
+-  description = "IPv4 address of the server"
++output "vanlug_main_ipv4_address" {
++  description = "IPv4 address of the main VanLUG server"
+   value       = hcloud_server.vanlug_main.ipv4_address
+ }
+ 
++output "vanlug_forgejo_runner_ipv6_address" {
++  description = "IPv6 address of the Forgejo runner VanLUG server"
++  value       = hcloud_server.vanlug_forgejo_runner.ipv6_address
++}
++
++output "vanlug_forgejo_runner_ipv4_address" {
++  description = "IPv4 address of the Forgejo runner VanLUG server"
++  value       = hcloud_server.vanlug_forgejo_runner.ipv4_address
++}
++
+ output "ssh_setup_user" {
+   description = "SSH setup user of the server"
+   value       = var.ssh_setup_user
+-}
+\ No newline at end of file
++}
+diff --git a/podman.yaml b/podman.yaml
+index 55b9b6dbc24322388047f88146a13ae1fca5747d..c4b8891f8e00167c495f56765228662423108a84 100644
+--- a/podman.yaml
++++ b/podman.yaml
+@@ -1,5 +1,7 @@
+ - name: Configure Podman
+-  hosts: all
++  hosts:
++    - vanlug_mains
++    - vanlug_forgejo_runners
+   gather_facts: false
+   tasks:
+     - name: Install Podman
+diff --git a/updates.yaml b/updates.yaml
+index b603a953c67b09f6c56fc478e26d6accffe4de6a..c5635cb98a716fd6ce6a7b41ced0e413e73e291a 100644
+--- a/updates.yaml
++++ b/updates.yaml
+@@ -1,5 +1,7 @@
+ - name: Configure automatic updates
+-  hosts: all
++  hosts:
++    - vanlug_mains
++    - vanlug_forgejo_runners
+   gather_facts: false
+   tasks:
+     - name: Install dnf-automatic
+@@ -11,12 +13,13 @@         state: present
+     - name: Write dnf-automatic config
+       become: true
+       ansible.builtin.copy:
+-        content: | # See https://docs.fedoraproject.org/en-US/quick-docs/autoupdates/
++        content:
++          | # See https://docs.fedoraproject.org/en-US/quick-docs/autoupdates/
+           [commands]
+           apply_updates=True
+           reboot=when-changed
+         dest: /etc/dnf/automatic.conf
+-        mode: '0644'
++        mode: "0644"
+     - name: Enable dnf-automatic
+       become: true
+       ansible.builtin.systemd_service:
+
