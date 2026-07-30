@@ -1,0 +1,278 @@
+From a25ce5d6bf094866c867f45e8654295f915eeccf Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Wed, 29 Jul 2026 22:19:50 -0700
+Subject: [PATCH] feat: Add basic git-pages deployment and point Caddy at it
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/Caddyfile b/Caddyfile
+index b5b62a11d1c9d01cc463c9c8cc3f1235e6c56549..19e3bc759fed784e2c6f515006a93511ecfa7c55 100644
+--- a/Caddyfile
++++ b/Caddyfile
+@@ -7,6 +7,11 @@ 	auto_https disable_redirects
+ 
+ 	# We have a read-only file system
+ 	persist_config off
++
++	on_demand_tls {
++		# We ask git-pages for whether we should request a TLS cert for this site
++		permission http http://host.containers.internal:3005
++	}
+ }
+ 
+ # These are supposed to be default_bind in the global block, but due to caddy#7525
+@@ -38,14 +43,19 @@
+ 	redir https://{host}{uri}
+ }
+ 
+-vanlug.p8.lu {
++git.vanlug.p8.lu {
+ 	import workarounds
+ 
+-	respond "Hello, world from the VanLUG test root domain!"
++	reverse_proxy host.containers.internal:3000
+ }
+ 
+-git.vanlug.p8.lu {
++# git-pages
++https:// {
++	tls {
++		on_demand
++	}
++
+ 	import workarounds
+ 
+-	reverse_proxy host.containers.internal:3000
++	reverse_proxy host.containers.internal:3003
+ }
+diff --git a/README.md b/README.md
+index 1a550d1d809a0d3708aee483564d867ee8511d5c..59941ba9d497a8c68758835140ae261960ea8de7 100644
+--- a/README.md
++++ b/README.md
+@@ -24,6 +24,7 @@ # To get logs for quadlets on main server
+ $ ssh setup@vanlug.p8.lu
+ [setup@vanlug-main ~]$ sudo journalctl _SYSTEMD_USER_UNIT=caddy.service -f
+ [setup@vanlug-main ~]$ sudo journalctl _SYSTEMD_USER_UNIT=forgejo.service -f
++[setup@vanlug-main ~]$ sudo journalctl _SYSTEMD_USER_UNIT=git-pages.service -f
+ # To get logs for quadlets on Forgejo runner server
+ $ ssh setup@2a01:4f8:c015:706c::1
+ [setup@vanlug-forgejo-runner ~]$ sudo journalctl _SYSTEMD_USER_UNIT=forgejo-runner.service -f
+diff --git a/git-pages-caddy.service b/git-pages-caddy.service
+new file mode 100644
+index 0000000000000000000000000000000000000000..056f0eb33f9ced75d6e4f23d795b9d88cec2e327
+--- /dev/null
++++ b/git-pages-caddy.service
+@@ -0,0 +1,11 @@
++[Unit]
++Requires=git-pages-caddy.socket
++After=git-pages-caddy.socket
++Requires=git-pages.service
++After=git-pages.service
++
++[Service]
++ExecStart=/usr/lib/systemd/systemd-socket-proxyd localhost:3006
++
++[Install]
++WantedBy=default.target
+diff --git a/git-pages-caddy.socket b/git-pages-caddy.socket
+new file mode 100644
+index 0000000000000000000000000000000000000000..fbf7e7809f39739225ecf7d4910549acec472cd7
+--- /dev/null
++++ b/git-pages-caddy.socket
+@@ -0,0 +1,6 @@
++[Socket]
++ListenStream=3005
++# No HTTP/3 here, git-pages listens on a raw TCP socket
++
++[Install]
++WantedBy=sockets.target
+diff --git a/git-pages-pages.service b/git-pages-pages.service
+new file mode 100644
+index 0000000000000000000000000000000000000000..f3c17f68adaaf40224464cea9780f455e8ccde58
+--- /dev/null
++++ b/git-pages-pages.service
+@@ -0,0 +1,11 @@
++[Unit]
++Requires=git-pages-pages.socket
++After=git-pages-pages.socket
++Requires=git-pages.service
++After=git-pages.service
++
++[Service]
++ExecStart=/usr/lib/systemd/systemd-socket-proxyd localhost:3004
++
++[Install]
++WantedBy=default.target
+diff --git a/git-pages-pages.socket b/git-pages-pages.socket
+new file mode 100644
+index 0000000000000000000000000000000000000000..94b2f42a6b00ad77f27a8a38c9acd479152e9429
+--- /dev/null
++++ b/git-pages-pages.socket
+@@ -0,0 +1,6 @@
++[Socket]
++ListenStream=3003
++# No HTTP/3 here, git-pages listens on a raw TCP socket
++
++[Install]
++WantedBy=sockets.target
+diff --git a/git-pages.container b/git-pages.container
+new file mode 100644
+index 0000000000000000000000000000000000000000..d8122aef21aa238af55f0d58c16925e9549bb9de
+--- /dev/null
++++ b/git-pages.container
+@@ -0,0 +1,14 @@
++[Container]
++ContainerName=git-pages
++Image=codeberg.org/git-pages/git-pages:latest
++Label=io.containers.autoupdate=registry
++# We use systemd-socket-proxyd on 3003/3005, so we listen on 3004/3006 instead
++PublishPort=3004:3000
++PublishPort=3006:3001
++Volume=git_pages_data:/app/data
++LogDriver=journald
++NoNewPrivileges=true
++ReadOnly=true
++
++[Install]
++WantedBy=default.target
+diff --git a/git-pages.yaml b/git-pages.yaml
+new file mode 100644
+index 0000000000000000000000000000000000000000..b15809c26522af528612927443d9e21654be5acc
+--- /dev/null
++++ b/git-pages.yaml
+@@ -0,0 +1,124 @@
++- name: Configure git-pages # See https://git-pages.org/running-a-server/#via-docker
++  hosts:
++    - vanlug_mains
++  gather_facts: false
++  tasks:
++    - name: Create user for git-pages
++      become: true
++      register: git_pages_user
++      ansible.builtin.user:
++        name: git-pages
++    - name: Enable linger for git-pages user # See https://old.reddit.com/r/systemd/comments/suaa5x/proper_way_to_enable_lingering_ansible/
++      become: true
++      ansible.builtin.command: loginctl enable-linger git-pages
++      args:
++        creates: /var/lib/systemd/linger/git-pages
++    - name: Create socket directory for git-pages
++      become: true
++      ansible.builtin.file:
++        path: /home/git-pages/.config/systemd/user
++        state: directory
++        owner: git-pages
++        group: git-pages
++        mode: "0755"
++    - name: Write socket activation service files for git-pages
++      become: true
++      ansible.builtin.copy:
++        src: "{{ item }}"
++        dest: "/home/git-pages/.config/systemd/user/{{ item }}"
++        owner: git-pages
++        group: git-pages
++        mode: "0644"
++      loop:
++        - git-pages-pages.service
++        - git-pages-caddy.service
++    - name: Write socket files for git-pages
++      become: true
++      ansible.builtin.copy:
++        src: "{{ item }}"
++        dest: "/home/git-pages/.config/systemd/user/{{ item }}"
++        owner: git-pages
++        group: git-pages
++        mode: "0644"
++      # This will only run on changes to the file; see https://docs.ansible.com/projects/ansible/latest/playbook_guide/playbooks_handlers.html#id1
++      notify: Restart git-pages user sockets
++      loop:
++        - git-pages-pages.socket
++        - git-pages-caddy.socket
++    - name: Enable git-pages user sockets
++      become: true
++      become_user: git-pages
++      ansible.builtin.systemd_service:
++        name: "{{ item }}"
++        state: started
++        enabled: true
++        daemon_reload: true
++        scope: user
++      environment:
++        XDG_RUNTIME_DIR: "/run/user/{{ git_pages_user.uid }}"
++      loop:
++        - git-pages-pages.socket
++        - git-pages-caddy.socket
++    - name: Create container directory for git-pages
++      become: true
++      ansible.builtin.file:
++        path: /home/git-pages/.config/containers/systemd
++        state: directory
++        owner: git-pages
++        group: git-pages
++        mode: "0755"
++    - name: Write container file for git-pages
++      become: true
++      ansible.builtin.copy:
++        src: git-pages.container
++        dest: /home/git-pages/.config/containers/systemd/git-pages.container
++        owner: git-pages
++        group: git-pages
++        mode: "0644"
++      # This will only run on changes to the file; see https://docs.ansible.com/projects/ansible/latest/playbook_guide/playbooks_handlers.html#id1
++      notify: Restart git-pages user service
++    - name: Enable git-pages user service
++      become: true
++      become_user: git-pages
++      ansible.builtin.systemd_service:
++        name: git-pages.service
++        state: started
++        enabled: true
++        daemon_reload: true
++        scope: user
++      environment:
++        XDG_RUNTIME_DIR: "/run/user/{{ git_pages_user.uid }}"
++    - name: Enable Podman auto-update user service
++      become: true
++      become_user: git-pages
++      ansible.builtin.systemd_service:
++        name: podman-auto-update.timer
++        state: started
++        enabled: true
++        scope: user
++      environment:
++        XDG_RUNTIME_DIR: "/run/user/{{ git_pages_user.uid }}"
++  handlers:
++    - name: Restart git-pages user service
++      become: true
++      become_user: git-pages
++      ansible.builtin.systemd_service:
++        name: git-pages.service
++        state: restarted
++        daemon_reload: true
++        scope: user
++      environment:
++        XDG_RUNTIME_DIR: "/run/user/{{ git_pages_user.uid }}"
++    - name: Restart git-pages user sockets
++      become: true
++      become_user: git-pages
++      ansible.builtin.systemd_service:
++        name: "{{ item }}"
++        state: restarted
++        daemon_reload: true
++        scope: user
++      environment:
++        XDG_RUNTIME_DIR: "/run/user/{{ git_pages_user.uid }}"
++      loop:
++        - git-pages-pages.socket
++        - git-pages-caddy.socket
+diff --git a/site.yaml b/site.yaml
+index f5209c9d051730a3fc16a65c35d7a048cca36e2e..a8f0ca377f23f5ea58f93d6556da225eacab9872 100644
+--- a/site.yaml
++++ b/site.yaml
+@@ -10,3 +10,5 @@ - name: Configure Forgejo
+   ansible.builtin.import_playbook: forgejo.yaml
+ - name: Configure Forgejo runner
+   ansible.builtin.import_playbook: forgejo-runner.yaml
++- name: Configure git-pages
++  ansible.builtin.import_playbook: git-pages.yaml
+
