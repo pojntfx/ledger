@@ -1,0 +1,139 @@
+From 4ba39a620167fb376c2f02150b93dc598f41b428 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Thu, 30 Jul 2026 21:55:24 -0700
+Subject: [PATCH] feat: Add shim service to allow caddy user to restart the system Caddy service
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/caddy-auto-update.rules b/caddy-auto-update.rules
+new file mode 100644
+index 0000000000000000000000000000000000000000..c4a6dfe4aa33cdac08978469108c77a0699575cc
+--- /dev/null
++++ b/caddy-auto-update.rules
+@@ -0,0 +1,12 @@
++// We want to allow the caddy user to be able to restart the caddy _system_ service
++// See https://www.rushworth.us/lisa/?p=12192
++polkit.addRule(function (action, subject) {
++  if (
++    action.id == "org.freedesktop.systemd1.manage-units" &&
++    action.lookup("unit") == "caddy.service" &&
++    action.lookup("verb") == "restart" &&
++    subject.user == "caddy"
++  ) {
++    return polkit.Result.YES;
++  }
++});
+diff --git a/caddy-shim.service b/caddy-shim.service
+new file mode 100644
+index 0000000000000000000000000000000000000000..acb110999d5ab275e3a2f8cfbed54e0cfebc9719
+--- /dev/null
++++ b/caddy-shim.service
+@@ -0,0 +1,10 @@
++[Unit]
++Description=Shim so that rootless Podman auto-update can trigger a restart of the Caddy system service
++
++[Service]
++Type=oneshot
++RemainAfterExit=yes
++ExecStart=/usr/bin/systemctl restart caddy.service
++
++[Install]
++WantedBy=default.target
+diff --git a/caddy.yaml b/caddy.yaml
+index 3eebc7bb41acada13ee339e26a3b16c06528d276..3897035ce2be9c243221f96fdceeb4a5feff3b77 100644
+--- a/caddy.yaml
++++ b/caddy.yaml
+@@ -65,6 +65,44 @@         owner: caddy
+         group: caddy
+         mode: "0644"
+       notify: Reload Caddy system service
++    - name: Write polkit rule to allow the caddy user to be able to restart the caddy system service
++      become: true
++      ansible.builtin.copy:
++        src: caddy-auto-update.rules
++        dest: /etc/polkit-1/rules.d/50-caddy-auto-update.rules
++        owner: root
++        group: root
++        mode: "0644"
++    - name: Create user systemd directory for Caddy
++      become: true
++      ansible.builtin.file:
++        dest: /home/caddy/.config/systemd/user
++        state: directory
++        owner: caddy
++        group: caddy
++        mode: "0755"
++    - name: Write Caddy Podman auto-update one-shot user service
++      become: true
++      ansible.builtin.copy:
++        src: caddy-shim.service
++        # We need to name this service caddy.service, else
++        # `podman auto-update` won't pick it up
++        dest: /home/caddy/.config/systemd/user/caddy.service
++        owner: caddy
++        group: caddy
++        mode: "0644"
++      notify: Reload Caddy user manager
++    - name: Enable Podman auto-update user service
++      become: true
++      become_user: caddy
++      ansible.builtin.systemd_service:
++        name: podman-auto-update.timer
++        state: started
++        enabled: true
++        daemon_reload: true
++        scope: user
++      environment:
++        XDG_RUNTIME_DIR: "/run/user/{{ caddy_user.uid }}"
+   handlers:
+     - name: Restart Caddy system socket
+       become: true
+@@ -84,3 +122,11 @@       ansible.builtin.systemd_service:
+         name: caddy.service
+         state: reloaded
+         daemon_reload: true
++    - name: Reload Caddy user manager
++      become: true
++      become_user: caddy
++      ansible.builtin.systemd_service:
++        daemon_reload: true
++        scope: user
++      environment:
++        XDG_RUNTIME_DIR: "/run/user/{{ caddy_user.uid }}"
+diff --git a/forgejo-runner.yaml b/forgejo-runner.yaml
+index 85867ba6fc888413d21c24b9ad5479d1dbda848f..3d79427377fe1a1124204b5be9a8a9561a4634e4 100644
+--- a/forgejo-runner.yaml
++++ b/forgejo-runner.yaml
+@@ -65,6 +65,7 @@       ansible.builtin.systemd_service:
+         name: podman-auto-update.timer
+         state: started
+         enabled: true
++        daemon_reload: true
+         scope: user
+       environment:
+         XDG_RUNTIME_DIR: "/run/user/{{ forgejo_runner_user.uid }}"
+diff --git a/forgejo.yaml b/forgejo.yaml
+index ef3a0fab02e9ea74424381e545b0de8c2e5394b5..e2d3746ea37096a8702f480c50914a9dec8375b6 100644
+--- a/forgejo.yaml
++++ b/forgejo.yaml
+@@ -127,6 +127,7 @@       ansible.builtin.systemd_service:
+         name: podman-auto-update.timer
+         state: started
+         enabled: true
++        daemon_reload: true
+         scope: user
+       environment:
+         XDG_RUNTIME_DIR: "/run/user/{{ forgejo_user.uid }}"
+diff --git a/git-pages.yaml b/git-pages.yaml
+index b15809c26522af528612927443d9e21654be5acc..91ac5d8c71d5f3814ab27cb5de5b958664b0e1b6 100644
+--- a/git-pages.yaml
++++ b/git-pages.yaml
+@@ -95,6 +95,7 @@       ansible.builtin.systemd_service:
+         name: podman-auto-update.timer
+         state: started
+         enabled: true
++        daemon_reload: true
+         scope: user
+       environment:
+         XDG_RUNTIME_DIR: "/run/user/{{ git_pages_user.uid }}"
+
