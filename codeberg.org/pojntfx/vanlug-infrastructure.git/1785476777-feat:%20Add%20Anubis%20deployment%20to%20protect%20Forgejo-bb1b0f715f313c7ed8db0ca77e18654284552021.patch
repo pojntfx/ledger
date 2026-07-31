@@ -1,0 +1,217 @@
+From bb1b0f715f313c7ed8db0ca77e18654284552021 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Thu, 30 Jul 2026 22:46:17 -0700
+Subject: [PATCH] feat: Add Anubis deployment to protect Forgejo
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/Caddyfile b/Caddyfile
+index 19e3bc759fed784e2c6f515006a93511ecfa7c55..ff4bf64df674cbf234674e606b316b5169bbb95d 100644
+--- a/Caddyfile
++++ b/Caddyfile
+@@ -46,7 +46,11 @@
+ git.vanlug.p8.lu {
+ 	import workarounds
+ 
+-	reverse_proxy host.containers.internal:3000
++	# See https://anubis.techaro.lol/docs/admin/environments/caddy
++	reverse_proxy host.containers.internal:3007 {
++		header_up X-Real-Ip {remote_host}
++		header_up X-Http-Version {http.request.proto}
++	}
+ }
+ 
+ # git-pages
+diff --git a/README.md b/README.md
+index 164bee872f4e34e792c80eeebb0c0e30637486e5..0f06b2b3ad5b979c58b16459e9540b13212ff04f 100644
+--- a/README.md
++++ b/README.md
+@@ -25,6 +25,7 @@ $ ssh setup@vanlug.p8.lu
+ [setup@vanlug-main ~]$ sudo journalctl -u caddy.service -f
+ [setup@vanlug-main ~]$ sudo journalctl _SYSTEMD_USER_UNIT=forgejo.service -f
+ [setup@vanlug-main ~]$ sudo journalctl _SYSTEMD_USER_UNIT=git-pages.service -f
++[setup@vanlug-main ~]$ sudo journalctl _SYSTEMD_USER_UNIT=anubis.service -f
+ # To get logs for quadlets on Forgejo runner server
+ $ ssh setup@2a01:4f8:c015:706c::1
+ [setup@vanlug-forgejo-runner ~]$ sudo journalctl _SYSTEMD_USER_UNIT=forgejo-runner.service -f
+diff --git a/anubis-http.service b/anubis-http.service
+new file mode 100644
+index 0000000000000000000000000000000000000000..4c41b41f66cfcfa3a6dd570f49d3db54fac5aebe
+--- /dev/null
++++ b/anubis-http.service
+@@ -0,0 +1,11 @@
++[Unit]
++Requires=anubis-http.socket
++After=anubis-http.socket
++Requires=anubis-http.service
++After=anubis-http.service
++
++[Service]
++ExecStart=/usr/lib/systemd/systemd-socket-proxyd localhost:3008
++
++[Install]
++WantedBy=default.target
+diff --git a/anubis-http.socket b/anubis-http.socket
+new file mode 100644
+index 0000000000000000000000000000000000000000..bff58b9f048135e5c7151924797cd015a3e65c1d
+--- /dev/null
++++ b/anubis-http.socket
+@@ -0,0 +1,6 @@
++[Socket]
++ListenStream=3007
++# No HTTP/3 here, Anubis listens on a raw TCP socket
++
++[Install]
++WantedBy=sockets.target
+diff --git a/anubis.container b/anubis.container
+new file mode 100644
+index 0000000000000000000000000000000000000000..e470e91dd714ffc8ea5ddece2f3924898233a295
+--- /dev/null
++++ b/anubis.container
+@@ -0,0 +1,16 @@
++# See https://anubis.techaro.lol/docs/admin/environments/caddy
++[Container]
++ContainerName=anubis
++Image=ghcr.io/techarohq/anubis:latest
++Label=io.containers.autoupdate=registry
++# We use systemd-socket-proxyd on 3007, so we listen on 3008 instead
++PublishPort=3008:3000
++Environment=BIND=:3000
++# This is Forgejo
++Environment=TARGET=http://host.containers.internal:3000
++LogDriver=journald
++NoNewPrivileges=true
++ReadOnly=true
++
++[Install]
++WantedBy=default.target
+diff --git a/anubis.yaml b/anubis.yaml
+new file mode 100644
+index 0000000000000000000000000000000000000000..db4e5d55f19427efc35a77adc62c184139abf397
+--- /dev/null
++++ b/anubis.yaml
+@@ -0,0 +1,113 @@
++- name: Configure Anubis # See https://anubis.techaro.lol/docs/admin/environments/caddy
++  hosts:
++    - vanlug_mains
++  gather_facts: false
++  tasks:
++    - name: Create user for Anubis
++      become: true
++      register: anubis_user
++      ansible.builtin.user:
++        name: anubis
++    - name: Enable linger for Anubis user # See https://old.reddit.com/r/systemd/comments/suaa5x/proper_way_to_enable_lingering_ansible/
++      become: true
++      ansible.builtin.command: loginctl enable-linger anubis
++      args:
++        creates: /var/lib/systemd/linger/anubis
++    - name: Create socket directory for Anubis
++      become: true
++      ansible.builtin.file:
++        path: /home/anubis/.config/systemd/user
++        state: directory
++        owner: anubis
++        group: anubis
++        mode: "0755"
++    - name: Write socket activation service file for Anubis
++      become: true
++      ansible.builtin.copy:
++        src: anubis-http.service
++        dest: /home/anubis/.config/systemd/user/anubis-http.service
++        owner: anubis
++        group: anubis
++        mode: "0644"
++    - name: Write socket file for Anubis
++      become: true
++      ansible.builtin.copy:
++        src: anubis-http.socket
++        dest: /home/anubis/.config/systemd/user/anubis-http.socket
++        owner: anubis
++        group: anubis
++        mode: "0644"
++      # This will only run on changes to the file; see https://docs.ansible.com/projects/ansible/latest/playbook_guide/playbooks_handlers.html#id1
++      notify: Restart Anubis user socket
++    - name: Enable Anubis user socket
++      become: true
++      become_user: anubis
++      ansible.builtin.systemd_service:
++        name: anubis-http.socket
++        state: started
++        enabled: true
++        daemon_reload: true
++        scope: user
++      environment:
++        XDG_RUNTIME_DIR: "/run/user/{{ anubis_user.uid }}"
++    - name: Create container directory for Anubis
++      become: true
++      ansible.builtin.file:
++        path: /home/anubis/.config/containers/systemd
++        state: directory
++        owner: anubis
++        group: anubis
++        mode: "0755"
++    - name: Write container file for Anubis
++      become: true
++      ansible.builtin.copy:
++        src: anubis.container
++        dest: /home/anubis/.config/containers/systemd/anubis.container
++        owner: anubis
++        group: anubis
++        mode: "0644"
++      # This will only run on changes to the file; see https://docs.ansible.com/projects/ansible/latest/playbook_guide/playbooks_handlers.html#id1
++      notify: Restart Anubis user service
++    - name: Enable Anubis user service
++      become: true
++      become_user: anubis
++      ansible.builtin.systemd_service:
++        name: anubis.service
++        state: started
++        enabled: true
++        daemon_reload: true
++        scope: user
++      environment:
++        XDG_RUNTIME_DIR: "/run/user/{{ anubis_user.uid }}"
++    - name: Enable Podman auto-update user service
++      become: true
++      become_user: anubis
++      ansible.builtin.systemd_service:
++        name: podman-auto-update.timer
++        state: started
++        enabled: true
++        daemon_reload: true
++        scope: user
++      environment:
++        XDG_RUNTIME_DIR: "/run/user/{{ anubis_user.uid }}"
++  handlers:
++    - name: Restart Anubis user service
++      become: true
++      become_user: anubis
++      ansible.builtin.systemd_service:
++        name: anubis.service
++        state: restarted
++        daemon_reload: true
++        scope: user
++      environment:
++        XDG_RUNTIME_DIR: "/run/user/{{ anubis_user.uid }}"
++    - name: Restart Anubis user socket
++      become: true
++      become_user: anubis
++      ansible.builtin.systemd_service:
++        name: anubis-http.socket
++        state: restarted
++        daemon_reload: true
++        scope: user
++      environment:
++        XDG_RUNTIME_DIR: "/run/user/{{ anubis_user.uid }}"
+diff --git a/site.yaml b/site.yaml
+index a8f0ca377f23f5ea58f93d6556da225eacab9872..9224878e53dd3732ecdd2bee6e3121c3860705a4 100644
+--- a/site.yaml
++++ b/site.yaml
+@@ -12,3 +12,5 @@ - name: Configure Forgejo runner
+   ansible.builtin.import_playbook: forgejo-runner.yaml
+ - name: Configure git-pages
+   ansible.builtin.import_playbook: git-pages.yaml
++- name: Configure Anubis
++  ansible.builtin.import_playbook: anubis.yaml
+
