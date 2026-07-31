@@ -1,0 +1,374 @@
+From 9b703ce3235f921a06906001d0d3c630a9c096a6 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Thu, 30 Jul 2026 20:09:38 -0700
+Subject: [PATCH] feat: Run caddy.socket and forgejo-ssh.socket as system services, but forward them to user services instead of using DNAT
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/README.md b/README.md
+index 59941ba9d497a8c68758835140ae261960ea8de7..164bee872f4e34e792c80eeebb0c0e30637486e5 100644
+--- a/README.md
++++ b/README.md
+@@ -22,7 +22,7 @@ $ ansible-galaxy collection install cloud.terraform ansible.posix
+ $ ansible-playbook site.yaml # You might want to change `binary_path` in `inventory.yaml` first
+ # To get logs for quadlets on main server
+ $ ssh setup@vanlug.p8.lu
+-[setup@vanlug-main ~]$ sudo journalctl _SYSTEMD_USER_UNIT=caddy.service -f
++[setup@vanlug-main ~]$ sudo journalctl -u caddy.service -f
+ [setup@vanlug-main ~]$ sudo journalctl _SYSTEMD_USER_UNIT=forgejo.service -f
+ [setup@vanlug-main ~]$ sudo journalctl _SYSTEMD_USER_UNIT=git-pages.service -f
+ # To get logs for quadlets on Forgejo runner server
+diff --git a/caddy.container b/caddy.container
+index 8230d42b8f2b8d874d4bb30d58d0e9f95a385ac4..6304bfa4e82c49571c06b1ee84a0fbf58469de71 100644
+--- a/caddy.container
++++ b/caddy.container
+@@ -1,6 +1,10 @@
+ [Unit]
+ After=caddy.socket
+ Requires=caddy.socket
++# See https://github.com/eriksjolund/podman-nginx-socket-activation/blob/main/examples/example6/example6-backend.container.in#L1-L7
++Requires=user@{{ caddy_uid }}.service
++After=user@{{ caddy_uid }}.service
++RequiresMountsFor=/run/user/{{ caddy_uid }}/containers
+ 
+ [Container]
+ ContainerName=caddy
+@@ -18,7 +22,8 @@ Notify=true
+ ReadOnly=true
+ 
+ [Service]
++User=caddy
+ ExecReload=podman exec -w /etc/caddy caddy /usr/bin/caddy reload --config /etc/caddy/Caddyfile # See https://hub.docker.com/_/caddy#graceful-reloads
+ 
+ [Install]
+-WantedBy=default.target
++WantedBy=multi-user.target
+diff --git a/caddy.socket b/caddy.socket
+index 7a7de50d8016417bcbe4c8d85d6f61ad8f8b229b..1cc920afe9fe4606307293d0b68515ccdadfc549 100644
+--- a/caddy.socket
++++ b/caddy.socket
+@@ -1,8 +1,8 @@
+ [Socket]
+-ListenStream=8080
+-ListenStream=8443
++ListenStream=80
++ListenStream=443
+ # HTTP/3
+-ListenDatagram=8443
++ListenDatagram=443
+ 
+ [Install]
+ WantedBy=sockets.target
+diff --git a/caddy.yaml b/caddy.yaml
+index f1c9d029daf7f8e6676254d41a0b2d5066ffb867..3eebc7bb41acada13ee339e26a3b16c06528d276 100644
+--- a/caddy.yaml
++++ b/caddy.yaml
+@@ -13,88 +13,41 @@       become: true
+       ansible.builtin.command: loginctl enable-linger caddy
+       args:
+         creates: /var/lib/systemd/linger/caddy
+-    - name: Create socket directory for Caddy
+-      become: true
+-      ansible.builtin.file:
+-        path: /home/caddy/.config/systemd/user
+-        state: directory
+-        owner: caddy
+-        group: caddy
+-        mode: "0755"
+-    - name: Write socket file for Caddy
++    - name: Write system socket file for Caddy
+       become: true
+       ansible.builtin.copy:
+         src: caddy.socket
+-        dest: /home/caddy/.config/systemd/user/caddy.socket
+-        owner: caddy
+-        group: caddy
++        dest: /etc/systemd/system/caddy.socket
++        owner: root
++        group: root
+         mode: "0644"
+       # This will only run on changes to the file; see https://docs.ansible.com/projects/ansible/latest/playbook_guide/playbooks_handlers.html#id1
+-      notify: Restart Caddy user socket
+-    - name: Enable Caddy user socket
+-      become: true
+-      become_user: caddy
+-      ansible.builtin.systemd_service:
+-        name: caddy.socket
+-        state: started
+-        enabled: true
+-        daemon_reload: true
+-        scope: user
+-      environment:
+-        XDG_RUNTIME_DIR: "/run/user/{{ caddy_user.uid }}"
+-    - name: Create container directory for Caddy
+-      become: true
+-      ansible.builtin.file:
+-        path: /home/caddy/.config/containers/systemd
+-        state: directory
+-        owner: caddy
+-        group: caddy
+-        mode: "0755"
+-    - name: Write container file for Caddy
++      notify: Restart Caddy system socket
++    - name: Write system container file for Caddy
+       become: true
+-      ansible.builtin.copy:
++      ansible.builtin.template:
+         src: caddy.container
+-        dest: /home/caddy/.config/containers/systemd/caddy.container
+-        owner: caddy
+-        group: caddy
++        dest: /etc/containers/systemd/caddy.container
++        owner: root
++        group: root
+         mode: "0644"
++      vars:
++        caddy_uid: "{{ caddy_user.uid }}"
+       # This will only run on changes to the file; see https://docs.ansible.com/projects/ansible/latest/playbook_guide/playbooks_handlers.html#id1
+-      notify: Restart Caddy user service
+-    - name: Enable Caddy user service
++      notify: Restart Caddy system service
++    - name: Enable Caddy system socket
+       become: true
+-      become_user: caddy
+       ansible.builtin.systemd_service:
+-        name: caddy.service
++        name: caddy.socket
+         state: started
+         enabled: true
+         daemon_reload: true
+-        scope: user
+-      environment:
+-        XDG_RUNTIME_DIR: "/run/user/{{ caddy_user.uid }}"
+-    - name: Enable Podman auto-update user service
++    - name: Enable Caddy system service
+       become: true
+-      become_user: caddy
+       ansible.builtin.systemd_service:
+-        name: podman-auto-update.timer
++        name: caddy.service
+         state: started
+-        enabled: true
+-        scope: user
+-      environment:
+-        XDG_RUNTIME_DIR: "/run/user/{{ caddy_user.uid }}"
+-    - name: Create port forwarding rules
+-      become: true
+-      ansible.posix.firewalld:
+-        rich_rule: "{{ item }}"
+-        permanent: true
+-        immediate: true
+-        state: enabled
+-      loop:
+-        - rule family=ipv6 forward-port port=80 protocol=tcp to-port=8080
+-        - rule family=ipv4 forward-port port=80 protocol=tcp to-port=8080
+-        - rule family=ipv6 forward-port port=443 protocol=tcp to-port=8443
+-        - rule family=ipv4 forward-port port=443 protocol=tcp to-port=8443
+-        - rule family=ipv6 forward-port port=443 protocol=udp to-port=8443 # HTTP/3
+-        - rule family=ipv4 forward-port port=443 protocol=udp to-port=8443 # HTTP/3
++        daemon_reload: true
+     - name: Create config directory for Caddyfile
+       become: true
+       ansible.builtin.file:
+@@ -111,35 +64,23 @@         dest: /home/caddy/.config/caddy/Caddyfile
+         owner: caddy
+         group: caddy
+         mode: "0644"
+-      notify: Reload Caddy user service
++      notify: Reload Caddy system service
+   handlers:
+-    - name: Restart Caddy user socket
++    - name: Restart Caddy system socket
+       become: true
+-      become_user: caddy
+       ansible.builtin.systemd_service:
+         name: caddy.socket
+         state: restarted
+         daemon_reload: true
+-        scope: user
+-      environment:
+-        XDG_RUNTIME_DIR: "/run/user/{{ caddy_user.uid }}"
+-    - name: Restart Caddy user service
++    - name: Restart Caddy system service
+       become: true
+-      become_user: caddy
+       ansible.builtin.systemd_service:
+         name: caddy.service
+         state: restarted
+         daemon_reload: true
+-        scope: user
+-      environment:
+-        XDG_RUNTIME_DIR: "/run/user/{{ caddy_user.uid }}"
+-    - name: Reload Caddy user service
++    - name: Reload Caddy system service
+       become: true
+-      become_user: caddy
+       ansible.builtin.systemd_service:
+         name: caddy.service
+         state: reloaded
+         daemon_reload: true
+-        scope: user
+-      environment:
+-        XDG_RUNTIME_DIR: "/run/user/{{ caddy_user.uid }}"
+diff --git a/forgejo-ssh.service b/forgejo-ssh.service
+index 0df15b0f5e2c6774d2d93c6ffe794a8aca75d474..d597c6f320bd7d5a9e06aa1b95063a095bdccd72 100644
+--- a/forgejo-ssh.service
++++ b/forgejo-ssh.service
+@@ -1,11 +1,13 @@
++# See https://github.com/eriksjolund/podman-nginx-socket-activation/blob/main/examples/example6/example6-backend.container.in#L1-L7
+ [Unit]
+ Requires=forgejo-ssh.socket
+ After=forgejo-ssh.socket
+-Requires=forgejo.service
+-After=forgejo.service
++Requires=user@{{ forgejo_uid }}.service
++After=user@{{ forgejo_uid }}.service
+ 
+ [Service]
++User=forgejo
+ ExecStart=/usr/lib/systemd/systemd-socket-proxyd localhost:2223
+ 
+ [Install]
+-WantedBy=default.target
++WantedBy=multi-user.target
+diff --git a/forgejo-ssh.socket b/forgejo-ssh.socket
+index a9ab45534cb0ee24fe880dfc8a3add567b0b47d2..893302fdefe46b6086bba01eb14a934477f3a90e 100644
+--- a/forgejo-ssh.socket
++++ b/forgejo-ssh.socket
+@@ -1,5 +1,5 @@
+ [Socket]
+-ListenStream=2222
++ListenStream=220
+ 
+ [Install]
+ WantedBy=sockets.target
+diff --git a/forgejo.container b/forgejo.container
+index f0daf286caf7cc4c2b7337681ef2a132a4d84ea4..399806f346ca1f2e5e3e7ec8a723b089848b28b2 100644
+--- a/forgejo.container
++++ b/forgejo.container
+@@ -10,7 +10,7 @@ Environment=FORGEJO__security__INSTALL_LOCK=true
+ Environment=FORGEJO__security__GLOBAL_TWO_FACTOR_REQUIREMENT=all
+ Environment=FORGEJO____APP_NAME="VanLUG Forge"
+ Environment=FORGEJO____RUN_USER=forgejo
+-# Forgejo runs rootless, we use DNAT on the host to redirect 220 to 2222
++# Forgejo runs rootless, the system-level forgejo-ssh.socket proxies 220 to 2222
+ Environment=FORGEJO__server__SSH_PORT=220
+ # Else Forgejo will try to start via HTTPS without having a cert (we use Caddy for that)
+ Environment=FORGEJO__server__PROTOCOL=http
+diff --git a/forgejo.yaml b/forgejo.yaml
+index cddc1311a649c6d8a98e4ed4d5091dea41989c64..ef3a0fab02e9ea74424381e545b0de8c2e5394b5 100644
+--- a/forgejo.yaml
++++ b/forgejo.yaml
+@@ -31,7 +31,6 @@         group: forgejo
+         mode: "0644"
+       loop:
+         - forgejo-http.service
+-        - forgejo-ssh.service
+     - name: Write socket files for Forgejo
+       become: true
+       ansible.builtin.copy:
+@@ -44,7 +43,6 @@       # This will only run on changes to the file; see https://docs.ansible.com/projects/ansible/latest/playbook_guide/playbooks_handlers.html#id1
+       notify: Restart Forgejo user sockets
+       loop:
+         - forgejo-http.socket
+-        - forgejo-ssh.socket
+     - name: Enable Forgejo user sockets
+       become: true
+       become_user: forgejo
+@@ -58,7 +56,41 @@       environment:
+         XDG_RUNTIME_DIR: "/run/user/{{ forgejo_user.uid }}"
+       loop:
+         - forgejo-http.socket
+-        - forgejo-ssh.socket
++    - name: Write system socket file for Forgejo SSH # Binds the privileged port 220 as root; the proxy runs as the forgejo user
++      become: true
++      ansible.builtin.copy:
++        src: forgejo-ssh.socket
++        dest: /etc/systemd/system/forgejo-ssh.socket
++        owner: root
++        group: root
++        mode: "0644"
++      # This will only run on changes to the file; see https://docs.ansible.com/projects/ansible/latest/playbook_guide/playbooks_handlers.html#id1
++      notify: Restart Forgejo SSH system socket
++    - name: Write system socket activation service file for Forgejo SSH
++      become: true
++      ansible.builtin.template:
++        src: forgejo-ssh.service
++        dest: /etc/systemd/system/forgejo-ssh.service
++        owner: root
++        group: root
++        mode: "0644"
++      vars:
++        forgejo_uid: "{{ forgejo_user.uid }}"
++      # This will only run on changes to the file; see https://docs.ansible.com/projects/ansible/latest/playbook_guide/playbooks_handlers.html#id1
++      notify: Restart Forgejo SSH system service
++    - name: Enable Forgejo SSH system socket
++      become: true
++      ansible.builtin.systemd_service:
++        name: forgejo-ssh.socket
++        state: started
++        enabled: true
++        daemon_reload: true
++    - name: Enable Forgejo SSH system service
++      become: true
++      ansible.builtin.systemd_service:
++        name: forgejo-ssh.service
++        state: started
++        daemon_reload: true
+     - name: Create container directory for Forgejo
+       become: true
+       ansible.builtin.file:
+@@ -98,17 +130,6 @@         enabled: true
+         scope: user
+       environment:
+         XDG_RUNTIME_DIR: "/run/user/{{ forgejo_user.uid }}"
+-    - name: Create port forwarding rules
+-      become: true
+-      ansible.posix.firewalld:
+-        rich_rule: "{{ item }}"
+-        permanent: true
+-        immediate: true
+-        state: enabled
+-      loop:
+-        # Forgejo can't route SSH, so we bypass it
+-        - rule family=ipv6 forward-port port=220 protocol=tcp to-port=2222
+-        - rule family=ipv4 forward-port port=220 protocol=tcp to-port=2222
+     - name: List existing Forgejo users
+       become: true
+       become_user: forgejo
+@@ -166,4 +187,15 @@       environment:
+         XDG_RUNTIME_DIR: "/run/user/{{ forgejo_user.uid }}"
+       loop:
+         - forgejo-http.socket
+-        - forgejo-ssh.socket
++    - name: Restart Forgejo SSH system socket
++      become: true
++      ansible.builtin.systemd_service:
++        name: forgejo-ssh.socket
++        state: restarted
++        daemon_reload: true
++    - name: Restart Forgejo SSH system service
++      become: true
++      ansible.builtin.systemd_service:
++        name: forgejo-ssh.service
++        state: restarted
++        daemon_reload: true
+diff --git a/git-pages.container b/git-pages.container
+index 06b39035cd3579bc6df5def4ed582dc903b8731f..518f259b51eaae15a83e16e862886423f04234ff 100644
+--- a/git-pages.container
++++ b/git-pages.container
+@@ -6,11 +6,12 @@ # We use systemd-socket-proxyd on 3003/3005, so we listen on 3004/3006 instead
+ PublishPort=3004:3000
+ PublishPort=3006:3001
+ Volume=git_pages_data:/app/data
++AddHost=git.vanlug.p8.lu:host-gateway
+ # See https://git-pages.org/running-a-server/#wildcard-domains
+ # We're not supposed to re-use the same second-level domain (vanlug.p8.lu)
+ # for user-generated pages, but since we only allow board members to public
+ # sites, this is fine for us
+-Environment="PAGES_WILDCARD=[{\"Domain\":\"pages.vanlug.p8.lu\",\"CloneURL\":\"http://host.containers.internal:3000/<user>/<project>.git\",\"IndexRepo\":\"<user>.pages.vanlug.p8.lu\",\"IndexRepoBranch\":\"main\",\"Authorization\":\"forgejo\"}]"
++Environment="PAGES_WILDCARD=[{\"Domain\":\"pages.vanlug.p8.lu\",\"CloneURL\":\"https://git.vanlug.p8.lu/<user>/<project>.git\",\"IndexRepo\":\"<user>.pages.vanlug.p8.lu\",\"IndexRepoBranch\":\"main\",\"Authorization\":\"forgejo\"}]"
+ LogDriver=journald
+ NoNewPrivileges=true
+ ReadOnly=true
+
