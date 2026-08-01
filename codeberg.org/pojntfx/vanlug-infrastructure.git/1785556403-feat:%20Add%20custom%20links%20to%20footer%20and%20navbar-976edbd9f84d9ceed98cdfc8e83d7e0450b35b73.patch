@@ -1,0 +1,65 @@
+From 976edbd9f84d9ceed98cdfc8e83d7e0450b35b73 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Fri, 31 Jul 2026 20:53:23 -0700
+Subject: [PATCH] feat: Add custom links to footer and navbar
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/custom/templates/custom/extra_links.tmpl b/custom/templates/custom/extra_links.tmpl
+new file mode 100644
+index 0000000000000000000000000000000000000000..4c5205d4a35401830cd5a731c1c4def1f6fa6c26
+--- /dev/null
++++ b/custom/templates/custom/extra_links.tmpl
+@@ -0,0 +1 @@
++<a class="item" target="_blank" href="https://vanlug.ca/">{{svg "octicon-link-external"}} vanlug.ca</a>
+diff --git a/custom/templates/custom/extra_links_footer.tmpl b/custom/templates/custom/extra_links_footer.tmpl
+new file mode 100644
+index 0000000000000000000000000000000000000000..9b42f994207e81876a521486e84044d32d56c095
+--- /dev/null
++++ b/custom/templates/custom/extra_links_footer.tmpl
+@@ -0,0 +1,2 @@
++<a class="item" target="_blank" href="https://vanlug.ca/terms/">Terms</a>
++<a class="item" target="_blank" href="https://vanlug.ca/privacy/">Privacy</a>
+diff --git a/forgejo.container b/forgejo.container
+index 399806f346ca1f2e5e3e7ec8a723b089848b28b2..1277559106ad552ed8cc2fe99e2080520cf80500 100644
+--- a/forgejo.container
++++ b/forgejo.container
+@@ -6,6 +6,8 @@ # We use systemd-socket-proxyd on 3000/2222, so we listen on 3001/2223 instead
+ PublishPort=3001:3000
+ PublishPort=2223:2222
+ Volume=forgejo_data:/var/lib/gitea
++Volume=%E/forgejo/custom:/etc/forgejo/custom
++Environment=FORGEJO_CUSTOM=/etc/forgejo/custom
+ Environment=FORGEJO__security__INSTALL_LOCK=true
+ Environment=FORGEJO__security__GLOBAL_TWO_FACTOR_REQUIREMENT=all
+ Environment=FORGEJO____APP_NAME="VanLUG Forge"
+diff --git a/forgejo.yaml b/forgejo.yaml
+index e2d3746ea37096a8702f480c50914a9dec8375b6..7546105f6682d544a332282c8c1bb8c7487f5927 100644
+--- a/forgejo.yaml
++++ b/forgejo.yaml
+@@ -109,6 +109,24 @@         group: forgejo
+         mode: "0644"
+       # This will only run on changes to the file; see https://docs.ansible.com/projects/ansible/latest/playbook_guide/playbooks_handlers.html#id1
+       notify: Restart Forgejo user service
++    - name: Create custom directory for Forgejo
++      become: true
++      ansible.builtin.file:
++        path: /home/forgejo/.config/forgejo/custom
++        state: directory
++        owner: forgejo
++        group: forgejo
++        mode: "0755"
++    - name: Write custom directory for Forgejo
++      become: true
++      ansible.posix.synchronize:
++        src: custom/ # Trailing slash: sync the contents, not the directory itself
++        dest: /home/forgejo/.config/forgejo/custom
++        rsync_opts:
++          - "--chown=forgejo:forgejo"
++        delete: true
++      # This will only run on changes to the file; see https://docs.ansible.com/projects/ansible/latest/playbook_guide/playbooks_handlers.html#id1
++      notify: Restart Forgejo user service
+     - name: Enable Forgejo user service
+       become: true
+       become_user: forgejo
+
