@@ -1,0 +1,133 @@
+From c524aba53f822f9f84be65d4ee031d05dad56be3 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Wed, 05 Aug 2026 23:54:26 -0700
+Subject: [PATCH] feat: Add custom SELinux rules to allow Caddy to listen on TCP and UDP listeners via socket activation
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/README.md b/README.md
+index 0f06b2b3ad5b979c58b16459e9540b13212ff04f..7afa6f97bd80456226e007222d0cc739d300a007 100644
+--- a/README.md
++++ b/README.md
+@@ -31,6 +31,22 @@ $ ssh setup@2a01:4f8:c015:706c::1
+ [setup@vanlug-forgejo-runner ~]$ sudo journalctl _SYSTEMD_USER_UNIT=forgejo-runner.service -f
+ ```
+ 
++To update the SELinux policies for the containers (`.cil` files), run:
++
++```shell
++$ ssh setup@vanlug.p8.lu
++[setup@vanlug-main ~]$ sudo -iu caddy podman inspect caddy | sudo udica caddy
++$ scp setup@vanlug.p8.lu:/home/setup/caddy.cil caddy.cil
++```
++
++You'll then need to manually edit the CIL file (see https://github.com/SELinuxProject/selinux-notebook/blob/main/src/cil_overview.md for a guide) for any additional capabilities the container might need. You can see the denials by running the following:
++
++```shell
++[setup@vanlug-main ~]$ sudo ausearch -m avc -ts recent --input-logs
++[setup@vanlug-main ~]$ sudo semodule -DB # To show any denials hidden by `dontaudit` rules
++[setup@vanlug-main ~]$ sudo semodule -B # To re-enable the `dontaudit` rules
++```
++
+ ## License
+ 
+ vanlug-infrastructure (c) 2026 Felicitas Pojtinger
+diff --git a/caddy.cil b/caddy.cil
+new file mode 100644
+index 0000000000000000000000000000000000000000..181e07a945dcb851be979938ecdd3c51b5d97e6f
+--- /dev/null
++++ b/caddy.cil
+@@ -0,0 +1,33 @@
++(block caddy
++    (blockinherit container)
++    (blockinherit restricted_net_container)
++    (allow process process ( capability ( chown dac_override fowner fsetid kill net_bind_service setfcap setgid setpcap setuid sys_chroot ))) 
++
++    (allow process http_port_t ( tcp_socket (  name_bind ))) 
++    (allow process http_port_t ( tcp_socket (  name_bind ))) 
++    (allow process http_port_t ( udp_socket (  name_bind ))) 
++    (allow process unreserved_port_t ( tcp_socket (  name_bind ))) 
++    (allow process container_file_t ( dir ( add_name create getattr ioctl lock open read remove_name rmdir search setattr write ))) 
++    (allow process container_file_t ( file ( append create getattr ioctl lock map open read rename setattr unlink write ))) 
++    (allow process container_file_t ( fifo_file ( getattr read write append ioctl lock open ))) 
++    (allow process container_file_t ( sock_file ( append getattr open read write ))) 
++    (allow process config_home_t ( dir ( getattr ioctl lock open read search ))) 
++    (allow process config_home_t ( file ( getattr ioctl lock open read ))) 
++    (allow process config_home_t ( fifo_file ( getattr open read lock ioctl ))) 
++    (allow process config_home_t ( sock_file ( getattr open read ))) 
++    (allow process container_file_t ( dir ( getattr ioctl lock open read search ))) 
++    (allow process container_file_t ( file ( getattr ioctl lock open read ))) 
++    (allow process container_file_t ( fifo_file ( getattr open read lock ioctl ))) 
++    (allow process container_file_t ( sock_file ( getattr open read ))) 
++
++    ; Custom rules start here
++
++    ; For Notify=true
++    (allow process unconfined_service_t (unix_dgram_socket (sendto)))
++    
++    ; Socket activation for TCP listeners
++    (allow process unconfined_service_t (tcp_socket (read write getopt setopt getattr ioctl shutdown accept listen)))
++
++    ; Socket activation for UDP listeners (HTTP/3)
++    (allow process unconfined_service_t (udp_socket (read write getopt setopt getattr ioctl)))
++)
+\ No newline at end of file
+diff --git a/caddy.container b/caddy.container
+index 6304bfa4e82c49571c06b1ee84a0fbf58469de71..de3db1922ef3fa9c1ad48ada4c9493e5332a6703 100644
+--- a/caddy.container
++++ b/caddy.container
+@@ -8,6 +8,10 @@ RequiresMountsFor=/run/user/{{ caddy_uid }}/containers
+ 
+ [Container]
+ ContainerName=caddy
++# Since we use enforcing SELinux we disable NoNewPrivileges here and
++# use our own custom SELinux domain to get extra permissions for socket activation
++# and upstream connects
++SecurityLabelType=caddy.process
+ Exec=/usr/bin/caddy run --config /etc/caddy/Caddyfile
+ Image=docker.io/library/caddy:latest
+ Label=io.containers.autoupdate=registry
+@@ -17,7 +21,6 @@ LogDriver=journald
+ # Uncomment the line below when #7526 is fixed; until
+ # then, we can't enable it, since we can't reach out to ACME otherwise
+ # Network=none
+-NoNewPrivileges=true
+ Notify=true
+ ReadOnly=true
+ 
+diff --git a/caddy.yaml b/caddy.yaml
+index 3897035ce2be9c243221f96fdceeb4a5feff3b77..c091b925185260ad3cb992f40d25b31d99691e8f 100644
+--- a/caddy.yaml
++++ b/caddy.yaml
+@@ -35,6 +35,30 @@       vars:
+         caddy_uid: "{{ caddy_user.uid }}"
+       # This will only run on changes to the file; see https://docs.ansible.com/projects/ansible/latest/playbook_guide/playbooks_handlers.html#id1
+       notify: Restart Caddy system service
++    - name: Create policy directory for Caddy
++      become: true
++      ansible.builtin.file:
++        path: /usr/local/share/selinux/targeted
++        state: directory
++        owner: root
++        group: root
++        mode: "0755"
++    - name: Write policy for Caddy
++      become: true
++      register: caddy_policy
++      ansible.builtin.template:
++        src: caddy.cil
++        dest: /usr/local/share/selinux/targeted/caddy.cil
++        owner: root
++        group: root
++        mode: "0644"
++    # We can't use a handler for this since we must apply the policy before we try to start the service
++    - name: Apply Caddy policy # noqa: no-handler
++      become: true
++      when: caddy_policy.changed
++      changed_when: true
++      ansible.builtin.command: semodule -i /usr/local/share/selinux/targeted/caddy.cil
++      notify: Restart Caddy system service
+     - name: Enable Caddy system socket
+       become: true
+       ansible.builtin.systemd_service:
+
