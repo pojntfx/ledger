@@ -1,0 +1,134 @@
+From 16db924437644b0a7177a9705c1433b576adc937 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Thu, 06 Aug 2026 18:34:05 -0700
+Subject: [PATCH] feat: Register custom SELinux network port types for Anubis, Forgejo and git-pages
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/README.md b/README.md
+index 7afa6f97bd80456226e007222d0cc739d300a007..6aa1babf431f6c01a38ac60a042e5508be9206f0 100644
+--- a/README.md
++++ b/README.md
+@@ -18,7 +18,7 @@ $ cd vanlug-infrastructure
+ $ source .env.local # See `.env` for required secrets; ask `@pojntfx:beeper.com` for access
+ $ tofu init
+ $ tofu apply
+-$ ansible-galaxy collection install cloud.terraform ansible.posix
++$ ansible-galaxy collection install cloud.terraform ansible.posix community.general
+ $ ansible-playbook site.yaml # You might want to change `binary_path` in `inventory.yaml` first
+ # To get logs for quadlets on main server
+ $ ssh setup@vanlug.p8.lu
+@@ -39,7 +39,7 @@ [setup@vanlug-main ~]$ sudo -iu caddy podman inspect caddy | sudo udica caddy
+ $ scp setup@vanlug.p8.lu:/home/setup/caddy.cil caddy.cil
+ ```
+ 
+-You'll then need to manually edit the CIL file (see https://github.com/SELinuxProject/selinux-notebook/blob/main/src/cil_overview.md for a guide) for any additional capabilities the container might need. You can see the denials by running the following:
++You'll then need to manually edit the CIL file (see https://github.com/SELinuxProject/selinux-notebook/blob/main/src/cil_overview.md and https://github.com/SELinuxProject/selinux/tree/master/secilc/docs for a guide) for any additional capabilities the container might need. You can see the denials by running the following:
+ 
+ ```shell
+ [setup@vanlug-main ~]$ sudo ausearch -m avc -ts recent --input-logs
+diff --git a/anubis.yaml b/anubis.yaml
+index db4e5d55f19427efc35a77adc62c184139abf397..ae05f805c61106820d4a3563b3a850e01fe088fa 100644
+--- a/anubis.yaml
++++ b/anubis.yaml
+@@ -50,6 +50,13 @@         daemon_reload: true
+         scope: user
+       environment:
+         XDG_RUNTIME_DIR: "/run/user/{{ anubis_user.uid }}"
++    - name: Register Anubis' SELinux network port types
++      become: true
++      community.general.seport:
++        ports: 3007
++        proto: tcp
++        setype: anubis_port_t
++        state: present
+     - name: Create container directory for Anubis
+       become: true
+       ansible.builtin.file:
+diff --git a/caddy.cil b/caddy.cil
+index 181e07a945dcb851be979938ecdd3c51b5d97e6f..b4bbdb2447eb15e96bfac2ae2c1e4e242c1203e1 100644
+--- a/caddy.cil
++++ b/caddy.cil
+@@ -1,3 +1,13 @@
++; Custom ports for upstreams
++(type forgejo_port_t)
++(typeattributeset port_type (forgejo_port_t))
++
++(type git_pages_port_t)
++(typeattributeset port_type (git_pages_port_t))
++
++(type anubis_port_t)
++(typeattributeset port_type (anubis_port_t))
++
+ (block caddy
+     (blockinherit container)
+     (blockinherit restricted_net_container)
+@@ -30,4 +40,9 @@     (allow process unconfined_service_t (tcp_socket (read write getopt setopt getattr ioctl shutdown accept listen)))
+ 
+     ; Socket activation for UDP listeners (HTTP/3)
+     (allow process unconfined_service_t (udp_socket (read write getopt setopt getattr ioctl)))
++
++    ; Dialing permission for upstreams
++    (allow process forgejo_port_t ( tcp_socket ( name_connect )))
++    (allow process git_pages_port_t ( tcp_socket ( name_connect )))
++    (allow process anubis_port_t ( tcp_socket ( name_connect )))
+ )
+\ No newline at end of file
+diff --git a/forgejo.yaml b/forgejo.yaml
+index 7546105f6682d544a332282c8c1bb8c7487f5927..bc018c3af802bbb2735e96b8ea32440eee42ee10 100644
+--- a/forgejo.yaml
++++ b/forgejo.yaml
+@@ -91,6 +91,13 @@       ansible.builtin.systemd_service:
+         name: forgejo-ssh.service
+         state: started
+         daemon_reload: true
++    - name: Register Forgejo's SELinux network port types
++      become: true
++      community.general.seport:
++        ports: 3000-3001
++        proto: tcp
++        setype: forgejo_port_t
++        state: present
+     - name: Create container directory for Forgejo
+       become: true
+       ansible.builtin.file:
+diff --git a/git-pages.yaml b/git-pages.yaml
+index 91ac5d8c71d5f3814ab27cb5de5b958664b0e1b6..ae2df74b525443221f7f79702ac091318dd0453d 100644
+--- a/git-pages.yaml
++++ b/git-pages.yaml
+@@ -59,6 +59,15 @@         XDG_RUNTIME_DIR: "/run/user/{{ git_pages_user.uid }}"
+       loop:
+         - git-pages-pages.socket
+         - git-pages-caddy.socket
++    - name: Register git-pages SELinux network port types
++      become: true
++      community.general.seport:
++        ports:
++          - 3003
++          - 3005
++        proto: tcp
++        setype: git_pages_port_t
++        state: present
+     - name: Create container directory for git-pages
+       become: true
+       ansible.builtin.file:
+diff --git a/site.yaml b/site.yaml
+index 7606d815e39f2bc84a7fb2dc6c6a357981e2bc33..5a813f43565eba5b1b843ebb8d40f7abe4a2c08f 100644
+--- a/site.yaml
++++ b/site.yaml
+@@ -6,8 +6,6 @@ - name: Configure automatic updates
+   ansible.builtin.import_playbook: updates.yaml
+ - name: Configure Podman
+   ansible.builtin.import_playbook: podman.yaml
+-- name: Configure Caddy
+-  ansible.builtin.import_playbook: caddy.yaml
+ - name: Configure Forgejo
+   ansible.builtin.import_playbook: forgejo.yaml
+ - name: Configure Forgejo runner
+@@ -16,3 +14,5 @@ - name: Configure git-pages
+   ansible.builtin.import_playbook: git-pages.yaml
+ - name: Configure Anubis
+   ansible.builtin.import_playbook: anubis.yaml
++- name: Configure Caddy
++  ansible.builtin.import_playbook: caddy.yaml
+
