@@ -1,0 +1,233 @@
+From 91d3b29d9bbd2c34e26e3a6f506e93c63a825f59 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Thu, 06 Aug 2026 18:42:45 -0700
+Subject: [PATCH] feat: Add starter SELinux policies for Anubis, Forgejo and git-pages and roll them out via Ansible
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/anubis.cil b/anubis.cil
+new file mode 100644
+index 0000000000000000000000000000000000000000..cee50a53260f6c8385bea363933a45cad142f748
+--- /dev/null
++++ b/anubis.cil
+@@ -0,0 +1,5 @@
++(block anubis
++    (blockinherit container)
++    (blockinherit restricted_net_container)
++    (allow process forgejo_port_t ( tcp_socket (  name_bind ))) 
++)
+\ No newline at end of file
+diff --git a/anubis.container b/anubis.container
+index e470e91dd714ffc8ea5ddece2f3924898233a295..2fa54dd23ee0bab3409e1fbd7820f3360648a90d 100644
+--- a/anubis.container
++++ b/anubis.container
+@@ -1,6 +1,9 @@
+ # See https://anubis.techaro.lol/docs/admin/environments/caddy
+ [Container]
+ ContainerName=anubis
++# Since we use enforcing SELinux we disable NoNewPrivileges here and
++# use our own custom SELinux domain instead
++SecurityLabelType=anubis.process
+ Image=ghcr.io/techarohq/anubis:latest
+ Label=io.containers.autoupdate=registry
+ # We use systemd-socket-proxyd on 3007, so we listen on 3008 instead
+@@ -9,7 +12,6 @@ Environment=BIND=:3000
+ # This is Forgejo
+ Environment=TARGET=http://host.containers.internal:3000
+ LogDriver=journald
+-NoNewPrivileges=true
+ ReadOnly=true
+ 
+ [Install]
+diff --git a/anubis.yaml b/anubis.yaml
+index ae05f805c61106820d4a3563b3a850e01fe088fa..a49e7376ce1d1523bc6893ada2b91b8a08316061 100644
+--- a/anubis.yaml
++++ b/anubis.yaml
+@@ -57,6 +57,30 @@         ports: 3007
+         proto: tcp
+         setype: anubis_port_t
+         state: present
++    - name: Create policy directory for Anubis
++      become: true
++      ansible.builtin.file:
++        path: /home/anubis/.local/share/selinux/targeted
++        state: directory
++        owner: anubis
++        group: anubis
++        mode: "0755"
++    - name: Write policy for Anubis
++      become: true
++      register: anubis_policy
++      ansible.builtin.copy:
++        src: anubis.cil
++        dest: /home/anubis/.local/share/selinux/targeted/anubis.cil
++        owner: anubis
++        group: anubis
++        mode: "0644"
++    # We can't use a handler for this since we must apply the policy before we try to start the service
++    - name: Apply Anubis policy # noqa: no-handler
++      become: true
++      when: anubis_policy.changed
++      changed_when: true
++      ansible.builtin.command: semodule -i /home/anubis/.local/share/selinux/targeted/anubis.cil
++      notify: Restart Anubis user service
+     - name: Create container directory for Anubis
+       become: true
+       ansible.builtin.file:
+diff --git a/forgejo.cil b/forgejo.cil
+new file mode 100644
+index 0000000000000000000000000000000000000000..f771a95c1109e79a39875dc3a36847b9382ebc39
+--- /dev/null
++++ b/forgejo.cil
+@@ -0,0 +1,14 @@
++(block forgejo
++    (blockinherit container)
++    (blockinherit restricted_net_container)
++    (allow process unreserved_port_t ( tcp_socket (  name_bind ))) 
++    (allow process forgejo_port_t ( tcp_socket (  name_bind ))) 
++    (allow process config_home_t ( dir ( add_name create getattr ioctl lock open read remove_name rmdir search setattr write ))) 
++    (allow process config_home_t ( file ( append create getattr ioctl lock map open read rename setattr unlink write ))) 
++    (allow process config_home_t ( fifo_file ( getattr read write append ioctl lock open ))) 
++    (allow process config_home_t ( sock_file ( append getattr open read write ))) 
++    (allow process container_file_t ( dir ( add_name create getattr ioctl lock open read remove_name rmdir search setattr write ))) 
++    (allow process container_file_t ( file ( append create getattr ioctl lock map open read rename setattr unlink write ))) 
++    (allow process container_file_t ( fifo_file ( getattr read write append ioctl lock open ))) 
++    (allow process container_file_t ( sock_file ( append getattr open read write ))) 
++)
+\ No newline at end of file
+diff --git a/forgejo.container b/forgejo.container
+index 1277559106ad552ed8cc2fe99e2080520cf80500..9cdddd7bcd224e865c3aefa944ad4d938c1577f9 100644
+--- a/forgejo.container
++++ b/forgejo.container
+@@ -1,5 +1,8 @@
+ [Container]
+ ContainerName=forgejo
++# Since we use enforcing SELinux we disable NoNewPrivileges here and
++# use our own custom SELinux domain instead
++SecurityLabelType=forgejo.process
+ Image=codeberg.org/forgejo/forgejo:16-rootless
+ Label=io.containers.autoupdate=registry
+ # We use systemd-socket-proxyd on 3000/2222, so we listen on 3001/2223 instead
+@@ -24,7 +27,6 @@ # We're not open for registration, and do not need email support
+ Environment=FORGEJO__service__DISABLE_REGISTRATION=true
+ Environment=FORGEJO__mailer__ENABLED=false
+ LogDriver=journald
+-NoNewPrivileges=true
+ ReadOnly=true
+ 
+ [Install]
+diff --git a/forgejo.yaml b/forgejo.yaml
+index bc018c3af802bbb2735e96b8ea32440eee42ee10..ac1c54afc763a95a4a2a1bacd6cd42dd75c168d9 100644
+--- a/forgejo.yaml
++++ b/forgejo.yaml
+@@ -98,6 +98,30 @@         ports: 3000-3001
+         proto: tcp
+         setype: forgejo_port_t
+         state: present
++    - name: Create policy directory for Forgejo
++      become: true
++      ansible.builtin.file:
++        path: /home/forgejo/.local/share/selinux/targeted
++        state: directory
++        owner: forgejo
++        group: forgejo
++        mode: "0755"
++    - name: Write policy for Forgejo
++      become: true
++      register: forgejo_policy
++      ansible.builtin.copy:
++        src: forgejo.cil
++        dest: /home/forgejo/.local/share/selinux/targeted/forgejo.cil
++        owner: forgejo
++        group: forgejo
++        mode: "0644"
++    # We can't use a handler for this since we must apply the policy before we try to start the service
++    - name: Apply Forgejo policy # noqa: no-handler
++      become: true
++      when: forgejo_policy.changed
++      changed_when: true
++      ansible.builtin.command: semodule -i /home/forgejo/.local/share/selinux/targeted/forgejo.cil
++      notify: Restart Forgejo user service
+     - name: Create container directory for Forgejo
+       become: true
+       ansible.builtin.file:
+diff --git a/git-pages.cil b/git-pages.cil
+new file mode 100644
+index 0000000000000000000000000000000000000000..a8c8bf39e94db4138a9d4fb7508cb6f9ab9dd415
+--- /dev/null
++++ b/git-pages.cil
+@@ -0,0 +1,16 @@
++(block git_pages
++    (blockinherit container)
++    (blockinherit restricted_net_container)
++    (allow process process ( capability ( chown dac_override fowner fsetid kill net_bind_service setfcap setgid setpcap setuid sys_chroot ))) 
++
++    (allow process http_port_t ( tcp_socket (  name_bind ))) 
++    (allow process http_port_t ( tcp_socket (  name_bind ))) 
++    (allow process http_port_t ( udp_socket (  name_bind ))) 
++    (allow process forgejo_port_t ( tcp_socket (  name_bind ))) 
++    (allow process forgejo_port_t ( tcp_socket (  name_bind ))) 
++    (allow process unreserved_port_t ( tcp_socket (  name_bind ))) 
++    (allow process container_file_t ( dir ( add_name create getattr ioctl lock open read remove_name rmdir search setattr write ))) 
++    (allow process container_file_t ( file ( append create getattr ioctl lock map open read rename setattr unlink write ))) 
++    (allow process container_file_t ( fifo_file ( getattr read write append ioctl lock open ))) 
++    (allow process container_file_t ( sock_file ( append getattr open read write ))) 
++)
+\ No newline at end of file
+diff --git a/git-pages.container b/git-pages.container
+index 518f259b51eaae15a83e16e862886423f04234ff..096ac211c390c9288c1c508c21d2ee8dd051d3a7 100644
+--- a/git-pages.container
++++ b/git-pages.container
+@@ -1,5 +1,8 @@
+ [Container]
+ ContainerName=git-pages
++# Since we use enforcing SELinux we disable NoNewPrivileges here and
++# use our own custom SELinux domain instead
++SecurityLabelType=git_pages.process
+ Image=codeberg.org/git-pages/git-pages:latest
+ Label=io.containers.autoupdate=registry
+ # We use systemd-socket-proxyd on 3003/3005, so we listen on 3004/3006 instead
+@@ -13,7 +16,6 @@ # for user-generated pages, but since we only allow board members to public
+ # sites, this is fine for us
+ Environment="PAGES_WILDCARD=[{\"Domain\":\"pages.vanlug.p8.lu\",\"CloneURL\":\"https://git.vanlug.p8.lu/<user>/<project>.git\",\"IndexRepo\":\"<user>.pages.vanlug.p8.lu\",\"IndexRepoBranch\":\"main\",\"Authorization\":\"forgejo\"}]"
+ LogDriver=journald
+-NoNewPrivileges=true
+ ReadOnly=true
+ 
+ [Install]
+diff --git a/git-pages.yaml b/git-pages.yaml
+index ae2df74b525443221f7f79702ac091318dd0453d..df1a62278c3b3c7613817a3b9a6723481117f99c 100644
+--- a/git-pages.yaml
++++ b/git-pages.yaml
+@@ -68,6 +68,30 @@           - 3005
+         proto: tcp
+         setype: git_pages_port_t
+         state: present
++    - name: Create policy directory for git-pages
++      become: true
++      ansible.builtin.file:
++        path: /home/git-pages/.local/share/selinux/targeted
++        state: directory
++        owner: git-pages
++        group: git-pages
++        mode: "0755"
++    - name: Write policy for git-pages
++      become: true
++      register: git_pages_policy
++      ansible.builtin.copy:
++        src: git-pages.cil
++        dest: /home/git-pages/.local/share/selinux/targeted/git-pages.cil
++        owner: git-pages
++        group: git-pages
++        mode: "0644"
++    # We can't use a handler for this since we must apply the policy before we try to start the service
++    - name: Apply git-pages policy # noqa: no-handler
++      become: true
++      when: git_pages_policy.changed
++      changed_when: true
++      ansible.builtin.command: semodule -i /home/git-pages/.local/share/selinux/targeted/git-pages.cil
++      notify: Restart git-pages user service
+     - name: Create container directory for git-pages
+       become: true
+       ansible.builtin.file:
+
