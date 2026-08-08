@@ -1,0 +1,37 @@
+From e671f1abf27e6fcb64f0448876f3f040c850dab0 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Fri, 07 Aug 2026 20:54:12 -0700
+Subject: [PATCH] feat: Set up SELinux policy for `systemd-socket-proxyd`
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/forgejo.yaml b/forgejo.yaml
+index ac1c54afc763a95a4a2a1bacd6cd42dd75c168d9..7aff30a1a2ba72ed1fca6cafc3d180a9f45f6f31 100644
+--- a/forgejo.yaml
++++ b/forgejo.yaml
+@@ -56,6 +56,13 @@       environment:
+         XDG_RUNTIME_DIR: "/run/user/{{ forgejo_user.uid }}"
+       loop:
+         - forgejo-http.socket
++    - name: Register Forgejo SSH port as systemd-socket-proxyd port SELinux network port type
++      become: true
++      community.general.seport:
++        ports: 220
++        proto: tcp
++        setype: systemd_socket_proxyd_port_t
++        state: present
+     - name: Write system socket file for Forgejo SSH # Binds the privileged port 220 as root; the proxy runs as the forgejo user
+       become: true
+       ansible.builtin.copy:
+@@ -94,7 +101,9 @@         daemon_reload: true
+     - name: Register Forgejo's SELinux network port types
+       become: true
+       community.general.seport:
+-        ports: 3000-3001
++        ports:
++          - 3000
++          - 3001
+         proto: tcp
+         setype: forgejo_port_t
+         state: present
+
