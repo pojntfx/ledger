@@ -1,0 +1,161 @@
+From 473accbe53f4e9923ae97144832b27838bbeee46 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Fri, 07 Aug 2026 21:47:06 -0700
+Subject: [PATCH] feat: Add SELinux policy for Forgejo runner (without DinD support for now), get SSH clones to work
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/caddy.cil b/caddy.cil
+index b4bbdb2447eb15e96bfac2ae2c1e4e242c1203e1..5ba0408af264f238ce4d6366ef4b623a36f56bb6 100644
+--- a/caddy.cil
++++ b/caddy.cil
+@@ -1,3 +1,5 @@
++; Custom rules start here
++
+ ; Custom ports for upstreams
+ (type forgejo_port_t)
+ (typeattributeset port_type (forgejo_port_t))
+@@ -7,6 +9,8 @@ (typeattributeset port_type (git_pages_port_t))
+ 
+ (type anubis_port_t)
+ (typeattributeset port_type (anubis_port_t))
++    
++; Custom rules end here
+ 
+ (block caddy
+     (blockinherit container)
+@@ -45,4 +49,6 @@     ; Dialing permission for upstreams
+     (allow process forgejo_port_t ( tcp_socket ( name_connect )))
+     (allow process git_pages_port_t ( tcp_socket ( name_connect )))
+     (allow process anubis_port_t ( tcp_socket ( name_connect )))
++
++    ; Custom rules end here
+ )
+\ No newline at end of file
+diff --git a/forgejo-runner.cil b/forgejo-runner.cil
+new file mode 100644
+index 0000000000000000000000000000000000000000..37f4830d01050fea6d7069cdd289f21ee6143391
+--- /dev/null
++++ b/forgejo-runner.cil
+@@ -0,0 +1,25 @@
++(block forgejo_runner
++    (blockinherit container)
++    (allow process container_file_t ( dir ( add_name create getattr ioctl lock open read remove_name rmdir search setattr write )))
++    (allow process container_file_t ( file ( append create getattr ioctl lock map open read rename setattr unlink write )))
++    (allow process container_file_t ( fifo_file ( getattr read write append ioctl lock open )))
++    (allow process container_file_t ( sock_file ( append getattr open read write )))
++    (allow process user_tmp_t ( dir ( add_name create getattr ioctl lock open read remove_name rmdir search setattr write )))
++    (allow process user_tmp_t ( file ( append create getattr ioctl lock map open read rename setattr unlink write )))
++    (allow process user_tmp_t ( fifo_file ( getattr read write append ioctl lock open )))
++    (allow process user_tmp_t ( sock_file ( append getattr open read write )))
++
++    ; Custom rules start here
++
++    ; Connecting to the rootless Podman API socket for Podman-in-Podman
++    (allow process container_runtime_t ( unix_stream_socket ( connectto )))
++
++    ; Binding and listening on the local cache server on loopback
++    (allow process node_t ( tcp_socket ( node_bind )))
++    (allow process process ( tcp_socket ( listen )))
++
++    ; Dialing Forgejo over HTTPS to register and poll for jobs
++    (allow process http_port_t ( tcp_socket ( name_connect )))
++
++    ; Custom rules end here
++)
+diff --git a/forgejo-runner.container b/forgejo-runner.container
+index 9807c3d9c0a16fa869364c871e6cbbe7e7f876ec..1e7105ebcc7a21029a91e5b457af1f5864d976ed 100644
+--- a/forgejo-runner.container
++++ b/forgejo-runner.container
+@@ -5,6 +5,9 @@ After=podman.socket
+ 
+ [Container]
+ ContainerName=forgejo-runner
++# Since we use enforcing SELinux we disable NoNewPrivileges here and
++# use our own custom SELinux domain instead
++SecurityLabelType=forgejo_runner.process
+ Exec=/bin/forgejo-runner --config config.yml daemon
+ Image=code.forgejo.org/forgejo/runner:12
+ Label=io.containers.autoupdate=registry
+@@ -16,7 +19,6 @@ Environment=DOCKER_HOST=unix:///var/run/docker.sock
+ # Process stays running as the `setup` user, but GID 0 since inside this rootless container, GID 0 maps to the unprivileged forgejo-runner group on the host, which owns podman.sock
+ GroupAdd=root
+ LogDriver=journald
+-NoNewPrivileges=true
+ ReadOnly=true
+ 
+ [Service]
+diff --git a/forgejo-runner.yaml b/forgejo-runner.yaml
+index 3d79427377fe1a1124204b5be9a8a9561a4634e4..2cee77e0ec0b9ab5289d4517bf6116e6015a6e8f 100644
+--- a/forgejo-runner.yaml
++++ b/forgejo-runner.yaml
+@@ -13,6 +13,30 @@       become: true
+       ansible.builtin.command: loginctl enable-linger forgejo-runner
+       args:
+         creates: /var/lib/systemd/linger/forgejo-runner
++    - name: Create policy directory for Forgejo runner
++      become: true
++      ansible.builtin.file:
++        path: /home/forgejo-runner/.local/share/selinux/targeted
++        state: directory
++        owner: forgejo-runner
++        group: forgejo-runner
++        mode: "0755"
++    - name: Write policy for Forgejo runner
++      become: true
++      register: forgejo_runner_policy
++      ansible.builtin.copy:
++        src: forgejo-runner.cil
++        dest: /home/forgejo-runner/.local/share/selinux/targeted/forgejo-runner.cil
++        owner: forgejo-runner
++        group: forgejo-runner
++        mode: "0644"
++    # We can't use a handler for this since we must apply the policy before we try to start the service
++    - name: Apply Forgejo runner policy # noqa: no-handler
++      become: true
++      when: forgejo_runner_policy.changed
++      changed_when: true
++      ansible.builtin.command: semodule -i /home/forgejo-runner/.local/share/selinux/targeted/forgejo-runner.cil
++      notify: Restart Forgejo runner user service
+     - name: Create container directory for Forgejo runner
+       become: true
+       ansible.builtin.file:
+diff --git a/forgejo.cil b/forgejo.cil
+index f771a95c1109e79a39875dc3a36847b9382ebc39..7f20769e8880ec9c8f71f00aea982529f33ab379 100644
+--- a/forgejo.cil
++++ b/forgejo.cil
+@@ -10,5 +10,12 @@     (allow process config_home_t ( sock_file ( append getattr open read write ))) 
+     (allow process container_file_t ( dir ( add_name create getattr ioctl lock open read remove_name rmdir search setattr write ))) 
+     (allow process container_file_t ( file ( append create getattr ioctl lock map open read rename setattr unlink write ))) 
+     (allow process container_file_t ( fifo_file ( getattr read write append ioctl lock open ))) 
+-    (allow process container_file_t ( sock_file ( append getattr open read write ))) 
++    (allow process container_file_t ( sock_file ( append getattr open read write )))
++
++    ; Custom rules start here
++
++    ; `gitea serv` dials Forgejo's internal HTTP API when executed via SSH
++    (allow process forgejo_port_t ( tcp_socket ( name_connect )))
++
++    ; Custom rules end here
+ )
+\ No newline at end of file
+diff --git a/forgejo.yaml b/forgejo.yaml
+index 7aff30a1a2ba72ed1fca6cafc3d180a9f45f6f31..bfceb78812e96129a66250988780301e707994c3 100644
+--- a/forgejo.yaml
++++ b/forgejo.yaml
+@@ -56,10 +56,12 @@       environment:
+         XDG_RUNTIME_DIR: "/run/user/{{ forgejo_user.uid }}"
+       loop:
+         - forgejo-http.socket
+-    - name: Register Forgejo SSH port as systemd-socket-proxyd port SELinux network port type
++    - name: Register Forgejo SSH ports as systemd-socket-proxyd port SELinux network port type
+       become: true
+       community.general.seport:
+-        ports: 220
++        ports:
++          - 220 # Bound by systemd-socket-proxyd
++          - 2223 # Dialed by systemd-socket-proxyd
+         proto: tcp
+         setype: systemd_socket_proxyd_port_t
+         state: present
+
