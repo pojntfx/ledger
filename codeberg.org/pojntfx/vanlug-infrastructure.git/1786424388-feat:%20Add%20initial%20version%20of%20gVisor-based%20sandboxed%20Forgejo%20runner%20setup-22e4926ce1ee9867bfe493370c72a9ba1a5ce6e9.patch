@@ -1,0 +1,628 @@
+From 22e4926ce1ee9867bfe493370c72a9ba1a5ce6e9 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Mon, 10 Aug 2026 21:59:48 -0700
+Subject: [PATCH] feat: Add initial version of gVisor-based sandboxed Forgejo runner setup
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/.env b/.env
+index d45b9ab9c2e05a356aaa66dc0198f324651420a5..c0d02e7cdbe51e412e2db9c95ca2937d34e877ca 100644
+--- a/.env
++++ b/.env
+@@ -6,4 +6,15 @@ export FORGEJO_ADMIN_USERNAME="pojntfx"
+ export FORGEJO_ADMIN_EMAIL="felicitas@pojtinger.com"
+ export FORGEJO_ADMIN_INITIAL_PASSWORD=""
+ export FORGEJO_RUNNER_SHARED_SECRET="" # openssl rand -hex 20
+-export FORGEJO_RUNNER_UUID="" # echo -n "$FORGEJO_RUNNER_SHARED_SECRET" | python3 -c 'import sys; import uuid;input=sys.stdin.read();print(str(uuid.UUID(bytes=input[:16].encode("utf-8"))))'
++export FORGEJO_RUNNER_UUID="" # printed by `forgejo forgejo-cli actions register --secret ...` on first registration
++# A personal access token with write:package scope, generated via:
++# podman exec forgejo forgejo admin user generate-access-token --username <user> --token-name registry --scopes write:package
++# Used by forgejo-runner-docker-image.yaml to log in and push the runner's
++# base image (see forgejo-runner-docker-image/ dir + repo), breaking the
++# chicken-and-egg problem for its own first build
++export FORGEJO_REGISTRY_TOKEN=""
++# A personal access token with write:repository scope, generated via:
++# podman exec forgejo forgejo admin user generate-access-token --username <user> --token-name repo-admin --scopes write:repository
++# Used by forgejo-runner-docker-image.yaml to create the
++# forgejo-runner-docker-image repo (if missing) and push its files to it
++export FORGEJO_REPO_TOKEN=""
+diff --git a/forgejo-runner-docker-image.yaml b/forgejo-runner-docker-image.yaml
+new file mode 100644
+index 0000000000000000000000000000000000000000..d92edc8e93820c8d7ba5cb1cd7d35f44de4f121e
+--- /dev/null
++++ b/forgejo-runner-docker-image.yaml
+@@ -0,0 +1,109 @@
++- name: Bootstrap the Forgejo runner's base image # One-time (but safe to rerun) local build+push via rootless Podman, to break the chicken-and-egg problem: the image's own weekly rebuild workflow (see the forgejo-runner-docker-image/ directory in this repo, pushed to its own Forgejo repo below) needs Docker-in-gVisor to already work on the runner, which is exactly what this image provides. After this first push, all subsequent rebuilds happen automatically via that Forgejo Actions workflow - this playbook is only needed again if the image is ever lost from the registry. The Dockerfile/bootstrap action/workflow live in forgejo-runner-docker-image/ IN THIS REPO (single source of truth) - the Forgejo repo is a deploy target this playbook pushes to, not hand-maintained separately.
++  hosts:
++    - localhost
++  gather_facts: false
++  vars:
++    forgejo_runner_docker_image: git.vanlug.p8.lu/pojntfx/forgejo-runner-docker-image:latest
++    forgejo_runner_docker_image_repo_dir: /tmp/forgejo-runner-docker-image
++  tasks:
++    - name: Check if the Forgejo repo for the image already exists
++      register: forgejo_runner_docker_image_repo_check
++      ansible.builtin.uri:
++        url: https://git.vanlug.p8.lu/api/v1/repos/pojntfx/forgejo-runner-docker-image
++        headers:
++          Authorization: 'token {{ lookup("ansible.builtin.env", "FORGEJO_REPO_TOKEN") }}'
++        status_code:
++          - 200
++          - 404
++      no_log: true
++    - name: Create the Forgejo repo for the image # Needs write:repository scope, which FORGEJO_REGISTRY_TOKEN (write:package only) doesn't have - see .env
++      when: forgejo_runner_docker_image_repo_check.status == 404
++      ansible.builtin.uri:
++        url: https://git.vanlug.p8.lu/api/v1/user/repos
++        method: POST
++        headers:
++          Authorization: 'token {{ lookup("ansible.builtin.env", "FORGEJO_REPO_TOKEN") }}'
++        body_format: json
++        body:
++          name: forgejo-runner-docker-image
++          description: "Base image for the Forgejo Actions runner: dockerd bootstrapped to run inside its own gVisor sandbox, rebuilt weekly"
++          private: false
++          auto_init: false
++        status_code:
++          - 201
++      no_log: true
++    - name: Enable Actions on the Forgejo repo for the image # Off by default on newly created repos, unlike the initial handful of repos that predate this playbook
++      when: forgejo_runner_docker_image_repo_check.status == 404
++      ansible.builtin.uri:
++        url: https://git.vanlug.p8.lu/api/v1/repos/pojntfx/forgejo-runner-docker-image
++        method: PATCH
++        headers:
++          Authorization: 'token {{ lookup("ansible.builtin.env", "FORGEJO_REPO_TOKEN") }}'
++        body_format: json
++        body:
++          has_actions: true
++        status_code:
++          - 200
++      no_log: true
++    - name: Set the registry push secret for the image repo's own build workflow
++      ansible.builtin.uri:
++        url: https://git.vanlug.p8.lu/api/v1/repos/pojntfx/forgejo-runner-docker-image/actions/secrets/REGISTRY_TOKEN
++        method: PUT
++        headers:
++          Authorization: 'token {{ lookup("ansible.builtin.env", "FORGEJO_REPO_TOKEN") }}'
++        body_format: json
++        body:
++          data: '{{ lookup("ansible.builtin.env", "FORGEJO_REGISTRY_TOKEN") }}'
++        status_code:
++          - 201
++          - 204
++      no_log: true
++    - name: Clone the image repo # Idempotent: clones fresh if missing, otherwise leaves any existing local checkout alone (does NOT reset/pull - the push below is what syncs content)
++      ansible.builtin.git:
++        repo: ssh://git@git.vanlug.p8.lu:220/pojntfx/forgejo-runner-docker-image.git
++        dest: "{{ forgejo_runner_docker_image_repo_dir }}"
++        version: main
++      environment:
++        GIT_SSH_COMMAND: ssh -4
++      failed_when: false # Fails on a brand new empty repo (no `main` branch yet) - handled by the init fallback below
++      register: forgejo_runner_docker_image_clone
++    - name: Initialize the local checkout if the clone above failed # Brand new repo with no commits yet has no `main` branch to clone
++      when: forgejo_runner_docker_image_clone is failed
++      ansible.builtin.command:
++        cmd: git init -b main {{ forgejo_runner_docker_image_repo_dir }}
++        creates: "{{ forgejo_runner_docker_image_repo_dir }}/.git"
++      changed_when: true
++    - name: Sync the image repo's files from this repo
++      ansible.posix.synchronize:
++        src: forgejo-runner-docker-image/ # Trailing slash: sync the contents, not the directory itself
++        dest: "{{ forgejo_runner_docker_image_repo_dir }}"
++        rsync_opts:
++          - "--exclude=.git"
++        delete: true
++    - name: Commit and push the image repo's files # Idempotent - no-ops if nothing changed since the last push
++      ansible.builtin.shell:
++        cmd: |
++          git add -A
++          git -c user.email="{{ lookup("ansible.builtin.env", "FORGEJO_ADMIN_EMAIL") }}" -c user.name="{{ lookup("ansible.builtin.env", "FORGEJO_ADMIN_USERNAME") }}" commit -m "Sync from vanlug-infrastructure" --allow-empty-message -q || true
++          git branch -M main
++          git -c core.sshCommand="ssh -4" push -u origin main
++        chdir: "{{ forgejo_runner_docker_image_repo_dir }}"
++      changed_when: true
++    - name: Log in to the Forgejo container registry # Uses a personal access token (see .env for how to generate one), not the admin's initial password - that password is one-time/forced-to-change and isn't a valid long-term registry credential
++      ansible.builtin.command:
++        cmd: >
++          podman login git.vanlug.p8.lu
++          -u {{ lookup("ansible.builtin.env", "FORGEJO_ADMIN_USERNAME") }}
++          --password-stdin
++        stdin: '{{ lookup("ansible.builtin.env", "FORGEJO_REGISTRY_TOKEN") }}'
++      changed_when: true
++      no_log: true
++    - name: Build the image
++      ansible.builtin.command:
++        cmd: podman build -t {{ forgejo_runner_docker_image }} .
++        chdir: "{{ forgejo_runner_docker_image_repo_dir }}"
++      changed_when: true
++    - name: Push the image
++      ansible.builtin.command:
++        cmd: podman push {{ forgejo_runner_docker_image }}
++      changed_when: true
+diff --git a/forgejo-runner-docker-image/.forgejo/workflows/build.yaml b/forgejo-runner-docker-image/.forgejo/workflows/build.yaml
+new file mode 100644
+index 0000000000000000000000000000000000000000..8e75ab0405365675e6a09caf4b4dd6d4fd93eae1
+--- /dev/null
++++ b/forgejo-runner-docker-image/.forgejo/workflows/build.yaml
+@@ -0,0 +1,32 @@
++name: Build and push image
++
++on:
++  push:
++    branches:
++      - main
++  schedule:
++    # Weekly rebuild so base-image security updates land automatically
++    - cron: "0 3 * * 0"
++
++jobs:
++  build:
++    runs-on: ubuntu-latest
++    container:
++      image: git.vanlug.p8.lu/pojntfx/forgejo-runner-docker-image:latest
++    steps:
++      - uses: actions/checkout@v4
++
++      - uses: ./bootstrap-dockerd
++
++      # Uses a dedicated write:package personal access token (repo secret
++      # REGISTRY_TOKEN), not the automatic FORGEJO_TOKEN - that token doesn't
++      # carry package-registry write scope, and docker push fails with
++      # "unauthorized: authentication required" even though docker login
++      # itself reports success.
++      - name: Log in to the Forgejo container registry
++        run: echo "${{ secrets.REGISTRY_TOKEN }}" | docker login git.vanlug.p8.lu -u "${{ github.actor }}" --password-stdin
++
++      - name: Build and push image
++        run: |
++          docker build -t git.vanlug.p8.lu/${{ github.repository }}:latest .
++          docker push git.vanlug.p8.lu/${{ github.repository }}:latest
+diff --git a/forgejo-runner-docker-image/Dockerfile b/forgejo-runner-docker-image/Dockerfile
+new file mode 100644
+index 0000000000000000000000000000000000000000..eb48b51a5c25433f81d5f656bd622e7cfa380235
+--- /dev/null
++++ b/forgejo-runner-docker-image/Dockerfile
+@@ -0,0 +1,8 @@
++FROM node:lts
++
++RUN apt-get update && \
++    apt-get install -y --no-install-recommends docker.io iptables iproute2 && \
++    rm -rf /var/lib/apt/lists/*
++
++COPY bootstrap-dockerd/bootstrap-dockerd.sh /usr/local/bin/bootstrap-dockerd.sh
++RUN chmod +x /usr/local/bin/bootstrap-dockerd.sh
+diff --git a/forgejo-runner-docker-image/bootstrap-dockerd/action.yml b/forgejo-runner-docker-image/bootstrap-dockerd/action.yml
+new file mode 100644
+index 0000000000000000000000000000000000000000..f0c98ca1b9daeee27981967d151e69749acd6829
+--- /dev/null
++++ b/forgejo-runner-docker-image/bootstrap-dockerd/action.yml
+@@ -0,0 +1,13 @@
++name: Bootstrap dockerd
++description: >
++  Starts a dockerd inside the job container's own gVisor sandbox (tmpfs at
++  /var/lib/docker, IPv4+IPv6 NAT, --iptables=false). Only needed on images
++  that don't already have it running; the
++  git.vanlug.p8.lu/pojntfx/forgejo-runner-docker-image base image ships
++  everything this needs pre-installed.
++
++runs:
++  using: composite
++  steps:
++    - run: bash "${{ github.action_path }}/bootstrap-dockerd.sh"
++      shell: bash
+diff --git a/forgejo-runner-docker-image/bootstrap-dockerd/bootstrap-dockerd.sh b/forgejo-runner-docker-image/bootstrap-dockerd/bootstrap-dockerd.sh
+new file mode 100644
+index 0000000000000000000000000000000000000000..2d047eec7b1de104241f8de2cb56f76f34cc3bf9
+--- /dev/null
++++ b/forgejo-runner-docker-image/bootstrap-dockerd/bootstrap-dockerd.sh
+@@ -0,0 +1,62 @@
++#!/bin/bash
++# Bootstraps a dockerd INSIDE this container's own gVisor sandbox (the host's
++# dockerd socket is never forwarded in - see forgejo-runner.container in the
++# vanlug-infrastructure repo). Adapted from
++# https://github.com/google/gvisor/blob/master/images/basic/docker/start-dockerd.sh
++#
++# Run this as the first step of any job using this image - it can't be baked
++# in as an ENTRYPOINT since forgejo-runner always overrides job containers'
++# entrypoint with `tail -f /dev/null` to keep them alive for step exec'ing,
++# so this needs a live network namespace that only exists once the container
++# is actually running, which an image build never has.
++#
++# The plain `iptables` binary fails inside the sandbox ("Failed to initialize
++# nft: Protocol not supported" - it defaults to the nft backend on Debian,
++# which gVisor's netstack doesn't implement). `iptables-legacy` DOES work
++# (confirmed) - this is exactly why gVisor's own reference script prefers it
++# when available. Without these SNAT rules, the inner dockerd's default
++# bridge network gets enable_ip_masquerade=false (an automatic consequence of
++# --iptables=false) and nested containers (including the ones a `docker
++# build` creates for each RUN step) have no outbound route at all.
++#
++# IPv4 only, deliberately: `dockerd --ipv6` fails outright under gVisor
++# ("Cannot read IPv6 setup for bridge docker0: open
++# /proc/sys/net/ipv6/conf/docker0/disable_ipv6: no such file or directory").
++# This isn't a missing flag - gVisor's /proc/sys/net tree only ever exposes
++# core/ and ipv4/, never ipv6/, for ANY interface, confirmed against a stock
++# node:lts sandbox with no dockerd involved at all. Long-standing, still-open
++# upstream gap: https://github.com/google/gvisor/issues/5745 (no workaround
++# as of writing; there's an open PR #13609 that may eventually address it -
++# worth revisiting this file if that lands). The OUTER job container's own
++# IPv6 connectivity is unaffected (it uses the real host kernel's /proc, not
++# gVisor's) - only containers created by this INNER dockerd are IPv4-only.
++set -e
++
++# gVisor only supports tmpfs as an overlayfs upper layer
++if [ "$(stat -f -c %T /var/lib/docker 2>/dev/null || echo none)" != "tmpfs" ]; then
++  mkdir -p /var/lib/docker
++  mount -t tmpfs -o size="${DOCKER_TMPFS_SIZE:-2G}" tmpfs /var/lib/docker
++fi
++
++# Single-line extraction (-n '1s/.../p'): a dual-stack default route (which
++# enable_ipv6 networks have) produces TWO "default" lines from `ip route show
++# default`, and an unguarded sed would concatenate both matches with the
++# command-substitution's stripped newline still joining them, producing a
++# garbage value like "eth0\neth0".
++dev=$(ip route show default | sed -n '1s/.*\sdev\s\(\S*\)\s.*$/\1/p')
++addr=$(ip -4 addr show dev "$dev" | grep -w inet | sed 's/^\s*inet\s\(\S*\)\/.*$/\1/')
++
++IPTABLES=iptables
++command -v iptables-legacy >/dev/null 2>&1 && IPTABLES=iptables-legacy
++
++echo 1 > /proc/sys/net/ipv4/ip_forward
++$IPTABLES -t nat -A POSTROUTING -o "$dev" -j SNAT --to-source "$addr" -p tcp
++$IPTABLES -t nat -A POSTROUTING -o "$dev" -j SNAT --to-source "$addr" -p udp
++
++dockerd --iptables=false --ip6tables=false &
++
++for _ in $(seq 1 30); do
++  docker info >/dev/null 2>&1 && break
++  sleep 1
++done
++docker info >/dev/null
+diff --git a/forgejo-runner.cil b/forgejo-runner.cil
+index 37f4830d01050fea6d7069cdd289f21ee6143391..6c3c41ca4ac99f241fb2f99f52b65d42c3119fc2 100644
+--- a/forgejo-runner.cil
++++ b/forgejo-runner.cil
+@@ -1,3 +1,9 @@
++; Forgejo runner SELinux domain (see forgejo-runner.yaml - "flatpak" and
++; "hardened" tiers were tried and dropped, Docker is all that's needed)
++
++; Access to the rootful Docker daemon's socket is used to create job
++; containers under gVisor (Podman's own copier can't write into a running
++; gVisor sandbox; Docker's storage-layer-based copier can)
+ (block forgejo_runner
+     (blockinherit container)
+     (allow process container_file_t ( dir ( add_name create getattr ioctl lock open read remove_name rmdir search setattr write )))
+@@ -8,18 +14,9 @@     (allow process user_tmp_t ( dir ( add_name create getattr ioctl lock open read remove_name rmdir search setattr write )))
+     (allow process user_tmp_t ( file ( append create getattr ioctl lock map open read rename setattr unlink write )))
+     (allow process user_tmp_t ( fifo_file ( getattr read write append ioctl lock open )))
+     (allow process user_tmp_t ( sock_file ( append getattr open read write )))
+-
+-    ; Custom rules start here
+-
+-    ; Connecting to the rootless Podman API socket for Podman-in-Podman
+     (allow process container_runtime_t ( unix_stream_socket ( connectto )))
+-
+-    ; Binding and listening on the local cache server on loopback
+     (allow process node_t ( tcp_socket ( node_bind )))
+     (allow process process ( tcp_socket ( listen )))
+-
+-    ; Dialing Forgejo over HTTPS to register and poll for jobs
+     (allow process http_port_t ( tcp_socket ( name_connect )))
+-
+-    ; Custom rules end here
++    (allow process container_var_run_t ( sock_file ( append getattr open read write )))
+ )
+diff --git a/forgejo-runner.container b/forgejo-runner.container
+index 1e7105ebcc7a21029a91e5b457af1f5864d976ed..fda6800b8bd634455558529efe7e0eca9b46dd8d 100644
+--- a/forgejo-runner.container
++++ b/forgejo-runner.container
+@@ -1,7 +1,23 @@
+ [Unit]
+-## For rootless Podman-in-Podman
+-Requires=podman.socket
+-After=podman.socket
++## Job containers need the rootful Docker daemon (not rootless Podman) since
++## Podman's copier can't write into a running gVisor sandbox post-start (it
++## uses setns() into the container's mount namespace, which doesn't exist for
++## a gVisor guest); Docker's copier mounts the storage layer directly instead.
++## (Podman's compat copier also has a reproducible startup race against
++## freshly-created rootless containers even without gVisor, which is why
++## this goes through Docker regardless.)
++## docker.socket is a SYSTEM-scope unit and can't be Requires=/After='d from
++## this USER-scope quadlet; it's always enabled system-wide, so no explicit
++## ordering is needed here.
++##
++## This socket access is for the RUNNER PROCESS ITSELF ONLY (to create/start
++## job containers via the Docker API) - it must never be forwarded into job
++## containers themselves; see the [Service] comment below for why. Job
++## containers that need Docker-in-Docker instead run a SEPARATE dockerd
++## inside their OWN gVisor sandbox, bootstrapped via the vendored
++## `pojntfx/forgejo-runner-docker-image/bootstrap-dockerd` composite action -
++## see that repo for the full recipe (iptables-legacy SNAT setup, tmpfs
++## overlay workaround, IPv4-only due to a gVisor /proc/sys/net/ipv6 gap).
+ 
+ [Container]
+ ContainerName=forgejo-runner
+@@ -12,18 +28,44 @@ Exec=/bin/forgejo-runner --config config.yml daemon
+ Image=code.forgejo.org/forgejo/runner:12
+ Label=io.containers.autoupdate=registry
+ Volume=forgejo_runner_data:/data
+-# See https://docs.podman.io/en/latest/markdown/podman-system-service.1.html#run-the-command-in-a-systemd-service
+-Volume=%t/podman/podman.sock:/var/run/docker.sock
++Volume=/var/run/docker.sock:/var/run/docker.sock
+ # See https://docs.docker.com/reference/cli/docker/#host
+ Environment=DOCKER_HOST=unix:///var/run/docker.sock
+-# Process stays running as the `setup` user, but GID 0 since inside this rootless container, GID 0 maps to the unprivileged forgejo-runner group on the host, which owns podman.sock
++# Process stays running as the `setup` user, but GID 0 since inside this
++# rootless container, GID 0 maps to the unprivileged forgejo-runner group on
++# the host, which docker.sock is group-owned by (see docker.socket.d drop-in)
+ GroupAdd=root
+ LogDriver=journald
+ ReadOnly=true
+ 
+ [Service]
+ # See https://code.forgejo.org/forgejo/runner/src/branch/main/examples/docker-compose/compose-forgejo-and-runner.yml#L69-L81
+-ExecStartPre=/usr/bin/podman run --rm -v forgejo_runner_data:/data -w /data code.forgejo.org/forgejo/runner:12 bash -c 'forgejo-runner generate-config > config.yml && sed -i -e "s|  connections:|  connections:\\n    default:\\n      url: https://git.vanlug.p8.lu\\n      uuid: {{ forgejo_runner_uuid | replace("\\", "\\\\") | replace("|", "\\|") | replace("&", "\\&") }}\\n      token: {{ forgejo_runner_shared_secret | replace("\\", "\\\\") | replace("|", "\\|") | replace("&", "\\&") }}|" config.yml && sed -i -e "s|  labels: \[\]|  labels:\\n    - ubuntu-latest:docker://node:lts|" config.yml && sed -i -e "s|  enable_ipv6: false|  enable_ipv6: true|" config.yml'
++# docker_host is deliberately left at its default ("-", mount nothing): job
++# containers must NEVER get the host/runner's own docker.sock bind-mounted in
++# - that socket is root-equivalent on this host, so forwarding it into a
++# sandboxed job container (running arbitrary, attacker-controlled workflow
++# code) would let it trivially escape gVisor entirely via `docker run -v
++# /:/host --privileged`. Docker-in-Docker instead runs a SEPARATE dockerd
++# INSIDE the job container's own gVisor sandbox - gVisor confines that inner
++# daemon too, so nothing forwarded from the host is ever reachable from job
++# code.
++#
++# The default job image is our own pre-built
++# git.vanlug.p8.lu/pojntfx/forgejo-runner-docker-image (docker.io/iptables/
++# iproute2 pre-installed, dockerd bootstrapped via its vendored
++# bootstrap-dockerd composite action) rather than node:lts - every job on
++# this runner gets Docker-in-Docker for free.
++#
++# force_pull: true - NOT a wasteful full re-download every run: `docker pull`
++# is already a conditional operation (checks the registry manifest digest,
++# transfers only changed layers, reports "Image is up to date" near-
++# instantly when nothing changed - confirmed manually). Without force_pull,
++# forgejo-runner skips even that registry check once any image is cached
++# under the tag, so a `:latest` tag that gets rebuilt weekly would never be
++# noticed again after the first job run. This is "check for an update, pull
++# if there is one" - just implemented at the Docker layer instead of
++# forgejo-runner's own config (which has no separate mode for it).
++ExecStartPre=/usr/bin/podman run --rm -v forgejo_runner_data:/data -w /data code.forgejo.org/forgejo/runner:12 bash -c 'forgejo-runner generate-config > config.yml && sed -i -e "s|  connections:|  connections:\n    default:\n      url: https://git.vanlug.p8.lu\n      uuid: {{ forgejo_runner_uuid }}\n      token: {{ forgejo_runner_shared_secret }}|" config.yml && sed -i -e "s|  labels: \[\]|  labels:\n    - ubuntu-latest:docker://git.vanlug.p8.lu/pojntfx/forgejo-runner-docker-image:latest|" config.yml && sed -i -e "s|  enable_ipv6: false|  enable_ipv6: true|" config.yml && sed -i -e "s|  options:.*|  options: --security-opt label=disable --cap-add=all --volume /etc/resolv.conf:/etc/resolv.conf:ro|" config.yml && sed -i -e "s|  valid_volumes: \[\]|  valid_volumes:\n    - /etc/resolv.conf|" config.yml && sed -i -e "s|  force_pull: false|  force_pull: true|" config.yml'
+ 
+ [Install]
+ WantedBy=default.target
+diff --git a/forgejo-runner.yaml b/forgejo-runner.yaml
+index 2cee77e0ec0b9ab5289d4517bf6116e6015a6e8f..b3e8711f222f1baa2a2d1d4f058f9b4c1fdc23c0 100644
+--- a/forgejo-runner.yaml
++++ b/forgejo-runner.yaml
+@@ -37,6 +37,109 @@       when: forgejo_runner_policy.changed
+       changed_when: true
+       ansible.builtin.command: semodule -i /home/forgejo-runner/.local/share/selinux/targeted/forgejo-runner.cil
+       notify: Restart Forgejo runner user service
++    - name: Download gVisor release archive # See https://gvisor.dev/docs/user_guide/install/ - job containers run under runsc since rootless-in-rootless nested builds/runs need its userspace kernel to avoid host pivot_root/mount-namespace restrictions. The archive (not the individual runsc/containerd-shim-runsc-v1 binaries) is the documented, future-proof install method: it also ships gvisor-bin/, sidecar binaries runsc executes at runtime, which the individual-binary download silently omitted.
++      become: true
++      ansible.builtin.get_url:
++        url: "https://storage.googleapis.com/gvisor/releases/release/latest/x86_64/gvisor.tar.bz2"
++        dest: /tmp/gvisor.tar.bz2
++        checksum: "sha512:https://storage.googleapis.com/gvisor/releases/release/latest/x86_64/gvisor.tar.bz2.sha512"
++        mode: "0644"
++    - name: Install bzip2 # Needed to extract the gvisor.tar.bz2 archive below - not present on a minimal AlmaLinux install
++      become: true
++      ansible.builtin.package:
++        name: bzip2
++        state: present
++    - name: Extract gVisor release archive
++      become: true
++      ansible.builtin.unarchive:
++        src: /tmp/gvisor.tar.bz2
++        dest: /usr/local/bin
++        remote_src: true
++        owner: root
++        group: root
++    # Job containers need a rootFUL Docker daemon (not rootless Podman), since
++    # Podman's copier writes into a running container via setns() into its
++    # mount namespace, which doesn't exist for a gVisor sandbox (gVisor's
++    # guest filesystem is emulated entirely in userspace, not a real Linux
++    # mount namespace); forgejo-runner always copies generated step scripts
++    # into job containers post-start, so this is unavoidable. Docker's own
++    # copier instead mounts the container's storage layer directly on the
++    # host side, which works regardless of OCI runtime. See docker-ce.repo:
++    # https://download.docker.com/linux/rhel/docker-ce.repo (binary-compatible
++    # with AlmaLinux). dockerd itself is still SELinux-confined (container_runtime_t,
++    # via the container-selinux policy installed in selinux.yaml); the actual
++    # sandbox boundary for job containers is gVisor. (Podman's compat copier
++    # also has a reproducible startup race against freshly-created rootless
++    # containers even without gVisor - a "hardened", no-Docker, rootless-
++    # Podman-backed tier was tried and dropped for exactly this reason.)
++    - name: Add Docker CE repository
++      become: true
++      ansible.builtin.get_url:
++        url: https://download.docker.com/linux/rhel/docker-ce.repo
++        dest: /etc/yum.repos.d/docker-ce.repo
++        owner: root
++        group: root
++        mode: "0644"
++    - name: Install Docker CE
++      become: true
++      ansible.builtin.package:
++        name:
++          - docker-ce
++          - docker-ce-cli
++          - containerd.io
++        state: present
++    - name: Write base Docker daemon.json # default-runtime=runsc since this host only ever runs gVisor-sandboxed job containers; the runsc runtime entry itself is added below via `runsc install`, not hand-written here, so it stays in sync with whatever schema the installed gVisor version actually expects
++      become: true
++      register: forgejo_runner_docker_daemon_json
++      ansible.builtin.copy:
++        content: |
++          {
++            "group": "forgejo-runner",
++            "default-runtime": "runsc"
++          }
++        dest: /etc/docker/daemon.json
++        owner: root
++        group: root
++        mode: "0644"
++      notify: Restart Docker
++    - name: Register the runsc Docker runtime # See https://gvisor.dev/docs/user_guide/quick_start/docker/ and https://gvisor.dev/docs/user_guide/tutorials/docker/ - patches daemon.json's "runtimes" key in place (clobbering only the "runsc" entry), rather than us hand-maintaining its path/args schema. --net-raw/--allow-packet-socket-write since job containers now run their OWN dockerd inside the sandbox (see forgejo-runner.container and the pojntfx/forgejo-runner-docker-image repo) rather than being handed the host's socket.
++      become: true
++      register: forgejo_runner_docker_runsc_runtime
++      ansible.builtin.command: >
++        /usr/local/bin/runsc install --runtime=runsc --
++        -ignore-cgroups=true -host-uds=open --net-raw --allow-packet-socket-write
++      changed_when: "'Successfully updated config' in forgejo_runner_docker_runsc_runtime.stderr"
++      notify: Restart Docker
++    - name: Create systemd drop-in directory for Docker socket
++      become: true
++      ansible.builtin.file:
++        path: /etc/systemd/system/docker.socket.d
++        state: directory
++        owner: root
++        group: root
++        mode: "0755"
++    - name: Group-own the Docker socket by the Forgejo runner user # daemon.json's "group" key has no effect since docker.socket (systemd socket activation) creates the socket itself; matches the GroupAdd=root trick already used for podman.sock
++      become: true
++      register: forgejo_runner_docker_socket_group
++      ansible.builtin.copy:
++        content: |
++          [Socket]
++          SocketGroup=forgejo-runner
++        dest: /etc/systemd/system/docker.socket.d/group.conf
++        owner: root
++        group: root
++        mode: "0644"
++      notify: Restart Docker
++    - name: Enable Docker socket and service
++      become: true
++      ansible.builtin.systemd_service:
++        name: "{{ item }}"
++        state: started
++        enabled: true
++        daemon_reload: true
++      loop:
++        - docker.socket
++        - docker.service
+     - name: Create container directory for Forgejo runner
+       become: true
+       ansible.builtin.file:
+@@ -45,8 +148,62 @@         state: directory
+         owner: forgejo-runner
+         group: forgejo-runner
+         mode: "0755"
++    - name: Stop and disable the dropped hardened runner tier # Rootless-Podman-backed, no Docker access - dropped, see comment above
++      become: true
++      become_user: forgejo-runner
++      ansible.builtin.systemd_service:
++        name: forgejo-runner-hardened.service
++        state: stopped
++        enabled: false
++        scope: user
++      environment:
++        XDG_RUNTIME_DIR: "/run/user/{{ forgejo_runner_user.uid }}"
++      failed_when: false
++    - name: Remove the dropped hardened runner tier container file
++      become: true
++      ansible.builtin.file:
++        path: /home/forgejo-runner/.config/containers/systemd/forgejo-runner-hardened.container
++        state: absent
++    - name: Stop and disable the dropped flatpak runner tier # Dropped per user call - Docker is all that's needed for now
++      become: true
++      become_user: forgejo-runner
++      ansible.builtin.systemd_service:
++        name: forgejo-runner-flatpak.service
++        state: stopped
++        enabled: false
++        scope: user
++      environment:
++        XDG_RUNTIME_DIR: "/run/user/{{ forgejo_runner_user.uid }}"
++      failed_when: false
++    - name: Remove the dropped flatpak runner tier container file
++      become: true
++      ansible.builtin.file:
++        path: /home/forgejo-runner/.config/containers/systemd/forgejo-runner-flatpak.container
++        state: absent
++    - name: Stop and disable the dropped docker-tier-named runner service # Renamed back to the flat forgejo-runner.service now that it's the only tier again
++      become: true
++      become_user: forgejo-runner
++      ansible.builtin.systemd_service:
++        name: forgejo-runner-docker.service
++        state: stopped
++        enabled: false
++        scope: user
++      environment:
++        XDG_RUNTIME_DIR: "/run/user/{{ forgejo_runner_user.uid }}"
++      failed_when: false
++    - name: Remove the dropped docker-tier-named runner container file
++      become: true
++      ansible.builtin.file:
++        path: /home/forgejo-runner/.config/containers/systemd/forgejo-runner-docker.container
++        state: absent
++    - name: Remove the leftover config-generation script # An earlier iteration bind-mounted a script file into the ExecStartPre container instead of using the sed chain below - rootless Podman's bind-mounted host FILES (as opposed to directories) hit a UID-mapping wall (0644 host file still "Permission denied" inside the container, no AVC denials logged), so this was reverted in favor of the proven inline sed approach
++      become: true
++      ansible.builtin.file:
++        path: /home/forgejo-runner/.config/containers/systemd/forgejo-runner-generate-config.sh
++        state: absent
+     - name: Write container file for Forgejo runner
+       become: true
++      register: forgejo_runner_container
+       ansible.builtin.template:
+         src: forgejo-runner.container
+         dest: /home/forgejo-runner/.config/containers/systemd/forgejo-runner.container
+@@ -59,18 +216,6 @@         forgejo_runner_uuid: '{{ lookup("ansible.builtin.env", "FORGEJO_RUNNER_UUID") }}'
+       no_log: true # The file includes the shared secret and UUID
+       # This will only run on changes to the file; see https://docs.ansible.com/projects/ansible/latest/playbook_guide/playbooks_handlers.html#id1
+       notify: Restart Forgejo runner user service
+-    # For rootless Podman-in-Podman
+-    - name: Enable Podman API user service
+-      become: true
+-      become_user: forgejo-runner
+-      ansible.builtin.systemd_service:
+-        name: podman.socket
+-        state: started
+-        enabled: true
+-        daemon_reload: true
+-        scope: user
+-      environment:
+-        XDG_RUNTIME_DIR: "/run/user/{{ forgejo_runner_user.uid }}"
+     - name: Enable Forgejo runner user service
+       become: true
+       become_user: forgejo-runner
+@@ -104,3 +249,9 @@         daemon_reload: true
+         scope: user
+       environment:
+         XDG_RUNTIME_DIR: "/run/user/{{ forgejo_runner_user.uid }}"
++    - name: Restart Docker
++      become: true
++      ansible.builtin.systemd_service:
++        name: docker.service
++        state: restarted
++        daemon_reload: true
+diff --git a/forgejo.yaml b/forgejo.yaml
+index bfceb78812e96129a66250988780301e707994c3..f13a3b6d0ee74013a6e7f15f573432937e79bfd0 100644
+--- a/forgejo.yaml
++++ b/forgejo.yaml
+@@ -219,6 +219,7 @@       become: true
+       become_user: forgejo
+       when: true # This command is idempotent
+       changed_when: true
++      no_log: true # The command includes the shared secret
+       ansible.builtin.command: |
+         podman exec forgejo forgejo forgejo-cli actions register \
+           --keep-labels \
+diff --git a/site.yaml b/site.yaml
+index 5a813f43565eba5b1b843ebb8d40f7abe4a2c08f..dd8d49af1a06340c6912b8924738cb5fc2305604 100644
+--- a/site.yaml
++++ b/site.yaml
+@@ -8,6 +8,8 @@ - name: Configure Podman
+   ansible.builtin.import_playbook: podman.yaml
+ - name: Configure Forgejo
+   ansible.builtin.import_playbook: forgejo.yaml
++- name: Bootstrap the Forgejo runner's base image
++  ansible.builtin.import_playbook: forgejo-runner-docker-image.yaml
+ - name: Configure Forgejo runner
+   ansible.builtin.import_playbook: forgejo-runner.yaml
+ - name: Configure git-pages
+
