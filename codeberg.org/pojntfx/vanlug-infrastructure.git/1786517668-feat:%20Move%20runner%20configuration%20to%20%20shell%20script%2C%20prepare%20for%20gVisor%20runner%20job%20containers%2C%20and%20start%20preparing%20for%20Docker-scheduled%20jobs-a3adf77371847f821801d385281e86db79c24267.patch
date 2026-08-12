@@ -1,0 +1,116 @@
+From a3adf77371847f821801d385281e86db79c24267 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Tue, 11 Aug 2026 23:54:28 -0700
+Subject: [PATCH] feat: Move runner configuration to  shell script, prepare for gVisor runner job containers, and start preparing for Docker-scheduled jobs
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/forgejo-runner-generate-config.sh b/forgejo-runner-generate-config.sh
+new file mode 100644
+index 0000000000000000000000000000000000000000..af50e9dc36105f9cd500905d51f6749b9aa9e7dd
+--- /dev/null
++++ b/forgejo-runner-generate-config.sh
+@@ -0,0 +1,14 @@
++#!/bin/bash
++
++set -e
++
++forgejo-runner generate-config >config.yml
++
++sed -i \
++	-e "s|  labels: \[\]|  labels:\n    - ubuntu-latest:docker://git.vanlug.p8.lu/pojntfx/forgejo-runner-docker-image:latest|" \
++	-e "s|  enable_ipv6: false|  enable_ipv6: true|" \
++	-e "s|  options:.*|  options: --security-opt label=disable --cap-add=all --volume /etc/resolv.conf:/etc/resolv.conf:ro|" \
++	-e "s|  valid_volumes: \[\]|  valid_volumes:\n    - /etc/resolv.conf|" \
++	-e "s|  force_pull: false|  force_pull: true|" \
++	-e "s|  connections:|  connections:\n    default:\n      url: https://git.vanlug.p8.lu\n      uuid: ${FORGEJO_RUNNER_UUID}\n      token: ${FORGEJO_RUNNER_SHARED_SECRET}|" \
++	config.yml
+diff --git a/forgejo-runner.container b/forgejo-runner.container
+index 1e7105ebcc7a21029a91e5b457af1f5864d976ed..064e89847ff213758bcbe920e6322348bcd5e67f 100644
+--- a/forgejo-runner.container
++++ b/forgejo-runner.container
+@@ -1,7 +1,5 @@
+ [Unit]
+-## For rootless Podman-in-Podman
+-Requires=podman.socket
+-After=podman.socket
++# We don't need podman.socket as a dependency because we forward the Docker socket into the Forgejo runner container
+ 
+ [Container]
+ ContainerName=forgejo-runner
+@@ -12,8 +10,15 @@ Exec=/bin/forgejo-runner --config config.yml daemon
+ Image=code.forgejo.org/forgejo/runner:12
+ Label=io.containers.autoupdate=registry
+ Volume=forgejo_runner_data:/data
+-# See https://docs.podman.io/en/latest/markdown/podman-system-service.1.html#run-the-command-in-a-systemd-service
+-Volume=%t/podman/podman.sock:/var/run/docker.sock
++# We forward the rootful Docker socket,
++# which is used by the Forgejo runner to schedule job containers
++# to run with gVisor because Podman (rootless and rootful)
++# can't write into a running gVisor sandbox after starting it
++# which the Forgejo runner needs.
++# This socket is not forwarded into job containers
++# themselves, if those want to use Docker they run a nested `dockerd` inside
++# the gVisor sandbox
++Volume=/var/run/docker.sock:/var/run/docker.sock
+ # See https://docs.docker.com/reference/cli/docker/#host
+ Environment=DOCKER_HOST=unix:///var/run/docker.sock
+ # Process stays running as the `setup` user, but GID 0 since inside this rootless container, GID 0 maps to the unprivileged forgejo-runner group on the host, which owns podman.sock
+@@ -23,7 +28,7 @@ ReadOnly=true
+ 
+ [Service]
+ # See https://code.forgejo.org/forgejo/runner/src/branch/main/examples/docker-compose/compose-forgejo-and-runner.yml#L69-L81
+-ExecStartPre=/usr/bin/podman run --rm -v forgejo_runner_data:/data -w /data code.forgejo.org/forgejo/runner:12 bash -c 'forgejo-runner generate-config > config.yml && sed -i -e "s|  connections:|  connections:\\n    default:\\n      url: https://git.vanlug.p8.lu\\n      uuid: {{ forgejo_runner_uuid | replace("\\", "\\\\") | replace("|", "\\|") | replace("&", "\\&") }}\\n      token: {{ forgejo_runner_shared_secret | replace("\\", "\\\\") | replace("|", "\\|") | replace("&", "\\&") }}|" config.yml && sed -i -e "s|  labels: \[\]|  labels:\\n    - ubuntu-latest:docker://node:lts|" config.yml && sed -i -e "s|  enable_ipv6: false|  enable_ipv6: true|" config.yml'
++ExecStartPre=/usr/bin/podman run --rm -v forgejo_runner_data:/data -w /data -e FORGEJO_RUNNER_UUID={{ forgejo_runner_uuid }} -e FORGEJO_RUNNER_SHARED_SECRET={{ forgejo_runner_shared_secret }} code.forgejo.org/forgejo/runner:12 ./forgejo-runner-generate-config.sh
+ 
+ [Install]
+ WantedBy=default.target
+diff --git a/forgejo-runner.yaml b/forgejo-runner.yaml
+index 2cee77e0ec0b9ab5289d4517bf6116e6015a6e8f..418c64ed991e3e116c9a06dfe1a2123033cced18 100644
+--- a/forgejo-runner.yaml
++++ b/forgejo-runner.yaml
+@@ -37,6 +37,24 @@       when: forgejo_runner_policy.changed
+       changed_when: true
+       ansible.builtin.command: semodule -i /home/forgejo-runner/.local/share/selinux/targeted/forgejo-runner.cil
+       notify: Restart Forgejo runner user service
++    - name: Create data volume directory for Forgejo runner
++      become: true
++      become_user: forgejo-runner
++      when: true # This command is idempotent
++      changed_when: true
++      ansible.builtin.command: podman volume create forgejo_runner_data
++      environment:
++        XDG_RUNTIME_DIR: "/run/user/{{ forgejo_runner_user.uid }}"
++    - name: Write config generation script file for Forgejo runner
++      become: true
++      ansible.builtin.copy:
++        src: forgejo-runner-generate-config.sh
++        dest: /home/forgejo-runner/.local/share/containers/storage/volumes/forgejo_runner_data/_data/generate-config.sh
++        owner: forgejo-runner
++        group: forgejo-runner
++        mode: "0755"
++      # This will only run on changes to the file; see https://docs.ansible.com/projects/ansible/latest/playbook_guide/playbooks_handlers.html#id1
++      notify: Restart Forgejo runner user service
+     - name: Create container directory for Forgejo runner
+       become: true
+       ansible.builtin.file:
+@@ -59,18 +77,6 @@         forgejo_runner_uuid: '{{ lookup("ansible.builtin.env", "FORGEJO_RUNNER_UUID") }}'
+       no_log: true # The file includes the shared secret and UUID
+       # This will only run on changes to the file; see https://docs.ansible.com/projects/ansible/latest/playbook_guide/playbooks_handlers.html#id1
+       notify: Restart Forgejo runner user service
+-    # For rootless Podman-in-Podman
+-    - name: Enable Podman API user service
+-      become: true
+-      become_user: forgejo-runner
+-      ansible.builtin.systemd_service:
+-        name: podman.socket
+-        state: started
+-        enabled: true
+-        daemon_reload: true
+-        scope: user
+-      environment:
+-        XDG_RUNTIME_DIR: "/run/user/{{ forgejo_runner_user.uid }}"
+     - name: Enable Forgejo runner user service
+       become: true
+       become_user: forgejo-runner
+
