@@ -1,0 +1,138 @@
+From 89c0d4f29d03a252431ef2a9504cb14855be9e73 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Tue, 11 Aug 2026 23:15:20 -0700
+Subject: [PATCH] feat: Move config generation script out of container definition and into it's own script, fix local actions reference
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/forgejo-runner-generate-config.sh b/forgejo-runner-generate-config.sh
+new file mode 100644
+index 0000000000000000000000000000000000000000..f1277305e23d39ad1a4869da46c75a42837e55f4
+--- /dev/null
++++ b/forgejo-runner-generate-config.sh
+@@ -0,0 +1,50 @@
++#!/bin/bash
++# Generates config.yml for the Forgejo runner container. A real script file,
++# not an inline ExecStartPre= command: nesting quoted sed/awk one-liners
++# inside a systemd unit file's ExecStartPre= value proved unreliable across
++# multiple attempts (sed: "unmatched '|'", awk: "Unexpected token") even
++# when the exact same content ran fine manually via SSH or systemd-run -
++# something specific to how the quadlet-generated ExecStartPre= gets
++# re-parsed at actual service-start time breaks embedded quoting. This file
++# is written directly into the forgejo_runner_data volume's host-backing
++# directory by Ansible (not bind-mounted from an arbitrary host path, which
++# separately hit a rootless-Podman UID-mapping wall for single-file mounts),
++# so ExecStartPre just runs it with zero shell-escaping involved anywhere.
++set -e
++
++forgejo-runner generate-config > config.yml
++
++awk -v uuid="$FORGEJO_RUNNER_UUID" -v secret="$FORGEJO_RUNNER_SHARED_SECRET" '
++$0 == "  labels: []" {
++  print "  labels:"
++  print "    - ubuntu-latest:docker://git.vanlug.p8.lu/pojntfx/forgejo-runner-docker-image:latest"
++  next
++}
++$0 == "  enable_ipv6: false" {
++  print "  enable_ipv6: true"
++  next
++}
++/^  options:/ {
++  print "  options: --security-opt label=disable --cap-add=all --volume /etc/resolv.conf:/etc/resolv.conf:ro"
++  next
++}
++$0 == "  valid_volumes: []" {
++  print "  valid_volumes:"
++  print "    - /etc/resolv.conf"
++  next
++}
++$0 == "  force_pull: false" {
++  print "  force_pull: true"
++  next
++}
++$0 == "  connections:" {
++  print
++  print "    default:"
++  print "      url: https://git.vanlug.p8.lu"
++  print "      uuid: " uuid
++  print "      token: " secret
++  next
++}
++{ print }
++' config.yml > config.yml.new
++mv config.yml.new config.yml
+diff --git a/forgejo-runner.container b/forgejo-runner.container
+index 83416694f1f04f17017993d2df6fb0548f7dda3b..e81e07d70386232e429e7fe3f1882ca92a8d8fbf 100644
+--- a/forgejo-runner.container
++++ b/forgejo-runner.container
+@@ -65,7 +65,16 @@ # under the tag, so a `:latest` tag that gets rebuilt weekly would never be
+ # noticed again after the first job run. This is "check for an update, pull
+ # if there is one" - just implemented at the Docker layer instead of
+ # forgejo-runner's own config (which has no separate mode for it).
+-ExecStartPre=/usr/bin/podman run --rm -e FRUUID={{ forgejo_runner_uuid }} -e FRSECRET={{ forgejo_runner_shared_secret }} -v forgejo_runner_data:/data -w /data code.forgejo.org/forgejo/runner:12 sh -c 'forgejo-runner generate-config > config.yml; awk -v uuid="$FRUUID" -v secret="$FRSECRET" "{ if (\$0 == \"  labels: []\") { print \"  labels:\"; print \"    - ubuntu-latest:docker://git.vanlug.p8.lu/pojntfx/forgejo-runner-docker-image:latest\" } else if (\$0 == \"  enable_ipv6: false\") { print \"  enable_ipv6: true\" } else if (\$0 ~ /^  options:/) { print \"  options: --security-opt label=disable --cap-add=all --volume /etc/resolv.conf:/etc/resolv.conf:ro\" } else if (\$0 == \"  valid_volumes: []\") { print \"  valid_volumes:\"; print \"    - /etc/resolv.conf\" } else if (\$0 == \"  force_pull: false\") { print \"  force_pull: true\" } else if (\$0 == \"  connections:\") { print; print \"    default:\"; print \"      url: https://git.vanlug.p8.lu\"; print \"      uuid: \" uuid; print \"      token: \" secret } else { print } }" config.yml > config.yml.new; mv config.yml.new config.yml'
++# The config-generation logic lives in a real script file
++# (forgejo-runner-generate-config.sh), written directly into the
++# forgejo_runner_data volume's host-backing directory by Ansible - not
++# embedded in this ExecStartPre= line at all. Nesting quoted sed/awk inside
++# ExecStartPre= proved unreliable across multiple attempts (sed: "unmatched
++# '|'", awk: "Unexpected token") even when the exact same content ran fine
++# manually via SSH or systemd-run - something specific to how the quadlet-
++# generated ExecStartPre= gets re-parsed at actual service-start time breaks
++# embedded quoting. A plain script file sidesteps the whole class of bug.
++ExecStartPre=/usr/bin/podman run --rm -e FORGEJO_RUNNER_UUID={{ forgejo_runner_uuid }} -e FORGEJO_RUNNER_SHARED_SECRET={{ forgejo_runner_shared_secret }} -v forgejo_runner_data:/data -w /data code.forgejo.org/forgejo/runner:12 bash generate-config.sh
+ 
+ [Install]
+ WantedBy=default.target
+diff --git a/forgejo-runner.yaml b/forgejo-runner.yaml
+index b3e8711f222f1baa2a2d1d4f058f9b4c1fdc23c0..8bccfda3158871b2aaa70edef845a61834e977a1 100644
+--- a/forgejo-runner.yaml
++++ b/forgejo-runner.yaml
+@@ -196,11 +196,24 @@       become: true
+       ansible.builtin.file:
+         path: /home/forgejo-runner/.config/containers/systemd/forgejo-runner-docker.container
+         state: absent
+-    - name: Remove the leftover config-generation script # An earlier iteration bind-mounted a script file into the ExecStartPre container instead of using the sed chain below - rootless Podman's bind-mounted host FILES (as opposed to directories) hit a UID-mapping wall (0644 host file still "Permission denied" inside the container, no AVC denials logged), so this was reverted in favor of the proven inline sed approach
++    - name: Create the Forgejo runner data volume # Must exist before we can write the config-generation script into its host-backing directory below
++      become: true
++      become_user: forgejo-runner
++      ansible.builtin.command: podman volume create forgejo_runner_data
++      register: forgejo_runner_volume_create
++      changed_when: "'already exists' not in forgejo_runner_volume_create.stderr"
++      failed_when: forgejo_runner_volume_create.rc != 0 and 'already exists' not in forgejo_runner_volume_create.stderr
++      environment:
++        XDG_RUNTIME_DIR: "/run/user/{{ forgejo_runner_user.uid }}"
++    - name: Write config-generation script for Forgejo runner # Written directly into the volume's host-backing directory, not bind-mounted from an arbitrary host path (which hit a rootless-Podman UID-mapping wall for single-file mounts - a 0644 host file still gave "Permission denied" inside the container, with no AVC denials logged) and not embedded inline in ExecStartPre= (which proved unreliable across multiple sed/awk escaping attempts - see forgejo-runner.container)
+       become: true
+-      ansible.builtin.file:
+-        path: /home/forgejo-runner/.config/containers/systemd/forgejo-runner-generate-config.sh
+-        state: absent
++      ansible.builtin.copy:
++        src: forgejo-runner-generate-config.sh
++        dest: /home/forgejo-runner/.local/share/containers/storage/volumes/forgejo_runner_data/_data/generate-config.sh
++        owner: forgejo-runner
++        group: forgejo-runner
++        mode: "0755"
++      notify: Restart Forgejo runner user service
+     - name: Write container file for Forgejo runner
+       become: true
+       register: forgejo_runner_container
+diff --git a/forgejo.container b/forgejo.container
+index 9cdddd7bcd224e865c3aefa944ad4d938c1577f9..d6dbc7d99ec32213caeafe817674efda56caef26 100644
+--- a/forgejo.container
++++ b/forgejo.container
+@@ -26,6 +26,14 @@ Environment=FORGEJO__server__ROOT_URL=https://git.vanlug.p8.lu/
+ # We're not open for registration, and do not need email support
+ Environment=FORGEJO__service__DISABLE_REGISTRATION=true
+ Environment=FORGEJO__mailer__ENABLED=false
++# Without this, a workflow's `uses: owner/repo@ref` (no absolute URL)
++# resolves against upstream data.forgejo.org by default, which doesn't know
++# about repos hosted here - not just an inconvenience, but a real footgun:
++# an unqualified `uses:` should never silently defer to a third-party
++# instance's namespace, since that's how a workflow ends up unexpectedly
++# fetching someone else's action. Since registration is disabled (no open
++# signup), there's no name-conflict risk in pointing this at ourselves.
++Environment=FORGEJO__actions__DEFAULT_ACTIONS_URL=https://git.vanlug.p8.lu
+ LogDriver=journald
+ ReadOnly=true
+ 
+
