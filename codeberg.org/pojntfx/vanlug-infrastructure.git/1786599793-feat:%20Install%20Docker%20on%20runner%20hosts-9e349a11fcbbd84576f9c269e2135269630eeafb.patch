@@ -1,0 +1,58 @@
+From 9e349a11fcbbd84576f9c269e2135269630eeafb Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Wed, 12 Aug 2026 22:43:13 -0700
+Subject: [PATCH] feat: Install Docker on runner hosts
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/docker.yaml b/docker.yaml
+new file mode 100644
+index 0000000000000000000000000000000000000000..867aafb8357648348186cf0cd5e05f6085665cce
+--- /dev/null
++++ b/docker.yaml
+@@ -0,0 +1,31 @@
++- name: Configure Docker
++  hosts:
++    - vanlug_forgejo_runners
++  gather_facts: false
++  tasks:
++    - name: Install Docker CE repo
++      become: true
++      # See https://download.docker.com/linux/rhel/docker-ce.repo
++      ansible.builtin.yum_repository:
++        name: docker-ce-stable
++        description: Docker CE Stable - $basearch
++        baseurl: https://download.docker.com/linux/rhel/$releasever/$basearch/stable
++        enabled: true
++        gpgcheck: true
++        gpgkey: https://download.docker.com/linux/rhel/gpg
++    - name: Install Docker
++      become: true
++      # See https://docs.docker.com/engine/install/centos/#install-docker-engine
++      ansible.builtin.package:
++        name:
++          - docker-ce
++          - docker-ce-cli
++          - containerd.io
++        state: present
++    - name: Enable Docker service
++      become: true
++      ansible.builtin.systemd_service:
++        name: docker.service
++        state: started
++        enabled: true
++        daemon_reload: true
+diff --git a/site.yaml b/site.yaml
+index 5a813f43565eba5b1b843ebb8d40f7abe4a2c08f..65e2fdb6e83362b45e1e5ef37c275b0fb99272a6 100644
+--- a/site.yaml
++++ b/site.yaml
+@@ -6,6 +6,8 @@ - name: Configure automatic updates
+   ansible.builtin.import_playbook: updates.yaml
+ - name: Configure Podman
+   ansible.builtin.import_playbook: podman.yaml
++- name: Configure Docker
++  ansible.builtin.import_playbook: docker.yaml
+ - name: Configure Forgejo
+   ansible.builtin.import_playbook: forgejo.yaml
+ - name: Configure Forgejo runner
+
