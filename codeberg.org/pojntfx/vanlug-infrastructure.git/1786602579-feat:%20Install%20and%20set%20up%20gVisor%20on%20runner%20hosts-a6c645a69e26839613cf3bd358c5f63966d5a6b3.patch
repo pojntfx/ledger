@@ -1,0 +1,86 @@
+From a6c645a69e26839613cf3bd358c5f63966d5a6b3 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Wed, 12 Aug 2026 23:29:39 -0700
+Subject: [PATCH] feat: Install and set up gVisor on runner hosts
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/forgejo-runner-generate-config.sh b/forgejo-runner-generate-config.sh
+index af50e9dc36105f9cd500905d51f6749b9aa9e7dd..fd9b1bcfbe21c7d22855613dd92325b50e23cde4 100644
+--- a/forgejo-runner-generate-config.sh
++++ b/forgejo-runner-generate-config.sh
+@@ -7,7 +7,7 @@
+ sed -i \
+ 	-e "s|  labels: \[\]|  labels:\n    - ubuntu-latest:docker://git.vanlug.p8.lu/pojntfx/forgejo-runner-docker-image:latest|" \
+ 	-e "s|  enable_ipv6: false|  enable_ipv6: true|" \
+-	-e "s|  options:.*|  options: --security-opt label=disable --cap-add=all --volume /etc/resolv.conf:/etc/resolv.conf:ro|" \
++	-e "s|  options:.*|  options: --security-opt label=disable --cap-add=all --volume /etc/resolv.conf:/etc/resolv.conf:ro --runtime=runsc|" \
+ 	-e "s|  valid_volumes: \[\]|  valid_volumes:\n    - /etc/resolv.conf|" \
+ 	-e "s|  force_pull: false|  force_pull: true|" \
+ 	-e "s|  connections:|  connections:\n    default:\n      url: https://git.vanlug.p8.lu\n      uuid: ${FORGEJO_RUNNER_UUID}\n      token: ${FORGEJO_RUNNER_SHARED_SECRET}|" \
+diff --git a/gvisor.yaml b/gvisor.yaml
+new file mode 100644
+index 0000000000000000000000000000000000000000..6db6226a427b30c754b5667a88aa61574b561b42
+--- /dev/null
++++ b/gvisor.yaml
+@@ -0,0 +1,46 @@
++- name: Configure gVisor
++  hosts:
++    - vanlug_forgejo_runners
++  gather_facts: false
++  tasks:
++    - name: Install bzip2 # To extract the gVisor archive
++      become: true
++      # See https://gvisor.dev/docs/user_guide/install/
++      ansible.builtin.package:
++        name:
++          - bzip2
++        state: present
++    - name: Gather architecture fact
++      ansible.builtin.setup:
++        gather_subset: # See https://docs.ansible.com/projects/ansible/latest/collections/ansible/builtin/setup_module.html#parameter-gather_subset
++          - architecture
++    - name: Create temporary file for gVisor binary tarball
++      register: gvisor_tarball
++      ansible.builtin.tempfile:
++        suffix: .tar.bz2
++    # TODO: We need to add an auto-update hook here to make sure that dnf-automatic also updates gVisor
++    - name: Download latest gVisor binary tarball
++      ansible.builtin.get_url:
++        url: https://storage.googleapis.com/gvisor/releases/release/latest/{{ ansible_facts["architecture"] }}/gvisor.tar.bz2
++        dest: "{{ gvisor_tarball.path }}"
++        mode: "0644"
++        force: true # `tempfile` from above always creates an empty file, so we need to force the download
++    - name: Unarchive gVisor binary tarball
++      become: true
++      ansible.builtin.unarchive:
++        src: "{{ gvisor_tarball.path }}"
++        dest: /usr/local/bin
++        remote_src: true
++    - name: Register gVisor as Docker runtime
++      become: true
++      when: true # This command is idempotent
++      changed_when: true
++      ansible.builtin.command: sudo /usr/local/bin/runsc install
++      # This will only run on changes to the file; see https://docs.ansible.com/projects/ansible/latest/playbook_guide/playbooks_handlers.html#id1
++      notify: Reload Docker service
++  handlers:
++    - name: Reload Docker service
++      become: true
++      ansible.builtin.systemd_service:
++        name: docker.service
++        state: reloaded
+diff --git a/site.yaml b/site.yaml
+index 65e2fdb6e83362b45e1e5ef37c275b0fb99272a6..804dba60491570565f568613fa8dd40779311ef5 100644
+--- a/site.yaml
++++ b/site.yaml
+@@ -8,6 +8,8 @@ - name: Configure Podman
+   ansible.builtin.import_playbook: podman.yaml
+ - name: Configure Docker
+   ansible.builtin.import_playbook: docker.yaml
++- name: Configure gVisor
++  ansible.builtin.import_playbook: gvisor.yaml
+ - name: Configure Forgejo
+   ansible.builtin.import_playbook: forgejo.yaml
+ - name: Configure Forgejo runner
+
