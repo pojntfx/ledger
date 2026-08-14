@@ -1,0 +1,22 @@
+From c8521a8898ed9a929a091e02affd5a12e9dbc18a Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Thu, 13 Aug 2026 20:51:21 -0700
+Subject: [PATCH] feat: Allow running `dockerd` to run in gVisor
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/gvisor.yaml b/gvisor.yaml
+index 6db6226a427b30c754b5667a88aa61574b561b42..4f8ac592d31f4f2a371b8d123858f8cd824e9b97 100644
+--- a/gvisor.yaml
++++ b/gvisor.yaml
+@@ -35,7 +35,8 @@     - name: Register gVisor as Docker runtime
+       become: true
+       when: true # This command is idempotent
+       changed_when: true
+-      ansible.builtin.command: sudo /usr/local/bin/runsc install
++      # We need the extra flags to `runsc install` so that we can run `dockerd` inside of the gVisor container to build images
++      ansible.builtin.command: /usr/local/bin/runsc install -- -ignore-cgroups=true -host-uds=open --net-raw --allow-packet-socket-write
+       # This will only run on changes to the file; see https://docs.ansible.com/projects/ansible/latest/playbook_guide/playbooks_handlers.html#id1
+       notify: Reload Docker service
+   handlers:
+
