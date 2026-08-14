@@ -1,0 +1,128 @@
+From f628ef01f401739cf8ece0cf63cea8daf89c790e Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Thu, 13 Aug 2026 20:38:43 -0700
+Subject: [PATCH] feat: Using a systemd drop-in, allow Forgejo runner access to the rootful Docker socket
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/docker.yaml b/docker.yaml
+index 867aafb8357648348186cf0cd5e05f6085665cce..730b382db3a65214e3adddf8272f13f0c4425695 100644
+--- a/docker.yaml
++++ b/docker.yaml
+@@ -22,6 +22,28 @@           - docker-ce
+           - docker-ce-cli
+           - containerd.io
+         state: present
++    - name: Create systemd drop-in directory for Docker socket
++      become: true
++      ansible.builtin.file:
++        path: /etc/systemd/system/docker.socket.d
++        state: directory
++        owner: root
++        group: root
++        mode: "0755"
++    - name: Allow Forgejo runner user to access Docker socket
++      become: true
++      ansible.builtin.copy:
++        content: |
++          [Socket]
++          SocketGroup=forgejo-runner
++        dest: /etc/systemd/system/docker.socket.d/group.conf
++        owner: root
++        group: root
++        mode: "0644"
++      # This will only run on changes to the file; see https://docs.ansible.com/projects/ansible/latest/playbook_guide/playbooks_handlers.html#id1
++      notify:
++        - Restart Docker service
++        - Restart Docker socket
+     - name: Enable Docker service
+       become: true
+       ansible.builtin.systemd_service:
+@@ -29,3 +51,16 @@         name: docker.service
+         state: started
+         enabled: true
+         daemon_reload: true
++  handlers:
++    - name: Restart Docker service
++      become: true
++      ansible.builtin.systemd_service:
++        name: docker.service
++        state: restarted
++        daemon_reload: true
++    - name: Restart Docker socket
++      become: true
++      ansible.builtin.systemd_service:
++        name: docker.socket
++        state: restarted
++        daemon_reload: true
+diff --git a/forgejo-runner.cil b/forgejo-runner.cil
+index 37f4830d01050fea6d7069cdd289f21ee6143391..88d3b9d46177bc698ccbccb38e0ce2dab3197583 100644
+--- a/forgejo-runner.cil
++++ b/forgejo-runner.cil
+@@ -14,6 +14,9 @@
+     ; Connecting to the rootless Podman API socket for Podman-in-Podman
+     (allow process container_runtime_t ( unix_stream_socket ( connectto )))
+ 
++    ; Access to the rootful Docker daemon socket to create gVisor containers for jobs
++    (allow process container_var_run_t ( sock_file ( append getattr open read write )))
++
+     ; Binding and listening on the local cache server on loopback
+     (allow process node_t ( tcp_socket ( node_bind )))
+     (allow process process ( tcp_socket ( listen )))
+diff --git a/forgejo-runner.container b/forgejo-runner.container
+index 064e89847ff213758bcbe920e6322348bcd5e67f..43e60ded002dfe7847f794d257f5dd76e9a8dfd9 100644
+--- a/forgejo-runner.container
++++ b/forgejo-runner.container
+@@ -21,14 +21,15 @@ # the gVisor sandbox
+ Volume=/var/run/docker.sock:/var/run/docker.sock
+ # See https://docs.docker.com/reference/cli/docker/#host
+ Environment=DOCKER_HOST=unix:///var/run/docker.sock
+-# Process stays running as the `setup` user, but GID 0 since inside this rootless container, GID 0 maps to the unprivileged forgejo-runner group on the host, which owns podman.sock
+-GroupAdd=root
++# We need to use the `forgejo-user` ID here, not `0:0` so that we can access the `forgejo_runner_data` volume
++UserNS=keep-id:uid=1000,gid=1000
+ LogDriver=journald
+ ReadOnly=true
+ 
+ [Service]
+ # See https://code.forgejo.org/forgejo/runner/src/branch/main/examples/docker-compose/compose-forgejo-and-runner.yml#L69-L81
+-ExecStartPre=/usr/bin/podman run --rm -v forgejo_runner_data:/data -w /data -e FORGEJO_RUNNER_UUID={{ forgejo_runner_uuid }} -e FORGEJO_RUNNER_SHARED_SECRET={{ forgejo_runner_shared_secret }} code.forgejo.org/forgejo/runner:12 ./forgejo-runner-generate-config.sh
++# We need to use the `forgejo-user` ID here, not `0:0` so that we can access the script, which is stored on the `forgejo_runner_data` volume
++ExecStartPre=/usr/bin/podman run --rm --userns=keep-id:uid=1000,gid=1000 -v forgejo_runner_data:/data -w /data -e FORGEJO_RUNNER_UUID={{ forgejo_runner_uuid }} -e FORGEJO_RUNNER_SHARED_SECRET={{ forgejo_runner_shared_secret }} code.forgejo.org/forgejo/runner:12 ./forgejo-runner-generate-config.sh
+ 
+ [Install]
+ WantedBy=default.target
+diff --git a/forgejo-runner.yaml b/forgejo-runner.yaml
+index 418c64ed991e3e116c9a06dfe1a2123033cced18..8cafdb0865d9b072833b76e6de19a2243258eefb 100644
+--- a/forgejo-runner.yaml
++++ b/forgejo-runner.yaml
+@@ -2,6 +2,8 @@ - name: Configure Forgejo runner # See https://code.forgejo.org/forgejo/runner/src/branch/main/examples/docker-compose
+   hosts:
+     - vanlug_forgejo_runners
+   gather_facts: false
++  vars:
++    forgejo_runner_data_dir: /home/forgejo-runner/.local/share/containers/storage/volumes/forgejo_runner_data/_data
+   tasks:
+     - name: Create user for Forgejo runner
+       become: true
+@@ -40,16 +42,16 @@       notify: Restart Forgejo runner user service
+     - name: Create data volume directory for Forgejo runner
+       become: true
+       become_user: forgejo-runner
+-      when: true # This command is idempotent
+-      changed_when: true
+       ansible.builtin.command: podman volume create forgejo_runner_data
++      args:
++        creates: "{{ forgejo_runner_data_dir }}"
+       environment:
+         XDG_RUNTIME_DIR: "/run/user/{{ forgejo_runner_user.uid }}"
+     - name: Write config generation script file for Forgejo runner
+       become: true
+       ansible.builtin.copy:
+         src: forgejo-runner-generate-config.sh
+-        dest: /home/forgejo-runner/.local/share/containers/storage/volumes/forgejo_runner_data/_data/generate-config.sh
++        dest: "{{ forgejo_runner_data_dir }}/forgejo-runner-generate-config.sh"
+         owner: forgejo-runner
+         group: forgejo-runner
+         mode: "0755"
+
