@@ -1,0 +1,86 @@
+From 3d78da63478f70a731cbb3ad851add68804cc1c9 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Sat, 15 Aug 2026 11:37:17 -0700
+Subject: [PATCH] feat: Add support for showing CoC, terms and privacy policy on Anubis deny and loading page
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/anubis.cil b/anubis.cil
+index cee50a53260f6c8385bea363933a45cad142f748..da3df20e6c5e8c9e2ba94746b3baa6a0333abf70 100644
+--- a/anubis.cil
++++ b/anubis.cil
+@@ -2,4 +2,11 @@ (block anubis
+     (blockinherit container)
+     (blockinherit restricted_net_container)
+     (allow process forgejo_port_t ( tcp_socket (  name_bind ))) 
++
++    ; Custom rules start here
++
++    ; Dialing permission for Forgejo upstream
++    (allow process forgejo_port_t ( tcp_socket ( name_connect )))
++
++    ; Custom rules end here
+ )
+\ No newline at end of file
+diff --git a/anubis.container b/anubis.container
+index 2fa54dd23ee0bab3409e1fbd7820f3360648a90d..74dcbe38cd570996d5cb48af14583556db4c7278 100644
+--- a/anubis.container
++++ b/anubis.container
+@@ -11,6 +11,8 @@ PublishPort=3008:3000
+ Environment=BIND=:3000
+ # This is Forgejo
+ Environment=TARGET=http://host.containers.internal:3000
++Environment=POLICY_FNAME=/data/botPolicies.yaml
++Volume=/home/anubis/.config/anubis/botPolicies.yaml:/data/botPolicies.yaml:ro,Z
+ LogDriver=journald
+ ReadOnly=true
+ 
+diff --git a/anubis.yaml b/anubis.yaml
+index a49e7376ce1d1523bc6893ada2b91b8a08316061..94a834befef8932c70ed7537bbe33f1d05b2d136 100644
+--- a/anubis.yaml
++++ b/anubis.yaml
+@@ -89,6 +89,24 @@         state: directory
+         owner: anubis
+         group: anubis
+         mode: "0755"
++    - name: Create config directory for Anubis
++      become: true
++      ansible.builtin.file:
++        path: /home/anubis/.config/anubis
++        state: directory
++        owner: anubis
++        group: anubis
++        mode: "0755"
++    - name: Write bot policies file for Anubis
++      become: true
++      ansible.builtin.copy:
++        src: botPolicies.yaml
++        dest: /home/anubis/.config/anubis/botPolicies.yaml
++        owner: anubis
++        group: anubis
++        mode: "0644"
++      # This will only run on changes to the file; see https://docs.ansible.com/projects/ansible/latest/playbook_guide/playbooks_handlers.html#id1
++      notify: Restart Anubis user service
+     - name: Write container file for Anubis
+       become: true
+       ansible.builtin.copy:
+diff --git a/botPolicies.yaml b/botPolicies.yaml
+new file mode 100644
+index 0000000000000000000000000000000000000000..b5219118c91536ef01b86fb4cc649a2f8128ac25
+--- /dev/null
++++ b/botPolicies.yaml
+@@ -0,0 +1,13 @@
++# See https://anubis.techaro.lol/docs/admin/policies and https://github.com/TecharoHQ/anubis/blob/main/data/botPolicies.yaml
++bots:
++  - import: (data)/meta/default-config.yaml
++
++# See https://anubis.techaro.lol/docs/admin/configuration/impressum/
++impressum:
++  footer: Please see the imprint for our code of conduct, terms and privacy policy.
++  page:
++    title: Code of Conduct, Terms and Privacy Policy
++    body: >-
++      <a target="_blank" href="https://vanlug.ca/conduct/">Code of Conduct</a>
++      <a target="_blank" href="https://vanlug.ca/terms/">Terms</a>
++      <a target="_blank" href="https://vanlug.ca/privacy/">Privacy</a>
+
