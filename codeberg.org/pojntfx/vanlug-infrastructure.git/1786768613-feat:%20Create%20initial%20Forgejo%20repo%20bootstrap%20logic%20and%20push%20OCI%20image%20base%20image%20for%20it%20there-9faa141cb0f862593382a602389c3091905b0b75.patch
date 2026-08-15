@@ -1,0 +1,110 @@
+From 9faa141cb0f862593382a602389c3091905b0b75 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Fri, 14 Aug 2026 21:36:53 -0700
+Subject: [PATCH] feat: Create initial Forgejo repo bootstrap logic and push OCI image base image for it there
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/README.md b/README.md
+index b82bedfd7334833ffa6de56707f38b39df114eeb..f905db629b483678a4036f4bbf15dabdd7f396ea 100644
+--- a/README.md
++++ b/README.md
+@@ -18,7 +18,7 @@ $ cd vanlug-infrastructure
+ $ source .env.local # See `.env` for required secrets; ask `@pojntfx:beeper.com` for access
+ $ tofu init
+ $ tofu apply
+-$ ansible-galaxy collection install cloud.terraform ansible.posix community.general
++$ ansible-galaxy collection install cloud.terraform ansible.posix community.general community.docker
+ $ ansible-playbook site.yaml # You might want to change `binary_path` in `inventory.yaml` first
+ # To get logs for quadlets on main server
+ $ ssh setup@vanlug.p8.lu
+diff --git a/forgejo-runner-meta.yaml b/forgejo-runner-meta.yaml
+new file mode 100644
+index 0000000000000000000000000000000000000000..a3fca864551e817ecd458c03a5bc10bddaed02f8
+--- /dev/null
++++ b/forgejo-runner-meta.yaml
+@@ -0,0 +1,57 @@
++- name: Configure Forgejo runner meta
++  hosts:
++    - localhost
++  gather_facts: false
++  tasks:
++    - name: Build Forgejo runner OCI image with Docker preinstalled
++      community.docker.docker_image_build:
++        name: git.vanlug.p8.lu/pojntfx/forgejo-runner-meta:latest
++        path: forgejo-runner-meta
++        dockerfile: Containerfile
++    - name: Fetch user for Forgejo
++      become: true
++      register: forgejo_user
++      delegate_to: "{{ groups['vanlug_mains'][0] }}" # Forgejo host
++      ansible.builtin.user:
++        name: forgejo
++    - name: Mint Forgejo API key
++      become: true
++      become_user: forgejo
++      when: true # This API key is disposable
++      changed_when: true
++      register: forgejo_api_key
++      delegate_to: "{{ groups['vanlug_mains'][0] }}" # Forgejo host
++      # For the UUID, see https://docs.ansible.com/projects/ansible/latest/collections/ansible/builtin/to_uuid_filter.html#examples.
++      # This isn't a secret so we don't need true randomness here.
++      ansible.builtin.command: |
++        podman exec forgejo forgejo admin user generate-access-token \
++          --username '{{ lookup("ansible.builtin.env", "FORGEJO_ADMIN_USERNAME") }}' \
++          --token-name 'forgejo-runner-meta-initial-setup-{{ 999999999999 | random | to_uuid }}' \
++          --scopes 'write:package,write:repository,write:user' \
++          --raw
++      environment:
++        XDG_RUNTIME_DIR: "/run/user/{{ forgejo_user.uid }}"
++      # We can't clean up previous runs via the API without having the user's admin password (token auth doesn't work for this), so instead
++      # we need to create fresh ones for each run. They can be manually cleaned up via https://git.vanlug.p8.lu/user/settings/applications.
++      # This is somewhat mitigated since we don't expect to run this playbook often.
++    - name: Create forgejo-runner-meta repo in Forgejo
++      ansible.builtin.uri:
++        url: https://git.vanlug.p8.lu/api/v1/user/repos
++        method: POST
++        headers:
++          Authorization: "token {{ forgejo_api_key.stdout }}"
++        body_format: json
++        body:
++          name: forgejo-runner-meta
++        status_code:
++          - 201
++          - 409 # Repo already exists, which is fine since this is idempotent
++    - name: Log into Forgejo registry
++      community.docker.docker_login:
++        registry_url: git.vanlug.p8.lu
++        username: '{{ lookup("ansible.builtin.env", "FORGEJO_ADMIN_USERNAME") }}'
++        password: "{{ forgejo_api_key.stdout }}"
++    - name: Push Forgejo runner OCI image
++      community.docker.docker_image_push:
++        name: git.vanlug.p8.lu/pojntfx/forgejo-runner-meta
++        tag: latest
+diff --git a/forgejo-runner-meta/Containerfile b/forgejo-runner-meta/Containerfile
+new file mode 100644
+index 0000000000000000000000000000000000000000..8d6592e64b143e0a630627bb4e89c0a29bd96147
+--- /dev/null
++++ b/forgejo-runner-meta/Containerfile
+@@ -0,0 +1,3 @@
++FROM node:lts
++
++RUN apt-get update && apt-get install -y docker.io iptables iproute2 && rm -rf /var/lib/apt/lists/*
+diff --git a/site.yaml b/site.yaml
+index 804dba60491570565f568613fa8dd40779311ef5..7d66a6ee2ef61e6fed8660e85820940ab90f9b5a 100644
+--- a/site.yaml
++++ b/site.yaml
+@@ -12,8 +12,10 @@ - name: Configure gVisor
+   ansible.builtin.import_playbook: gvisor.yaml
+ - name: Configure Forgejo
+   ansible.builtin.import_playbook: forgejo.yaml
+-- name: Configure Forgejo runner
+-  ansible.builtin.import_playbook: forgejo-runner.yaml
++- name: Configure Forgejo
++  ansible.builtin.import_playbook: forgejo.yaml
++- name: Configure Forgejo runner meta
++  ansible.builtin.import_playbook: forgejo-runner-meta.yaml
+ - name: Configure git-pages
+   ansible.builtin.import_playbook: git-pages.yaml
+ - name: Configure Anubis
+
