@@ -1,0 +1,51 @@
+From 3b8e478aa76cc3e4d4db2123bf9bcce98165bd42 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Sat, 15 Aug 2026 21:02:01 -0700
+Subject: [PATCH] feat: Clone runner meta repo from Forgejo instance, sync our template into it, and push it to Forgejo
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/forgejo-runner-meta.yaml b/forgejo-runner-meta.yaml
+index 740b8fc52f0bcbabee0d80e2a69162de4e378fe1..e6f5f85d4304459d364eafa18c9b92c85fcad1dd 100644
+--- a/forgejo-runner-meta.yaml
++++ b/forgejo-runner-meta.yaml
+@@ -125,3 +125,38 @@     - name: Push Forgejo runner OCI image
+       community.docker.docker_image_push:
+         name: git.vanlug.p8.lu/pojntfx/forgejo-runner-meta
+         tag: latest
++    - name: Create temporary directory for forgejo-runner-meta git repo
++      register: forgejo_runner_meta_git_repo
++      ansible.builtin.tempfile:
++        suffix: git_repo
++        state: directory
++    - name: Clone forgejo-runner-meta git repo
++      ansible.builtin.git:
++        repo: "https://pojntfx:{{ forgejo_api_key.stdout }}@git.vanlug.p8.lu/pojntfx/forgejo-runner-meta.git"
++        dest: "{{ forgejo_runner_meta_git_repo.path }}"
++        version: main
++      no_log: true # The repo URL contains the API token
++    - name: Sync our local repo template to the checked out repo dir
++      register: forgejo_runner_meta_git_repo_changes
++      ansible.posix.synchronize:
++        src: forgejo-runner-meta/ # Trailing slash: sync the contents, not the directory itself
++        dest: "{{ forgejo_runner_meta_git_repo.path }}"
++        delete: true
++        rsync_opts:
++          - "--exclude=.git" # We don't want to delete the git metadata
++      # This will only run on changes to the file; see https://docs.ansible.com/projects/ansible/latest/playbook_guide/playbooks_handlers.html#id1
++      notify: Sync forgejo-runner-meta git repo changes to Forgejo
++  handlers:
++    - name: Sync forgejo-runner-meta git repo changes to Forgejo
++      when: true # This only runs if there are changes/if it is required as per the `notify` above
++      changed_when: true
++      ansible.builtin.shell: # noqa: command-instead-of-module # We can't do these actions with the git module
++        cmd: |
++          set -e
++          git add -A
++          git \
++            -c user.name='{{ lookup("ansible.builtin.env", "FORGEJO_ADMIN_USERNAME") }}' \
++            -c user.email='{{ lookup("ansible.builtin.env", "FORGEJO_ADMIN_USERNAME") }}@git.vanlug.p8.lu' \
++            commit -m 'Sync forgejo-runner-meta'
++          git push origin HEAD:main
++        chdir: "{{ forgejo_runner_meta_git_repo.path }}"
+
