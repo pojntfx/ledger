@@ -1,0 +1,194 @@
+From 1a58369125be08aad3c30ac5a518590afe7ea316 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Sat, 15 Aug 2026 20:32:14 -0700
+Subject: [PATCH] feat: Add initial custom `setup-docker` action and OCI image CI/CD configuration
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/forgejo-runner-meta.yaml b/forgejo-runner-meta.yaml
+index a3fca864551e817ecd458c03a5bc10bddaed02f8..740b8fc52f0bcbabee0d80e2a69162de4e378fe1 100644
+--- a/forgejo-runner-meta.yaml
++++ b/forgejo-runner-meta.yaml
+@@ -14,7 +14,7 @@       register: forgejo_user
+       delegate_to: "{{ groups['vanlug_mains'][0] }}" # Forgejo host
+       ansible.builtin.user:
+         name: forgejo
+-    - name: Mint Forgejo API key
++    - name: Mint local Forgejo API key
+       become: true
+       become_user: forgejo
+       when: true # This API key is disposable
+@@ -34,6 +34,26 @@         XDG_RUNTIME_DIR: "/run/user/{{ forgejo_user.uid }}"
+       # We can't clean up previous runs via the API without having the user's admin password (token auth doesn't work for this), so instead
+       # we need to create fresh ones for each run. They can be manually cleaned up via https://git.vanlug.p8.lu/user/settings/applications.
+       # This is somewhat mitigated since we don't expect to run this playbook often.
++    - name: Mint actions Forgejo API key
++      become: true
++      become_user: forgejo
++      when: true # This API key is disposable
++      changed_when: true
++      register: forgejo_api_key_actions
++      delegate_to: "{{ groups['vanlug_mains'][0] }}" # Forgejo host
++      # For the UUID, see https://docs.ansible.com/projects/ansible/latest/collections/ansible/builtin/to_uuid_filter.html#examples.
++      # This isn't a secret so we don't need true randomness here.
++      ansible.builtin.command: |
++        podman exec forgejo forgejo admin user generate-access-token \
++          --username '{{ lookup("ansible.builtin.env", "FORGEJO_ADMIN_USERNAME") }}' \
++          --token-name 'forgejo-runner-meta-actions-{{ 999999999999 | random | to_uuid }}' \
++          --scopes 'write:package' \
++          --raw
++      environment:
++        XDG_RUNTIME_DIR: "/run/user/{{ forgejo_user.uid }}"
++      # We can't clean up previous runs via the API without having the user's admin password (token auth doesn't work for this), so instead
++      # we need to create fresh ones for each run. They can be manually cleaned up via https://git.vanlug.p8.lu/user/settings/applications.
++      # This is somewhat mitigated since we don't expect to run this playbook often.
+     - name: Create forgejo-runner-meta repo in Forgejo
+       ansible.builtin.uri:
+         url: https://git.vanlug.p8.lu/api/v1/user/repos
+@@ -46,6 +66,56 @@           name: forgejo-runner-meta
+         status_code:
+           - 201
+           - 409 # Repo already exists, which is fine since this is idempotent
++    - name: Enable actions for forgejo-runner-meta repo in Forgejo
++      ansible.builtin.uri:
++        url: https://git.vanlug.p8.lu/api/v1/repos/pojntfx/forgejo-runner-meta
++        method: PATCH
++        headers:
++          Authorization: "token {{ forgejo_api_key.stdout }}"
++        body_format: json
++        body:
++          has_actions: true
++        status_code: 200
++    - name: Set DOCKER_USERNAME variable for forgejo-runner-meta repo in Forgejo
++      ansible.builtin.uri:
++        url: "https://git.vanlug.p8.lu/api/v1/repos/pojntfx/forgejo-runner-meta/actions/variables/DOCKER_USERNAME"
++        method: PUT
++        headers:
++          Authorization: "token {{ forgejo_api_key.stdout }}"
++        body_format: json
++        body:
++          name: DOCKER_USERNAME
++          value: '{{ lookup("ansible.builtin.env", "FORGEJO_ADMIN_USERNAME") }}'
++        status_code:
++          - 204
++          - 404 # Variable doesn't exist yet, create it below
++      register: forgejo_docker_username_variable
++    - name: Create DOCKER_USERNAME variable for forgejo-runner-meta repo in Forgejo
++      ansible.builtin.uri:
++        url: "https://git.vanlug.p8.lu/api/v1/repos/pojntfx/forgejo-runner-meta/actions/variables/DOCKER_USERNAME"
++        method: POST
++        headers:
++          Authorization: "token {{ forgejo_api_key.stdout }}"
++        body_format: json
++        body:
++          value: '{{ lookup("ansible.builtin.env", "FORGEJO_ADMIN_USERNAME") }}'
++        status_code:
++          - 201
++          - 204
++      when: forgejo_docker_username_variable.status == 404
++    # Secrets are idempotent, unlike variables
++    - name: Set DOCKER_PASSWORD secret for forgejo-runner-meta repo in Forgejo
++      ansible.builtin.uri:
++        url: "https://git.vanlug.p8.lu/api/v1/repos/pojntfx/forgejo-runner-meta/actions/secrets/DOCKER_PASSWORD"
++        method: PUT
++        headers:
++          Authorization: "token {{ forgejo_api_key.stdout }}"
++        body_format: json
++        body:
++          data: "{{ forgejo_api_key_actions.stdout }}"
++        status_code:
++          - 201 # Secret created
++          - 204 # Secret updated
+     - name: Log into Forgejo registry
+       community.docker.docker_login:
+         registry_url: git.vanlug.p8.lu
+diff --git a/forgejo-runner-meta/.forgejo/workflows/oci.yaml b/forgejo-runner-meta/.forgejo/workflows/oci.yaml
+new file mode 100644
+index 0000000000000000000000000000000000000000..eb274825d1911bb4f46f40685fdc3ae217007cfb
+--- /dev/null
++++ b/forgejo-runner-meta/.forgejo/workflows/oci.yaml
+@@ -0,0 +1,45 @@
++name: OCI CI
++
++on:
++  push:
++    branches:
++      - main
++  # We allow manually triggering the workflow, e.g. to quickly patch a known CVE not tracked in code (e.g. in Debian's repos)
++  workflow_dispatch:
++  schedule:
++    - cron: "0 6 * * 1" # Every Monday at 06:00 UTC
++
++jobs:
++  build:
++    runs-on: ubuntu-latest
++    steps:
++      - name: Checkout
++        uses: https://code.forgejo.org/actions/checkout@v7
++        with:
++          fetch-depth: 0
++      - name: Setup Docker
++        uses: ./setup-docker
++      # See https://docs.docker.com/guides/gha/#conclusion
++      - name: Extract Docker image metadata
++        id: meta
++        uses: https://github.com/docker/metadata-action@v6
++        with:
++          images: git.vanlug.p8.lu/${{ vars.DOCKER_USERNAME }}/forgejo-runner-meta
++      - name: Log in to Docker Hub
++        uses: https://github.com/docker/login-action@v4
++        with:
++          registry: git.vanlug.p8.lu
++          username: ${{ vars.DOCKER_USERNAME }}
++          password: ${{ secrets.DOCKER_PASSWORD }}
++      - name: Set up Docker Buildx
++        uses: https://github.com/docker/setup-buildx-action@v4
++      - name: Build and push Docker image
++        uses: https://github.com/docker/build-push-action@v7
++        with:
++          push: ${{ github.event_name != 'pull_request' }}
++          tags: ${{ steps.meta.outputs.tags }}
++          annotations: ${{ steps.meta.outputs.annotations }}
++          # Both provenance and SBOM generation are very flaky, and since we're the only users of this image they are disabled
++          # provenance: true
++          # sbom: true
++          file: Containerfile
+diff --git a/forgejo-runner-meta/setup-docker/action.yaml b/forgejo-runner-meta/setup-docker/action.yaml
+new file mode 100644
+index 0000000000000000000000000000000000000000..38ef2af7530ff3d947468457af15603d5f8df023
+--- /dev/null
++++ b/forgejo-runner-meta/setup-docker/action.yaml
+@@ -0,0 +1,32 @@
++name: Setup Docker
++description: Set up nested Docker on gVisor
++
++runs:
++  using: composite
++  steps:
++    # gVisor only supports tmpfs as an overlayfs upper layer, so we give
++    # dockerd a tmpfs backing store to let overlayfs work; see
++    # https://gvisor.dev/docs/tutorials/docker-in-gvisor/
++    - name: Setup tmpfs
++      shell: bash
++      run: |
++        mkdir -p /var/lib/docker
++        mount -t tmpfs -o size=3G tmpfs /var/lib/docker
++    # See https://github.com/google/gvisor/issues/5745; this is IPv4 only for
++    # now because gVisor doesn't support nested Docker with IPv6 yet.
++    # We need to use `iptables-legacy` since `nftables` don't work inside of gVisor.
++    # gVisor doesn't support MASQUERADE, so we use SNAT instead.
++    - name: Setup SNAT rules
++      shell: bash
++      run: |
++        dev=$(ip -4 route show default | sed -En '1s/.* dev ([^ ]+).*/\1/p')
++        addr=$(ip -4 addr show dev "$dev" | sed -En 's/^\s*inet ([^ ]+)\/.*/\1/p')
++        echo 1 > /proc/sys/net/ipv4/ip_forward
++        iptables-legacy -t nat -A POSTROUTING -o "$dev" -p tcp -j SNAT --to-source "$addr"
++        iptables-legacy -t nat -A POSTROUTING -o "$dev" -p udp -j SNAT --to-source "$addr"
++    - name: Start dockerd
++      shell: bash
++      run: dockerd --iptables=false --ip6tables=false &
++    - name: Wait for dockerd to be ready
++      shell: bash
++      run: timeout 30s bash -c 'until docker info; do sleep 1; done'
+
