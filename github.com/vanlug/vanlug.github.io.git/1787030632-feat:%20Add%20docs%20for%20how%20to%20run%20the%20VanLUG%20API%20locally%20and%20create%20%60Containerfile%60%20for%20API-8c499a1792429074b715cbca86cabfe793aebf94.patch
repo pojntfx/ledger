@@ -1,0 +1,77 @@
+From 8c499a1792429074b715cbca86cabfe793aebf94 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Mon, 17 Aug 2026 22:23:52 -0700
+Subject: [PATCH] feat: Add docs for how to run the VanLUG API locally and create `Containerfile` for API
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/.forgejo/workflows/hugo.yaml b/.forgejo/workflows/hugo.yaml
+index 6b0a424e22807e7dfdf75206fdb9f6bde1cf8b65..26fe63b4fc8d9e08c5355b2ea2819ce7d322a8c2 100644
+--- a/.forgejo/workflows/hugo.yaml
++++ b/.forgejo/workflows/hugo.yaml
+@@ -4,10 +4,12 @@ # Adapted from https://codeberg.org/pojntfx/netteart-com/src/branch/main/.forgejo/workflows/hugo.yaml
+ # and https://codeberg.org/pojntfx/vanlug-infrastructure/src/branch/master/forgejo-runner-meta/.forgejo/workflows/oci.yaml
+ 
+ name: Hugo CI
++
+ on:
+   push:
+     branches:
+       - main
++
+ jobs:
+   build:
+     runs-on: ubuntu-latest
+diff --git a/.forgejo/workflows/oci.yaml b/.forgejo/workflows/oci.yaml
+index 4fd636a2305e6280bdd85d49b2b79adb9e33bf90..fb4944d130843da26a807a4fbcd8d775b69212fb 100644
+--- a/.forgejo/workflows/oci.yaml
++++ b/.forgejo/workflows/oci.yaml
+@@ -26,7 +26,7 @@       - name: Extract Docker image metadata
+         id: meta
+         uses: https://github.com/docker/metadata-action@v6
+         with:
+-          images: git.vanlug.p8.lu/${{ vars.DOCKER_USERNAME }}/forgejo-runner-meta
++          images: git.vanlug.p8.lu/${{ vars.DOCKER_USERNAME }}/vanlug-api
+       - name: Log in to Docker Hub
+         uses: https://github.com/docker/login-action@v4
+         with:
+diff --git a/Containerfile b/Containerfile
+new file mode 100644
+index 0000000000000000000000000000000000000000..10b6a085d7d8b718a49d5c31353b59d1249e6a5f
+--- /dev/null
++++ b/Containerfile
+@@ -0,0 +1,15 @@
++FROM docker.io/library/golang:latest AS build
++
++COPY go.mod go.sum .
++
++RUN go mod download
++
++COPY . .
++
++RUN CGO_ENABLED=0 go build -o /usr/local/bin/vanlug-api .
++
++FROM gcr.io/distroless/static-debian13
++
++COPY --from=build /usr/local/bin/vanlug-api /usr/local/bin/vanlug-api
++
++CMD ["/usr/local/bin/vanlug-api"]
+diff --git a/README.md b/README.md
+index 55249f3e009bd80c3047d18cd3ee13a81ca87bf9..21e75bba0e76f2cef521c472be98d63416f2a3a6 100644
+--- a/README.md
++++ b/README.md
+@@ -72,6 +72,13 @@ $ npm install
+ $ hugo server
+ ```
+ 
++By default, the static site is configured to use the production version of our API hosted at [https://vanlug.p8.lu/api](https://vanlug.p8.lu/api), which is deployed as a Podman quadlet by [https://codeberg.org/pojntfx/vanlug-infrastructure](https://codeberg.org/pojntfx/vanlug-infrastructure). During development, if you'd like to make changes to the API, first set `api` in [data/links.yaml](data/links.yaml) to `http://localhost:8080`, then start it locally by running the following:
++
++```shell
++$ export SITE_URL=http://localhost:1313/ MASTODON_SERVER=https://thecanadian.social MASTODON_ACCESS_TOKEN=myaccesstoken
++$ go run .
++```
++
+ ## License
+ 
+ vanlug.p8.lu (c) 2026 Felicitas Pojtinger and contributors
+
