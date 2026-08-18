@@ -1,0 +1,255 @@
+From faef33ea0dd0cc889a774a8ceb390ba0b0146ff9 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Mon, 17 Aug 2026 21:21:45 -0700
+Subject: [PATCH] feat: Start transition to Codeberg by moving workflow and docs over to it
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/.forgejo/workflows/hugo.yaml b/.forgejo/workflows/hugo.yaml
+new file mode 100644
+index 0000000000000000000000000000000000000000..660fd04fe7a736918e5653169f65b50c21b24a3f
+--- /dev/null
++++ b/.forgejo/workflows/hugo.yaml
+@@ -0,0 +1,63 @@
++# Based on https://codeberg.org/steiger/hugo-on-codeberg-pages-documentation#4-set-up-forgejo-action
++# and https://github.com/vanlug/vanlug.github.io/blob/main/.github/workflows/hugo.yaml.
++# Adapted from https://codeberg.org/pojntfx/netteart-com/src/branch/main/.forgejo/workflows/hugo.yaml
++# and https://codeberg.org/pojntfx/vanlug-infrastructure/src/branch/master/forgejo-runner-meta/.forgejo/workflows/oci.yaml
++
++name: Hugo CI
++on:
++  push:
++    branches:
++      - main
++jobs:
++  build:
++    runs-on: ubuntu-latest
++    env:
++      DART_SASS_VERSION: 1.102.0
++      HUGO_VERSION: 0.165.0
++      NODE_VERSION: 26.7.0
++    steps:
++      - name: Checkout
++        uses: https://code.forgejo.org/actions/checkout@v7
++        with:
++          fetch-depth: 0
++      - name: Setup Node.js
++        uses: https://code.forgejo.org/actions/setup-node@v7
++        with:
++          node-version: ${{ env.NODE_VERSION }}
++      - name: Install Dart Sass
++        run: |
++          mkdir -p "${HOME}/.local"
++          curl -sLJO "https://github.com/sass/dart-sass/releases/download/${DART_SASS_VERSION}/dart-sass-${DART_SASS_VERSION}-linux-x64.tar.gz"
++          tar -C "${HOME}/.local" -xf "dart-sass-${DART_SASS_VERSION}-linux-x64.tar.gz"
++          rm "dart-sass-${DART_SASS_VERSION}-linux-x64.tar.gz"
++          echo "${HOME}/.local/dart-sass" >> "${FORGEJO_PATH}"
++      - name: Install Hugo
++        run: |
++          curl -sLJO "https://github.com/gohugoio/hugo/releases/download/v${HUGO_VERSION}/hugo_extended_${HUGO_VERSION}_linux-amd64.tar.gz"
++          mkdir -p "${HOME}/.local/hugo"
++          tar -C "${HOME}/.local/hugo" -xf "hugo_extended_${HUGO_VERSION}_linux-amd64.tar.gz"
++          rm "hugo_extended_${HUGO_VERSION}_linux-amd64.tar.gz"
++          echo "${HOME}/.local/hugo" >> "${FORGEJO_PATH}"
++      - name: Install Node.js dependencies
++        run: |
++          [[ -f package-lock.json || -f npm-shrinkwrap.json ]] && npm ci || true
++      - name: Build the site
++        run: |
++          hugo build \
++            --gc \
++            --minify \
++            --baseURL "https://vanlug.ca/"
++      - name: Deploy to Forgejo Pages at vanlug.ca
++        uses: https://code.forgejo.org/actions/git-pages@v2
++        with:
++          site: https://vanlug.ca/
++          server: codeberg.page
++          token: ${{ forge.token }}
++          source: public/
++      # See https://docs.codeberg.org/codeberg-pages/using-custom-domain/#deploying-to-versions-of-your-domain-both-with-and-without-www.
++      - name: Deploy to Forgejo Pages at www.vanlug.ca
++        uses: https://code.forgejo.org/actions/git-pages@v2
++        with:
++          site: https://www.vanlug.ca/
++          token: ${{ forge.token }}
++          source: public/
+diff --git a/.github/workflows/hugo.yaml b/.github/workflows/hugo.yaml
+deleted file mode 100644
+index 942e532d1d049bc518abbeb985aef503d40b86da..0000000000000000000000000000000000000000
+--- a/.github/workflows/hugo.yaml
++++ /dev/null
+@@ -1,90 +0,0 @@
+-# Based on https://gohugo.io/host-and-deploy/host-on-github-pages/#article
+-
+-name: Hugo CI
+-on:
+-  push:
+-    branches:
+-      - main
+-  workflow_dispatch:
+-permissions:
+-  contents: read
+-  pages: write
+-  id-token: write
+-concurrency:
+-  group: pages
+-  cancel-in-progress: false
+-defaults:
+-  run:
+-    shell: bash
+-jobs:
+-  build:
+-    runs-on: ubuntu-latest
+-    env:
+-      DART_SASS_VERSION: 1.98.0
+-      HUGO_VERSION: 0.158.0
+-      NODE_VERSION: 24.14.0
+-    steps:
+-      - name: Checkout
+-        uses: actions/checkout@v6
+-        with:
+-          fetch-depth: 0
+-      - name: Setup Node.js
+-        uses: actions/setup-node@v6
+-        with:
+-          node-version: ${{ env.NODE_VERSION }}
+-      - name: Setup Pages
+-        id: pages
+-        uses: actions/configure-pages@v5
+-      - name: Create directory for user-specific executable files
+-        run: |
+-          mkdir -p "${HOME}/.local"
+-      - name: Install Dart Sass
+-        run: |
+-          curl -sLJO "https://github.com/sass/dart-sass/releases/download/${DART_SASS_VERSION}/dart-sass-${DART_SASS_VERSION}-linux-x64.tar.gz"
+-          tar -C "${HOME}/.local" -xf "dart-sass-${DART_SASS_VERSION}-linux-x64.tar.gz"
+-          rm "dart-sass-${DART_SASS_VERSION}-linux-x64.tar.gz"
+-          echo "${HOME}/.local/dart-sass" >> "${GITHUB_PATH}"
+-      - name: Install Hugo
+-        run: |
+-          curl -sLJO "https://github.com/gohugoio/hugo/releases/download/v${HUGO_VERSION}/hugo_extended_${HUGO_VERSION}_linux-amd64.tar.gz"
+-          mkdir "${HOME}/.local/hugo"
+-          tar -C "${HOME}/.local/hugo" -xf "hugo_extended_${HUGO_VERSION}_linux-amd64.tar.gz"
+-          rm "hugo_extended_${HUGO_VERSION}_linux-amd64.tar.gz"
+-          echo "${HOME}/.local/hugo" >> "${GITHUB_PATH}"
+-      - name: Install Node.js dependencies
+-        run: |
+-          [[ -f package-lock.json || -f npm-shrinkwrap.json ]] && npm ci || true
+-      - name: Cache restore
+-        id: cache-restore
+-        uses: actions/cache/restore@v5
+-        with:
+-          path: ${{ runner.temp }}/hugo_cache
+-          key: hugo-${{ github.run_id }}
+-          restore-keys: hugo-
+-      - name: Build the site
+-        run: |
+-          hugo build \
+-            --gc \
+-            --minify \
+-            --baseURL "${{ steps.pages.outputs.base_url }}/" \
+-            --cacheDir "${{ runner.temp }}/hugo_cache"
+-      - name: Cache save
+-        id: cache-save
+-        uses: actions/cache/save@v5
+-        with:
+-          path: ${{ runner.temp }}/hugo_cache
+-          key: ${{ steps.cache-restore.outputs.cache-primary-key }}
+-      - name: Upload artifact
+-        uses: actions/upload-pages-artifact@v3
+-        with:
+-          path: ./public
+-  deploy:
+-    environment:
+-      name: github-pages
+-      url: ${{ steps.deployment.outputs.page_url }}
+-    runs-on: ubuntu-latest
+-    needs: build
+-    steps:
+-      - name: Deploy to GitHub Pages
+-        id: deployment
+-        uses: actions/deploy-pages@v4
+diff --git a/README.md b/README.md
+index a11c1a54c533619e04e672477f9f29449ced1d74..c6822cae0aff9c6f81803d0e1ebac6af5c4a1a81 100644
+--- a/README.md
++++ b/README.md
+@@ -2,9 +2,10 @@ # vanlug.ca
+ 
+ Website for the Vancouver Linux Users Group.
+ 
+-[![Hugo CI](https://github.com/vanlug/vanlug.github.io/actions/workflows/hugo.yaml/badge.svg)](https://github.com/vanlug/vanlug.github.io/actions/workflows/hugo.yaml)
++[![Hugo CI](https://git.vanlug.ca/vanlug/vanlug.ca/badges/workflows/hugo.yaml/badge.svg)](https://git.vanlug.ca/vanlug/vanlug.ca/actions?workflow=hugo.yaml)
++[![Docker CI](https://git.vanlug.ca/vanlug/vanlug.ca/badges/workflows/docker.yaml/badge.svg)](https://git.vanlug.ca/vanlug/vanlug.ca/actions?workflow=docker.yaml)
+ ![Go Version](https://img.shields.io/badge/go%20version-%3E=1.25-61CFDD.svg)
+-[![Go Reference](https://pkg.go.dev/badge/github.com/vanlug/vanlug.github.io.svg)](https://pkg.go.dev/github.com/vanlug/vanlug.github.io)
++[![Go Reference](https://pkg.go.dev/badge/git.vanlug.ca/vanlug/vanlug.ca.svg)](https://pkg.go.dev/git.vanlug.ca/vanlug/vanlug.ca)
+ 
+ ## Overview
+ 
+@@ -60,13 +61,13 @@ - [Luma](https://luma.com/home) provides the event calendar and API.
+ 
+ ## Contributing
+ 
+-To contribute, please use the [GitHub flow](https://guides.github.com/introduction/flow/) and follow our [Code of Conduct](./CODE_OF_CONDUCT.md).
++To contribute, please use the [Codeberg flow](https://docs.codeberg.org/collaborating/) and follow our [Code of Conduct](https://vanlug.ca/conduct/).
+ 
+ To build the site locally, run:
+ 
+ ```shell
+-$ git clone https://github.com/vanlug/vanlug.github.io.git
+-$ cd vanlug.github.io
++$ git clone https://git.vanlug.ca/vanlug/vanlug.ca
++$ cd vanlug.ca
+ $ npm install
+ $ hugo server
+ ```
+diff --git a/data/site.yaml b/data/site.yaml
+index eba57a038e76accfd069ed08b3e693814b5f25f5..bc9427c3b5435e8304d78648fde64f2e4a666849 100644
+--- a/data/site.yaml
++++ b/data/site.yaml
+@@ -10,5 +10,5 @@   - Free Software
+   - LUG
+   - British Columbia
+   - Meetup
+-source: https://github.com/vanlug/vanlug.github.io
++source: https://git.vanlug.ca/vanlug/vanlug.ca
+ license: AGPL-3.0-or-later
+diff --git a/go.mod b/go.mod
+index 0675f4a40e7334a9b37b4434dcba3ca0ebf89102..aa1b49524aef0d95bd173cd66ccd742c1185305f 100644
+--- a/go.mod
++++ b/go.mod
+@@ -1,4 +1,4 @@
+-module github.com/vanlug/vanlug.github.io
++module git.vanlug.ca/vanlug/vanlug.ca
+ 
+ go 1.26
+ 
+diff --git a/main.go b/main.go
+index 6346fedad9ef34d37c79c2217a00e657d5a4d331..bfcf516cdf9d3571bb5e56ce46f1ba2bab8b7ea1 100644
+--- a/main.go
++++ b/main.go
+@@ -7,7 +7,7 @@ 	"net/http"
+ 	"os"
+ 
+ 	mastodonhandler "github.com/pojntfx/felicitas.pojtinger.com/api/mastodon"
+-	"github.com/vanlug/vanlug.github.io/pkg/handlers"
++	"git.vanlug.ca/vanlug/vanlug.ca/pkg/handlers"
+ )
+ 
+ const (
+diff --git a/static/CNAME b/static/CNAME
+deleted file mode 100644
+index db13d870043d07c3bf796f80c8683d0934bdb8c6..0000000000000000000000000000000000000000
+--- a/static/CNAME
++++ /dev/null
+@@ -1 +0,0 @@
+-vanlug.ca
+diff --git a/static/_redirects b/static/_redirects
+new file mode 100644
+index 0000000000000000000000000000000000000000..8d023ce0f0b116417117a29ca653bd1156f6a156
+--- /dev/null
++++ b/static/_redirects
+@@ -0,0 +1 @@
++//www.vanlug.ca/* https://vanlug.ca/:splat 301!
+
