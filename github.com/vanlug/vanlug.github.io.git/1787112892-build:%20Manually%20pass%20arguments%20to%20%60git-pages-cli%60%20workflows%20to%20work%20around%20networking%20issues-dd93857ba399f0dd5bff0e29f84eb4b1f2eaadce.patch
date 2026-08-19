@@ -1,0 +1,54 @@
+From dd93857ba399f0dd5bff0e29f84eb4b1f2eaadce Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Tue, 18 Aug 2026 21:14:52 -0700
+Subject: [PATCH] build: Manually pass arguments to `git-pages-cli` workflows to work around networking issues
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/.forgejo/workflows/hugo.yaml b/.forgejo/workflows/hugo.yaml
+index 26fe63b4fc8d9e08c5355b2ea2819ce7d322a8c2..bdeac2c456376c295bc0a72b5f14be1d4834edc4 100644
+--- a/.forgejo/workflows/hugo.yaml
++++ b/.forgejo/workflows/hugo.yaml
+@@ -50,17 +50,31 @@             --gc \
+             --minify \
+             --baseURL "https://vanlug.p8.lu/"
+       - name: Deploy to Forgejo Pages at vanlug.p8.lu
+-        uses: https://code.forgejo.org/actions/git-pages@v2
++        # When using `uses` with `runs.using: docker` directly, the Forgejo runner tries to use `--network=container:$jobcontainer`,
++        # which gVisor doesn't support (see https://github.com/google/gvisor/issues/13337 and
++        # https://github.com/google/gvisor/issues/12132), leading to no network device appearing in the container.
++        # To fix this, we use `docker://` and pass the arguments directly, which attaches the job container directly
++        # to the job's bridge network and fixes the issue.
++        uses: docker://data.forgejo.org/git-pages/git-pages-cli:1.10.0
+         with:
+-          site: https://vanlug.p8.lu/
+-          server: git.vanlug.p8.lu
+-          token: ${{ forge.token }}
+-          source: public/
++          # See https://code.forgejo.org/actions/git-pages/src/tag/v2.2.0/action.yml#L31
++          args: >-
++            https://vanlug.p8.lu/
++            --path=
++            --parents
++            --server=git.vanlug.p8.lu
++            --password=
++            --token=${{ forge.token }}
++            --upload-dir=public/
+       # See https://docs.codeberg.org/codeberg-pages/using-custom-domain/#deploying-to-versions-of-your-domain-both-with-and-without-www.
+       - name: Deploy to Forgejo Pages at www.vanlug.p8.lu
+-        uses: https://code.forgejo.org/actions/git-pages@v2
++        uses: docker://data.forgejo.org/git-pages/git-pages-cli:1.10.0
+         with:
+-          site: https://www.vanlug.p8.lu/
+-          server: git.vanlug.p8.lu
+-          token: ${{ forge.token }}
+-          source: public/
++          args: >-
++            https://www.vanlug.p8.lu/
++            --path=
++            --parents
++            --server=git.vanlug.p8.lu
++            --password=
++            --token=${{ forge.token }}
++            --upload-dir=public/
+
