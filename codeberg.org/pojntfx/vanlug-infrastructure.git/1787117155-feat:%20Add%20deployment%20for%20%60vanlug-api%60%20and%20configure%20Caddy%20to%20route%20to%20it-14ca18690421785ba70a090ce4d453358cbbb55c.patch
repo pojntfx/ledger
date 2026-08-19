@@ -1,0 +1,354 @@
+From 14ca18690421785ba70a090ce4d453358cbbb55c Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Tue, 18 Aug 2026 22:25:55 -0700
+Subject: [PATCH] feat: Add deployment for `vanlug-api` and configure Caddy to route to it
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/.env b/.env
+index d45b9ab9c2e05a356aaa66dc0198f324651420a5..a16d73e469647dbb8cae7da1723d0f454babed9b 100644
+--- a/.env
++++ b/.env
+@@ -7,3 +7,4 @@ export FORGEJO_ADMIN_EMAIL="felicitas@pojtinger.com"
+ export FORGEJO_ADMIN_INITIAL_PASSWORD=""
+ export FORGEJO_RUNNER_SHARED_SECRET="" # openssl rand -hex 20
+ export FORGEJO_RUNNER_UUID="" # echo -n "$FORGEJO_RUNNER_SHARED_SECRET" | python3 -c 'import sys; import uuid;input=sys.stdin.read();print(str(uuid.UUID(bytes=input[:16].encode("utf-8"))))'
++export MASTODON_ACCESS_TOKEN=
+diff --git a/Caddyfile b/Caddyfile
+index ff4bf64df674cbf234674e606b316b5169bbb95d..f19124aff9657dc44948b4006a859cdbb2b63a7e 100644
+--- a/Caddyfile
++++ b/Caddyfile
+@@ -53,6 +53,26 @@ 		header_up X-Http-Version {http.request.proto}
+ 	}
+ }
+ 
++https://vanlug.p8.lu {
++	tls {
++		on_demand
++	}
++
++	import workarounds
++
++	# vanlug-api
++	handle_path /api* {
++		reverse_proxy host.containers.internal:3009
++	}
++
++	# Optimally we'd fall through to the git-pages block below,
++	# but Caddy doesn't allow that, so instead we duplicate the block from
++	# below here.
++	handle {
++		reverse_proxy host.containers.internal:3003
++	}
++}
++
+ # git-pages
+ https:// {
+ 	tls {
+diff --git a/README.md b/README.md
+index f905db629b483678a4036f4bbf15dabdd7f396ea..c56a1c289341cfb97081c0ea58b78da1c353a8eb 100644
+--- a/README.md
++++ b/README.md
+@@ -26,6 +26,7 @@ [setup@vanlug-main ~]$ sudo journalctl -u caddy.service -f
+ [setup@vanlug-main ~]$ sudo journalctl _SYSTEMD_USER_UNIT=forgejo.service -f
+ [setup@vanlug-main ~]$ sudo journalctl _SYSTEMD_USER_UNIT=git-pages.service -f
+ [setup@vanlug-main ~]$ sudo journalctl _SYSTEMD_USER_UNIT=anubis.service -f
++[setup@vanlug-main ~]$ sudo journalctl _SYSTEMD_USER_UNIT=vanlug-api.service -f
+ # To get logs for quadlets on Forgejo runner server
+ $ ssh setup@2a01:4f8:c015:706c::1
+ [setup@vanlug-forgejo-runner ~]$ sudo journalctl _SYSTEMD_USER_UNIT=forgejo-runner.service -f
+diff --git a/anubis-http.service b/anubis-http.service
+index 4c41b41f66cfcfa3a6dd570f49d3db54fac5aebe..e7db681e8e39a53cabd1d3ae095274876d4ede9d 100644
+--- a/anubis-http.service
++++ b/anubis-http.service
+@@ -1,8 +1,8 @@
+ [Unit]
+ Requires=anubis-http.socket
+ After=anubis-http.socket
+-Requires=anubis-http.service
+-After=anubis-http.service
++Requires=anubis.service
++After=anubis.service
+ 
+ [Service]
+ ExecStart=/usr/lib/systemd/systemd-socket-proxyd localhost:3008
+diff --git a/caddy.cil b/caddy.cil
+index caf35ebe60712d12462c0d856eb6a68584afebc0..92a3889a58fe67ee58d1988ad1dc29973d48ae4b 100644
+--- a/caddy.cil
++++ b/caddy.cil
+@@ -9,7 +9,10 @@ (typeattributeset port_type (git_pages_port_t))
+ 
+ (type anubis_port_t)
+ (typeattributeset port_type (anubis_port_t))
+-    
++
++(type vanlug_api_port_t)
++(typeattributeset port_type (vanlug_api_port_t))
++
+ ; Custom rules end here
+ 
+ (block caddy
+@@ -49,6 +52,8 @@     ; Dialing permission for upstreams
+     (allow process forgejo_port_t ( tcp_socket ( name_connect )))
+     (allow process git_pages_port_t ( tcp_socket ( name_connect )))
+     (allow process anubis_port_t ( tcp_socket ( name_connect )))
++    (allow process vanlug_api_port_t ( tcp_socket ( name_connect )))
++
+     ; Admin API to apply changes from Caddyfle
+     (allow process unreserved_port_t ( tcp_socket ( name_connect )))
+ 
+diff --git a/site.yaml b/site.yaml
+index 7d66a6ee2ef61e6fed8660e85820940ab90f9b5a..78b119dd312d0b061266f28b9e19f8a3494c5d51 100644
+--- a/site.yaml
++++ b/site.yaml
+@@ -10,6 +10,10 @@ - name: Configure Docker
+   ansible.builtin.import_playbook: docker.yaml
+ - name: Configure gVisor
+   ansible.builtin.import_playbook: gvisor.yaml
++# We define all the SELinux port types here,
++# we need to deploy Caddy before we deploy its upstreams
++- name: Configure Caddy
++  ansible.builtin.import_playbook: caddy.yaml
+ - name: Configure Forgejo
+   ansible.builtin.import_playbook: forgejo.yaml
+ - name: Configure Forgejo
+@@ -20,5 +24,5 @@ - name: Configure git-pages
+   ansible.builtin.import_playbook: git-pages.yaml
+ - name: Configure Anubis
+   ansible.builtin.import_playbook: anubis.yaml
+-- name: Configure Caddy
+-  ansible.builtin.import_playbook: caddy.yaml
++- name: Configure vanlug-api
++  ansible.builtin.import_playbook: vanlug-api.yaml
+diff --git a/vanlug-api-http.service b/vanlug-api-http.service
+new file mode 100644
+index 0000000000000000000000000000000000000000..be3d0e8d724e81572b7698abebdd6d628ea19bcf
+--- /dev/null
++++ b/vanlug-api-http.service
+@@ -0,0 +1,11 @@
++[Unit]
++Requires=vanlug-api-http.socket
++After=vanlug-api-http.socket
++Requires=vanlug-api.service
++After=vanlug-api.service
++
++[Service]
++ExecStart=/usr/lib/systemd/systemd-socket-proxyd localhost:3010
++
++[Install]
++WantedBy=default.target
+diff --git a/vanlug-api-http.socket b/vanlug-api-http.socket
+new file mode 100644
+index 0000000000000000000000000000000000000000..a72241fc59276091aecc229868eddf8fd61f900c
+--- /dev/null
++++ b/vanlug-api-http.socket
+@@ -0,0 +1,6 @@
++[Socket]
++ListenStream=3009
++# No HTTP/3 here, vanlug-api listens on a raw TCP socket
++
++[Install]
++WantedBy=sockets.target
+diff --git a/vanlug-api.cil b/vanlug-api.cil
+new file mode 100644
+index 0000000000000000000000000000000000000000..d275bdd181cafe198c0911c07403ea35d129201f
+--- /dev/null
++++ b/vanlug-api.cil
+@@ -0,0 +1,11 @@
++(block vanlug_api
++    (blockinherit container)
++    (blockinherit restricted_net_container)
++    (allow process process ( capability ( chown dac_override fowner fsetid kill net_bind_service setfcap setgid setpcap setuid sys_chroot )))
++
++    (allow process http_cache_port_t ( tcp_socket (  name_bind )))
++    (allow process container_file_t ( dir ( add_name create getattr ioctl lock open read remove_name rmdir search setattr write )))
++    (allow process container_file_t ( file ( append create getattr ioctl lock map open read rename setattr unlink write )))
++    (allow process container_file_t ( fifo_file ( getattr read write append ioctl lock open )))
++    (allow process container_file_t ( sock_file ( append getattr open read write )))
++)
+\ No newline at end of file
+diff --git a/vanlug-api.container b/vanlug-api.container
+new file mode 100644
+index 0000000000000000000000000000000000000000..4221ef63b092c71dc54553275a4d4feb05808bef
+--- /dev/null
++++ b/vanlug-api.container
+@@ -0,0 +1,15 @@
++[Container]
++ContainerName=vanlug-api
++# Since we use enforcing SELinux we disable NoNewPrivileges here and
++# use our own custom SELinux domain instead
++SecurityLabelType=vanlug_api.process
++Image=git.vanlug.p8.lu/pojntfx/vanlug-api:main
++Label=io.containers.autoupdate=registry
++# We use systemd-socket-proxyd on 3009, so we listen on 3010 instead
++PublishPort=3010:8080
++Environment=MASTODON_ACCESS_TOKEN={{ mastodon_access_token }}
++LogDriver=journald
++ReadOnly=true
++
++[Install]
++WantedBy=default.target
+diff --git a/vanlug-api.yaml b/vanlug-api.yaml
+new file mode 100644
+index 0000000000000000000000000000000000000000..5d269822a691a1764e7900d0959a9b7b2224a273
+--- /dev/null
++++ b/vanlug-api.yaml
+@@ -0,0 +1,157 @@
++- name: Configure vanlug-api
++  hosts:
++    - vanlug_mains
++  gather_facts: false
++  tasks:
++    - name: Create user for vanlug-api
++      become: true
++      register: vanlug_api_user
++      ansible.builtin.user:
++        name: vanlug-api
++    - name: Enable linger for vanlug-api user # See https://old.reddit.com/r/systemd/comments/suaa5x/proper_way_to_enable_lingering_ansible/
++      become: true
++      ansible.builtin.command: loginctl enable-linger vanlug-api
++      args:
++        creates: /var/lib/systemd/linger/vanlug-api
++    - name: Create socket directory for vanlug-api
++      become: true
++      ansible.builtin.file:
++        path: /home/vanlug-api/.config/systemd/user
++        state: directory
++        owner: vanlug-api
++        group: vanlug-api
++        mode: "0755"
++    - name: Write socket activation service file for vanlug-api
++      become: true
++      ansible.builtin.copy:
++        src: vanlug-api-http.service
++        dest: /home/vanlug-api/.config/systemd/user/vanlug-api-http.service
++        owner: vanlug-api
++        group: vanlug-api
++        mode: "0644"
++    - name: Write socket file for vanlug-api
++      become: true
++      ansible.builtin.copy:
++        src: vanlug-api-http.socket
++        dest: /home/vanlug-api/.config/systemd/user/vanlug-api-http.socket
++        owner: vanlug-api
++        group: vanlug-api
++        mode: "0644"
++      # This will only run on changes to the file; see https://docs.ansible.com/projects/ansible/latest/playbook_guide/playbooks_handlers.html#id1
++      notify: Restart vanlug-api user socket
++    - name: Enable vanlug-api user socket
++      become: true
++      become_user: vanlug-api
++      ansible.builtin.systemd_service:
++        name: vanlug-api-http.socket
++        state: started
++        enabled: true
++        daemon_reload: true
++        scope: user
++      environment:
++        XDG_RUNTIME_DIR: "/run/user/{{ vanlug_api_user.uid }}"
++    - name: Register vanlug-api SELinux network port types
++      become: true
++      community.general.seport:
++        ports: 3009
++        proto: tcp
++        setype: vanlug_api_port_t
++        state: present
++    - name: Create policy directory for vanlug-api
++      become: true
++      ansible.builtin.file:
++        path: /home/vanlug-api/.local/share/selinux/targeted
++        state: directory
++        owner: vanlug-api
++        group: vanlug-api
++        mode: "0755"
++    - name: Write policy for vanlug-api
++      become: true
++      register: vanlug_api_policy
++      ansible.builtin.copy:
++        src: vanlug-api.cil
++        dest: /home/vanlug-api/.local/share/selinux/targeted/vanlug-api.cil
++        owner: vanlug-api
++        group: vanlug-api
++        mode: "0644"
++    # We can't use a handler for this since we must apply the policy before we try to start the service
++    - name: Apply vanlug-api policy # noqa: no-handler
++      become: true
++      when: vanlug_api_policy.changed
++      changed_when: true
++      ansible.builtin.command: semodule -i /home/vanlug-api/.local/share/selinux/targeted/vanlug-api.cil
++      notify: Restart vanlug-api user service
++    - name: Create container directory for vanlug-api
++      become: true
++      ansible.builtin.file:
++        path: /home/vanlug-api/.config/containers/systemd
++        state: directory
++        owner: vanlug-api
++        group: vanlug-api
++        mode: "0755"
++    - name: Write container file for vanlug-api
++      become: true
++      ansible.builtin.template:
++        src: vanlug-api.container
++        dest: /home/vanlug-api/.config/containers/systemd/vanlug-api.container
++        owner: vanlug-api
++        group: vanlug-api
++        mode: "0644"
++      vars:
++        mastodon_access_token: '{{ lookup("ansible.builtin.env", "MASTODON_ACCESS_TOKEN") }}'
++      # This will only run on changes to the file; see https://docs.ansible.com/projects/ansible/latest/playbook_guide/playbooks_handlers.html#id1
++      notify: Restart vanlug-api user service
++    - name: Enable vanlug-api user service
++      become: true
++      become_user: vanlug-api
++      ansible.builtin.systemd_service:
++        name: vanlug-api.service
++        state: started
++        enabled: true
++        daemon_reload: true
++        scope: user
++      environment:
++        XDG_RUNTIME_DIR: "/run/user/{{ vanlug_api_user.uid }}"
++    - name: Enable vanlug-api proxy user service
++      become: true
++      become_user: vanlug-api
++      ansible.builtin.systemd_service:
++        name: vanlug-api-http.service
++        state: started
++        enabled: true
++        daemon_reload: true
++        scope: user
++      environment:
++        XDG_RUNTIME_DIR: "/run/user/{{ vanlug_api_user.uid }}"
++    - name: Enable Podman auto-update user service
++      become: true
++      become_user: vanlug-api
++      ansible.builtin.systemd_service:
++        name: podman-auto-update.timer
++        state: started
++        enabled: true
++        daemon_reload: true
++        scope: user
++      environment:
++        XDG_RUNTIME_DIR: "/run/user/{{ vanlug_api_user.uid }}"
++  handlers:
++    - name: Restart vanlug-api user service
++      become: true
++      become_user: vanlug-api
++      ansible.builtin.systemd_service:
++        name: vanlug-api.service
++        state: restarted
++        daemon_reload: true
++        scope: user
++      environment:
++        XDG_RUNTIME_DIR: "/run/user/{{ vanlug_api_user.uid }}"
++    - name: Restart vanlug-api user socket
++      become: true
++      become_user: vanlug-api
++      ansible.builtin.systemd_service:
++        name: vanlug-api-http.socket
++        state: restarted
++        daemon_reload: true
++        scope: user
++      environment:
++        XDG_RUNTIME_DIR: "/run/user/{{ vanlug_api_user.uid }}"
+
