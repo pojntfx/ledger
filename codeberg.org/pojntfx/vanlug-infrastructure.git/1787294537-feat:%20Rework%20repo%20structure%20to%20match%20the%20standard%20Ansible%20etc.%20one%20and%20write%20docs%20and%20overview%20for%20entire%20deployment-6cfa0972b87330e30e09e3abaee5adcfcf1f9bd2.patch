@@ -1,0 +1,642 @@
+From 6cfa0972b87330e30e09e3abaee5adcfcf1f9bd2 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Thu, 20 Aug 2026 23:42:17 -0700
+Subject: [PATCH] feat: Rework repo structure to match the standard Ansible etc. one and write docs and overview for entire deployment
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/Caddyfile b/config/Caddyfile
+rename from Caddyfile
+rename to config/Caddyfile
+diff --git a/README.md b/README.md
+index c56a1c289341cfb97081c0ea58b78da1c353a8eb..0564ab28d64d79609a35c4c4fb928b5f75f4ee27 100644
+--- a/README.md
++++ b/README.md
+@@ -4,13 +4,25 @@ Infrastructure for the Vancouver Linux Users Group.
+ 
+ ## Overview
+ 
+-🚧 This project is a work-in-progress! Instructions will be added as soon as it is usable. 🚧
++This repo contains all infrastructure as code definitions (as OpenTofu, Ansible and rootless Podman Quadlets hardened with SELinux/gVisor) for VanLUG, including:
++
++- The VanLUG [Forgejo](https://forgejo.org/) instance
++- A [Forgejo runner](https://forgejo.org/docs/latest/admin/actions/#forgejo-runner) instance using gVisor to run semi-untrusted code
++- [Caddy](https://caddyserver.com/) as the reverse proxy, with [firewalld](https://firewalld.org/) as the firewall and [Anubis](https://anubis.techaro.lol/) to prevent the Forgejo instance from being overloaded by scrapers
++- [git-pages](https://git-pages.org/) to host the VanLUG website and any members website
++- A custom Podman quadlet for the VanLUG API, which powers e.g. the Luma and Mastodon proxies
++
++## Acknowledgements
++
++- [eriksjolund/podman-caddy-socket-activation](https://github.com/eriksjolund/podman-caddy-socket-activation) and [eriksjolund/podman-nginx-socket-activation](https://github.com/eriksjolund/podman-nginx-socket-activation) provide the socket activation patterns for the Caddy reverse proxy and its upstreams
+ 
+ ## Contributing
+ 
+-To contribute, please use the [Codeberg flow](https://docs.codeberg.org/collaborating/) and follow our [Code of Conduct](./CODE_OF_CONDUCT.md).
++Contributions to this repository are restricted to the VanLUG technical comittee at this time.
+ 
+-To deploy the infrastructure locally, run:
++To contribute, please use the [Codeberg flow](https://docs.codeberg.org/collaborating/) and follow our [Code of Conduct](https://vanlug.p8.lu/conduct/).
++
++To deploy the infrastructure locally, first use [OpenTofu](https://opentofu.org/) to create the physical infrastructure by running the following:
+ 
+ ```shell
+ $ git clone https://codeberg.org/pojntfx/vanlug-infrastructure
+@@ -18,8 +30,24 @@ $ cd vanlug-infrastructure
+ $ source .env.local # See `.env` for required secrets; ask `@pojntfx:beeper.com` for access
+ $ tofu init
+ $ tofu apply
++```
++
++Then, to use [Ansible](https://docs.ansible.com/projects/ansible/latest/index.html) to provision the hosts, run:
++
++```shell
+ $ ansible-galaxy collection install cloud.terraform ansible.posix community.general community.docker
+-$ ansible-playbook site.yaml # You might want to change `binary_path` in `inventory.yaml` first
++$ ANSIBLE_CONFIG=config/ansible.cfg ansible-playbook site.yaml # You might want to change `binary_path` in `inventory.yaml` first
++```
++
++Once the hosts are provisioned, sign into Forgejo, [import](https://forgejo.org/docs/latest/user/repo-mirror/) the VanLUG website repo from the [GitHub mirror](https://github.com/vanlug/vanlug.github.io), wait for the actions to pass (which build the website and API), and provision the quadlet for the API (the website is automatically deployed using [git-pages](https://git-pages.org/):
++
++```shell
++$ ANSIBLE_CONFIG=config/ansible.cfg ansible-playbook playbooks/vanlug-api.yaml # You might want to change `binary_path` in `inventory.yaml` first
++```
++
++Everything should now be up and running, and auto-updates should be enabled for all components, including the quadlets and OS itself. To get logs, run the following:
++
++```shell
+ # To get logs for quadlets on main server
+ $ ssh setup@vanlug.p8.lu
+ [setup@vanlug-main ~]$ sudo journalctl -u caddy.service -f
+@@ -32,12 +60,14 @@ $ ssh setup@2a01:4f8:c015:706c::1
+ [setup@vanlug-forgejo-runner ~]$ sudo journalctl _SYSTEMD_USER_UNIT=forgejo-runner.service -f
+ ```
+ 
+-To update the SELinux policies for the containers (`.cil` files), run:
++That's it! All infrastructure should now be deployed.
++
++During development, to update the SELinux policies for the containers (`.cil` files), run:
+ 
+ ```shell
+ $ ssh setup@vanlug.p8.lu
+ [setup@vanlug-main ~]$ sudo -iu caddy podman inspect caddy | sudo udica caddy
+-$ scp setup@vanlug.p8.lu:/home/setup/caddy.cil caddy.cil
++$ scp setup@vanlug.p8.lu:/home/setup/caddy.cil policies/caddy.cil
+ ```
+ 
+ You'll then need to manually edit the CIL file (see https://github.com/SELinuxProject/selinux-notebook/blob/main/src/cil_overview.md and https://github.com/SELinuxProject/selinux/tree/master/secilc/docs for a guide) for any additional capabilities the container might need. You can see the denials by running the following:
+@@ -56,8 +86,8 @@ $ cd forgejo/
+ $ # Both the icon and logo of these must be square
+ $ curl -sL https://raw.githubusercontent.com/vanlug/vanlug.github.io/refs/heads/main/static/design/icon.svg | tee ./assets/favicon.svg ./assets/logo.svg > /dev/null
+ $ make generate-images
+-$ mkdir -p ../custom/public/assets/img/
+-$ cp public/assets/img/{logo.svg,logo.png,avatar_default.png,repo_default.png,apple-touch-icon.png,favicon.svg,favicon.png} ../custom/public/assets/img/
++$ mkdir -p ../config/custom/public/assets/img/
++$ cp public/assets/img/{logo.svg,logo.png,avatar_default.png,repo_default.png,apple-touch-icon.png,favicon.svg,favicon.png} ../config/custom/public/assets/img/
+ ```
+ 
+ ## License
+diff --git a/ansible.cfg b/config/ansible.cfg
+rename from ansible.cfg
+rename to config/ansible.cfg
+index f3a9a5f136531cefc8c5a6ed7d961f17cad47a7a..b3f2493bcc6d238d949d38d5df1790b7bc08936a 100644
+--- a/ansible.cfg
++++ b/config/ansible.cfg
+@@ -1,5 +1,5 @@
+ [defaults]
+-inventory = inventory.yaml
++inventory = ../inventory.yaml
+ 
+ [ssh_connection]
+ pipelining = true
+diff --git a/anubis-http.service b/units/anubis-http.service
+rename from anubis-http.service
+rename to units/anubis-http.service
+diff --git a/anubis-http.socket b/units/anubis-http.socket
+rename from anubis-http.socket
+rename to units/anubis-http.socket
+diff --git a/anubis.cil b/policies/anubis.cil
+rename from anubis.cil
+rename to policies/anubis.cil
+diff --git a/anubis.container b/units/anubis.container
+rename from anubis.container
+rename to units/anubis.container
+diff --git a/anubis.yaml b/playbooks/anubis.yaml
+rename from anubis.yaml
+rename to playbooks/anubis.yaml
+index 94a834befef8932c70ed7537bbe33f1d05b2d136..407e13b8647bcbf5a46842bd23678272ba5d331e 100644
+--- a/anubis.yaml
++++ b/playbooks/anubis.yaml
+@@ -24,7 +24,7 @@         mode: "0755"
+     - name: Write socket activation service file for Anubis
+       become: true
+       ansible.builtin.copy:
+-        src: anubis-http.service
++        src: ../units/anubis-http.service
+         dest: /home/anubis/.config/systemd/user/anubis-http.service
+         owner: anubis
+         group: anubis
+@@ -32,7 +32,7 @@         mode: "0644"
+     - name: Write socket file for Anubis
+       become: true
+       ansible.builtin.copy:
+-        src: anubis-http.socket
++        src: ../units/anubis-http.socket
+         dest: /home/anubis/.config/systemd/user/anubis-http.socket
+         owner: anubis
+         group: anubis
+@@ -69,7 +69,7 @@     - name: Write policy for Anubis
+       become: true
+       register: anubis_policy
+       ansible.builtin.copy:
+-        src: anubis.cil
++        src: ../policies/anubis.cil
+         dest: /home/anubis/.local/share/selinux/targeted/anubis.cil
+         owner: anubis
+         group: anubis
+@@ -100,7 +100,7 @@         mode: "0755"
+     - name: Write bot policies file for Anubis
+       become: true
+       ansible.builtin.copy:
+-        src: botPolicies.yaml
++        src: ../config/botPolicies.yaml
+         dest: /home/anubis/.config/anubis/botPolicies.yaml
+         owner: anubis
+         group: anubis
+@@ -110,7 +110,7 @@       notify: Restart Anubis user service
+     - name: Write container file for Anubis
+       become: true
+       ansible.builtin.copy:
+-        src: anubis.container
++        src: ../units/anubis.container
+         dest: /home/anubis/.config/containers/systemd/anubis.container
+         owner: anubis
+         group: anubis
+diff --git a/botPolicies.yaml b/config/botPolicies.yaml
+rename from botPolicies.yaml
+rename to config/botPolicies.yaml
+diff --git a/caddy-auto-update.rules b/config/caddy-auto-update.rules
+rename from caddy-auto-update.rules
+rename to config/caddy-auto-update.rules
+diff --git a/caddy-shim.service b/units/caddy-shim.service
+rename from caddy-shim.service
+rename to units/caddy-shim.service
+diff --git a/caddy.cil b/policies/caddy.cil
+rename from caddy.cil
+rename to policies/caddy.cil
+diff --git a/caddy.container b/units/caddy.container
+rename from caddy.container
+rename to units/caddy.container
+diff --git a/caddy.socket b/units/caddy.socket
+rename from caddy.socket
+rename to units/caddy.socket
+diff --git a/caddy.yaml b/playbooks/caddy.yaml
+rename from caddy.yaml
+rename to playbooks/caddy.yaml
+index c091b925185260ad3cb992f40d25b31d99691e8f..9ed028d8a95b7f5b64223627cc32b3197c9bb35f 100644
+--- a/caddy.yaml
++++ b/playbooks/caddy.yaml
+@@ -16,7 +16,7 @@         creates: /var/lib/systemd/linger/caddy
+     - name: Write system socket file for Caddy
+       become: true
+       ansible.builtin.copy:
+-        src: caddy.socket
++        src: ../units/caddy.socket
+         dest: /etc/systemd/system/caddy.socket
+         owner: root
+         group: root
+@@ -26,7 +26,7 @@       notify: Restart Caddy system socket
+     - name: Write system container file for Caddy
+       become: true
+       ansible.builtin.template:
+-        src: caddy.container
++        src: ../units/caddy.container
+         dest: /etc/containers/systemd/caddy.container
+         owner: root
+         group: root
+@@ -47,7 +47,7 @@     - name: Write policy for Caddy
+       become: true
+       register: caddy_policy
+       ansible.builtin.template:
+-        src: caddy.cil
++        src: ../policies/caddy.cil
+         dest: /usr/local/share/selinux/targeted/caddy.cil
+         owner: root
+         group: root
+@@ -83,7 +83,7 @@         mode: "0755"
+     - name: Write Caddyfile
+       become: true
+       ansible.builtin.copy:
+-        src: Caddyfile
++        src: ../config/Caddyfile
+         dest: /home/caddy/.config/caddy/Caddyfile
+         owner: caddy
+         group: caddy
+@@ -92,7 +92,7 @@       notify: Reload Caddy system service
+     - name: Write polkit rule to allow the caddy user to be able to restart the caddy system service
+       become: true
+       ansible.builtin.copy:
+-        src: caddy-auto-update.rules
++        src: ../config/caddy-auto-update.rules
+         dest: /etc/polkit-1/rules.d/50-caddy-auto-update.rules
+         owner: root
+         group: root
+@@ -108,7 +108,7 @@         mode: "0755"
+     - name: Write Caddy Podman auto-update one-shot user service
+       become: true
+       ansible.builtin.copy:
+-        src: caddy-shim.service
++        src: ../units/caddy-shim.service
+         # We need to name this service caddy.service, else
+         # `podman auto-update` won't pick it up
+         dest: /home/caddy/.config/systemd/user/caddy.service
+diff --git a/cloud-init.yaml b/config/cloud-init.yaml
+rename from cloud-init.yaml
+rename to config/cloud-init.yaml
+diff --git a/custom/public/assets/img/apple-touch-icon.png b/config/custom/public/assets/img/apple-touch-icon.png
+rename from custom/public/assets/img/apple-touch-icon.png
+rename to config/custom/public/assets/img/apple-touch-icon.png
+diff --git a/custom/public/assets/img/avatar_default.png b/config/custom/public/assets/img/avatar_default.png
+rename from custom/public/assets/img/avatar_default.png
+rename to config/custom/public/assets/img/avatar_default.png
+diff --git a/custom/public/assets/img/favicon.png b/config/custom/public/assets/img/favicon.png
+rename from custom/public/assets/img/favicon.png
+rename to config/custom/public/assets/img/favicon.png
+diff --git a/custom/public/assets/img/favicon.svg b/config/custom/public/assets/img/favicon.svg
+rename from custom/public/assets/img/favicon.svg
+rename to config/custom/public/assets/img/favicon.svg
+diff --git a/custom/public/assets/img/logo.png b/config/custom/public/assets/img/logo.png
+rename from custom/public/assets/img/logo.png
+rename to config/custom/public/assets/img/logo.png
+diff --git a/custom/public/assets/img/logo.svg b/config/custom/public/assets/img/logo.svg
+rename from custom/public/assets/img/logo.svg
+rename to config/custom/public/assets/img/logo.svg
+diff --git a/custom/public/assets/img/repo_default.png b/config/custom/public/assets/img/repo_default.png
+rename from custom/public/assets/img/repo_default.png
+rename to config/custom/public/assets/img/repo_default.png
+diff --git a/custom/templates/custom/extra_links.tmpl b/config/custom/templates/custom/extra_links.tmpl
+rename from custom/templates/custom/extra_links.tmpl
+rename to config/custom/templates/custom/extra_links.tmpl
+diff --git a/custom/templates/custom/extra_links_footer.tmpl b/config/custom/templates/custom/extra_links_footer.tmpl
+rename from custom/templates/custom/extra_links_footer.tmpl
+rename to config/custom/templates/custom/extra_links_footer.tmpl
+diff --git a/custom/templates/custom/signin_mid.tmpl b/config/custom/templates/custom/signin_mid.tmpl
+rename from custom/templates/custom/signin_mid.tmpl
+rename to config/custom/templates/custom/signin_mid.tmpl
+diff --git a/custom/templates/custom/signup_top.tmpl b/config/custom/templates/custom/signup_top.tmpl
+rename from custom/templates/custom/signup_top.tmpl
+rename to config/custom/templates/custom/signup_top.tmpl
+diff --git a/docker.yaml b/playbooks/docker.yaml
+rename from docker.yaml
+rename to playbooks/docker.yaml
+diff --git a/firewall.yaml b/playbooks/firewall.yaml
+rename from firewall.yaml
+rename to playbooks/firewall.yaml
+diff --git a/forgejo-http.service b/units/forgejo-http.service
+rename from forgejo-http.service
+rename to units/forgejo-http.service
+diff --git a/forgejo-http.socket b/units/forgejo-http.socket
+rename from forgejo-http.socket
+rename to units/forgejo-http.socket
+diff --git a/forgejo-runner-generate-config.sh b/config/forgejo-runner-generate-config.sh
+rename from forgejo-runner-generate-config.sh
+rename to config/forgejo-runner-generate-config.sh
+diff --git a/forgejo-runner-meta.yaml b/playbooks/forgejo-runner-meta.yaml
+rename from forgejo-runner-meta.yaml
+rename to playbooks/forgejo-runner-meta.yaml
+index e6f5f85d4304459d364eafa18c9b92c85fcad1dd..d4ae7862af3c7c8a565cc440764a3cb3dae910b8 100644
+--- a/forgejo-runner-meta.yaml
++++ b/playbooks/forgejo-runner-meta.yaml
+@@ -139,7 +139,7 @@       no_log: true # The repo URL contains the API token
+     - name: Sync our local repo template to the checked out repo dir
+       register: forgejo_runner_meta_git_repo_changes
+       ansible.posix.synchronize:
+-        src: forgejo-runner-meta/ # Trailing slash: sync the contents, not the directory itself
++        src: ../config/forgejo-runner-meta/ # Trailing slash: sync the contents, not the directory itself
+         dest: "{{ forgejo_runner_meta_git_repo.path }}"
+         delete: true
+         rsync_opts:
+diff --git a/forgejo-runner-meta/.forgejo/workflows/oci.yaml b/config/forgejo-runner-meta/.forgejo/workflows/oci.yaml
+rename from forgejo-runner-meta/.forgejo/workflows/oci.yaml
+rename to config/forgejo-runner-meta/.forgejo/workflows/oci.yaml
+diff --git a/forgejo-runner-meta/Containerfile b/config/forgejo-runner-meta/Containerfile
+rename from forgejo-runner-meta/Containerfile
+rename to config/forgejo-runner-meta/Containerfile
+diff --git a/forgejo-runner-meta/setup-docker/action.yaml b/config/forgejo-runner-meta/setup-docker/action.yaml
+rename from forgejo-runner-meta/setup-docker/action.yaml
+rename to config/forgejo-runner-meta/setup-docker/action.yaml
+diff --git a/forgejo-runner.cil b/policies/forgejo-runner.cil
+rename from forgejo-runner.cil
+rename to policies/forgejo-runner.cil
+diff --git a/forgejo-runner.container b/units/forgejo-runner.container
+rename from forgejo-runner.container
+rename to units/forgejo-runner.container
+diff --git a/forgejo-runner.yaml b/playbooks/forgejo-runner.yaml
+rename from forgejo-runner.yaml
+rename to playbooks/forgejo-runner.yaml
+index 8cafdb0865d9b072833b76e6de19a2243258eefb..255b999c54cc3f9881432c35cf968682de7b252a 100644
+--- a/forgejo-runner.yaml
++++ b/playbooks/forgejo-runner.yaml
+@@ -27,7 +27,7 @@     - name: Write policy for Forgejo runner
+       become: true
+       register: forgejo_runner_policy
+       ansible.builtin.copy:
+-        src: forgejo-runner.cil
++        src: ../policies/forgejo-runner.cil
+         dest: /home/forgejo-runner/.local/share/selinux/targeted/forgejo-runner.cil
+         owner: forgejo-runner
+         group: forgejo-runner
+@@ -50,7 +50,7 @@         XDG_RUNTIME_DIR: "/run/user/{{ forgejo_runner_user.uid }}"
+     - name: Write config generation script file for Forgejo runner
+       become: true
+       ansible.builtin.copy:
+-        src: forgejo-runner-generate-config.sh
++        src: ../config/forgejo-runner-generate-config.sh
+         dest: "{{ forgejo_runner_data_dir }}/forgejo-runner-generate-config.sh"
+         owner: forgejo-runner
+         group: forgejo-runner
+@@ -68,7 +68,7 @@         mode: "0755"
+     - name: Write container file for Forgejo runner
+       become: true
+       ansible.builtin.template:
+-        src: forgejo-runner.container
++        src: ../units/forgejo-runner.container
+         dest: /home/forgejo-runner/.config/containers/systemd/forgejo-runner.container
+         owner: forgejo-runner
+         group: forgejo-runner
+diff --git a/forgejo-ssh.service b/units/forgejo-ssh.service
+rename from forgejo-ssh.service
+rename to units/forgejo-ssh.service
+diff --git a/forgejo-ssh.socket b/units/forgejo-ssh.socket
+rename from forgejo-ssh.socket
+rename to units/forgejo-ssh.socket
+diff --git a/forgejo.cil b/policies/forgejo.cil
+rename from forgejo.cil
+rename to policies/forgejo.cil
+diff --git a/forgejo.container b/units/forgejo.container
+rename from forgejo.container
+rename to units/forgejo.container
+diff --git a/forgejo.yaml b/playbooks/forgejo.yaml
+rename from forgejo.yaml
+rename to playbooks/forgejo.yaml
+index bfceb78812e96129a66250988780301e707994c3..0ce7ddec2e9ed3d816e1431d35de93951a863f18 100644
+--- a/forgejo.yaml
++++ b/playbooks/forgejo.yaml
+@@ -24,7 +24,7 @@         mode: "0755"
+     - name: Write socket activation service files for Forgejo
+       become: true
+       ansible.builtin.copy:
+-        src: "{{ item }}"
++        src: ../units/{{ item }}
+         dest: "/home/forgejo/.config/systemd/user/{{ item }}"
+         owner: forgejo
+         group: forgejo
+@@ -34,7 +34,7 @@         - forgejo-http.service
+     - name: Write socket files for Forgejo
+       become: true
+       ansible.builtin.copy:
+-        src: "{{ item }}"
++        src: ../units/{{ item }}
+         dest: "/home/forgejo/.config/systemd/user/{{ item }}"
+         owner: forgejo
+         group: forgejo
+@@ -68,7 +68,7 @@         state: present
+     - name: Write system socket file for Forgejo SSH # Binds the privileged port 220 as root; the proxy runs as the forgejo user
+       become: true
+       ansible.builtin.copy:
+-        src: forgejo-ssh.socket
++        src: ../units/forgejo-ssh.socket
+         dest: /etc/systemd/system/forgejo-ssh.socket
+         owner: root
+         group: root
+@@ -78,7 +78,7 @@       notify: Restart Forgejo SSH system socket
+     - name: Write system socket activation service file for Forgejo SSH
+       become: true
+       ansible.builtin.template:
+-        src: forgejo-ssh.service
++        src: ../units/forgejo-ssh.service
+         dest: /etc/systemd/system/forgejo-ssh.service
+         owner: root
+         group: root
+@@ -121,7 +121,7 @@     - name: Write policy for Forgejo
+       become: true
+       register: forgejo_policy
+       ansible.builtin.copy:
+-        src: forgejo.cil
++        src: ../policies/forgejo.cil
+         dest: /home/forgejo/.local/share/selinux/targeted/forgejo.cil
+         owner: forgejo
+         group: forgejo
+@@ -144,7 +144,7 @@         mode: "0755"
+     - name: Write container file for Forgejo
+       become: true
+       ansible.builtin.copy:
+-        src: forgejo.container
++        src: ../units/forgejo.container
+         dest: /home/forgejo/.config/containers/systemd/forgejo.container
+         owner: forgejo
+         group: forgejo
+@@ -162,7 +162,7 @@         mode: "0755"
+     - name: Write custom directory for Forgejo
+       become: true
+       ansible.posix.synchronize:
+-        src: custom/ # Trailing slash: sync the contents, not the directory itself
++        src: ../config/custom/ # Trailing slash: sync the contents, not the directory itself
+         dest: /home/forgejo/.config/forgejo/custom
+         rsync_opts:
+           - "--chown=forgejo:forgejo"
+diff --git a/git-pages-caddy.service b/units/git-pages-caddy.service
+rename from git-pages-caddy.service
+rename to units/git-pages-caddy.service
+diff --git a/git-pages-caddy.socket b/units/git-pages-caddy.socket
+rename from git-pages-caddy.socket
+rename to units/git-pages-caddy.socket
+diff --git a/git-pages-pages.service b/units/git-pages-pages.service
+rename from git-pages-pages.service
+rename to units/git-pages-pages.service
+diff --git a/git-pages-pages.socket b/units/git-pages-pages.socket
+rename from git-pages-pages.socket
+rename to units/git-pages-pages.socket
+diff --git a/git-pages.cil b/policies/git-pages.cil
+rename from git-pages.cil
+rename to policies/git-pages.cil
+diff --git a/git-pages.container b/units/git-pages.container
+rename from git-pages.container
+rename to units/git-pages.container
+diff --git a/git-pages.yaml b/playbooks/git-pages.yaml
+rename from git-pages.yaml
+rename to playbooks/git-pages.yaml
+index df1a62278c3b3c7613817a3b9a6723481117f99c..738473bea0ab34da774ce03a367d205ae8420d01 100644
+--- a/git-pages.yaml
++++ b/playbooks/git-pages.yaml
+@@ -24,7 +24,7 @@         mode: "0755"
+     - name: Write socket activation service files for git-pages
+       become: true
+       ansible.builtin.copy:
+-        src: "{{ item }}"
++        src: ../units/{{ item }}
+         dest: "/home/git-pages/.config/systemd/user/{{ item }}"
+         owner: git-pages
+         group: git-pages
+@@ -35,7 +35,7 @@         - git-pages-caddy.service
+     - name: Write socket files for git-pages
+       become: true
+       ansible.builtin.copy:
+-        src: "{{ item }}"
++        src: ../units/{{ item }}
+         dest: "/home/git-pages/.config/systemd/user/{{ item }}"
+         owner: git-pages
+         group: git-pages
+@@ -80,7 +80,7 @@     - name: Write policy for git-pages
+       become: true
+       register: git_pages_policy
+       ansible.builtin.copy:
+-        src: git-pages.cil
++        src: ../policies/git-pages.cil
+         dest: /home/git-pages/.local/share/selinux/targeted/git-pages.cil
+         owner: git-pages
+         group: git-pages
+@@ -103,7 +103,7 @@         mode: "0755"
+     - name: Write container file for git-pages
+       become: true
+       ansible.builtin.copy:
+-        src: git-pages.container
++        src: ../units/git-pages.container
+         dest: /home/git-pages/.config/containers/systemd/git-pages.container
+         owner: git-pages
+         group: git-pages
+diff --git a/gvisor.yaml b/playbooks/gvisor.yaml
+rename from gvisor.yaml
+rename to playbooks/gvisor.yaml
+diff --git a/main.tofu b/main.tofu
+index 55b6078d51da3a9984ade360283b9c453fd1d8e4..a6dd4c16ba9e8213ede293deb9f59f20d3469c17 100644
+--- a/main.tofu
++++ b/main.tofu
+@@ -72,7 +72,7 @@   # # Data is stored on the server's volume directly; we should not destroy it
+   delete_protection  = true
+   rebuild_protection = true
+ 
+-  user_data = templatefile("cloud-init.yaml", {
++  user_data = templatefile("config/cloud-init.yaml", {
+     ssh_setup_user = var.ssh_setup_user
+     ssh_public_key = var.ssh_public_key
+   })
+@@ -99,7 +99,7 @@   firewall_ids = [hcloud_firewall.vanlug_main.id]
+ 
+   # No backups or deletion protection for the Forgejo runner
+ 
+-  user_data = templatefile("cloud-init.yaml", {
++  user_data = templatefile("config/cloud-init.yaml", {
+     ssh_setup_user = var.ssh_setup_user
+     ssh_public_key = var.ssh_public_key
+   })
+diff --git a/podman.yaml b/playbooks/podman.yaml
+rename from podman.yaml
+rename to playbooks/podman.yaml
+diff --git a/selinux.yaml b/playbooks/selinux.yaml
+rename from selinux.yaml
+rename to playbooks/selinux.yaml
+diff --git a/site.yaml b/site.yaml
+index 78b119dd312d0b061266f28b9e19f8a3494c5d51..291ab0ec1445b02c7c86b353f2bd4557eb3b077b 100644
+--- a/site.yaml
++++ b/site.yaml
+@@ -1,28 +1,28 @@
++# See https://docs.ansible.com/projects/ansible/latest/tips_tricks/sample_setup.html for structure
+ - name: Configure SELinux
+-  ansible.builtin.import_playbook: selinux.yaml
++  ansible.builtin.import_playbook: playbooks/selinux.yaml
+ - name: Configure firewall
+-  ansible.builtin.import_playbook: firewall.yaml
++  ansible.builtin.import_playbook: playbooks/firewall.yaml
+ - name: Configure automatic updates
+-  ansible.builtin.import_playbook: updates.yaml
++  ansible.builtin.import_playbook: playbooks/updates.yaml
+ - name: Configure Podman
+-  ansible.builtin.import_playbook: podman.yaml
++  ansible.builtin.import_playbook: playbooks/podman.yaml
+ - name: Configure Docker
+-  ansible.builtin.import_playbook: docker.yaml
++  ansible.builtin.import_playbook: playbooks/docker.yaml
+ - name: Configure gVisor
+-  ansible.builtin.import_playbook: gvisor.yaml
++  ansible.builtin.import_playbook: playbooks/gvisor.yaml
+ # We define all the SELinux port types here,
+ # we need to deploy Caddy before we deploy its upstreams
+ - name: Configure Caddy
+-  ansible.builtin.import_playbook: caddy.yaml
++  ansible.builtin.import_playbook: playbooks/caddy.yaml
+ - name: Configure Forgejo
+-  ansible.builtin.import_playbook: forgejo.yaml
++  ansible.builtin.import_playbook: playbooks/forgejo.yaml
+ - name: Configure Forgejo
+-  ansible.builtin.import_playbook: forgejo.yaml
++  ansible.builtin.import_playbook: playbooks/forgejo.yaml
+ - name: Configure Forgejo runner meta
+-  ansible.builtin.import_playbook: forgejo-runner-meta.yaml
++  ansible.builtin.import_playbook: playbooks/forgejo-runner-meta.yaml
+ - name: Configure git-pages
+-  ansible.builtin.import_playbook: git-pages.yaml
++  ansible.builtin.import_playbook: playbooks/git-pages.yaml
+ - name: Configure Anubis
+-  ansible.builtin.import_playbook: anubis.yaml
+-- name: Configure vanlug-api
+-  ansible.builtin.import_playbook: vanlug-api.yaml
++  ansible.builtin.import_playbook: playbooks/anubis.yaml
++# We don't run vanlug-api by default here since we need to manually import the VanLUG website repo
+diff --git a/updates.yaml b/playbooks/updates.yaml
+rename from updates.yaml
+rename to playbooks/updates.yaml
+diff --git a/vanlug-api-http.service b/units/vanlug-api-http.service
+rename from vanlug-api-http.service
+rename to units/vanlug-api-http.service
+diff --git a/vanlug-api-http.socket b/units/vanlug-api-http.socket
+rename from vanlug-api-http.socket
+rename to units/vanlug-api-http.socket
+diff --git a/vanlug-api.cil b/policies/vanlug-api.cil
+rename from vanlug-api.cil
+rename to policies/vanlug-api.cil
+diff --git a/vanlug-api.container b/units/vanlug-api.container
+rename from vanlug-api.container
+rename to units/vanlug-api.container
+diff --git a/vanlug-api.yaml b/playbooks/vanlug-api.yaml
+rename from vanlug-api.yaml
+rename to playbooks/vanlug-api.yaml
+index 5d269822a691a1764e7900d0959a9b7b2224a273..11d13b13053e437f6ca55d9697145031c09f3bca 100644
+--- a/vanlug-api.yaml
++++ b/playbooks/vanlug-api.yaml
+@@ -24,7 +24,7 @@         mode: "0755"
+     - name: Write socket activation service file for vanlug-api
+       become: true
+       ansible.builtin.copy:
+-        src: vanlug-api-http.service
++        src: ../units/vanlug-api-http.service
+         dest: /home/vanlug-api/.config/systemd/user/vanlug-api-http.service
+         owner: vanlug-api
+         group: vanlug-api
+@@ -32,7 +32,7 @@         mode: "0644"
+     - name: Write socket file for vanlug-api
+       become: true
+       ansible.builtin.copy:
+-        src: vanlug-api-http.socket
++        src: ../units/vanlug-api-http.socket
+         dest: /home/vanlug-api/.config/systemd/user/vanlug-api-http.socket
+         owner: vanlug-api
+         group: vanlug-api
+@@ -69,7 +69,7 @@     - name: Write policy for vanlug-api
+       become: true
+       register: vanlug_api_policy
+       ansible.builtin.copy:
+-        src: vanlug-api.cil
++        src: ../policies/vanlug-api.cil
+         dest: /home/vanlug-api/.local/share/selinux/targeted/vanlug-api.cil
+         owner: vanlug-api
+         group: vanlug-api
+@@ -92,7 +92,7 @@         mode: "0755"
+     - name: Write container file for vanlug-api
+       become: true
+       ansible.builtin.template:
+-        src: vanlug-api.container
++        src: ../units/vanlug-api.container
+         dest: /home/vanlug-api/.config/containers/systemd/vanlug-api.container
+         owner: vanlug-api
+         group: vanlug-api
+
