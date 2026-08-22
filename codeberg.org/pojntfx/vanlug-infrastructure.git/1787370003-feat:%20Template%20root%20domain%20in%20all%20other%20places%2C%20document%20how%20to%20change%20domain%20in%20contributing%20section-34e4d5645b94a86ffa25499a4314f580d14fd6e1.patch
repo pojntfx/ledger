@@ -1,0 +1,421 @@
+From 34e4d5645b94a86ffa25499a4314f580d14fd6e1 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Fri, 21 Aug 2026 20:40:03 -0700
+Subject: [PATCH] feat: Template root domain in all other places, document how to change domain in contributing section
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/README.md b/README.md
+index 1fc8114b55c732a06aaedf66adcf6fe4c3e89b44..9505ca7cb9c08921bf1fccbb7573754831c74494 100644
+--- a/README.md
++++ b/README.md
+@@ -20,7 +20,7 @@ ## Contributing
+ 
+ Contributions to this repository are restricted to the VanLUG technical comittee at this time.
+ 
+-To contribute, please use the [Codeberg flow](https://docs.codeberg.org/collaborating/) and follow our [Code of Conduct](https://vanlug.p8.lu/conduct/).
++To contribute, please use the [Codeberg flow](https://docs.codeberg.org/collaborating/) and follow our [Code of Conduct](https://vanlug.ca/conduct/).
+ 
+ To deploy the infrastructure locally, first use [OpenTofu](https://opentofu.org/) to create the physical infrastructure by running the following:
+ 
+@@ -32,7 +32,7 @@ $ tofu init
+ $ tofu apply
+ ```
+ 
+-Then, to use [Ansible](https://docs.ansible.com/projects/ansible/latest/index.html) to provision the hosts, run:
++Then, configure the domain you'd like to use in [`group_vars/all.yaml`](group_vars/all.yaml) (e.g. `vanlug.p8.lu` during development or `vanlug.ca` in production, as we'll be using in the following), and use [Ansible](https://docs.ansible.com/projects/ansible/latest/index.html) to provision the hosts by running:
+ 
+ ```shell
+ $ ansible-galaxy collection install cloud.terraform ansible.posix community.general community.docker
+@@ -49,7 +49,7 @@ Everything should now be up and running, and auto-updates should be enabled for all components, including the quadlets and OS itself. To get logs, run the following:
+ 
+ ```shell
+ # To get logs for quadlets on main server
+-$ ssh setup@vanlug.p8.lu
++$ ssh setup@vanlug.ca
+ [setup@vanlug-main ~]$ sudo journalctl -u caddy.service -f
+ [setup@vanlug-main ~]$ sudo journalctl _SYSTEMD_USER_UNIT=forgejo.service -f
+ [setup@vanlug-main ~]$ sudo journalctl _SYSTEMD_USER_UNIT=git-pages.service -f
+@@ -65,9 +65,9 @@
+ During development, to update the SELinux policies for the containers (`.cil` files), run:
+ 
+ ```shell
+-$ ssh setup@vanlug.p8.lu
++$ ssh setup@vanlug.ca
+ [setup@vanlug-main ~]$ sudo -iu caddy podman inspect caddy | sudo udica caddy
+-$ scp setup@vanlug.p8.lu:/home/setup/caddy.cil policies/caddy.cil
++$ scp setup@vanlug.ca:/home/setup/caddy.cil policies/caddy.cil
+ ```
+ 
+ You'll then need to manually edit the CIL file (see https://github.com/SELinuxProject/selinux-notebook/blob/main/src/cil_overview.md and https://github.com/SELinuxProject/selinux/tree/master/secilc/docs for a guide) for any additional capabilities the container might need. You can see the denials by running the following:
+diff --git a/config/botPolicies.yaml b/config/botPolicies.yaml
+index fba399d4f67d2f28c05233a3a9b7f96b95bf94a5..6e499a099947eff7a87817793515e2e3f6c9f021 100644
+--- a/config/botPolicies.yaml
++++ b/config/botPolicies.yaml
+@@ -8,6 +8,6 @@   footer: Please see the imprint for our code of conduct, terms and privacy policy.
+   page:
+     title: Code of Conduct, Terms and Privacy Policy
+     body: >-
+-      <a target="_blank" href="https://vanlug.p8.lu/conduct/">Code of Conduct</a>
+-      <a target="_blank" href="https://vanlug.p8.lu/terms/">Terms</a>
+-      <a target="_blank" href="https://vanlug.p8.lu/privacy/">Privacy</a>
++      <a target="_blank" href="https://{{ vanlug_domain }}/conduct/">Code of Conduct</a>
++      <a target="_blank" href="https://{{ vanlug_domain }}/terms/">Terms</a>
++      <a target="_blank" href="https://{{ vanlug_domain }}/privacy/">Privacy</a>
+diff --git a/config/custom/templates/custom/extra_links.tmpl b/config/custom/templates/custom/extra_links.tmpl
+index fcb2ee7861b666305fa2f50c4aae59031b1d39b6..7fad7972e239105092cb07d42ae3e27edb4efca3 100644
+--- a/config/custom/templates/custom/extra_links.tmpl
++++ b/config/custom/templates/custom/extra_links.tmpl
+@@ -1 +1 @@
+-<a class="item" target="_blank" href="https://vanlug.p8.lu/"><span class="tw-mr-1">vanlug.p8.lu</span>{{svg "octicon-link-external"}}</a>
++<a class="item" target="_blank" href="https://[[ vanlug_domain ]]/"><span class="tw-mr-1">[[ vanlug_domain ]]</span>{{svg "octicon-link-external"}}</a>
+diff --git a/config/custom/templates/custom/extra_links_footer.tmpl b/config/custom/templates/custom/extra_links_footer.tmpl
+index f25eb7ebc0d5e93ad8c5c822885f5475a7ddbd53..a7599ac0d0b2e72de705aaa834ff21e3356bdf18 100644
+--- a/config/custom/templates/custom/extra_links_footer.tmpl
++++ b/config/custom/templates/custom/extra_links_footer.tmpl
+@@ -1,3 +1,3 @@
+-<a class="item" target="_blank" href="https://vanlug.p8.lu/conduct/"><span class="tw-mr-1">Code of Conduct</span>{{svg "octicon-link-external"}}</a>
+-<a class="item" target="_blank" href="https://vanlug.p8.lu/terms/"><span class="tw-mr-1">Terms</span>{{svg "octicon-link-external"}}</a>
+-<a class="item" target="_blank" href="https://vanlug.p8.lu/privacy/"><span class="tw-mr-1">Privacy</span>{{svg "octicon-link-external"}}</a>
++<a class="item" target="_blank" href="https://[[ vanlug_domain ]]/conduct/"><span class="tw-mr-1">Code of Conduct</span>{{svg "octicon-link-external"}}</a>
++<a class="item" target="_blank" href="https://[[ vanlug_domain ]]/terms/"><span class="tw-mr-1">Terms</span>{{svg "octicon-link-external"}}</a>
++<a class="item" target="_blank" href="https://[[ vanlug_domain ]]/privacy/"><span class="tw-mr-1">Privacy</span>{{svg "octicon-link-external"}}</a>
+diff --git a/config/custom/templates/custom/signin_mid.tmpl b/config/custom/templates/custom/signin_mid.tmpl
+index a4cd664db02da9c60e0a144355e0750b55b20577..19efd3ba569f1dfd867b30c9169ff735ef1573c0 100644
+--- a/config/custom/templates/custom/signin_mid.tmpl
++++ b/config/custom/templates/custom/signin_mid.tmpl
+@@ -1,10 +1,10 @@
+ <div class="ui warning message tw-mb-4">
+     <p>
+         By signing in or creating an account, you agree to our
+-        <a target="_blank" href="https://vanlug.p8.lu/terms/">terms {{svg "octicon-link-external"}}</a>
++        <a target="_blank" href="https://[[ vanlug_domain ]]/terms/">terms {{svg "octicon-link-external"}}</a>
+         and
+-        <a target="_blank" href="https://vanlug.p8.lu/privacy/">privacy policy {{svg "octicon-link-external"}}</a>,
++        <a target="_blank" href="https://[[ vanlug_domain ]]/privacy/">privacy policy {{svg "octicon-link-external"}}</a>,
+         and to abide by our
+-        <a target="_blank" href="https://vanlug.p8.lu/conduct/">code of conduct {{svg "octicon-link-external"}}</a>.
++        <a target="_blank" href="https://[[ vanlug_domain ]]/conduct/">code of conduct {{svg "octicon-link-external"}}</a>.
+     </p>
+ </div>
+diff --git a/config/custom/templates/custom/signup_top.tmpl b/config/custom/templates/custom/signup_top.tmpl
+index 1f27d084a03a4f7358d898838196fb91e2d0c2de..dffca8df846aa9029940ae4d5b13cda4144b17ff 100644
+--- a/config/custom/templates/custom/signup_top.tmpl
++++ b/config/custom/templates/custom/signup_top.tmpl
+@@ -1,10 +1,10 @@
+ <div class="ui warning message tw-flex tw-mt-0 tw-mb-4 tw-text-start">
+ 	<p>
+ 		By signing in or creating an account, you agree to our
+-		<a target="_blank" href="https://vanlug.p8.lu/terms/">terms {{svg "octicon-link-external"}}</a>
++		<a target="_blank" href="https://[[ vanlug_domain ]]/terms/">terms {{svg "octicon-link-external"}}</a>
+ 		and
+-		<a target="_blank" href="https://vanlug.p8.lu/privacy/">privacy policy {{svg "octicon-link-external"}}</a>,
++		<a target="_blank" href="https://[[ vanlug_domain ]]/privacy/">privacy policy {{svg "octicon-link-external"}}</a>,
+ 		and to abide by our
+-		<a target="_blank" href="https://vanlug.p8.lu/conduct/">code of conduct {{svg "octicon-link-external"}}</a>.
++		<a target="_blank" href="https://[[ vanlug_domain ]]/conduct/">code of conduct {{svg "octicon-link-external"}}</a>.
+ 	</p>
+ </div>
+\ No newline at end of file
+diff --git a/config/forgejo-runner-generate-config.sh b/config/forgejo-runner-generate-config.sh
+index 4a4d640a6c3cc9320fc15340054c76f71840af18..28a5efb1e31c32e0fc6b9b3a140f70e54a6dd73d 100644
+--- a/config/forgejo-runner-generate-config.sh
++++ b/config/forgejo-runner-generate-config.sh
+@@ -5,10 +5,10 @@
+ forgejo-runner generate-config >config.yml
+ 
+ sed -i \
+-	-e "s|  labels: \[\]|  labels:\n    - ubuntu-latest:docker://git.vanlug.p8.lu/pojntfx/forgejo-runner-meta:latest|" \
++	-e "s|  labels: \[\]|  labels:\n    - ubuntu-latest:docker://git.{{ vanlug_domain }}/pojntfx/forgejo-runner-meta:latest|" \
+ 	-e "s|  enable_ipv6: false|  enable_ipv6: true|" \
+ 	-e "s|  options:.*|  options: --security-opt label=disable --cap-add=all --volume /etc/resolv.conf:/etc/resolv.conf:ro --runtime=runsc|" \
+ 	-e "s|  valid_volumes: \[\]|  valid_volumes:\n    - /etc/resolv.conf|" \
+ 	-e "s|  force_pull: false|  force_pull: true|" \
+-	-e "s|  connections:|  connections:\n    default:\n      url: https://git.vanlug.p8.lu\n      uuid: ${FORGEJO_RUNNER_UUID}\n      token: ${FORGEJO_RUNNER_SHARED_SECRET}|" \
++	-e "s|  connections:|  connections:\n    default:\n      url: https://git.{{ vanlug_domain }}\n      uuid: ${FORGEJO_RUNNER_UUID}\n      token: ${FORGEJO_RUNNER_SHARED_SECRET}|" \
+ 	config.yml
+diff --git a/config/forgejo-runner-meta/.forgejo/workflows/oci.yaml b/config/forgejo-runner-meta/.forgejo/workflows/oci.yaml
+index eb274825d1911bb4f46f40685fdc3ae217007cfb..ab5e77800a2ac398fd8bdd19e8e910c2bc546695 100644
+--- a/config/forgejo-runner-meta/.forgejo/workflows/oci.yaml
++++ b/config/forgejo-runner-meta/.forgejo/workflows/oci.yaml
+@@ -24,11 +24,11 @@       - name: Extract Docker image metadata
+         id: meta
+         uses: https://github.com/docker/metadata-action@v6
+         with:
+-          images: git.vanlug.p8.lu/${{ vars.DOCKER_USERNAME }}/forgejo-runner-meta
++          images: git.[[ vanlug_domain ]]/${{ vars.DOCKER_USERNAME }}/forgejo-runner-meta
+       - name: Log in to Docker Hub
+         uses: https://github.com/docker/login-action@v4
+         with:
+-          registry: git.vanlug.p8.lu
++          registry: git.[[ vanlug_domain ]]
+           username: ${{ vars.DOCKER_USERNAME }}
+           password: ${{ secrets.DOCKER_PASSWORD }}
+       - name: Set up Docker Buildx
+diff --git a/playbooks/anubis.yaml b/playbooks/anubis.yaml
+index 407e13b8647bcbf5a46842bd23678272ba5d331e..c00c845b15d71b2fccadeb8e5767fb181f5846a7 100644
+--- a/playbooks/anubis.yaml
++++ b/playbooks/anubis.yaml
+@@ -99,7 +99,7 @@         group: anubis
+         mode: "0755"
+     - name: Write bot policies file for Anubis
+       become: true
+-      ansible.builtin.copy:
++      ansible.builtin.template:
+         src: ../config/botPolicies.yaml
+         dest: /home/anubis/.config/anubis/botPolicies.yaml
+         owner: anubis
+diff --git a/playbooks/forgejo-runner-meta.yaml b/playbooks/forgejo-runner-meta.yaml
+index d4ae7862af3c7c8a565cc440764a3cb3dae910b8..aed036b1ce975f79e5e35b88d630b88d02ec3ff3 100644
+--- a/playbooks/forgejo-runner-meta.yaml
++++ b/playbooks/forgejo-runner-meta.yaml
+@@ -5,7 +5,7 @@   gather_facts: false
+   tasks:
+     - name: Build Forgejo runner OCI image with Docker preinstalled
+       community.docker.docker_image_build:
+-        name: git.vanlug.p8.lu/pojntfx/forgejo-runner-meta:latest
++        name: git.{{ vanlug_domain }}/pojntfx/forgejo-runner-meta:latest
+         path: forgejo-runner-meta
+         dockerfile: Containerfile
+     - name: Fetch user for Forgejo
+@@ -32,7 +32,7 @@           --raw
+       environment:
+         XDG_RUNTIME_DIR: "/run/user/{{ forgejo_user.uid }}"
+       # We can't clean up previous runs via the API without having the user's admin password (token auth doesn't work for this), so instead
+-      # we need to create fresh ones for each run. They can be manually cleaned up via https://git.vanlug.p8.lu/user/settings/applications.
++      # we need to create fresh ones for each run. They can be manually cleaned up via https://git.{{ vanlug_domain }}/user/settings/applications.
+       # This is somewhat mitigated since we don't expect to run this playbook often.
+     - name: Mint actions Forgejo API key
+       become: true
+@@ -52,11 +52,11 @@           --raw
+       environment:
+         XDG_RUNTIME_DIR: "/run/user/{{ forgejo_user.uid }}"
+       # We can't clean up previous runs via the API without having the user's admin password (token auth doesn't work for this), so instead
+-      # we need to create fresh ones for each run. They can be manually cleaned up via https://git.vanlug.p8.lu/user/settings/applications.
++      # we need to create fresh ones for each run. They can be manually cleaned up via https://git.{{ vanlug_domain }}/user/settings/applications.
+       # This is somewhat mitigated since we don't expect to run this playbook often.
+     - name: Create forgejo-runner-meta repo in Forgejo
+       ansible.builtin.uri:
+-        url: https://git.vanlug.p8.lu/api/v1/user/repos
++        url: https://git.{{ vanlug_domain }}/api/v1/user/repos
+         method: POST
+         headers:
+           Authorization: "token {{ forgejo_api_key.stdout }}"
+@@ -68,7 +68,7 @@           - 201
+           - 409 # Repo already exists, which is fine since this is idempotent
+     - name: Enable actions for forgejo-runner-meta repo in Forgejo
+       ansible.builtin.uri:
+-        url: https://git.vanlug.p8.lu/api/v1/repos/pojntfx/forgejo-runner-meta
++        url: https://git.{{ vanlug_domain }}/api/v1/repos/pojntfx/forgejo-runner-meta
+         method: PATCH
+         headers:
+           Authorization: "token {{ forgejo_api_key.stdout }}"
+@@ -78,7 +78,7 @@           has_actions: true
+         status_code: 200
+     - name: Set DOCKER_USERNAME variable for forgejo-runner-meta repo in Forgejo
+       ansible.builtin.uri:
+-        url: "https://git.vanlug.p8.lu/api/v1/repos/pojntfx/forgejo-runner-meta/actions/variables/DOCKER_USERNAME"
++        url: "https://git.{{ vanlug_domain }}/api/v1/repos/pojntfx/forgejo-runner-meta/actions/variables/DOCKER_USERNAME"
+         method: PUT
+         headers:
+           Authorization: "token {{ forgejo_api_key.stdout }}"
+@@ -92,7 +92,7 @@           - 404 # Variable doesn't exist yet, create it below
+       register: forgejo_docker_username_variable
+     - name: Create DOCKER_USERNAME variable for forgejo-runner-meta repo in Forgejo
+       ansible.builtin.uri:
+-        url: "https://git.vanlug.p8.lu/api/v1/repos/pojntfx/forgejo-runner-meta/actions/variables/DOCKER_USERNAME"
++        url: "https://git.{{ vanlug_domain }}/api/v1/repos/pojntfx/forgejo-runner-meta/actions/variables/DOCKER_USERNAME"
+         method: POST
+         headers:
+           Authorization: "token {{ forgejo_api_key.stdout }}"
+@@ -106,7 +106,7 @@       when: forgejo_docker_username_variable.status == 404
+     # Secrets are idempotent, unlike variables
+     - name: Set DOCKER_PASSWORD secret for forgejo-runner-meta repo in Forgejo
+       ansible.builtin.uri:
+-        url: "https://git.vanlug.p8.lu/api/v1/repos/pojntfx/forgejo-runner-meta/actions/secrets/DOCKER_PASSWORD"
++        url: "https://git.{{ vanlug_domain }}/api/v1/repos/pojntfx/forgejo-runner-meta/actions/secrets/DOCKER_PASSWORD"
+         method: PUT
+         headers:
+           Authorization: "token {{ forgejo_api_key.stdout }}"
+@@ -118,12 +118,12 @@           - 201 # Secret created
+           - 204 # Secret updated
+     - name: Log into Forgejo registry
+       community.docker.docker_login:
+-        registry_url: git.vanlug.p8.lu
++        registry_url: git.{{ vanlug_domain }}
+         username: '{{ lookup("ansible.builtin.env", "FORGEJO_ADMIN_USERNAME") }}'
+         password: "{{ forgejo_api_key.stdout }}"
+     - name: Push Forgejo runner OCI image
+       community.docker.docker_image_push:
+-        name: git.vanlug.p8.lu/pojntfx/forgejo-runner-meta
++        name: git.{{ vanlug_domain }}/pojntfx/forgejo-runner-meta
+         tag: latest
+     - name: Create temporary directory for forgejo-runner-meta git repo
+       register: forgejo_runner_meta_git_repo
+@@ -132,7 +132,7 @@         suffix: git_repo
+         state: directory
+     - name: Clone forgejo-runner-meta git repo
+       ansible.builtin.git:
+-        repo: "https://pojntfx:{{ forgejo_api_key.stdout }}@git.vanlug.p8.lu/pojntfx/forgejo-runner-meta.git"
++        repo: "https://pojntfx:{{ forgejo_api_key.stdout }}@git.{{ vanlug_domain }}/pojntfx/forgejo-runner-meta.git"
+         dest: "{{ forgejo_runner_meta_git_repo.path }}"
+         version: main
+       no_log: true # The repo URL contains the API token
+@@ -144,6 +144,21 @@         dest: "{{ forgejo_runner_meta_git_repo.path }}"
+         delete: true
+         rsync_opts:
+           - "--exclude=.git" # We don't want to delete the git metadata
++          # The OCI workflow uses ${{ }} expressions, so we template it
++          # with [[ ]] separately below instead of syncing it raw
++          - "--exclude=.forgejo/workflows/oci.yaml"
++      # This will only run on changes to the file; see https://docs.ansible.com/projects/ansible/latest/playbook_guide/playbooks_handlers.html#id1
++      notify: Sync forgejo-runner-meta git repo changes to Forgejo
++    - name: Create workflows directory in checked out repo dir
++      ansible.builtin.file:
++        path: "{{ forgejo_runner_meta_git_repo.path }}/.forgejo/workflows"
++        state: directory
++    - name: Write templated OCI workflow to checked out repo dir
++      ansible.builtin.template:
++        src: ../config/forgejo-runner-meta/.forgejo/workflows/oci.yaml
++        dest: "{{ forgejo_runner_meta_git_repo.path }}/.forgejo/workflows/oci.yaml"
++        variable_start_string: "[["
++        variable_end_string: "]]"
+       # This will only run on changes to the file; see https://docs.ansible.com/projects/ansible/latest/playbook_guide/playbooks_handlers.html#id1
+       notify: Sync forgejo-runner-meta git repo changes to Forgejo
+   handlers:
+@@ -156,7 +171,7 @@           set -e
+           git add -A
+           git \
+             -c user.name='{{ lookup("ansible.builtin.env", "FORGEJO_ADMIN_USERNAME") }}' \
+-            -c user.email='{{ lookup("ansible.builtin.env", "FORGEJO_ADMIN_USERNAME") }}@git.vanlug.p8.lu' \
++            -c user.email='{{ lookup("ansible.builtin.env", "FORGEJO_ADMIN_USERNAME") }}@git.{{ vanlug_domain }}' \
+             commit -m 'Sync forgejo-runner-meta'
+           git push origin HEAD:main
+         chdir: "{{ forgejo_runner_meta_git_repo.path }}"
+diff --git a/playbooks/forgejo-runner.yaml b/playbooks/forgejo-runner.yaml
+index 255b999c54cc3f9881432c35cf968682de7b252a..4d7f97992d34748c823fcddc56bd34689056cd05 100644
+--- a/playbooks/forgejo-runner.yaml
++++ b/playbooks/forgejo-runner.yaml
+@@ -49,7 +49,7 @@       environment:
+         XDG_RUNTIME_DIR: "/run/user/{{ forgejo_runner_user.uid }}"
+     - name: Write config generation script file for Forgejo runner
+       become: true
+-      ansible.builtin.copy:
++      ansible.builtin.template:
+         src: ../config/forgejo-runner-generate-config.sh
+         dest: "{{ forgejo_runner_data_dir }}/forgejo-runner-generate-config.sh"
+         owner: forgejo-runner
+diff --git a/playbooks/forgejo.yaml b/playbooks/forgejo.yaml
+index 0ce7ddec2e9ed3d816e1431d35de93951a863f18..bc177b426bcc1b7b43f72f8dbd89a59ccd5729ae 100644
+--- a/playbooks/forgejo.yaml
++++ b/playbooks/forgejo.yaml
+@@ -143,7 +143,7 @@         group: forgejo
+         mode: "0755"
+     - name: Write container file for Forgejo
+       become: true
+-      ansible.builtin.copy:
++      ansible.builtin.template:
+         src: ../units/forgejo.container
+         dest: /home/forgejo/.config/containers/systemd/forgejo.container
+         owner: forgejo
+@@ -166,7 +166,36 @@         src: ../config/custom/ # Trailing slash: sync the contents, not the directory itself
+         dest: /home/forgejo/.config/forgejo/custom
+         rsync_opts:
+           - "--chown=forgejo:forgejo"
++          # The custom templates use Go templating ({{ }}), so we template them
++          # with [[ ]] separately below instead of syncing them raw
++          - "--exclude=templates/custom/"
+         delete: true
++      # This will only run on changes to the file; see https://docs.ansible.com/projects/ansible/latest/playbook_guide/playbooks_handlers.html#id1
++      notify: Restart Forgejo user service
++    - name: Create custom templates directory for Forgejo
++      become: true
++      ansible.builtin.file:
++        path: /home/forgejo/.config/forgejo/custom/templates/custom
++        state: directory
++        owner: forgejo
++        group: forgejo
++        mode: "0755"
++    - name: Write custom templates for Forgejo
++      become: true
++      # These are Go templates which use {{ }}, so we use [[ ]] for templating instead
++      ansible.builtin.template:
++        src: "../config/custom/templates/custom/{{ item }}"
++        dest: "/home/forgejo/.config/forgejo/custom/templates/custom/{{ item }}"
++        owner: forgejo
++        group: forgejo
++        mode: "0644"
++        variable_start_string: "[["
++        variable_end_string: "]]"
++      loop:
++        - extra_links.tmpl
++        - extra_links_footer.tmpl
++        - signin_mid.tmpl
++        - signup_top.tmpl
+       # This will only run on changes to the file; see https://docs.ansible.com/projects/ansible/latest/playbook_guide/playbooks_handlers.html#id1
+       notify: Restart Forgejo user service
+     - name: Enable Forgejo user service
+diff --git a/playbooks/git-pages.yaml b/playbooks/git-pages.yaml
+index 738473bea0ab34da774ce03a367d205ae8420d01..a6420d28d46afb00c5936525d047e1f9fdf53b6e 100644
+--- a/playbooks/git-pages.yaml
++++ b/playbooks/git-pages.yaml
+@@ -102,7 +102,7 @@         group: git-pages
+         mode: "0755"
+     - name: Write container file for git-pages
+       become: true
+-      ansible.builtin.copy:
++      ansible.builtin.template:
+         src: ../units/git-pages.container
+         dest: /home/git-pages/.config/containers/systemd/git-pages.container
+         owner: git-pages
+diff --git a/units/forgejo.container b/units/forgejo.container
+index 9cdddd7bcd224e865c3aefa944ad4d938c1577f9..1175f2f984edbf5a59e892c85c83bbae9d13b26f 100644
+--- a/units/forgejo.container
++++ b/units/forgejo.container
+@@ -20,9 +20,9 @@ Environment=FORGEJO__server__SSH_PORT=220
+ # Else Forgejo will try to start via HTTPS without having a cert (we use Caddy for that)
+ Environment=FORGEJO__server__PROTOCOL=http
+ # Forgejo runs rootless, we use Caddy, but we still need to tell Forgejo where it is accessible from
+-Environment=FORGEJO__server__DOMAIN=git.vanlug.p8.lu
+-Environment=FORGEJO__server__SSH_DOMAIN=git.vanlug.p8.lu
+-Environment=FORGEJO__server__ROOT_URL=https://git.vanlug.p8.lu/
++Environment=FORGEJO__server__DOMAIN=git.{{ vanlug_domain }}
++Environment=FORGEJO__server__SSH_DOMAIN=git.{{ vanlug_domain }}
++Environment=FORGEJO__server__ROOT_URL=https://git.{{ vanlug_domain }}/
+ # We're not open for registration, and do not need email support
+ Environment=FORGEJO__service__DISABLE_REGISTRATION=true
+ Environment=FORGEJO__mailer__ENABLED=false
+diff --git a/units/git-pages.container b/units/git-pages.container
+index 096ac211c390c9288c1c508c21d2ee8dd051d3a7..9e702515acbc6d724f441ff270f3d92e207af07e 100644
+--- a/units/git-pages.container
++++ b/units/git-pages.container
+@@ -9,12 +9,12 @@ # We use systemd-socket-proxyd on 3003/3005, so we listen on 3004/3006 instead
+ PublishPort=3004:3000
+ PublishPort=3006:3001
+ Volume=git_pages_data:/app/data
+-AddHost=git.vanlug.p8.lu:host-gateway
++AddHost=git.{{ vanlug_domain }}:host-gateway
+ # See https://git-pages.org/running-a-server/#wildcard-domains
+-# We're not supposed to re-use the same second-level domain (vanlug.p8.lu)
++# We're not supposed to re-use the same second-level domain ({{ vanlug_domain }})
+ # for user-generated pages, but since we only allow board members to public
+ # sites, this is fine for us
+-Environment="PAGES_WILDCARD=[{\"Domain\":\"pages.vanlug.p8.lu\",\"CloneURL\":\"https://git.vanlug.p8.lu/<user>/<project>.git\",\"IndexRepo\":\"<user>.pages.vanlug.p8.lu\",\"IndexRepoBranch\":\"main\",\"Authorization\":\"forgejo\"}]"
++Environment="PAGES_WILDCARD=[{\"Domain\":\"pages.{{ vanlug_domain }}\",\"CloneURL\":\"https://git.{{ vanlug_domain }}/<user>/<project>.git\",\"IndexRepo\":\"<user>.pages.{{ vanlug_domain }}\",\"IndexRepoBranch\":\"main\",\"Authorization\":\"forgejo\"}]"
+ LogDriver=journald
+ ReadOnly=true
+ 
+diff --git a/units/vanlug-api.container b/units/vanlug-api.container
+index 4221ef63b092c71dc54553275a4d4feb05808bef..1ff2d0eab893a76649234a2a89d3f7926d96709d 100644
+--- a/units/vanlug-api.container
++++ b/units/vanlug-api.container
+@@ -3,7 +3,7 @@ ContainerName=vanlug-api
+ # Since we use enforcing SELinux we disable NoNewPrivileges here and
+ # use our own custom SELinux domain instead
+ SecurityLabelType=vanlug_api.process
+-Image=git.vanlug.p8.lu/pojntfx/vanlug-api:main
++Image=git.{{ vanlug_domain }}/pojntfx/vanlug-api:main
+ Label=io.containers.autoupdate=registry
+ # We use systemd-socket-proxyd on 3009, so we listen on 3010 instead
+ PublishPort=3010:8080
+
