@@ -1,0 +1,91 @@
+From e0f5d57a1039d3a6e02ecae9cacc4c43f5828b30 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Fri, 21 Aug 2026 20:18:47 -0700
+Subject: [PATCH] feat: Start setting up global variables for VanLUG root domain starting with Caddy
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/README.md b/README.md
+index 0564ab28d64d79609a35c4c4fb928b5f75f4ee27..1fc8114b55c732a06aaedf66adcf6fe4c3e89b44 100644
+--- a/README.md
++++ b/README.md
+@@ -36,13 +36,13 @@ Then, to use [Ansible](https://docs.ansible.com/projects/ansible/latest/index.html) to provision the hosts, run:
+ 
+ ```shell
+ $ ansible-galaxy collection install cloud.terraform ansible.posix community.general community.docker
+-$ ANSIBLE_CONFIG=config/ansible.cfg ansible-playbook site.yaml # You might want to change `binary_path` in `inventory.yaml` first
++$ ansible-playbook site.yaml # You might want to change `binary_path` in `inventory.yaml` first
+ ```
+ 
+ Once the hosts are provisioned, sign into Forgejo, [import](https://forgejo.org/docs/latest/user/repo-mirror/) the VanLUG website repo from the [GitHub mirror](https://github.com/vanlug/vanlug.github.io), wait for the actions to pass (which build the website and API), and provision the quadlet for the API (the website is automatically deployed using [git-pages](https://git-pages.org/):
+ 
+ ```shell
+-$ ANSIBLE_CONFIG=config/ansible.cfg ansible-playbook playbooks/vanlug-api.yaml # You might want to change `binary_path` in `inventory.yaml` first
++$ ansible-playbook playbooks/vanlug-api.yaml # You might want to change `binary_path` in `inventory.yaml` first
+ ```
+ 
+ Everything should now be up and running, and auto-updates should be enabled for all components, including the quadlets and OS itself. To get logs, run the following:
+diff --git a/config/Caddyfile b/config/Caddyfile
+index f19124aff9657dc44948b4006a859cdbb2b63a7e..d6fe7320d3179c6b3c00c21d2e21640ef9db5837 100644
+--- a/config/Caddyfile
++++ b/config/Caddyfile
+@@ -43,7 +43,7 @@
+ 	redir https://{host}{uri}
+ }
+ 
+-git.vanlug.p8.lu {
++git.[[ vanlug_domain ]] {
+ 	import workarounds
+ 
+ 	# See https://anubis.techaro.lol/docs/admin/environments/caddy
+@@ -53,7 +53,7 @@ 		header_up X-Http-Version {http.request.proto}
+ 	}
+ }
+ 
+-https://vanlug.p8.lu {
++https://[[ vanlug_domain ]] {
+ 	tls {
+ 		on_demand
+ 	}
+diff --git a/config/ansible.cfg b/ansible.cfg
+rename from config/ansible.cfg
+rename to ansible.cfg
+index b3f2493bcc6d238d949d38d5df1790b7bc08936a..f3a9a5f136531cefc8c5a6ed7d961f17cad47a7a 100644
+--- a/config/ansible.cfg
++++ b/ansible.cfg
+@@ -1,5 +1,5 @@
+ [defaults]
+-inventory = ../inventory.yaml
++inventory = inventory.yaml
+ 
+ [ssh_connection]
+ pipelining = true
+diff --git a/group_vars/all.yaml b/group_vars/all.yaml
+new file mode 100644
+index 0000000000000000000000000000000000000000..828155ac80466458d59a2929eb17647b3c209256
+--- /dev/null
++++ b/group_vars/all.yaml
+@@ -0,0 +1,2 @@
++# The primary domain all services are served under
++vanlug_domain: vanlug.p8.lu
+diff --git a/playbooks/caddy.yaml b/playbooks/caddy.yaml
+index 9ed028d8a95b7f5b64223627cc32b3197c9bb35f..21c237a90e7ed7a32e897b2c574a24f9fe5546cf 100644
+--- a/playbooks/caddy.yaml
++++ b/playbooks/caddy.yaml
+@@ -82,12 +82,14 @@         group: caddy
+         mode: "0755"
+     - name: Write Caddyfile
+       become: true
+-      ansible.builtin.copy:
++      ansible.builtin.template:
+         src: ../config/Caddyfile
+         dest: /home/caddy/.config/caddy/Caddyfile
+         owner: caddy
+         group: caddy
+         mode: "0644"
++        variable_start_string: "[[" # `{{` breaks the Caddy formatter
++        variable_end_string: "]]" # `{{` breaks the Caddy formatter
+       notify: Reload Caddy system service
+     - name: Write polkit rule to allow the caddy user to be able to restart the caddy system service
+       become: true
+
