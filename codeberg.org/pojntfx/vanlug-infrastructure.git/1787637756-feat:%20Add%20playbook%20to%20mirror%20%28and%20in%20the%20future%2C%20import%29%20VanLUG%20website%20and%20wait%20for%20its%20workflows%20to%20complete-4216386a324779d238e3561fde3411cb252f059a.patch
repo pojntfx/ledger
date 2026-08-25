@@ -1,0 +1,191 @@
+From 4216386a324779d238e3561fde3411cb252f059a Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Mon, 24 Aug 2026 23:02:36 -0700
+Subject: [PATCH] feat: Add playbook to mirror (and in the future, import) VanLUG website and wait for its workflows to complete
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/README.md b/README.md
+index 1be29a5b82b3b8b97aa4cebe77c607348c89f177..fe5401c7e36b4f1eebadbb53f8734da579fa0eca 100644
+--- a/README.md
++++ b/README.md
+@@ -56,13 +56,7 @@ $ ansible-galaxy collection install cloud.terraform ansible.posix community.general community.docker
+ $ ansible-playbook site.yaml # You might want to change `binary_path` in `inventory.yaml` first
+ ```
+ 
+-Once the hosts are provisioned, sign into Forgejo, [import](https://forgejo.org/docs/latest/user/repo-mirror/) the VanLUG website repo from the [GitHub mirror](https://github.com/vanlug/vanlug.github.io), wait for the actions to pass (which build the website and API), and provision the quadlet for the API (the website is automatically deployed using [git-pages](https://git-pages.org/):
+-
+-```shell
+-$ ansible-playbook playbooks/vanlug-api.yaml # You might want to change `binary_path` in `inventory.yaml` first
+-```
+-
+-Everything should now be up and running, and auto-updates should be enabled for all components, including the quadlets and OS itself. To get logs, run the following:
++Everything should now be up and running, and auto-updates should be enabled for all components, including the quadlets and OS itself. Updates to the VanLUG API should be rolled out automatically as well; there is no need to re-run these playbooks unless they have changed. To get logs for the components, run the following:
+ 
+ ```shell
+ # To get logs for quadlets on main server
+diff --git a/playbooks/vanlug-website.yaml b/playbooks/vanlug-website.yaml
+new file mode 100644
+index 0000000000000000000000000000000000000000..01cd84f9219db71838ca727a904e870ea3101242
+--- /dev/null
++++ b/playbooks/vanlug-website.yaml
+@@ -0,0 +1,144 @@
++- name: Configure vanlug-website
++  hosts:
++    - localhost
++  gather_facts: false
++  tasks:
++    - name: Fetch user for Forgejo
++      become: true
++      register: forgejo_user
++      delegate_to: "{{ groups['vanlug_mains'][0] }}" # Forgejo host
++      ansible.builtin.user:
++        name: forgejo
++    - name: Mint local Forgejo API key
++      become: true
++      become_user: forgejo
++      when: true # This API key is disposable
++      changed_when: true
++      register: forgejo_api_key
++      delegate_to: "{{ groups['vanlug_mains'][0] }}" # Forgejo host
++      # For the UUID, see https://docs.ansible.com/projects/ansible/latest/collections/ansible/builtin/to_uuid_filter.html#examples.
++      # This isn't a secret so we don't need true randomness here.
++      ansible.builtin.command: |
++        podman exec forgejo forgejo admin user generate-access-token \
++          --username '{{ lookup("ansible.builtin.env", "FORGEJO_ADMIN_USERNAME") }}' \
++          --token-name 'vanlug-website-initial-setup-{{ 999999999999 | random | to_uuid }}' \
++          --scopes 'write:package,write:repository,write:user' \
++          --raw
++      environment:
++        XDG_RUNTIME_DIR: "/run/user/{{ forgejo_user.uid }}"
++      # We can't clean up previous runs via the API without having the user's admin password (token auth doesn't work for this), so instead
++      # we need to create fresh ones for each run. They can be manually cleaned up via https://git.{{ vanlug_domain }}/user/settings/applications.
++      # This is somewhat mitigated since we don't expect to run this playbook often.
++    - name: Mint actions Forgejo API key
++      become: true
++      become_user: forgejo
++      when: true # This API key is disposable
++      changed_when: true
++      register: forgejo_api_key_actions
++      delegate_to: "{{ groups['vanlug_mains'][0] }}" # Forgejo host
++      # For the UUID, see https://docs.ansible.com/projects/ansible/latest/collections/ansible/builtin/to_uuid_filter.html#examples.
++      # This isn't a secret so we don't need true randomness here.
++      ansible.builtin.command: |
++        podman exec forgejo forgejo admin user generate-access-token \
++          --username '{{ lookup("ansible.builtin.env", "FORGEJO_ADMIN_USERNAME") }}' \
++          --token-name 'vanlug-website-meta-actions-{{ 999999999999 | random | to_uuid }}' \
++          --scopes 'write:package' \
++          --raw
++      environment:
++        XDG_RUNTIME_DIR: "/run/user/{{ forgejo_user.uid }}"
++      # We can't clean up previous runs via the API without having the user's admin password (token auth doesn't work for this), so instead
++      # we need to create fresh ones for each run. They can be manually cleaned up via https://git.{{ vanlug_domain }}/user/settings/applications.
++      # This is somewhat mitigated since we don't expect to run this playbook often.
++    - name: Mirror vanlug.github.io repo to Forgejo as {{ vanlug_domain }}
++      ansible.builtin.uri:
++        url: https://git.{{ vanlug_domain }}/api/v1/repos/migrate
++        method: POST
++        headers:
++          Authorization: "token {{ forgejo_api_key.stdout }}"
++        body_format: json
++        body:
++          clone_addr: https://github.com/vanlug/vanlug.github.io.git
++          repo_name: "{{ vanlug_domain }}"
++          mirror: true
++        status_code:
++          - 201
++          - 409 # Repo already exists, which is fine since this is idempotent
++    - name: Enable actions for vanlug-website repo in Forgejo
++      ansible.builtin.uri:
++        url: https://git.{{ vanlug_domain }}/api/v1/repos/pojntfx/{{ vanlug_domain }}
++        method: PATCH
++        headers:
++          Authorization: "token {{ forgejo_api_key.stdout }}"
++        body_format: json
++        body:
++          has_actions: true
++        status_code: 200
++    - name: Set DOCKER_USERNAME variable for vanlug-website repo in Forgejo
++      ansible.builtin.uri:
++        url: "https://git.{{ vanlug_domain }}/api/v1/repos/pojntfx/{{ vanlug_domain }}/actions/variables/DOCKER_USERNAME"
++        method: PUT
++        headers:
++          Authorization: "token {{ forgejo_api_key.stdout }}"
++        body_format: json
++        body:
++          name: DOCKER_USERNAME
++          value: '{{ lookup("ansible.builtin.env", "FORGEJO_ADMIN_USERNAME") }}'
++        status_code:
++          - 204
++          - 404 # Variable doesn't exist yet, create it below
++      register: forgejo_docker_username_variable
++    - name: Create DOCKER_USERNAME variable for vanlug-website repo in Forgejo
++      ansible.builtin.uri:
++        url: "https://git.{{ vanlug_domain }}/api/v1/repos/pojntfx/{{ vanlug_domain }}/actions/variables/DOCKER_USERNAME"
++        method: POST
++        headers:
++          Authorization: "token {{ forgejo_api_key.stdout }}"
++        body_format: json
++        body:
++          value: '{{ lookup("ansible.builtin.env", "FORGEJO_ADMIN_USERNAME") }}'
++        status_code:
++          - 201
++          - 204
++      when: forgejo_docker_username_variable.status == 404
++    # Secrets are idempotent, unlike variables
++    - name: Set DOCKER_PASSWORD secret for vanlug-website repo in Forgejo
++      ansible.builtin.uri:
++        url: "https://git.{{ vanlug_domain }}/api/v1/repos/pojntfx/{{ vanlug_domain }}/actions/secrets/DOCKER_PASSWORD"
++        method: PUT
++        headers:
++          Authorization: "token {{ forgejo_api_key.stdout }}"
++        body_format: json
++        body:
++          data: "{{ forgejo_api_key_actions.stdout }}"
++        status_code:
++          - 201 # Secret created
++          - 204 # Secret updated
++    # Forgejo doesn't run actions for the initial mirror, so we need to trigger them manually
++    - name: Trigger workflows for vanlug-website repo in Forgejo
++      ansible.builtin.uri:
++        url: "https://git.{{ vanlug_domain }}/api/v1/repos/pojntfx/{{ vanlug_domain }}/actions/workflows/{{ item }}/dispatches"
++        method: POST
++        headers:
++          Authorization: "token {{ forgejo_api_key.stdout }}"
++        body_format: json
++        body:
++          ref: main
++          return_run_info: true
++        status_code: 201
++      register: workflow_dispatches
++      loop:
++        - hugo.yaml
++        - oci.yaml
++    - name: Wait for workflows in vanlug-website repo to complete
++      ansible.builtin.uri:
++        url: "https://git.{{ vanlug_domain }}/api/v1/repos/pojntfx/{{ vanlug_domain }}/actions/runs/{{ item.json.id }}"
++        method: GET
++        headers:
++          Authorization: "token {{ forgejo_api_key.stdout }}"
++        status_code: 200
++      register: workflow_run
++      # See https://code.forgejo.org/forgejo/forgejo/src/branch/forgejo/models/actions/status.go#L28-L37
++      until: workflow_run.json.status in ['success', 'failure', 'cancelled', 'skipped']
++      retries: 180 # 15 minutes (180 * 5s)
++      failed_when: workflow_run.json.status not in ['success', 'skipped']
++      loop: "{{ workflow_dispatches.results }}"
+diff --git a/site.yaml b/site.yaml
+index 291ab0ec1445b02c7c86b353f2bd4557eb3b077b..7f6b8187ae961f4e1790045e7e5f0ee544d7b09c 100644
+--- a/site.yaml
++++ b/site.yaml
+@@ -25,4 +25,8 @@ - name: Configure git-pages
+   ansible.builtin.import_playbook: playbooks/git-pages.yaml
+ - name: Configure Anubis
+   ansible.builtin.import_playbook: playbooks/anubis.yaml
+-# We don't run vanlug-api by default here since we need to manually import the VanLUG website repo
++- name: Configure vanlug-website
++  ansible.builtin.import_playbook: playbooks/vanlug-website.yaml
++# vanlug-api depends on vanlug-website since the latter builds and publishes the former's OCI image
++- name: Configure vanlug-api
++  ansible.builtin.import_playbook: playbooks/vanlug-api.yaml
+
