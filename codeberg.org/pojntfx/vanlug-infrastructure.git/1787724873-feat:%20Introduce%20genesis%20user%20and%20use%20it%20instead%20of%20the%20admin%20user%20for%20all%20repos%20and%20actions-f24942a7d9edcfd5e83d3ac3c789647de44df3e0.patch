@@ -1,0 +1,306 @@
+From f24942a7d9edcfd5e83d3ac3c789647de44df3e0 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Tue, 25 Aug 2026 23:14:33 -0700
+Subject: [PATCH] feat: Introduce genesis user and use it instead of the admin user for all repos and actions
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/.env b/.env
+index 75976ccf5a6d57c537226db35a25ee48c30fcea9..280aadfb51804b40784be1c026609773be1aaead 100644
+--- a/.env
++++ b/.env
+@@ -3,6 +3,7 @@ export AWS_SECRET_ACCESS_KEY=
+ export TF_VAR_hetzner_api_key=
+ export TF_VAR_ssh_public_key="ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEwIx/dRJkK0xPD15TRAPOEsklWV/JguGpf+p9h4dQUj pojntfx@fels-asus-proart-px13"
+ export FORGEJO_ADMIN_INITIAL_PASSWORD=""
++export FORGEJO_GENESIS_INITIAL_PASSWORD=""
+ export FORGEJO_RUNNER_SHARED_SECRET="" # openssl rand -hex 20
+ export FORGEJO_RUNNER_UUID="" # echo -n "$FORGEJO_RUNNER_SHARED_SECRET" | python3 -c 'import sys; import uuid;input=sys.stdin.read();print(str(uuid.UUID(bytes=input[:16].encode("utf-8"))))'
+ export MASTODON_ACCESS_TOKEN=
+diff --git a/README.md b/README.md
+index 00db649bd767bcf837cccd27472729dfdc869138..19a8f9307086eb18be89d897bad5dec228496b61 100644
+--- a/README.md
++++ b/README.md
+@@ -71,7 +71,7 @@ $ ssh setup@2a01:4f8:c015:706c::1
+ [setup@vanlug-forgejo-runner ~]$ sudo journalctl _SYSTEMD_USER_UNIT=forgejo-runner.service -f
+ ```
+ 
+-That's it! All infrastructure should now be deployed.
++That's it! All infrastructure should now be deployed. Don't forget to log into both the admin and genesis users to change their passwords and set up two-factor authentication.
+ 
+ During development, to update the SELinux policies for the containers (`.cil` files), run:
+ 
+diff --git a/config/forgejo-runner-generate-config.sh b/config/forgejo-runner-generate-config.sh
+index 12b89ddc66c916aaad28fe8d9d8c17488d1184c8..950183cd5883f7aca1c13f4d8b002fcb5578557d 100644
+--- a/config/forgejo-runner-generate-config.sh
++++ b/config/forgejo-runner-generate-config.sh
+@@ -5,7 +5,7 @@
+ forgejo-runner generate-config >config.yml
+ 
+ sed -i \
+-	-e "s|  labels: \[\]|  labels:\n    - ubuntu-latest:docker://git.{{ vanlug_domain }}/{{ forgejo_admin_username }}/forgejo-runner-meta:latest|" \
++	-e "s|  labels: \[\]|  labels:\n    - ubuntu-latest:docker://git.{{ vanlug_domain }}/{{ forgejo_genesis_username }}/forgejo-runner-meta:latest|" \
+ 	-e "s|  enable_ipv6: false|  enable_ipv6: true|" \
+ 	-e "s|  options:.*|  options: --security-opt label=disable --cap-add=all --volume /etc/resolv.conf:/etc/resolv.conf:ro --runtime=runsc|" \
+ 	-e "s|  valid_volumes: \[\]|  valid_volumes:\n    - /etc/resolv.conf|" \
+diff --git a/group_vars/all.yaml b/group_vars/all.yaml
+index e80ee8c579ec625fdc906d2f60b7ad3a47e644fe..62972fd86dc1352967dadfb7905920cc0bf3a479 100644
+--- a/group_vars/all.yaml
++++ b/group_vars/all.yaml
+@@ -1,6 +1,10 @@
+ # Primary domain all services are served under
+ vanlug_domain: vanlug.p8.lu
+-# Forgejo admin user used for API access and as owner of the internal repos
+-forgejo_admin_username: pojntfx
++# Forgejo admin user used for initial/admin API access
++forgejo_admin_username: vanlug-admin
+ # Email for Forgejo admin user
+ forgejo_admin_email: felicitas@pojtinger.com
++# Forgejo genesis user (owner of the internal repos and used for non-admin API access)
++forgejo_genesis_username: pojntfx
++# Email for Forgejo genesis user
++forgejo_genesis_email: felicitas.pojtinger@gmail.com
+diff --git a/playbooks/forgejo-runner-meta.yaml b/playbooks/forgejo-runner-meta.yaml
+index c27281d99399282be3f992140eb740a2756648aa..25e9b38c821c6a8a7409004b8c4eb97adf1ba176 100644
+--- a/playbooks/forgejo-runner-meta.yaml
++++ b/playbooks/forgejo-runner-meta.yaml
+@@ -5,7 +5,7 @@   gather_facts: false
+   tasks:
+     - name: Build Forgejo runner OCI image with Docker preinstalled
+       community.docker.docker_image_build:
+-        name: git.{{ vanlug_domain }}/{{ forgejo_admin_username }}/forgejo-runner-meta:latest
++        name: git.{{ vanlug_domain }}/{{ forgejo_genesis_username }}/forgejo-runner-meta:latest
+         path: forgejo-runner-meta
+         dockerfile: Containerfile
+     - name: Fetch user for Forgejo
+@@ -25,7 +25,7 @@       # For the UUID, see https://docs.ansible.com/projects/ansible/latest/collections/ansible/builtin/to_uuid_filter.html#examples.
+       # This isn't a secret so we don't need true randomness here.
+       ansible.builtin.command: |
+         podman exec forgejo forgejo admin user generate-access-token \
+-          --username '{{ forgejo_admin_username }}' \
++          --username '{{ forgejo_genesis_username }}' \
+           --token-name 'forgejo-runner-meta-initial-setup-{{ 999999999999 | random | to_uuid }}' \
+           --scopes 'write:package,write:repository,write:user' \
+           --raw
+@@ -45,7 +45,7 @@       # For the UUID, see https://docs.ansible.com/projects/ansible/latest/collections/ansible/builtin/to_uuid_filter.html#examples.
+       # This isn't a secret so we don't need true randomness here.
+       ansible.builtin.command: |
+         podman exec forgejo forgejo admin user generate-access-token \
+-          --username '{{ forgejo_admin_username }}' \
++          --username '{{ forgejo_genesis_username }}' \
+           --token-name 'forgejo-runner-meta-actions-{{ 999999999999 | random | to_uuid }}' \
+           --scopes 'write:package' \
+           --raw
+@@ -68,7 +68,7 @@           - 201
+           - 409 # Repo already exists, which is fine since this is idempotent
+     - name: Enable actions for forgejo-runner-meta repo in Forgejo
+       ansible.builtin.uri:
+-        url: https://git.{{ vanlug_domain }}/api/v1/repos/{{ forgejo_admin_username }}/forgejo-runner-meta
++        url: https://git.{{ vanlug_domain }}/api/v1/repos/{{ forgejo_genesis_username }}/forgejo-runner-meta
+         method: PATCH
+         headers:
+           Authorization: "token {{ forgejo_api_key.stdout }}"
+@@ -78,27 +78,27 @@           has_actions: true
+         status_code: 200
+     - name: Set DOCKER_USERNAME variable for forgejo-runner-meta repo in Forgejo
+       ansible.builtin.uri:
+-        url: "https://git.{{ vanlug_domain }}/api/v1/repos/{{ forgejo_admin_username }}/forgejo-runner-meta/actions/variables/DOCKER_USERNAME"
++        url: "https://git.{{ vanlug_domain }}/api/v1/repos/{{ forgejo_genesis_username }}/forgejo-runner-meta/actions/variables/DOCKER_USERNAME"
+         method: PUT
+         headers:
+           Authorization: "token {{ forgejo_api_key.stdout }}"
+         body_format: json
+         body:
+           name: DOCKER_USERNAME
+-          value: '{{ forgejo_admin_username }}'
++          value: '{{ forgejo_genesis_username }}'
+         status_code:
+           - 204
+           - 404 # Variable doesn't exist yet, create it below
+       register: forgejo_docker_username_variable
+     - name: Create DOCKER_USERNAME variable for forgejo-runner-meta repo in Forgejo
+       ansible.builtin.uri:
+-        url: "https://git.{{ vanlug_domain }}/api/v1/repos/{{ forgejo_admin_username }}/forgejo-runner-meta/actions/variables/DOCKER_USERNAME"
++        url: "https://git.{{ vanlug_domain }}/api/v1/repos/{{ forgejo_genesis_username }}/forgejo-runner-meta/actions/variables/DOCKER_USERNAME"
+         method: POST
+         headers:
+           Authorization: "token {{ forgejo_api_key.stdout }}"
+         body_format: json
+         body:
+-          value: '{{ forgejo_admin_username }}'
++          value: '{{ forgejo_genesis_username }}'
+         status_code:
+           - 201
+           - 204
+@@ -106,7 +106,7 @@       when: forgejo_docker_username_variable.status == 404
+     # Secrets are idempotent, unlike variables
+     - name: Set DOCKER_PASSWORD secret for forgejo-runner-meta repo in Forgejo
+       ansible.builtin.uri:
+-        url: "https://git.{{ vanlug_domain }}/api/v1/repos/{{ forgejo_admin_username }}/forgejo-runner-meta/actions/secrets/DOCKER_PASSWORD"
++        url: "https://git.{{ vanlug_domain }}/api/v1/repos/{{ forgejo_genesis_username }}/forgejo-runner-meta/actions/secrets/DOCKER_PASSWORD"
+         method: PUT
+         headers:
+           Authorization: "token {{ forgejo_api_key.stdout }}"
+@@ -119,11 +119,11 @@           - 204 # Secret updated
+     - name: Log into Forgejo registry
+       community.docker.docker_login:
+         registry_url: git.{{ vanlug_domain }}
+-        username: '{{ forgejo_admin_username }}'
++        username: '{{ forgejo_genesis_username }}'
+         password: "{{ forgejo_api_key.stdout }}"
+     - name: Push Forgejo runner OCI image
+       community.docker.docker_image_push:
+-        name: git.{{ vanlug_domain }}/{{ forgejo_admin_username }}/forgejo-runner-meta
++        name: git.{{ vanlug_domain }}/{{ forgejo_genesis_username }}/forgejo-runner-meta
+         tag: latest
+     - name: Create temporary directory for forgejo-runner-meta git repo
+       register: forgejo_runner_meta_git_repo
+@@ -132,7 +132,7 @@         suffix: git_repo
+         state: directory
+     - name: Clone forgejo-runner-meta git repo
+       ansible.builtin.git:
+-        repo: "https://{{ forgejo_admin_username }}:{{ forgejo_api_key.stdout }}@git.{{ vanlug_domain }}/{{ forgejo_admin_username }}/forgejo-runner-meta.git"
++        repo: "https://{{ forgejo_genesis_username }}:{{ forgejo_api_key.stdout }}@git.{{ vanlug_domain }}/{{ forgejo_genesis_username }}/forgejo-runner-meta.git"
+         dest: "{{ forgejo_runner_meta_git_repo.path }}"
+         version: main
+       no_log: true # The repo URL contains the API token
+@@ -170,8 +170,8 @@         cmd: |
+           set -e
+           git add -A
+           git \
+-            -c user.name='{{ forgejo_admin_username }}' \
+-            -c user.email='{{ forgejo_admin_username }}@git.{{ vanlug_domain }}' \
++            -c user.name='{{ forgejo_genesis_username }}' \
++            -c user.email='{{ forgejo_genesis_username }}@git.{{ vanlug_domain }}' \
+             commit -m 'Sync forgejo-runner-meta'
+           git push origin HEAD:main
+         chdir: "{{ forgejo_runner_meta_git_repo.path }}"
+diff --git a/playbooks/forgejo.yaml b/playbooks/forgejo.yaml
+index a75e9dbf35c101ee7480b9bfe49f5d8885e0d60e..477a07432ae21ccfb3bbd9236409508272c69dbe 100644
+--- a/playbooks/forgejo.yaml
++++ b/playbooks/forgejo.yaml
+@@ -243,6 +243,20 @@           --password '{{ lookup("ansible.builtin.env", "FORGEJO_ADMIN_INITIAL_PASSWORD") }}' \
+           --must-change-password
+       environment:
+         XDG_RUNTIME_DIR: "/run/user/{{ forgejo_user.uid }}"
++    - name: Set up Forgejo genesis user
++      become: true
++      become_user: forgejo
++      # This is a bit brittle since we could also match a column, but that's fine for a one-time setup task
++      when: forgejo_genesis_username not in forgejo_users.stdout
++      changed_when: true
++      ansible.builtin.command: |
++        podman exec forgejo forgejo admin user create \
++          --username '{{ forgejo_genesis_username }}' \
++          --email '{{ forgejo_genesis_email }}' \
++          --password '{{ lookup("ansible.builtin.env", "FORGEJO_GENESIS_INITIAL_PASSWORD") }}' \
++          --must-change-password
++      environment:
++        XDG_RUNTIME_DIR: "/run/user/{{ forgejo_user.uid }}"
+     - name: Set up Forgejo runner secret
+       become: true
+       become_user: forgejo
+diff --git a/playbooks/vanlug-website.yaml b/playbooks/vanlug-website.yaml
+index 58cdf8beb2999d7fa79562e7de8ff51f744c598f..4f203bd2dea900f3a659b57714de2710791ba500 100644
+--- a/playbooks/vanlug-website.yaml
++++ b/playbooks/vanlug-website.yaml
+@@ -20,7 +20,7 @@       # For the UUID, see https://docs.ansible.com/projects/ansible/latest/collections/ansible/builtin/to_uuid_filter.html#examples.
+       # This isn't a secret so we don't need true randomness here.
+       ansible.builtin.command: |
+         podman exec forgejo forgejo admin user generate-access-token \
+-          --username '{{ forgejo_admin_username }}' \
++          --username '{{ forgejo_genesis_username }}' \
+           --token-name 'vanlug-website-initial-setup-{{ 999999999999 | random | to_uuid }}' \
+           --scopes 'write:package,write:repository,write:user' \
+           --raw
+@@ -40,7 +40,7 @@       # For the UUID, see https://docs.ansible.com/projects/ansible/latest/collections/ansible/builtin/to_uuid_filter.html#examples.
+       # This isn't a secret so we don't need true randomness here.
+       ansible.builtin.command: |
+         podman exec forgejo forgejo admin user generate-access-token \
+-          --username '{{ forgejo_admin_username }}' \
++          --username '{{ forgejo_genesis_username }}' \
+           --token-name 'vanlug-website-meta-actions-{{ 999999999999 | random | to_uuid }}' \
+           --scopes 'write:package' \
+           --raw
+@@ -65,7 +65,7 @@           - 201
+           - 409 # Repo already exists, which is fine since this is idempotent
+     - name: Enable actions for vanlug-website repo in Forgejo
+       ansible.builtin.uri:
+-        url: https://git.{{ vanlug_domain }}/api/v1/repos/{{ forgejo_admin_username }}/{{ vanlug_domain }}
++        url: https://git.{{ vanlug_domain }}/api/v1/repos/{{ forgejo_genesis_username }}/{{ vanlug_domain }}
+         method: PATCH
+         headers:
+           Authorization: "token {{ forgejo_api_key.stdout }}"
+@@ -75,27 +75,27 @@           has_actions: true
+         status_code: 200
+     - name: Set DOCKER_USERNAME variable for vanlug-website repo in Forgejo
+       ansible.builtin.uri:
+-        url: "https://git.{{ vanlug_domain }}/api/v1/repos/{{ forgejo_admin_username }}/{{ vanlug_domain }}/actions/variables/DOCKER_USERNAME"
++        url: "https://git.{{ vanlug_domain }}/api/v1/repos/{{ forgejo_genesis_username }}/{{ vanlug_domain }}/actions/variables/DOCKER_USERNAME"
+         method: PUT
+         headers:
+           Authorization: "token {{ forgejo_api_key.stdout }}"
+         body_format: json
+         body:
+           name: DOCKER_USERNAME
+-          value: '{{ forgejo_admin_username }}'
++          value: "{{ forgejo_genesis_username }}"
+         status_code:
+           - 204
+           - 404 # Variable doesn't exist yet, create it below
+       register: forgejo_docker_username_variable
+     - name: Create DOCKER_USERNAME variable for vanlug-website repo in Forgejo
+       ansible.builtin.uri:
+-        url: "https://git.{{ vanlug_domain }}/api/v1/repos/{{ forgejo_admin_username }}/{{ vanlug_domain }}/actions/variables/DOCKER_USERNAME"
++        url: "https://git.{{ vanlug_domain }}/api/v1/repos/{{ forgejo_genesis_username }}/{{ vanlug_domain }}/actions/variables/DOCKER_USERNAME"
+         method: POST
+         headers:
+           Authorization: "token {{ forgejo_api_key.stdout }}"
+         body_format: json
+         body:
+-          value: '{{ forgejo_admin_username }}'
++          value: "{{ forgejo_genesis_username }}"
+         status_code:
+           - 201
+           - 204
+@@ -103,7 +103,7 @@       when: forgejo_docker_username_variable.status == 404
+     # Secrets are idempotent, unlike variables
+     - name: Set DOCKER_PASSWORD secret for vanlug-website repo in Forgejo
+       ansible.builtin.uri:
+-        url: "https://git.{{ vanlug_domain }}/api/v1/repos/{{ forgejo_admin_username }}/{{ vanlug_domain }}/actions/secrets/DOCKER_PASSWORD"
++        url: "https://git.{{ vanlug_domain }}/api/v1/repos/{{ forgejo_genesis_username }}/{{ vanlug_domain }}/actions/secrets/DOCKER_PASSWORD"
+         method: PUT
+         headers:
+           Authorization: "token {{ forgejo_api_key.stdout }}"
+@@ -116,7 +116,7 @@           - 204 # Secret updated
+     # Forgejo doesn't run actions for the initial mirror, so we need to trigger them manually
+     - name: Trigger workflows for vanlug-website repo in Forgejo
+       ansible.builtin.uri:
+-        url: "https://git.{{ vanlug_domain }}/api/v1/repos/{{ forgejo_admin_username }}/{{ vanlug_domain }}/actions/workflows/{{ item }}/dispatches"
++        url: "https://git.{{ vanlug_domain }}/api/v1/repos/{{ forgejo_genesis_username }}/{{ vanlug_domain }}/actions/workflows/{{ item }}/dispatches"
+         method: POST
+         headers:
+           Authorization: "token {{ forgejo_api_key.stdout }}"
+@@ -131,7 +131,7 @@         - hugo.yaml
+         - oci.yaml
+     - name: Wait for workflows in vanlug-website repo to complete
+       ansible.builtin.uri:
+-        url: "https://git.{{ vanlug_domain }}/api/v1/repos/{{ forgejo_admin_username }}/{{ vanlug_domain }}/actions/runs/{{ item.json.id }}"
++        url: "https://git.{{ vanlug_domain }}/api/v1/repos/{{ forgejo_genesis_username }}/{{ vanlug_domain }}/actions/runs/{{ item.json.id }}"
+         method: GET
+         headers:
+           Authorization: "token {{ forgejo_api_key.stdout }}"
+diff --git a/units/vanlug-api.container b/units/vanlug-api.container
+index 0254c94a985376eaba647739390ef808ed2ba9d4..f2591a636ca6a5f23ed40492b821e5248e46bb0a 100644
+--- a/units/vanlug-api.container
++++ b/units/vanlug-api.container
+@@ -3,7 +3,7 @@ ContainerName=vanlug-api
+ # Since we use enforcing SELinux we disable NoNewPrivileges here and
+ # use our own custom SELinux domain instead
+ SecurityLabelType=vanlug_api.process
+-Image=git.{{ vanlug_domain }}/{{ forgejo_admin_username }}/vanlug-api:main
++Image=git.{{ vanlug_domain }}/{{ forgejo_genesis_username }}/vanlug-api:main
+ Label=io.containers.autoupdate=registry
+ # We use systemd-socket-proxyd on 3009, so we listen on 3010 instead
+ PublishPort=3010:8080
+
