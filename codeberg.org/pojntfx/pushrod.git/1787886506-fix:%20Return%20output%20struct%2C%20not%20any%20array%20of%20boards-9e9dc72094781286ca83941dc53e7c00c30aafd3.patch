@@ -1,0 +1,36 @@
+From 9e9dc72094781286ca83941dc53e7c00c30aafd3 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Thu, 27 Aug 2026 20:08:26 -0700
+Subject: [PATCH] fix: Return output struct, not any array of boards
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/pkg/relay/server.go b/pkg/relay/server.go
+index 6671d9eead38a4adec8effb0d05c8a1d63502683..b87644fcd38134a20313eb695152bd1dadf68752 100644
+--- a/pkg/relay/server.go
++++ b/pkg/relay/server.go
+@@ -24,12 +24,12 @@ 		Description: "Get all currently connected boards",
+ 	}
+ )
+ 
+-func GetConnectedBoards(ctx context.Context, req *mcp.CallToolRequest, input struct{}) (*mcp.CallToolResult, []Board, error) {
++func GetConnectedBoards(ctx context.Context, req *mcp.CallToolRequest, input struct{}) (*mcp.CallToolResult, *Output, error) {
+ 	devices, err := usbhid.Enumerate(func(d *usbhid.Device) bool {
+ 		return d.VendorId() == USB_RELAY_4_VENDOR_ID && d.ProductId() == USB_RELAY_4_PRODUCT_ID
+ 	})
+ 	if err != nil {
+-		return nil, []Board{}, err
++		return nil, nil, err
+ 	}
+ 
+ 	boards := make([]Board, len(devices))
+@@ -40,5 +40,7 @@ 			IsInUse: device.IsOpen(),
+ 		}
+ 	}
+ 
+-	return nil, boards, nil
++	return nil, &Output{
++		Boards: boards,
++	}, nil
+ }
+
