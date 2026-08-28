@@ -1,0 +1,274 @@
+From 7d192ebcdec9fb3a534b299ef73398d587fe1ebe Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Thu, 27 Aug 2026 21:21:53 -0700
+Subject: [PATCH] feat: Add tool to set relay status and rework return value for getting relays' status
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/go.mod b/go.mod
+index 4f321169f3086710a2fdbb3c7c9a97c59d0982f9..f20762e2aa052f010875586281d2fadf305de8b0 100644
+--- a/go.mod
++++ b/go.mod
+@@ -4,7 +4,6 @@ go 1.26.4
+ 
+ require (
+ 	github.com/modelcontextprotocol/go-sdk v1.7.0
+-	go.yaml.in/yaml/v4 v4.0.0-rc.6
+ 	rafaelmartins.com/p/usbhid v0.0.0-20260811025057-543484740bef
+ )
+ 
+diff --git a/go.sum b/go.sum
+index e45edda29fc4501fb6f31b264089301f415406b7..d8a83325d1aa9122c2ba3133822ae305260c0a99 100644
+--- a/go.sum
++++ b/go.sum
+@@ -14,8 +14,6 @@ github.com/segmentio/encoding v0.5.4 h1:OW1VRern8Nw6ITAtwSZ7Idrl3MXCFwXHPgqESYfvNt0=
+ github.com/segmentio/encoding v0.5.4/go.mod h1:HS1ZKa3kSN32ZHVZ7ZLPLXWvOVIiZtyJnO1gPH1sKt0=
+ github.com/yosida95/uritemplate/v3 v3.0.2 h1:Ed3Oyj9yrmi9087+NczuL5BwkIc4wvTb5zIM+UJPGz4=
+ github.com/yosida95/uritemplate/v3 v3.0.2/go.mod h1:ILOh0sOhIJR3+L/8afwt/kE++YT040gmv5BQTMR2HP4=
+-go.yaml.in/yaml/v4 v4.0.0-rc.6 h1:1h7H1ohdUh93/FyE4YaDa1Zh64K6VVbjF4K6WUxMtH4=
+-go.yaml.in/yaml/v4 v4.0.0-rc.6/go.mod h1:aZqd9kCMsGL7AuUv/m/PvWLdg5sjJsZ4oHDEnfPPfY0=
+ golang.org/x/oauth2 v0.35.0 h1:Mv2mzuHuZuY2+bkyWXIHMfhNdJAdwW3FuWeCPYN5GVQ=
+ golang.org/x/oauth2 v0.35.0/go.mod h1:lzm5WQJQwKZ3nwavOZ3IS5Aulzxi68dUSgRHujetwEA=
+ golang.org/x/sync v0.20.0 h1:e0PTpb7pjO8GAtTs2dQ6jYa5BWYlMuX047Dco/pItO4=
+diff --git a/main.go b/main.go
+index 644db5ded3822bacc27ecca9f6945eec1387dbe1..75301a9e517649373bd0c70bb14b37d3abe2eebe 100644
+--- a/main.go
++++ b/main.go
+@@ -27,7 +27,8 @@ 		},
+ 		nil,
+ 	)
+ 	mcp.AddTool(server, relay.GetConnectedBoardsTool, service.GetConnectedBoards)
+-	mcp.AddTool(server, relay.GetBoardStatusTool, service.GetBoardStatus)
++	mcp.AddTool(server, relay.GetRelaysStatusTool, service.GetRelaysStatus)
++	mcp.AddTool(server, relay.SetRelaysStatusTool, service.SetRelaysStatus)
+ 
+ 	log.Println("Listening on", *laddr)
+ 
+diff --git a/pkg/relay/get_board_status.go b/pkg/relay/get_board_status.go
+deleted file mode 100644
+index 225a6c2ac3d9298510d341d64d760e04ae89f90a..0000000000000000000000000000000000000000
+--- a/pkg/relay/get_board_status.go
++++ /dev/null
+@@ -1,63 +0,0 @@
+-package relay
+-
+-import (
+-	"context"
+-	"errors"
+-
+-	"github.com/modelcontextprotocol/go-sdk/mcp"
+-	"rafaelmartins.com/p/usbhid"
+-)
+-
+-var (
+-	GetBoardStatusTool = &mcp.Tool{
+-		Name:        "getBoardStatus",
+-		Title:       "Get a board's status",
+-		Description: "Get the status for a board",
+-	}
+-
+-	ErrCouldNotFindBoard    = errors.New("could not find board")
+-	ErrInvalidFeatureReport = errors.New("invalid feature repo")
+-)
+-
+-type GetBoardStatusInput struct {
+-	Path string `json:"path" jsonschema:"path that uniquely identifies the relay board until it gets unplugged"`
+-}
+-
+-type GetBoardStatusOutput struct {
+-	RelayOn1 bool `json:"relayOn1" jsonschema:"whether relay 1 is on"`
+-	RelayOn2 bool `json:"relayOn2" jsonschema:"whether relay 2 is on"`
+-	RelayOn3 bool `json:"relayOn3" jsonschema:"whether relay 3 is on"`
+-	RelayOn4 bool `json:"relayOn4" jsonschema:"whether relay 4 is on"`
+-}
+-
+-func relayOn(state byte, n uint) bool {
+-	return state&(1<<(n-1)) != 0
+-}
+-
+-func (s *Service) GetBoardStatus(ctx context.Context, req *mcp.CallToolRequest, input GetBoardStatusInput) (*mcp.CallToolResult, *GetBoardStatusOutput, error) {
+-	device, err := usbhid.Get(func(d *usbhid.Device) bool {
+-		return isBoardRelay(d) && d.Path() == input.Path
+-	}, true, false)
+-	if err != nil {
+-		return nil, nil, errors.Join(ErrCouldNotFindBoard, err)
+-	}
+-	defer device.Close()
+-
+-	report, err := device.GetFeatureReport(0)
+-	if err != nil {
+-		return nil, nil, err
+-	}
+-
+-	if len(report) == 0 {
+-		return nil, nil, ErrInvalidFeatureReport
+-	}
+-
+-	state := report[len(report)-1] // Last byte of the report is the bitmask
+-
+-	return nil, &GetBoardStatusOutput{
+-		RelayOn1: relayOn(state, 1),
+-		RelayOn2: relayOn(state, 2),
+-		RelayOn3: relayOn(state, 3),
+-		RelayOn4: relayOn(state, 4),
+-	}, nil
+-}
+diff --git a/pkg/relay/get_relays_status.go b/pkg/relay/get_relays_status.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..1f76dbc38dc75cc23b880e4838f8e3260d3d8822
+--- /dev/null
++++ b/pkg/relay/get_relays_status.go
+@@ -0,0 +1,69 @@
++package relay
++
++import (
++	"context"
++	"errors"
++
++	"github.com/modelcontextprotocol/go-sdk/mcp"
++	"rafaelmartins.com/p/usbhid"
++)
++
++var (
++	GetRelaysStatusTool = &mcp.Tool{
++		Name:        "getRelaysStatus",
++		Title:       "Get relays' status",
++		Description: "Get the status for a board's relays",
++	}
++
++	ErrCouldNotFindBoard    = errors.New("could not find board")
++	ErrInvalidFeatureReport = errors.New("invalid feature repo")
++)
++
++type GetRelaysStatusInput struct {
++	Path string `json:"path" jsonschema:"path that uniquely identifies the relay board until it gets unplugged"`
++}
++
++type GetRelaysStatusOutput struct {
++	Relays []RelayStatus `json:"relays" jsonschema:"status of each relay"`
++}
++
++func relayOn(state byte, n uint) bool {
++	return state&(1<<(n-1)) != 0
++}
++
++func getRelaysState(d *usbhid.Device) (byte, error) {
++	report, err := d.GetFeatureReport(0)
++	if err != nil {
++		return 0, err
++	}
++
++	if len(report) == 0 {
++		return 0, ErrInvalidFeatureReport
++	}
++
++	return report[len(report)-1], nil // Last byte of the report is the bitmask
++}
++
++func (s *Service) GetRelaysStatus(ctx context.Context, req *mcp.CallToolRequest, input GetRelaysStatusInput) (*mcp.CallToolResult, *GetRelaysStatusOutput, error) {
++	device, err := usbhid.Get(func(d *usbhid.Device) bool {
++		return isBoardRelay(d) && d.Path() == input.Path
++	}, true, false)
++	if err != nil {
++		return nil, nil, errors.Join(ErrCouldNotFindBoard, err)
++	}
++	defer device.Close()
++
++	state, err := getRelaysState(device)
++	if err != nil {
++		return nil, nil, err
++	}
++
++	return nil, &GetRelaysStatusOutput{
++		Relays: []RelayStatus{
++			{Relay: 1, On: relayOn(state, 1)},
++			{Relay: 2, On: relayOn(state, 2)},
++			{Relay: 3, On: relayOn(state, 3)},
++			{Relay: 4, On: relayOn(state, 4)},
++		},
++	}, nil
++}
+diff --git a/pkg/relay/set_relays_status.go b/pkg/relay/set_relays_status.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..b74fd389c31c45f1a1b20ce82fd8772391706568
+--- /dev/null
++++ b/pkg/relay/set_relays_status.go
+@@ -0,0 +1,77 @@
++package relay
++
++import (
++	"context"
++	"errors"
++
++	"github.com/modelcontextprotocol/go-sdk/mcp"
++	"rafaelmartins.com/p/usbhid"
++)
++
++type relayCommand byte
++
++const (
++	relayCommandOn  relayCommand = 0xFF
++	relayCommandOff relayCommand = 0xFD
++)
++
++var (
++	SetRelaysStatusTool = &mcp.Tool{
++		Name:        "setRelaysStatus",
++		Title:       "Set relays' status",
++		Description: "Turn relays on a board on or off",
++	}
++
++	ErrInvalidRelay = errors.New("invalid relay")
++)
++
++type RelayStatus struct {
++	Relay uint `json:"relay" jsonschema:"relay number (1-4)"`
++	On    bool `json:"on" jsonschema:"whether to turn the relay on or off"`
++}
++
++type SetRelaysStatusInput struct {
++	Path   string        `json:"path" jsonschema:"path that uniquely identifies the relay board until it gets unplugged"`
++	Relays []RelayStatus `json:"relays" jsonschema:"relays to turn on or off"`
++}
++
++func (s *Service) SetRelaysStatus(ctx context.Context, req *mcp.CallToolRequest, input SetRelaysStatusInput) (*mcp.CallToolResult, *GetRelaysStatusOutput, error) {
++	device, err := usbhid.Get(func(d *usbhid.Device) bool {
++		return isBoardRelay(d) && d.Path() == input.Path
++	}, true, false)
++	if err != nil {
++		return nil, nil, errors.Join(ErrCouldNotFindBoard, err)
++	}
++	defer device.Close()
++
++	// TODO: Wait until all relays we want to change don't have a lock on them
++	for _, relay := range input.Relays {
++		if relay.Relay < 1 || relay.Relay > 4 {
++			return nil, nil, ErrInvalidRelay
++		}
++
++		command := relayCommandOff
++		if relay.On {
++			command = relayCommandOn
++		}
++
++		// TODO: Add a lock to each relay and auto-expire a lock after being "on" after 5s max so that the solenoids don't start melting the rod
++		if err := device.SetFeatureReport(byte(command), []byte{byte(relay.Relay)}); err != nil {
++			return nil, nil, err
++		}
++	}
++
++	state, err := getRelaysState(device)
++	if err != nil {
++		return nil, nil, err
++	}
++
++	return nil, &GetRelaysStatusOutput{
++		Relays: []RelayStatus{
++			{Relay: 1, On: relayOn(state, 1)},
++			{Relay: 2, On: relayOn(state, 2)},
++			{Relay: 3, On: relayOn(state, 3)},
++			{Relay: 4, On: relayOn(state, 4)},
++		},
++	}, nil
++}
+
