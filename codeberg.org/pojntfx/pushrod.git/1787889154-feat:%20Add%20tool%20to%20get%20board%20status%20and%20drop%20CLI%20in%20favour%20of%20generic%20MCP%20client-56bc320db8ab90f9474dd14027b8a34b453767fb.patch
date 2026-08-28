@@ -1,0 +1,291 @@
+From 56bc320db8ab90f9474dd14027b8a34b453767fb Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Thu, 27 Aug 2026 20:52:34 -0700
+Subject: [PATCH] feat: Add tool to get board status and drop CLI in favour of generic MCP client
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/README.md b/README.md
+index a329e4565e2e89e970173242e8aaec3ce91048e1..20942aaebb5bcac615efdf29422e35d84f92cfb5 100644
+--- a/README.md
++++ b/README.md
+@@ -30,6 +30,7 @@ ```shell
+ $ git clone https://codeberg.org/pojntfx/pushrod
+ $ cd pushrod
+ $ go run -exec sudo . # We need root to access the raw USB devices
++$ npx @modelcontextprotocol/inspector --web # Connect via streamable HTTP at localhost:1337
+ ```
+ 
+ ## License
+diff --git a/cmd/pushrodctl/main.go b/cmd/pushrodctl/main.go
+deleted file mode 100644
+index 86e11e6dfef11607d5c9a62c1476f20224325b79..0000000000000000000000000000000000000000
+--- a/cmd/pushrodctl/main.go
++++ /dev/null
+@@ -1,51 +0,0 @@
+-package main
+-
+-import (
+-	"context"
+-	"flag"
+-	"log"
+-	"os"
+-
+-	"codeberg.org/pojntfx/pushrod/pkg/relay"
+-	"github.com/modelcontextprotocol/go-sdk/mcp"
+-	"go.yaml.in/yaml/v4"
+-)
+-
+-func main() {
+-	rurl := flag.String("rurl", "http://localhost:1337", "Remote URL")
+-
+-	flag.Parse()
+-
+-	ctx, cancel := context.WithCancel(context.Background())
+-	defer cancel()
+-
+-	client := mcp.NewClient(
+-		&mcp.Implementation{},
+-		nil,
+-	)
+-
+-	session, err := client.Connect(
+-		ctx,
+-		&mcp.StreamableClientTransport{
+-			Endpoint: *rurl,
+-		},
+-		nil,
+-	)
+-	if err != nil {
+-		panic(err)
+-	}
+-	defer session.Close()
+-
+-	log.Println("Connected to", *rurl, "with session", session.ID())
+-
+-	res, err := session.CallTool(ctx, &mcp.CallToolParams{
+-		Name: relay.GetConnectedBoardsTool.Name,
+-	})
+-	if err != nil {
+-		panic(err)
+-	}
+-
+-	if err := yaml.NewEncoder(os.Stdout).Encode(res); err != nil {
+-		panic(err)
+-	}
+-}
+diff --git a/main.go b/main.go
+index 19f84c48b0c90d28a3c3f2edfdfef586b6088550..644db5ded3822bacc27ecca9f6945eec1387dbe1 100644
+--- a/main.go
++++ b/main.go
+@@ -14,6 +14,8 @@ 	laddr := flag.String("laddr", ":1337", "Listen address")
+ 
+ 	flag.Parse()
+ 
++	service := relay.NewService()
++
+ 	server := mcp.NewServer(
+ 		&mcp.Implementation{
+ 			Name:        "pushrod",
+@@ -24,7 +26,8 @@ 			WebsiteURL:  "https://codeberg.org/pojntfx/pushrod",
+ 		},
+ 		nil,
+ 	)
+-	mcp.AddTool(server, relay.GetConnectedBoardsTool, relay.GetConnectedBoards)
++	mcp.AddTool(server, relay.GetConnectedBoardsTool, service.GetConnectedBoards)
++	mcp.AddTool(server, relay.GetBoardStatusTool, service.GetBoardStatus)
+ 
+ 	log.Println("Listening on", *laddr)
+ 
+diff --git a/pkg/relay/constants.go b/pkg/relay/root.go
+rename from pkg/relay/constants.go
+rename to pkg/relay/root.go
+index 77bbc113fec9aa1e99e945b3df5fe6a6de1505a9..89a3e1ca00c62d72624f5e337534ec02650aa07a 100644
+--- a/pkg/relay/constants.go
++++ b/pkg/relay/root.go
+@@ -6,3 +6,9 @@ 	// and https://opentracelab.github.io/website/hardware/multiplexer/dcttech-usbrelay/
+ 	USB_RELAY_4_VENDOR_ID  = 0x16c0
+ 	USB_RELAY_4_PRODUCT_ID = 0x05df
+ )
++
++type Service struct{}
++
++func NewService() *Service {
++	return &Service{}
++}
+diff --git a/pkg/relay/get_board_status.go b/pkg/relay/get_board_status.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..225a6c2ac3d9298510d341d64d760e04ae89f90a
+--- /dev/null
++++ b/pkg/relay/get_board_status.go
+@@ -0,0 +1,63 @@
++package relay
++
++import (
++	"context"
++	"errors"
++
++	"github.com/modelcontextprotocol/go-sdk/mcp"
++	"rafaelmartins.com/p/usbhid"
++)
++
++var (
++	GetBoardStatusTool = &mcp.Tool{
++		Name:        "getBoardStatus",
++		Title:       "Get a board's status",
++		Description: "Get the status for a board",
++	}
++
++	ErrCouldNotFindBoard    = errors.New("could not find board")
++	ErrInvalidFeatureReport = errors.New("invalid feature repo")
++)
++
++type GetBoardStatusInput struct {
++	Path string `json:"path" jsonschema:"path that uniquely identifies the relay board until it gets unplugged"`
++}
++
++type GetBoardStatusOutput struct {
++	RelayOn1 bool `json:"relayOn1" jsonschema:"whether relay 1 is on"`
++	RelayOn2 bool `json:"relayOn2" jsonschema:"whether relay 2 is on"`
++	RelayOn3 bool `json:"relayOn3" jsonschema:"whether relay 3 is on"`
++	RelayOn4 bool `json:"relayOn4" jsonschema:"whether relay 4 is on"`
++}
++
++func relayOn(state byte, n uint) bool {
++	return state&(1<<(n-1)) != 0
++}
++
++func (s *Service) GetBoardStatus(ctx context.Context, req *mcp.CallToolRequest, input GetBoardStatusInput) (*mcp.CallToolResult, *GetBoardStatusOutput, error) {
++	device, err := usbhid.Get(func(d *usbhid.Device) bool {
++		return isBoardRelay(d) && d.Path() == input.Path
++	}, true, false)
++	if err != nil {
++		return nil, nil, errors.Join(ErrCouldNotFindBoard, err)
++	}
++	defer device.Close()
++
++	report, err := device.GetFeatureReport(0)
++	if err != nil {
++		return nil, nil, err
++	}
++
++	if len(report) == 0 {
++		return nil, nil, ErrInvalidFeatureReport
++	}
++
++	state := report[len(report)-1] // Last byte of the report is the bitmask
++
++	return nil, &GetBoardStatusOutput{
++		RelayOn1: relayOn(state, 1),
++		RelayOn2: relayOn(state, 2),
++		RelayOn3: relayOn(state, 3),
++		RelayOn4: relayOn(state, 4),
++	}, nil
++}
+diff --git a/pkg/relay/get_connected_boards.go b/pkg/relay/get_connected_boards.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..569dc02e56f92b3f42edaac51bb9aa0c3c02a388
+--- /dev/null
++++ b/pkg/relay/get_connected_boards.go
+@@ -0,0 +1,48 @@
++package relay
++
++import (
++	"context"
++
++	"github.com/modelcontextprotocol/go-sdk/mcp"
++	"rafaelmartins.com/p/usbhid"
++)
++
++var (
++	GetConnectedBoardsTool = &mcp.Tool{
++		Name:        "getConnectedBoards",
++		Title:       "Get connected boards",
++		Description: "Get all currently connected boards",
++	}
++)
++
++type Board struct {
++	Path    string `json:"path" jsonschema:"path that uniquely identifies the relay board until it gets unplugged"`
++	IsInUse bool   `json:"isInUse" jsonschema:"whether the relay board is currently in use or not"`
++}
++
++type GetConnectedBoardsOutput struct {
++	Boards []Board `json:"devices" jsonschema:"connected boards"`
++}
++
++func isBoardRelay(d *usbhid.Device) bool {
++	return d.VendorId() == USB_RELAY_4_VENDOR_ID && d.ProductId() == USB_RELAY_4_PRODUCT_ID
++}
++
++func (s *Service) GetConnectedBoards(ctx context.Context, req *mcp.CallToolRequest, input struct{}) (*mcp.CallToolResult, *GetConnectedBoardsOutput, error) {
++	devices, err := usbhid.Enumerate(isBoardRelay)
++	if err != nil {
++		return nil, nil, err
++	}
++
++	boards := make([]Board, len(devices))
++	for i, device := range devices {
++		boards[i] = Board{
++			Path:    device.Path(),
++			IsInUse: device.IsOpen(),
++		}
++	}
++
++	return nil, &GetConnectedBoardsOutput{
++		Boards: boards,
++	}, nil
++}
+diff --git a/pkg/relay/server.go b/pkg/relay/server.go
+deleted file mode 100644
+index b87644fcd38134a20313eb695152bd1dadf68752..0000000000000000000000000000000000000000
+--- a/pkg/relay/server.go
++++ /dev/null
+@@ -1,46 +0,0 @@
+-package relay
+-
+-import (
+-	"context"
+-
+-	"github.com/modelcontextprotocol/go-sdk/mcp"
+-	"rafaelmartins.com/p/usbhid"
+-)
+-
+-type Board struct {
+-	Path    string `json:"path" jsonschema:"path that uniquely identifies the board until it gets unplugged"`
+-	IsInUse bool   `json:"isInUse" jsonschema:"whether the board is currently in use or not"`
+-}
+-
+-type Output struct {
+-	Boards []Board `json:"devices" jsonschema:"connected boards"`
+-}
+-
+-var (
+-	GetConnectedBoardsTool = &mcp.Tool{
+-		Name:        "getConnectedBoards",
+-		Title:       "Get connected boards",
+-		Description: "Get all currently connected boards",
+-	}
+-)
+-
+-func GetConnectedBoards(ctx context.Context, req *mcp.CallToolRequest, input struct{}) (*mcp.CallToolResult, *Output, error) {
+-	devices, err := usbhid.Enumerate(func(d *usbhid.Device) bool {
+-		return d.VendorId() == USB_RELAY_4_VENDOR_ID && d.ProductId() == USB_RELAY_4_PRODUCT_ID
+-	})
+-	if err != nil {
+-		return nil, nil, err
+-	}
+-
+-	boards := make([]Board, len(devices))
+-	for i, device := range devices {
+-		boards[i] = Board{
+-			Path:    device.Path(),
+-			IsInUse: device.IsOpen(),
+-		}
+-	}
+-
+-	return nil, &Output{
+-		Boards: boards,
+-	}, nil
+-}
+
