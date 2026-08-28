@@ -1,0 +1,263 @@
+From e9211808c9c9efb050318491d3d9039009c40a5e Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Thu, 27 Aug 2026 19:47:33 -0700
+Subject: [PATCH] feat: Add initial MCP server to list connected relay boards
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/README.md b/README.md
+index 32b4afb5ddf020230f8f0b0839f2545ff1ec9861..a329e4565e2e89e970173242e8aaec3ce91048e1 100644
+--- a/README.md
++++ b/README.md
+@@ -9,8 +9,8 @@
+ It contains:
+ 
+ - FreeCAD models and ready-to-3D-print `.3mf` files for a solenoid-based non-destructive physical finger to reset the board and put it into flash mode without having to press the buttons yourself, plus a case for the required USB relay board
+-- CLIs and daemons to programmatically:
+-  - Trigger the solenoids with via a USB relay board with, with inbuilt rate limits for the relays to prevent them from overheating the solenoids
++- MCP servers to programmatically:
++  - Trigger the solenoids with via a [generic "dcttech.com USBRelay" relay board](https://opentracelab.github.io/website/hardware/multiplexer/dcttech-usbrelay/) with inbuilt rate limits for the relays to prevent them from overheating the solenoids
+   - Capture video output and provide emulated mouse/keyboard input via a [NanoKVM-USB](https://github.com/sipeed/NanoKVM-USB)
+   - Get early logs/a serial console from the board via UART, and to debug it via JTAG
+ - A clean Go reimplementation of the SpacemiT [Titanflasher/flashserver](https://www.spacemit.com/community/document/info?lang=en&nodepath=tools/user_guide/flasher_user_guide.md) to flash U-Boot, EDK2, or an entire OS onto the board
+@@ -29,7 +29,7 @@
+ ```shell
+ $ git clone https://codeberg.org/pojntfx/pushrod
+ $ cd pushrod
+-$ xdg-open .
++$ go run -exec sudo . # We need root to access the raw USB devices
+ ```
+ 
+ ## License
+diff --git a/cmd/pushrodctl/main.go b/cmd/pushrodctl/main.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..86e11e6dfef11607d5c9a62c1476f20224325b79
+--- /dev/null
++++ b/cmd/pushrodctl/main.go
+@@ -0,0 +1,51 @@
++package main
++
++import (
++	"context"
++	"flag"
++	"log"
++	"os"
++
++	"codeberg.org/pojntfx/pushrod/pkg/relay"
++	"github.com/modelcontextprotocol/go-sdk/mcp"
++	"go.yaml.in/yaml/v4"
++)
++
++func main() {
++	rurl := flag.String("rurl", "http://localhost:1337", "Remote URL")
++
++	flag.Parse()
++
++	ctx, cancel := context.WithCancel(context.Background())
++	defer cancel()
++
++	client := mcp.NewClient(
++		&mcp.Implementation{},
++		nil,
++	)
++
++	session, err := client.Connect(
++		ctx,
++		&mcp.StreamableClientTransport{
++			Endpoint: *rurl,
++		},
++		nil,
++	)
++	if err != nil {
++		panic(err)
++	}
++	defer session.Close()
++
++	log.Println("Connected to", *rurl, "with session", session.ID())
++
++	res, err := session.CallTool(ctx, &mcp.CallToolParams{
++		Name: relay.GetConnectedBoardsTool.Name,
++	})
++	if err != nil {
++		panic(err)
++	}
++
++	if err := yaml.NewEncoder(os.Stdout).Encode(res); err != nil {
++		panic(err)
++	}
++}
+diff --git a/go.mod b/go.mod
+new file mode 100644
+index 0000000000000000000000000000000000000000..4f321169f3086710a2fdbb3c7c9a97c59d0982f9
+--- /dev/null
++++ b/go.mod
+@@ -0,0 +1,21 @@
++module codeberg.org/pojntfx/pushrod
++
++go 1.26.4
++
++require (
++	github.com/modelcontextprotocol/go-sdk v1.7.0
++	go.yaml.in/yaml/v4 v4.0.0-rc.6
++	rafaelmartins.com/p/usbhid v0.0.0-20260811025057-543484740bef
++)
++
++require (
++	github.com/ebitengine/purego v0.9.1 // indirect
++	github.com/google/jsonschema-go v0.4.3 // indirect
++	github.com/segmentio/asm v1.1.3 // indirect
++	github.com/segmentio/encoding v0.5.4 // indirect
++	github.com/yosida95/uritemplate/v3 v3.0.2 // indirect
++	golang.org/x/oauth2 v0.35.0 // indirect
++	golang.org/x/sync v0.20.0 // indirect
++	golang.org/x/sys v0.41.0 // indirect
++	golang.org/x/time v0.15.0 // indirect
++)
+diff --git a/go.sum b/go.sum
+new file mode 100644
+index 0000000000000000000000000000000000000000..e45edda29fc4501fb6f31b264089301f415406b7
+--- /dev/null
++++ b/go.sum
+@@ -0,0 +1,30 @@
++github.com/ebitengine/purego v0.9.1 h1:a/k2f2HQU3Pi399RPW1MOaZyhKJL9w/xFpKAg4q1s0A=
++github.com/ebitengine/purego v0.9.1/go.mod h1:iIjxzd6CiRiOG0UyXP+V1+jWqUXVjPKLAI0mRfJZTmQ=
++github.com/golang-jwt/jwt/v5 v5.3.1 h1:kYf81DTWFe7t+1VvL7eS+jKFVWaUnK9cB1qbwn63YCY=
++github.com/golang-jwt/jwt/v5 v5.3.1/go.mod h1:fxCRLWMO43lRc8nhHWY6LGqRcf+1gQWArsqaEUEa5bE=
++github.com/google/go-cmp v0.7.0 h1:wk8382ETsv4JYUZwIsn6YpYiWiBsYLSJiTsyBybVuN8=
++github.com/google/go-cmp v0.7.0/go.mod h1:pXiqmnSA92OHEEa9HXL2W4E7lf9JzCmGVUdgjX3N/iU=
++github.com/google/jsonschema-go v0.4.3 h1:/DBOLZTfDow7pe2GmaJNhltueGTtDKICi8V8p+DQPd0=
++github.com/google/jsonschema-go v0.4.3/go.mod h1:r5quNTdLOYEz95Ru18zA0ydNbBuYoo9tgaYcxEYhJVE=
++github.com/modelcontextprotocol/go-sdk v1.7.0 h1:yqjY2dsbKAC0LSuWZVBMrHgiG8ukXv6NRo0JiALay44=
++github.com/modelcontextprotocol/go-sdk v1.7.0/go.mod h1:dL7u98E/zjJTGzEq+j30jQ8K2k1mb6LeAH4inEcSGts=
++github.com/segmentio/asm v1.1.3 h1:WM03sfUOENvvKexOLp+pCqgb/WDjsi7EK8gIsICtzhc=
++github.com/segmentio/asm v1.1.3/go.mod h1:Ld3L4ZXGNcSLRg4JBsZ3//1+f/TjYl0Mzen/DQy1EJg=
++github.com/segmentio/encoding v0.5.4 h1:OW1VRern8Nw6ITAtwSZ7Idrl3MXCFwXHPgqESYfvNt0=
++github.com/segmentio/encoding v0.5.4/go.mod h1:HS1ZKa3kSN32ZHVZ7ZLPLXWvOVIiZtyJnO1gPH1sKt0=
++github.com/yosida95/uritemplate/v3 v3.0.2 h1:Ed3Oyj9yrmi9087+NczuL5BwkIc4wvTb5zIM+UJPGz4=
++github.com/yosida95/uritemplate/v3 v3.0.2/go.mod h1:ILOh0sOhIJR3+L/8afwt/kE++YT040gmv5BQTMR2HP4=
++go.yaml.in/yaml/v4 v4.0.0-rc.6 h1:1h7H1ohdUh93/FyE4YaDa1Zh64K6VVbjF4K6WUxMtH4=
++go.yaml.in/yaml/v4 v4.0.0-rc.6/go.mod h1:aZqd9kCMsGL7AuUv/m/PvWLdg5sjJsZ4oHDEnfPPfY0=
++golang.org/x/oauth2 v0.35.0 h1:Mv2mzuHuZuY2+bkyWXIHMfhNdJAdwW3FuWeCPYN5GVQ=
++golang.org/x/oauth2 v0.35.0/go.mod h1:lzm5WQJQwKZ3nwavOZ3IS5Aulzxi68dUSgRHujetwEA=
++golang.org/x/sync v0.20.0 h1:e0PTpb7pjO8GAtTs2dQ6jYa5BWYlMuX047Dco/pItO4=
++golang.org/x/sync v0.20.0/go.mod h1:9xrNwdLfx4jkKbNva9FpL6vEN7evnE43NNNJQ2LF3+0=
++golang.org/x/sys v0.41.0 h1:Ivj+2Cp/ylzLiEU89QhWblYnOE9zerudt9Ftecq2C6k=
++golang.org/x/sys v0.41.0/go.mod h1:OgkHotnGiDImocRcuBABYBEXf8A9a87e/uXjp9XT3ks=
++golang.org/x/time v0.15.0 h1:bbrp8t3bGUeFOx08pvsMYRTCVSMk89u4tKbNOZbp88U=
++golang.org/x/time v0.15.0/go.mod h1:Y4YMaQmXwGQZoFaVFk4YpCt4FLQMYKZe9oeV/f4MSno=
++golang.org/x/tools v0.42.0 h1:uNgphsn75Tdz5Ji2q36v/nsFSfR/9BRFvqhGBaJGd5k=
++golang.org/x/tools v0.42.0/go.mod h1:Ma6lCIwGZvHK6XtgbswSoWroEkhugApmsXyrUmBhfr0=
++rafaelmartins.com/p/usbhid v0.0.0-20260811025057-543484740bef h1:R1IycbWCVegqAyyMyO7/bRKQjYi0aTvFX1kayxwWYko=
++rafaelmartins.com/p/usbhid v0.0.0-20260811025057-543484740bef/go.mod h1:Rta/iJgy+IuDjpHCBFwHKTNDfHI2i2z7HfO/re/sOV8=
+diff --git a/main.go b/main.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..19f84c48b0c90d28a3c3f2edfdfef586b6088550
+--- /dev/null
++++ b/main.go
+@@ -0,0 +1,41 @@
++package main
++
++import (
++	"flag"
++	"log"
++	"net/http"
++
++	"codeberg.org/pojntfx/pushrod/pkg/relay"
++	"github.com/modelcontextprotocol/go-sdk/mcp"
++)
++
++func main() {
++	laddr := flag.String("laddr", ":1337", "Listen address")
++
++	flag.Parse()
++
++	server := mcp.NewServer(
++		&mcp.Implementation{
++			Name:        "pushrod",
++			Title:       "Pushrod",
++			Description: "Hands-off hardware enablement for SpacemiT K3-based systems.",
++			Version:     "1.0.0",
++			WebsiteURL:  "https://codeberg.org/pojntfx/pushrod",
++		},
++		nil,
++	)
++	mcp.AddTool(server, relay.GetConnectedBoardsTool, relay.GetConnectedBoards)
++
++	log.Println("Listening on", *laddr)
++
++	// TODO: Run defer handlers in server (ctx listener) to release any open relays and make sure to power them all off
++
++	panic(
++		http.ListenAndServe(
++			*laddr,
++			mcp.NewStreamableHTTPHandler(func(r *http.Request) *mcp.Server {
++				return server
++			}, nil),
++		),
++	)
++}
+diff --git a/pkg/relay/constants.go b/pkg/relay/constants.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..77bbc113fec9aa1e99e945b3df5fe6a6de1505a9
+--- /dev/null
++++ b/pkg/relay/constants.go
+@@ -0,0 +1,8 @@
++package relay
++
++const (
++	// See https://the-sz.com/products/usbid/index.php?v=0x16c0&p=0x05df&n=
++	// and https://opentracelab.github.io/website/hardware/multiplexer/dcttech-usbrelay/
++	USB_RELAY_4_VENDOR_ID  = 0x16c0
++	USB_RELAY_4_PRODUCT_ID = 0x05df
++)
+diff --git a/pkg/relay/server.go b/pkg/relay/server.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..6671d9eead38a4adec8effb0d05c8a1d63502683
+--- /dev/null
++++ b/pkg/relay/server.go
+@@ -0,0 +1,44 @@
++package relay
++
++import (
++	"context"
++
++	"github.com/modelcontextprotocol/go-sdk/mcp"
++	"rafaelmartins.com/p/usbhid"
++)
++
++type Board struct {
++	Path    string `json:"path" jsonschema:"path that uniquely identifies the board until it gets unplugged"`
++	IsInUse bool   `json:"isInUse" jsonschema:"whether the board is currently in use or not"`
++}
++
++type Output struct {
++	Boards []Board `json:"devices" jsonschema:"connected boards"`
++}
++
++var (
++	GetConnectedBoardsTool = &mcp.Tool{
++		Name:        "getConnectedBoards",
++		Title:       "Get connected boards",
++		Description: "Get all currently connected boards",
++	}
++)
++
++func GetConnectedBoards(ctx context.Context, req *mcp.CallToolRequest, input struct{}) (*mcp.CallToolResult, []Board, error) {
++	devices, err := usbhid.Enumerate(func(d *usbhid.Device) bool {
++		return d.VendorId() == USB_RELAY_4_VENDOR_ID && d.ProductId() == USB_RELAY_4_PRODUCT_ID
++	})
++	if err != nil {
++		return nil, []Board{}, err
++	}
++
++	boards := make([]Board, len(devices))
++	for i, device := range devices {
++		boards[i] = Board{
++			Path:    device.Path(),
++			IsInUse: device.IsOpen(),
++		}
++	}
++
++	return nil, boards, nil
++}
+
