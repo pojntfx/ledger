@@ -1,0 +1,153 @@
+From 4e84e3bf098b58844ecefe81e93ad1ea800b01a5 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Fri, 28 Aug 2026 18:19:58 -0700
+Subject: [PATCH] feat: Add graceful shutdown support and support for background cancellation
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/main.go b/main.go
+index 75301a9e517649373bd0c70bb14b37d3abe2eebe..bf86decf1dea68dac8e1913c29113530b38ca9d5 100644
+--- a/main.go
++++ b/main.go
+@@ -1,9 +1,16 @@
+ package main
+ 
+ import (
++	"context"
++	"errors"
+ 	"flag"
+ 	"log"
++	"net"
+ 	"net/http"
++	"os"
++	"os/signal"
++	"syscall"
++	"time"
+ 
+ 	"codeberg.org/pojntfx/pushrod/pkg/relay"
+ 	"github.com/modelcontextprotocol/go-sdk/mcp"
+@@ -14,9 +21,12 @@ 	laddr := flag.String("laddr", ":1337", "Listen address")
+ 
+ 	flag.Parse()
+ 
+-	service := relay.NewService()
++	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
++	defer cancel()
++
++	service := relay.NewService(ctx, time.Second*10)
+ 
+-	server := mcp.NewServer(
++	handler := mcp.NewServer(
+ 		&mcp.Implementation{
+ 			Name:        "pushrod",
+ 			Title:       "Pushrod",
+@@ -26,20 +36,35 @@ 			WebsiteURL:  "https://codeberg.org/pojntfx/pushrod",
+ 		},
+ 		nil,
+ 	)
+-	mcp.AddTool(server, relay.GetConnectedBoardsTool, service.GetConnectedBoards)
+-	mcp.AddTool(server, relay.GetRelaysStatusTool, service.GetRelaysStatus)
+-	mcp.AddTool(server, relay.SetRelaysStatusTool, service.SetRelaysStatus)
++	mcp.AddTool(handler, relay.GetConnectedBoardsTool, service.GetConnectedBoards)
++	mcp.AddTool(handler, relay.GetRelaysStatusTool, service.GetRelaysStatus)
++	mcp.AddTool(handler, relay.SetRelaysStatusTool, service.SetRelaysStatus)
+ 
+ 	log.Println("Listening on", *laddr)
+ 
+-	// TODO: Run defer handlers in server (ctx listener) to release any open relays and make sure to power them all off
++	server := &http.Server{
++		Addr: *laddr,
++		Handler: mcp.NewStreamableHTTPHandler(func(r *http.Request) *mcp.Server {
++			return handler
++		}, nil),
++		BaseContext: func(l net.Listener) context.Context {
++			return ctx
++		},
++	}
+ 
+-	panic(
+-		http.ListenAndServe(
+-			*laddr,
+-			mcp.NewStreamableHTTPHandler(func(r *http.Request) *mcp.Server {
+-				return server
+-			}, nil),
+-		),
+-	)
++	go func() {
++		if err := server.ListenAndServe(); !errors.Is(err, http.ErrServerClosed) && !errors.Is(err, context.DeadlineExceeded) {
++			panic(err)
++		}
++	}()
++
++	<-ctx.Done()
++
++	log.Println("Shutting down gracefully ...")
++
++	if err := server.Shutdown(service.ShutdownContext()); err != nil && !errors.Is(err, context.DeadlineExceeded) {
++		panic(err)
++	}
++
++	service.Wait()
+ }
+diff --git a/pkg/relay/root.go b/pkg/relay/root.go
+index 89a3e1ca00c62d72624f5e337534ec02650aa07a..9cf7a1912db23653babdec02eab8ee410dcddc88 100644
+--- a/pkg/relay/root.go
++++ b/pkg/relay/root.go
+@@ -1,5 +1,11 @@
+ package relay
+ 
++import (
++	"context"
++	"sync"
++	"time"
++)
++
+ const (
+ 	// See https://the-sz.com/products/usbid/index.php?v=0x16c0&p=0x05df&n=
+ 	// and https://opentracelab.github.io/website/hardware/multiplexer/dcttech-usbrelay/
+@@ -7,8 +13,41 @@ 	USB_RELAY_4_VENDOR_ID  = 0x16c0
+ 	USB_RELAY_4_PRODUCT_ID = 0x05df
+ )
+ 
+-type Service struct{}
++type Service struct {
++	baseCtx,
++	shutdownCtx context.Context
++
++	wg *sync.WaitGroup
++}
++
++func NewService(baseCtx context.Context, shutdownTimeout time.Duration) *Service {
++	shutdownCtx, shutdownCancel := context.WithCancel(context.Background())
++
++	go func() {
++		<-baseCtx.Done()
++
++		timer := time.NewTimer(shutdownTimeout)
++		defer timer.Stop()
++
++		select {
++		case <-timer.C:
++			shutdownCancel()
++		case <-shutdownCtx.Done():
++		}
++	}()
+ 
+-func NewService() *Service {
+-	return &Service{}
++	return &Service{
++		baseCtx:     baseCtx,
++		shutdownCtx: shutdownCtx,
++
++		wg: &sync.WaitGroup{},
++	}
++}
++
++func (s *Service) ShutdownContext() context.Context {
++	return s.shutdownCtx
++}
++
++func (s *Service) Wait() {
++	s.wg.Wait()
+ }
+
