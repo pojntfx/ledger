@@ -1,0 +1,82 @@
+From 958ddebbddf1310ae48e9067a24ba4f226feb2d9 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Fri, 28 Aug 2026 19:15:45 -0700
+Subject: [PATCH] feat: Start adding boilerplate for relay setup
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/pkg/relay/root.go b/pkg/relay/root.go
+index 9cf7a1912db23653babdec02eab8ee410dcddc88..8fe9fe506bc2723465a3a8a66f873b1616f88f9d 100644
+--- a/pkg/relay/root.go
++++ b/pkg/relay/root.go
+@@ -13,14 +13,25 @@ 	USB_RELAY_4_VENDOR_ID  = 0x16c0
+ 	USB_RELAY_4_PRODUCT_ID = 0x05df
+ )
+ 
++type relayCycle struct {
++	lock                          *sync.Mutex
++	remainingOnRelayCycleDuration time.Duration
++}
++
+ type Service struct {
+ 	baseCtx,
+ 	shutdownCtx context.Context
+ 
+ 	wg *sync.WaitGroup
++
++	totalRelayCycleDuration,
++	onRelayCycleDuration time.Duration
++
++	relayCyclesLock *sync.Mutex
++	relayCycles     [4]*relayCycle
+ }
+ 
+-func NewService(baseCtx context.Context, shutdownTimeout time.Duration) *Service {
++func NewService(baseCtx context.Context, shutdownTimeout, totalRelayCycleDuration, onRelayCycleDuration time.Duration) *Service {
+ 	shutdownCtx, shutdownCancel := context.WithCancel(context.Background())
+ 
+ 	go func() {
+@@ -36,12 +47,41 @@ 		case <-shutdownCtx.Done():
+ 		}
+ 	}()
+ 
+-	return &Service{
++	svc := &Service{
+ 		baseCtx:     baseCtx,
+ 		shutdownCtx: shutdownCtx,
+ 
+ 		wg: &sync.WaitGroup{},
++
++		totalRelayCycleDuration: totalRelayCycleDuration,
++		onRelayCycleDuration:    onRelayCycleDuration,
++
++		relayCyclesLock: &sync.Mutex{},
++		relayCycles: [4]*relayCycle{
++			{
++				lock:                          &sync.Mutex{},
++				remainingOnRelayCycleDuration: onRelayCycleDuration,
++			},
++			{
++				lock:                          &sync.Mutex{},
++				remainingOnRelayCycleDuration: onRelayCycleDuration,
++			},
++			{
++				lock:                          &sync.Mutex{},
++				remainingOnRelayCycleDuration: onRelayCycleDuration,
++			},
++			{
++				lock:                          &sync.Mutex{},
++				remainingOnRelayCycleDuration: onRelayCycleDuration,
++			},
++		},
+ 	}
++
++	// TODO: Start timer for totalRelayCycleDuration and reset onRelayCycleDuration
++	// At TODO: Wait until all relays ..., start a timer (that gets stopped on the "off" command) which decreases the timer every 0.5s until stop is called, and shuts off the relay if there would be <0s remaining after the next decrease. We might want to use an atomic int instead of a time.Duration
++	// and a lock here?
++
++	return svc
+ }
+ 
+ func (s *Service) ShutdownContext() context.Context {
+
