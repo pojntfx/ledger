@@ -1,0 +1,224 @@
+From 11b916f94b11a70260e09b5a6426f89c999caebd Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Mon, 31 Aug 2026 19:54:29 -0700
+Subject: [PATCH] feat: Connect total cycle length and per-cycle on time status, start exposing it via MCP server
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/main.go b/main.go
+index bf86decf1dea68dac8e1913c29113530b38ca9d5..9be590753364039a9c2754ede4a30cc3455d151f 100644
+--- a/main.go
++++ b/main.go
+@@ -24,7 +24,7 @@
+ 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+ 	defer cancel()
+ 
+-	service := relay.NewService(ctx, time.Second*10)
++	service := relay.NewService(ctx, time.Second*10, time.Minute, time.Second*5)
+ 
+ 	handler := mcp.NewServer(
+ 		&mcp.Implementation{
+diff --git a/pkg/relay/get_connected_boards.go b/pkg/relay/get_connected_boards.go
+index 569dc02e56f92b3f42edaac51bb9aa0c3c02a388..c6ae260e94a6484f55581335bc4a10698d5df9d8 100644
+--- a/pkg/relay/get_connected_boards.go
++++ b/pkg/relay/get_connected_boards.go
+@@ -2,6 +2,7 @@ package relay
+ 
+ import (
+ 	"context"
++	"time"
+ 
+ 	"github.com/modelcontextprotocol/go-sdk/mcp"
+ 	"rafaelmartins.com/p/usbhid"
+@@ -16,8 +17,10 @@ 	}
+ )
+ 
+ type Board struct {
+-	Path    string `json:"path" jsonschema:"path that uniquely identifies the relay board until it gets unplugged"`
+-	IsInUse bool   `json:"isInUse" jsonschema:"whether the relay board is currently in use or not"`
++	Path                    string        `json:"path" jsonschema:"path that uniquely identifies the relay board until it gets unplugged"`
++	IsInUse                 bool          `json:"isInUse" jsonschema:"whether the relay board is currently in use or not"`
++	TotalRelayCycleDuration time.Duration `json:"totalRelayCycleDuration" jsonschema:"cycle duration after which the relay on time resets"`
++	OnRelayCycleDuration    time.Duration `json:"onRelayCycleDuration" jsonschema:"how long a relay can be on during the total cycle"`
+ }
+ 
+ type GetConnectedBoardsOutput struct {
+@@ -37,8 +40,10 @@
+ 	boards := make([]Board, len(devices))
+ 	for i, device := range devices {
+ 		boards[i] = Board{
+-			Path:    device.Path(),
+-			IsInUse: device.IsOpen(),
++			Path:                    device.Path(),
++			IsInUse:                 device.IsOpen(),
++			TotalRelayCycleDuration: s.totalRelayCycleDuration,
++			OnRelayCycleDuration:    s.onRelayCycleDuration,
+ 		}
+ 	}
+ 
+diff --git a/pkg/relay/get_relays_status.go b/pkg/relay/get_relays_status.go
+index 1f76dbc38dc75cc23b880e4838f8e3260d3d8822..d399779ab8f62d31d85b4f850a48add8cd4750e8 100644
+--- a/pkg/relay/get_relays_status.go
++++ b/pkg/relay/get_relays_status.go
+@@ -3,6 +3,7 @@
+ import (
+ 	"context"
+ 	"errors"
++	"time"
+ 
+ 	"github.com/modelcontextprotocol/go-sdk/mcp"
+ 	"rafaelmartins.com/p/usbhid"
+@@ -27,8 +28,13 @@ type GetRelaysStatusOutput struct {
+ 	Relays []RelayStatus `json:"relays" jsonschema:"status of each relay"`
+ }
+ 
+-func relayOn(state byte, n uint) bool {
+-	return state&(1<<(n-1)) != 0
++func (s *Service) relayOn(state byte, n uint) (bool, time.Duration) {
++	relayCycle := s.relayCycles[n]
++
++	relayCycle.lock.Lock()
++	defer relayCycle.lock.Unlock()
++
++	return state&(1<<(n-1)) != 0, relayCycle.remainingOnRelayCycleDuration
+ }
+ 
+ func getRelaysState(d *usbhid.Device) (byte, error) {
+@@ -58,12 +64,18 @@ 	if err != nil {
+ 		return nil, nil, err
+ 	}
+ 
++	relays := make([]RelayStatus, 4)
++	for i, _ := range relays {
++		on, remainingOnRelayCycleDuration := s.relayOn(state, uint(i)) // This is always >0
++
++		relays[i] = RelayStatus{
++			Relay:                         uint(i), // This is always >0
++			On:                            on,
++			RemainingOnRelayCycleDuration: remainingOnRelayCycleDuration,
++		}
++	}
++
+ 	return nil, &GetRelaysStatusOutput{
+-		Relays: []RelayStatus{
+-			{Relay: 1, On: relayOn(state, 1)},
+-			{Relay: 2, On: relayOn(state, 2)},
+-			{Relay: 3, On: relayOn(state, 3)},
+-			{Relay: 4, On: relayOn(state, 4)},
+-		},
++		Relays: relays,
+ 	}, nil
+ }
+diff --git a/pkg/relay/root.go b/pkg/relay/root.go
+index 8fe9fe506bc2723465a3a8a66f873b1616f88f9d..e51720857b4a471ef8503f2d450351332f41a7a2 100644
+--- a/pkg/relay/root.go
++++ b/pkg/relay/root.go
+@@ -27,8 +27,7 @@
+ 	totalRelayCycleDuration,
+ 	onRelayCycleDuration time.Duration
+ 
+-	relayCyclesLock *sync.Mutex
+-	relayCycles     [4]*relayCycle
++	relayCycles [4]*relayCycle
+ }
+ 
+ func NewService(baseCtx context.Context, shutdownTimeout, totalRelayCycleDuration, onRelayCycleDuration time.Duration) *Service {
+@@ -47,7 +46,7 @@ 		case <-shutdownCtx.Done():
+ 		}
+ 	}()
+ 
+-	svc := &Service{
++	s := &Service{
+ 		baseCtx:     baseCtx,
+ 		shutdownCtx: shutdownCtx,
+ 
+@@ -56,7 +55,6 @@
+ 		totalRelayCycleDuration: totalRelayCycleDuration,
+ 		onRelayCycleDuration:    onRelayCycleDuration,
+ 
+-		relayCyclesLock: &sync.Mutex{},
+ 		relayCycles: [4]*relayCycle{
+ 			{
+ 				lock:                          &sync.Mutex{},
+@@ -77,11 +75,34 @@ 			},
+ 		},
+ 	}
+ 
++	go func() {
++		ticker := time.NewTicker(s.totalRelayCycleDuration)
++		defer ticker.Stop()
++
++		for {
++			select {
++			case <-ticker.C:
++				func() {
++					for _, relayCycle := range s.relayCycles {
++						func() {
++							relayCycle.lock.Lock()
++							defer relayCycle.lock.Unlock()
++
++							relayCycle.remainingOnRelayCycleDuration = s.onRelayCycleDuration
++						}()
++					}
++				}()
++			case <-baseCtx.Done():
++				return
++			}
++		}
++	}()
++
+ 	// TODO: Start timer for totalRelayCycleDuration and reset onRelayCycleDuration
+ 	// At TODO: Wait until all relays ..., start a timer (that gets stopped on the "off" command) which decreases the timer every 0.5s until stop is called, and shuts off the relay if there would be <0s remaining after the next decrease. We might want to use an atomic int instead of a time.Duration
+ 	// and a lock here?
+ 
+-	return svc
++	return s
+ }
+ 
+ func (s *Service) ShutdownContext() context.Context {
+diff --git a/pkg/relay/set_relays_status.go b/pkg/relay/set_relays_status.go
+index b74fd389c31c45f1a1b20ce82fd8772391706568..14184e2f16c9e95ef7cbc4fd6c4c489e633c48ea 100644
+--- a/pkg/relay/set_relays_status.go
++++ b/pkg/relay/set_relays_status.go
+@@ -3,6 +3,7 @@
+ import (
+ 	"context"
+ 	"errors"
++	"time"
+ 
+ 	"github.com/modelcontextprotocol/go-sdk/mcp"
+ 	"rafaelmartins.com/p/usbhid"
+@@ -26,8 +27,9 @@ 	ErrInvalidRelay = errors.New("invalid relay")
+ )
+ 
+ type RelayStatus struct {
+-	Relay uint `json:"relay" jsonschema:"relay number (1-4)"`
+-	On    bool `json:"on" jsonschema:"whether to turn the relay on or off"`
++	Relay                         uint          `json:"relay" jsonschema:"relay number (1-4)"`
++	On                            bool          `json:"on" jsonschema:"whether to turn the relay on or off"`
++	RemainingOnRelayCycleDuration time.Duration `json:"remainingOnRelayCycleDuration" jsonschema:"remaining time that the relay can be on in this cycle"`
+ }
+ 
+ type SetRelaysStatusInput struct {
+@@ -61,17 +63,7 @@ 			return nil, nil, err
+ 		}
+ 	}
+ 
+-	state, err := getRelaysState(device)
+-	if err != nil {
+-		return nil, nil, err
+-	}
+-
+-	return nil, &GetRelaysStatusOutput{
+-		Relays: []RelayStatus{
+-			{Relay: 1, On: relayOn(state, 1)},
+-			{Relay: 2, On: relayOn(state, 2)},
+-			{Relay: 3, On: relayOn(state, 3)},
+-			{Relay: 4, On: relayOn(state, 4)},
+-		},
+-	}, nil
++	return s.GetRelaysStatus(ctx, req, GetRelaysStatusInput{
++		Path: input.Path,
++	})
+ }
+
