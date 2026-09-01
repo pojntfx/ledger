@@ -1,0 +1,81 @@
+From 33d86305bdd1e7f002f58e9edae4cba482914685 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Mon, 31 Aug 2026 20:15:08 -0700
+Subject: [PATCH] feat: Add initial auto-shutdown for relays
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/pkg/relay/set_relays_status.go b/pkg/relay/set_relays_status.go
+index 14184e2f16c9e95ef7cbc4fd6c4c489e633c48ea..87d8ffd7a13a923fdbc722d8ceb37caa68a2b962 100644
+--- a/pkg/relay/set_relays_status.go
++++ b/pkg/relay/set_relays_status.go
+@@ -3,6 +3,7 @@
+ import (
+ 	"context"
+ 	"errors"
++	"log"
+ 	"time"
+ 
+ 	"github.com/modelcontextprotocol/go-sdk/mcp"
+@@ -38,9 +39,18 @@ 	Relays []RelayStatus `json:"relays" jsonschema:"relays to turn on or off"`
+ }
+ 
+ func (s *Service) SetRelaysStatus(ctx context.Context, req *mcp.CallToolRequest, input SetRelaysStatusInput) (*mcp.CallToolResult, *GetRelaysStatusOutput, error) {
+-	device, err := usbhid.Get(func(d *usbhid.Device) bool {
+-		return isBoardRelay(d) && d.Path() == input.Path
+-	}, true, false)
++	openDevice := func() (*usbhid.Device, error) {
++		device, err := usbhid.Get(func(d *usbhid.Device) bool {
++			return isBoardRelay(d) && d.Path() == input.Path
++		}, true, false)
++		if err != nil {
++			return nil, errors.Join(ErrCouldNotFindBoard, err)
++		}
++
++		return device, nil
++	}
++
++	device, err := openDevice()
+ 	if err != nil {
+ 		return nil, nil, errors.Join(ErrCouldNotFindBoard, err)
+ 	}
+@@ -55,6 +65,38 @@
+ 		command := relayCommandOff
+ 		if relay.On {
+ 			command = relayCommandOn
++
++			go func() {
++				// TODO: We want to use the correct relay cycle's remainingOnRelayCycleDuration here
++				// and cancel
++				// We also need to grab a lock so that we don't call openDevice simultaneously from multiple places
++				// We also want to register this as a background function (by listening to the baseCtx in addition to the timer
++				// so that we always turn it off when we exit the service)
++				time.Sleep(s.onRelayCycleDuration)
++
++				device, err := openDevice()
++				if err != nil {
++					log.Println("Could not turn open relay device, giving up:", err)
++
++					return
++				}
++				defer device.Close()
++
++				for {
++					// We want to retry here since not turning off the relay could leave it getting very hot
++					if err := device.SetFeatureReport(byte(relayCommandOff), []byte{byte(relay.Relay)}); err != nil {
++						log.Println("Could not turn off relay, retrying in 1s:", err)
++
++						time.Sleep(time.Second)
++
++						continue
++					}
++
++					log.Println("Turned off relay because it exceeded its remaining on relay cycle duration")
++
++					return
++				}
++			}()
+ 		}
+ 
+ 		// TODO: Add a lock to each relay and auto-expire a lock after being "on" after 5s max so that the solenoids don't start melting the rod
+
