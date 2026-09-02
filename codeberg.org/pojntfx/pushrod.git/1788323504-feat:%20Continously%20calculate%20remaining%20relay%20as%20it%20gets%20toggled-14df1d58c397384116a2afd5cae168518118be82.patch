@@ -1,0 +1,46 @@
+From 14df1d58c397384116a2afd5cae168518118be82 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Tue, 01 Sep 2026 21:31:44 -0700
+Subject: [PATCH] feat: Continously calculate remaining relay as it gets toggled
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/pkg/relay/relay.go b/pkg/relay/relay.go
+index dd015d6834e9cc21e97f305531dfb211bdffbd7b..d89319877b63864f2857bcf5bb4eda8338d40db6 100644
+--- a/pkg/relay/relay.go
++++ b/pkg/relay/relay.go
+@@ -19,6 +19,7 @@ type relayCycle struct {
+ 	lock                          *sync.Mutex
+ 	remainingOnRelayCycleDuration time.Duration
+ 	index                         byte
++	lastPowerOnTime               time.Time
+ }
+ 
+ func (r *relayCycle) PowerOn(d *usbhid.Device) error {
+diff --git a/pkg/relay/set_relays_status.go b/pkg/relay/set_relays_status.go
+index 15bd813ae1b78d8600ec459e78d628ab04ec529f..a0e839faeb896ef6718f145ecd4161c4def2e028 100644
+--- a/pkg/relay/set_relays_status.go
++++ b/pkg/relay/set_relays_status.go
+@@ -86,10 +86,10 @@ 				if err := relay.PowerOffWithRetry(device, time.Second, math.MaxInt32, slog.Default()); err != nil {
+ 					slog.Error("Could not power off relay even after retries", "err", err)
+ 				}
+ 
+-				// TODO: Set remaining on cycle time to zero
++				relay.remainingOnRelayCycleDuration = 0
+ 			})
+ 
+-			// TODO: Store current time in relay struct for when we turned on the relay
++			relay.lastPowerOnTime = time.Now()
+ 
+ 			if err := relay.PowerOn(device); err != nil {
+ 				return nil, nil, err
+@@ -100,7 +100,7 @@ 			if err := relay.PowerOff(device); err != nil {
+ 				return nil, nil, err
+ 			}
+ 
+-			// TODO: Reduce remaining on cycle time in relay struct since we turned on the relay
++			relay.remainingOnRelayCycleDuration -= time.Since(relay.lastPowerOnTime)
+ 		}
+ 	}
+ 
+
