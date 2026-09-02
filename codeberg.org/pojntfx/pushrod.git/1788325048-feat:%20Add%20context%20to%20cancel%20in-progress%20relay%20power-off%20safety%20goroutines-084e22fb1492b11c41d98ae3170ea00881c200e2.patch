@@ -1,0 +1,68 @@
+From 084e22fb1492b11c41d98ae3170ea00881c200e2 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Tue, 01 Sep 2026 21:57:28 -0700
+Subject: [PATCH] feat: Add context to cancel in-progress relay power-off safety goroutines
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/pkg/relay/relay.go b/pkg/relay/relay.go
+index d89319877b63864f2857bcf5bb4eda8338d40db6..81d9275eb8875f7ccfd61108791d55324457cf31 100644
+--- a/pkg/relay/relay.go
++++ b/pkg/relay/relay.go
+@@ -1,6 +1,7 @@
+ package relay
+ 
+ import (
++	"context"
+ 	"log/slog"
+ 	"sync"
+ 	"time"
+@@ -20,6 +21,7 @@ 	lock                          *sync.Mutex
+ 	remainingOnRelayCycleDuration time.Duration
+ 	index                         byte
+ 	lastPowerOnTime               time.Time
++	poweredOffCancel              context.CancelFunc
+ }
+ 
+ func (r *relayCycle) PowerOn(d *usbhid.Device) error {
+diff --git a/pkg/relay/set_relays_status.go b/pkg/relay/set_relays_status.go
+index a0e839faeb896ef6718f145ecd4161c4def2e028..fdf65590987c362c62c7d71f4f10bfadcbd1fd04 100644
+--- a/pkg/relay/set_relays_status.go
++++ b/pkg/relay/set_relays_status.go
+@@ -65,6 +65,13 @@ 		}
+ 
+ 		relay := s.relayCycles[inputRelay.Relay]
+ 		if inputRelay.On {
++			if relay.poweredOffCancel != nil {
++				relay.poweredOffCancel()
++			}
++
++			poweredOffCtx, poweredOffCancel := context.WithCancel(context.Background())
++			relay.poweredOffCancel = poweredOffCancel
++
+ 			s.wg.Go(func() {
+ 				timer := time.NewTimer(relay.remainingOnRelayCycleDuration)
+ 				defer timer.Stop()
+@@ -72,6 +79,8 @@
+ 				select {
+ 				case <-s.baseCtx.Done():
+ 				case <-timer.C:
++				case <-poweredOffCtx.Done():
++					return
+ 				}
+ 
+ 				device, err := openDevice()
+@@ -95,7 +104,11 @@ 			if err := relay.PowerOn(device); err != nil {
+ 				return nil, nil, err
+ 			}
+ 		} else {
+-			// TODO: Cancel the background poweroff goroutine from above if we're here (using an additional non-blocking channel; we need to make sure it's still safe and non-blocking to publish if there is no listener)
++			if relay.poweredOffCancel != nil {
++				relay.poweredOffCancel()
++				relay.poweredOffCancel = nil
++			}
++
+ 			if err := relay.PowerOff(device); err != nil {
+ 				return nil, nil, err
+ 			}
+
