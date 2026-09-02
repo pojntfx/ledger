@@ -1,0 +1,227 @@
+From 2d96d5a1b65ae603750ff194a6b54ad914f8a7e1 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Tue, 01 Sep 2026 20:49:30 -0700
+Subject: [PATCH] feat: Shut down all relays before turning off the service and wire up relay cycle cooldown time, racing against shutdown
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/pkg/relay/relay.go b/pkg/relay/relay.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..dd015d6834e9cc21e97f305531dfb211bdffbd7b
+--- /dev/null
++++ b/pkg/relay/relay.go
+@@ -0,0 +1,50 @@
++package relay
++
++import (
++	"log/slog"
++	"sync"
++	"time"
++
++	"rafaelmartins.com/p/usbhid"
++)
++
++type relayCommand byte
++
++const (
++	relayCommandOn  relayCommand = 0xFF
++	relayCommandOff relayCommand = 0xFD
++)
++
++type relayCycle struct {
++	lock                          *sync.Mutex
++	remainingOnRelayCycleDuration time.Duration
++	index                         byte
++}
++
++func (r *relayCycle) PowerOn(d *usbhid.Device) error {
++	return d.SetFeatureReport(byte(relayCommandOff), []byte{r.index})
++}
++
++func (r *relayCycle) PowerOff(d *usbhid.Device) error {
++	return d.SetFeatureReport(byte(relayCommandOff), []byte{r.index})
++}
++
++// PowerOffWithRetry tries powering off the relay until the max relay attempts are exceeded to work around intermittent relay failures
++func (r *relayCycle) PowerOffWithRetry(d *usbhid.Device, sleepBetweenRetries time.Duration, maxRetryAttempts int, log *slog.Logger) error {
++	r.lock.Lock()
++	defer r.lock.Unlock()
++
++	for range maxRetryAttempts {
++		if err := r.PowerOff(d); err != nil {
++			log.Error("Could not turn off relay, retrying", "err", err, "sleep", sleepBetweenRetries)
++
++			time.Sleep(sleepBetweenRetries)
++
++			continue
++		}
++
++		return nil
++	}
++
++	return nil
++}
+diff --git a/pkg/relay/root.go b/pkg/relay/root.go
+index e51720857b4a471ef8503f2d450351332f41a7a2..43f8108bc77557df20fdc43f505260414bf53290 100644
+--- a/pkg/relay/root.go
++++ b/pkg/relay/root.go
+@@ -13,11 +13,6 @@ 	USB_RELAY_4_VENDOR_ID  = 0x16c0
+ 	USB_RELAY_4_PRODUCT_ID = 0x05df
+ )
+ 
+-type relayCycle struct {
+-	lock                          *sync.Mutex
+-	remainingOnRelayCycleDuration time.Duration
+-}
+-
+ type Service struct {
+ 	baseCtx,
+ 	shutdownCtx context.Context
+@@ -59,18 +54,22 @@ 		relayCycles: [4]*relayCycle{
+ 			{
+ 				lock:                          &sync.Mutex{},
+ 				remainingOnRelayCycleDuration: onRelayCycleDuration,
++				index:                         1, // The board's relays are indexed from 1
+ 			},
+ 			{
+ 				lock:                          &sync.Mutex{},
+ 				remainingOnRelayCycleDuration: onRelayCycleDuration,
++				index:                         2,
+ 			},
+ 			{
+ 				lock:                          &sync.Mutex{},
+ 				remainingOnRelayCycleDuration: onRelayCycleDuration,
++				index:                         3,
+ 			},
+ 			{
+ 				lock:                          &sync.Mutex{},
+ 				remainingOnRelayCycleDuration: onRelayCycleDuration,
++				index:                         4,
+ 			},
+ 		},
+ 	}
+@@ -97,10 +96,6 @@ 				return
+ 			}
+ 		}
+ 	}()
+-
+-	// TODO: Start timer for totalRelayCycleDuration and reset onRelayCycleDuration
+-	// At TODO: Wait until all relays ..., start a timer (that gets stopped on the "off" command) which decreases the timer every 0.5s until stop is called, and shuts off the relay if there would be <0s remaining after the next decrease. We might want to use an atomic int instead of a time.Duration
+-	// and a lock here?
+ 
+ 	return s
+ }
+diff --git a/pkg/relay/set_relays_status.go b/pkg/relay/set_relays_status.go
+index 87d8ffd7a13a923fdbc722d8ceb37caa68a2b962..15bd813ae1b78d8600ec459e78d628ab04ec529f 100644
+--- a/pkg/relay/set_relays_status.go
++++ b/pkg/relay/set_relays_status.go
+@@ -3,18 +3,12 @@
+ import (
+ 	"context"
+ 	"errors"
+-	"log"
++	"log/slog"
++	"math"
+ 	"time"
+ 
+ 	"github.com/modelcontextprotocol/go-sdk/mcp"
+ 	"rafaelmartins.com/p/usbhid"
+-)
+-
+-type relayCommand byte
+-
+-const (
+-	relayCommandOn  relayCommand = 0xFF
+-	relayCommandOff relayCommand = 0xFD
+ )
+ 
+ var (
+@@ -56,52 +50,57 @@ 		return nil, nil, errors.Join(ErrCouldNotFindBoard, err)
+ 	}
+ 	defer device.Close()
+ 
+-	// TODO: Wait until all relays we want to change don't have a lock on them
+-	for _, relay := range input.Relays {
+-		if relay.Relay < 1 || relay.Relay > 4 {
++	for _, inputRelay := range input.Relays {
++		relay := s.relayCycles[inputRelay.Relay]
++
++		// We acquire all the locks so that we can toggle all the relays at the same time (or close to the same time)
++		relay.lock.Lock()
++		defer relay.lock.Unlock()
++	}
++
++	for _, inputRelay := range input.Relays {
++		if inputRelay.Relay < 1 || inputRelay.Relay > 4 {
+ 			return nil, nil, ErrInvalidRelay
+ 		}
+ 
+-		command := relayCommandOff
+-		if relay.On {
+-			command = relayCommandOn
++		relay := s.relayCycles[inputRelay.Relay]
++		if inputRelay.On {
++			s.wg.Go(func() {
++				timer := time.NewTimer(relay.remainingOnRelayCycleDuration)
++				defer timer.Stop()
+ 
+-			go func() {
+-				// TODO: We want to use the correct relay cycle's remainingOnRelayCycleDuration here
+-				// and cancel
+-				// We also need to grab a lock so that we don't call openDevice simultaneously from multiple places
+-				// We also want to register this as a background function (by listening to the baseCtx in addition to the timer
+-				// so that we always turn it off when we exit the service)
+-				time.Sleep(s.onRelayCycleDuration)
++				select {
++				case <-s.baseCtx.Done():
++				case <-timer.C:
++				}
+ 
+ 				device, err := openDevice()
+ 				if err != nil {
+-					log.Println("Could not turn open relay device, giving up:", err)
++					slog.Error("Could not open device to power off relay, giving up", "err", err)
+ 
+ 					return
+ 				}
+ 				defer device.Close()
+ 
+-				for {
+-					// We want to retry here since not turning off the relay could leave it getting very hot
+-					if err := device.SetFeatureReport(byte(relayCommandOff), []byte{byte(relay.Relay)}); err != nil {
+-						log.Println("Could not turn off relay, retrying in 1s:", err)
++				if err := relay.PowerOffWithRetry(device, time.Second, math.MaxInt32, slog.Default()); err != nil {
++					slog.Error("Could not power off relay even after retries", "err", err)
++				}
+ 
+-						time.Sleep(time.Second)
++				// TODO: Set remaining on cycle time to zero
++			})
+ 
+-						continue
+-					}
++			// TODO: Store current time in relay struct for when we turned on the relay
+ 
+-					log.Println("Turned off relay because it exceeded its remaining on relay cycle duration")
+-
+-					return
+-				}
+-			}()
+-		}
++			if err := relay.PowerOn(device); err != nil {
++				return nil, nil, err
++			}
++		} else {
++			// TODO: Cancel the background poweroff goroutine from above if we're here (using an additional non-blocking channel; we need to make sure it's still safe and non-blocking to publish if there is no listener)
++			if err := relay.PowerOff(device); err != nil {
++				return nil, nil, err
++			}
+ 
+-		// TODO: Add a lock to each relay and auto-expire a lock after being "on" after 5s max so that the solenoids don't start melting the rod
+-		if err := device.SetFeatureReport(byte(command), []byte{byte(relay.Relay)}); err != nil {
+-			return nil, nil, err
++			// TODO: Reduce remaining on cycle time in relay struct since we turned on the relay
+ 		}
+ 	}
+ 
+
