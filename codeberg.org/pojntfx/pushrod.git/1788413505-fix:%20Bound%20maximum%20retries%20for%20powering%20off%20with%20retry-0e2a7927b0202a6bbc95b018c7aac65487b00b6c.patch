@@ -1,0 +1,58 @@
+From 0e2a7927b0202a6bbc95b018c7aac65487b00b6c Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Wed, 02 Sep 2026 22:31:45 -0700
+Subject: [PATCH] fix: Bound maximum retries for powering off with retry
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/pkg/relay/relay.go b/pkg/relay/relay.go
+index 3134e08a2f9ebdbac94a326b1f9a21d24cbb53b4..a62eb2b879e846316a6b978a3eda118b702c9b8e 100644
+--- a/pkg/relay/relay.go
++++ b/pkg/relay/relay.go
+@@ -37,17 +37,16 @@ func (r *relayCycle) PowerOffWithRetry(d *usbhid.Device, sleepBetweenRetries time.Duration, maxRetryAttempts int, log *slog.Logger) error {
+ 	r.lock.Lock()
+ 	defer r.lock.Unlock()
+ 
++	var err error
+ 	for range maxRetryAttempts {
+-		if err := r.PowerOff(d); err != nil {
+-			log.Error("Could not turn off relay, retrying", "err", err, "sleep", sleepBetweenRetries)
++		if err = r.PowerOff(d); err == nil {
++			return nil
++		}
+ 
+-			time.Sleep(sleepBetweenRetries)
++		log.Error("Could not turn off relay, retrying", "err", err, "sleep", sleepBetweenRetries)
+ 
+-			continue
+-		}
+-
+-		return nil
++		time.Sleep(sleepBetweenRetries)
+ 	}
+ 
+-	return nil
++	return err
+ }
+diff --git a/pkg/relay/set_relays_status.go b/pkg/relay/set_relays_status.go
+index 3db3c7af7a41dac9d2f9efe3b18fa5db094118c4..db9f902e187ac81b4d840cf712acd4d32755ff5e 100644
+--- a/pkg/relay/set_relays_status.go
++++ b/pkg/relay/set_relays_status.go
+@@ -5,7 +5,6 @@ 	"cmp"
+ 	"context"
+ 	"errors"
+ 	"log/slog"
+-	"math"
+ 	"slices"
+ 	"time"
+ 
+@@ -109,7 +108,7 @@ 						return
+ 					}
+ 					defer device.Close()
+ 
+-					if err := relay.PowerOffWithRetry(device, time.Second, math.MaxInt32, slog.Default()); err != nil {
++					if err := relay.PowerOffWithRetry(device, time.Second, 5, slog.Default()); err != nil {
+ 						slog.Error("Could not power off relay even after retries", "err", err)
+ 					}
+ 
+
