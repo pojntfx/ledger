@@ -1,0 +1,181 @@
+From 755c6dcf658cb2448c66ce3548a326d58f50c320 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Wed, 02 Sep 2026 22:19:47 -0700
+Subject: [PATCH] fix: Prevent deadlock when setting relay status and prevent off-by-one errors
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/pkg/relay/get_relays_status.go b/pkg/relay/get_relays_status.go
+index d399779ab8f62d31d85b4f850a48add8cd4750e8..b1311867d01492e8985d206b43f87698788e32e5 100644
+--- a/pkg/relay/get_relays_status.go
++++ b/pkg/relay/get_relays_status.go
+@@ -29,7 +29,7 @@ 	Relays []RelayStatus `json:"relays" jsonschema:"status of each relay"`
+ }
+ 
+ func (s *Service) relayOn(state byte, n uint) (bool, time.Duration) {
+-	relayCycle := s.relayCycles[n]
++	relayCycle := s.relayCycles[n-1] // The board's relays are indexed from 1
+ 
+ 	relayCycle.lock.Lock()
+ 	defer relayCycle.lock.Unlock()
+@@ -65,11 +65,11 @@ 		return nil, nil, err
+ 	}
+ 
+ 	relays := make([]RelayStatus, 4)
+-	for i, _ := range relays {
+-		on, remainingOnRelayCycleDuration := s.relayOn(state, uint(i)) // This is always >0
++	for i := range relays {
++		on, remainingOnRelayCycleDuration := s.relayOn(state, uint(i+1)) // The board's relays are indexed from 1
+ 
+ 		relays[i] = RelayStatus{
+-			Relay:                         uint(i), // This is always >0
++			Relay:                         uint(i + 1),
+ 			On:                            on,
+ 			RemainingOnRelayCycleDuration: remainingOnRelayCycleDuration,
+ 		}
+diff --git a/pkg/relay/relay.go b/pkg/relay/relay.go
+index 81d9275eb8875f7ccfd61108791d55324457cf31..3134e08a2f9ebdbac94a326b1f9a21d24cbb53b4 100644
+--- a/pkg/relay/relay.go
++++ b/pkg/relay/relay.go
+@@ -25,7 +25,7 @@ 	poweredOffCancel              context.CancelFunc
+ }
+ 
+ func (r *relayCycle) PowerOn(d *usbhid.Device) error {
+-	return d.SetFeatureReport(byte(relayCommandOff), []byte{r.index})
++	return d.SetFeatureReport(byte(relayCommandOn), []byte{r.index})
+ }
+ 
+ func (r *relayCycle) PowerOff(d *usbhid.Device) error {
+diff --git a/pkg/relay/set_relays_status.go b/pkg/relay/set_relays_status.go
+index fdf65590987c362c62c7d71f4f10bfadcbd1fd04..f78edb8e0e47ab41df510873eba6dfe28ea57ebf 100644
+--- a/pkg/relay/set_relays_status.go
++++ b/pkg/relay/set_relays_status.go
+@@ -50,71 +50,78 @@ 		return nil, nil, errors.Join(ErrCouldNotFindBoard, err)
+ 	}
+ 	defer device.Close()
+ 
+-	for _, inputRelay := range input.Relays {
+-		relay := s.relayCycles[inputRelay.Relay]
++	// We use a closure here to scope the locks
++	if err := func() error {
++		for _, inputRelay := range input.Relays {
++			if inputRelay.Relay < 1 || inputRelay.Relay > 4 {
++				return ErrInvalidRelay
++			}
+ 
+-		// We acquire all the locks so that we can toggle all the relays at the same time (or close to the same time)
+-		relay.lock.Lock()
+-		defer relay.lock.Unlock()
+-	}
++			relay := s.relayCycles[inputRelay.Relay-1] // The board's relays are indexed from 1
+ 
+-	for _, inputRelay := range input.Relays {
+-		if inputRelay.Relay < 1 || inputRelay.Relay > 4 {
+-			return nil, nil, ErrInvalidRelay
++			// We acquire all the locks so that we can toggle all the relays at the same time (or close to the same time)
++			relay.lock.Lock()
++			defer relay.lock.Unlock()
+ 		}
+ 
+-		relay := s.relayCycles[inputRelay.Relay]
+-		if inputRelay.On {
+-			if relay.poweredOffCancel != nil {
+-				relay.poweredOffCancel()
+-			}
++		for _, inputRelay := range input.Relays {
++			relay := s.relayCycles[inputRelay.Relay-1]
++			if inputRelay.On {
++				if relay.poweredOffCancel != nil {
++					relay.poweredOffCancel()
++				}
++
++				poweredOffCtx, poweredOffCancel := context.WithCancel(context.Background())
++				relay.poweredOffCancel = poweredOffCancel
+ 
+-			poweredOffCtx, poweredOffCancel := context.WithCancel(context.Background())
+-			relay.poweredOffCancel = poweredOffCancel
++				s.wg.Go(func() {
++					timer := time.NewTimer(relay.remainingOnRelayCycleDuration)
++					defer timer.Stop()
+ 
+-			s.wg.Go(func() {
+-				timer := time.NewTimer(relay.remainingOnRelayCycleDuration)
+-				defer timer.Stop()
++					select {
++					case <-s.baseCtx.Done():
++					case <-timer.C:
++					case <-poweredOffCtx.Done():
++						return
++					}
+ 
+-				select {
+-				case <-s.baseCtx.Done():
+-				case <-timer.C:
+-				case <-poweredOffCtx.Done():
+-					return
+-				}
++					device, err := openDevice()
++					if err != nil {
++						slog.Error("Could not open device to power off relay, giving up", "err", err)
+ 
+-				device, err := openDevice()
+-				if err != nil {
+-					slog.Error("Could not open device to power off relay, giving up", "err", err)
++						return
++					}
++					defer device.Close()
+ 
+-					return
+-				}
+-				defer device.Close()
++					if err := relay.PowerOffWithRetry(device, time.Second, math.MaxInt32, slog.Default()); err != nil {
++						slog.Error("Could not power off relay even after retries", "err", err)
++					}
+ 
+-				if err := relay.PowerOffWithRetry(device, time.Second, math.MaxInt32, slog.Default()); err != nil {
+-					slog.Error("Could not power off relay even after retries", "err", err)
+-				}
++					relay.remainingOnRelayCycleDuration = 0
++				})
+ 
+-				relay.remainingOnRelayCycleDuration = 0
+-			})
++				relay.lastPowerOnTime = time.Now()
+ 
+-			relay.lastPowerOnTime = time.Now()
++				if err := relay.PowerOn(device); err != nil {
++					return err
++				}
++			} else {
++				if relay.poweredOffCancel != nil {
++					relay.poweredOffCancel()
++					relay.poweredOffCancel = nil
++				}
+ 
+-			if err := relay.PowerOn(device); err != nil {
+-				return nil, nil, err
+-			}
+-		} else {
+-			if relay.poweredOffCancel != nil {
+-				relay.poweredOffCancel()
+-				relay.poweredOffCancel = nil
+-			}
++				if err := relay.PowerOff(device); err != nil {
++					return err
++				}
+ 
+-			if err := relay.PowerOff(device); err != nil {
+-				return nil, nil, err
++				relay.remainingOnRelayCycleDuration -= time.Since(relay.lastPowerOnTime)
+ 			}
++		}
+ 
+-			relay.remainingOnRelayCycleDuration -= time.Since(relay.lastPowerOnTime)
+-		}
++		return nil
++	}(); err != nil {
++		return nil, nil, err
+ 	}
+ 
+ 	return s.GetRelaysStatus(ctx, req, GetRelaysStatusInput{
+
