@@ -1,0 +1,30 @@
+From 5d42b8ceea6a0a1e619c422c1b939cd4b67165a0 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Wed, 02 Sep 2026 22:22:29 -0700
+Subject: [PATCH] fix: Don't try and lock the same relay twice
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/pkg/relay/set_relays_status.go b/pkg/relay/set_relays_status.go
+index f78edb8e0e47ab41df510873eba6dfe28ea57ebf..167693693462ee2c1820a94f22f0c8ad134a030f 100644
+--- a/pkg/relay/set_relays_status.go
++++ b/pkg/relay/set_relays_status.go
+@@ -52,10 +52,17 @@ 	defer device.Close()
+ 
+ 	// We use a closure here to scope the locks
+ 	if err := func() error {
++		seen := [4]bool{} // The board's relays are indexed from 1
++
+ 		for _, inputRelay := range input.Relays {
+ 			if inputRelay.Relay < 1 || inputRelay.Relay > 4 {
+ 				return ErrInvalidRelay
+ 			}
++
++			if seen[inputRelay.Relay-1] {
++				return ErrInvalidRelay // Locking the same relay's lock twice would deadlock
++			}
++			seen[inputRelay.Relay-1] = true
+ 
+ 			relay := s.relayCycles[inputRelay.Relay-1] // The board's relays are indexed from 1
+ 
+
