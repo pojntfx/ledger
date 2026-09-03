@@ -1,0 +1,38 @@
+From 006ead8b2b06e4e3f70664198f94b2ca4ea43d2c Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Wed, 02 Sep 2026 22:36:46 -0700
+Subject: [PATCH] refactor: Use separate input struct to prevent callers from being confused when setting the relay status
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/pkg/relay/set_relays_status.go b/pkg/relay/set_relays_status.go
+index db9f902e187ac81b4d840cf712acd4d32755ff5e..0afffcad891abaec1e83345091b3df24405539af 100644
+--- a/pkg/relay/set_relays_status.go
++++ b/pkg/relay/set_relays_status.go
+@@ -28,9 +28,14 @@ 	On                            bool          `json:"on" jsonschema:"whether to turn the relay on or off"`
+ 	RemainingOnRelayCycleDuration time.Duration `json:"remainingOnRelayCycleDuration" jsonschema:"remaining time that the relay can be on in this cycle"`
+ }
+ 
++type SetRelayStatus struct {
++	Relay uint `json:"relay" jsonschema:"relay number (1-4)"`
++	On    bool `json:"on" jsonschema:"whether to turn the relay on or off"`
++}
++
+ type SetRelaysStatusInput struct {
+-	Path   string        `json:"path" jsonschema:"path that uniquely identifies the relay board until it gets unplugged"`
+-	Relays []RelayStatus `json:"relays" jsonschema:"relays to turn on or off"`
++	Path   string           `json:"path" jsonschema:"path that uniquely identifies the relay board until it gets unplugged"`
++	Relays []SetRelayStatus `json:"relays" jsonschema:"relays to turn on or off"`
+ }
+ 
+ func (s *Service) SetRelaysStatus(ctx context.Context, req *mcp.CallToolRequest, input SetRelaysStatusInput) (*mcp.CallToolResult, *GetRelaysStatusOutput, error) {
+@@ -52,7 +57,7 @@ 	}
+ 	defer device.Close()
+ 
+ 	// We sort the relays here so that concurrent calls always acquire locks in the same order to prevent deadlocks
+-	slices.SortFunc(input.Relays, func(a, b RelayStatus) int {
++	slices.SortFunc(input.Relays, func(a, b SetRelayStatus) int {
+ 		return cmp.Compare(a.Relay, b.Relay)
+ 	})
+ 
+
