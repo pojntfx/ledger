@@ -1,0 +1,43 @@
+From 2e2d7b82b42995467550ccf802c8daf5e58d2a58 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Wed, 02 Sep 2026 22:43:13 -0700
+Subject: [PATCH] fix: Clean up remaining issues in relay service
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/pkg/relay/get_relays_status.go b/pkg/relay/get_relays_status.go
+index b1311867d01492e8985d206b43f87698788e32e5..899f1490cf90a825a1638c5d05ed81f6baf50e80 100644
+--- a/pkg/relay/get_relays_status.go
++++ b/pkg/relay/get_relays_status.go
+@@ -17,7 +17,7 @@ 		Description: "Get the status for a board's relays",
+ 	}
+ 
+ 	ErrCouldNotFindBoard    = errors.New("could not find board")
+-	ErrInvalidFeatureReport = errors.New("invalid feature repo")
++	ErrInvalidFeatureReport = errors.New("invalid feature report")
+ )
+ 
+ type GetRelaysStatusInput struct {
+diff --git a/pkg/relay/set_relays_status.go b/pkg/relay/set_relays_status.go
+index 0afffcad891abaec1e83345091b3df24405539af..05d5537016f34205cbfb120c1a08c4fc04ca48bb 100644
+--- a/pkg/relay/set_relays_status.go
++++ b/pkg/relay/set_relays_status.go
+@@ -52,7 +52,7 @@ 	}
+ 
+ 	device, err := openDevice()
+ 	if err != nil {
+-		return nil, nil, errors.Join(ErrCouldNotFindBoard, err)
++		return nil, nil, err
+ 	}
+ 	defer device.Close()
+ 
+@@ -138,7 +138,7 @@ 				if err := relay.PowerOff(device); err != nil {
+ 					return err
+ 				}
+ 
+-				relay.remainingOnRelayCycleDuration -= time.Since(relay.lastPowerOnTime)
++				relay.remainingOnRelayCycleDuration = max(relay.remainingOnRelayCycleDuration-time.Since(relay.lastPowerOnTime), 0) // If this were below zero the timer would instantly fire
+ 			}
+ 		}
+ 
+
