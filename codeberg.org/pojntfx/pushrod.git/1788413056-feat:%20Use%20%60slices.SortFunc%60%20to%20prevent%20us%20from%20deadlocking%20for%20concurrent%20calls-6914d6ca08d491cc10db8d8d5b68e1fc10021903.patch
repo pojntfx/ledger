@@ -1,0 +1,37 @@
+From 6914d6ca08d491cc10db8d8d5b68e1fc10021903 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Wed, 02 Sep 2026 22:24:16 -0700
+Subject: [PATCH] feat: Use `slices.SortFunc` to prevent us from deadlocking for concurrent calls
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/pkg/relay/set_relays_status.go b/pkg/relay/set_relays_status.go
+index 167693693462ee2c1820a94f22f0c8ad134a030f..b5001296667c871577698b79eaa6a1db8708b6bc 100644
+--- a/pkg/relay/set_relays_status.go
++++ b/pkg/relay/set_relays_status.go
+@@ -1,10 +1,12 @@
+ package relay
+ 
+ import (
++	"cmp"
+ 	"context"
+ 	"errors"
+ 	"log/slog"
+ 	"math"
++	"slices"
+ 	"time"
+ 
+ 	"github.com/modelcontextprotocol/go-sdk/mcp"
+@@ -49,6 +51,11 @@ 	if err != nil {
+ 		return nil, nil, errors.Join(ErrCouldNotFindBoard, err)
+ 	}
+ 	defer device.Close()
++
++	// We sort the relays here so that concurrent calls always acquire locks in the same order to prevent deadlocks
++	slices.SortFunc(input.Relays, func(a, b RelayStatus) int {
++		return cmp.Compare(a.Relay, b.Relay)
++	})
+ 
+ 	// We use a closure here to scope the locks
+ 	if err := func() error {
+
