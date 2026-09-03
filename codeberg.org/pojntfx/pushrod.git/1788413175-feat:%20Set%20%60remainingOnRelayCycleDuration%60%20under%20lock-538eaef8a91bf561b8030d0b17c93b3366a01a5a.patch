@@ -1,0 +1,34 @@
+From 538eaef8a91bf561b8030d0b17c93b3366a01a5a Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Wed, 02 Sep 2026 22:26:15 -0700
+Subject: [PATCH] feat: Set `remainingOnRelayCycleDuration` under lock
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/pkg/relay/set_relays_status.go b/pkg/relay/set_relays_status.go
+index b5001296667c871577698b79eaa6a1db8708b6bc..3db3c7af7a41dac9d2f9efe3b18fa5db094118c4 100644
+--- a/pkg/relay/set_relays_status.go
++++ b/pkg/relay/set_relays_status.go
+@@ -88,8 +88,10 @@
+ 				poweredOffCtx, poweredOffCancel := context.WithCancel(context.Background())
+ 				relay.poweredOffCancel = poweredOffCancel
+ 
++				remainingOnRelayCycleDuration := relay.remainingOnRelayCycleDuration // We still hold the lock here
++
+ 				s.wg.Go(func() {
+-					timer := time.NewTimer(relay.remainingOnRelayCycleDuration)
++					timer := time.NewTimer(remainingOnRelayCycleDuration)
+ 					defer timer.Stop()
+ 
+ 					select {
+@@ -110,6 +112,9 @@
+ 					if err := relay.PowerOffWithRetry(device, time.Second, math.MaxInt32, slog.Default()); err != nil {
+ 						slog.Error("Could not power off relay even after retries", "err", err)
+ 					}
++
++					relay.lock.Lock()
++					defer relay.lock.Unlock()
+ 
+ 					relay.remainingOnRelayCycleDuration = 0
+ 				})
+
