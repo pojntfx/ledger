@@ -1,0 +1,283 @@
+From c3da56c979ce4c5c77b0e566b3164e815c0e97cf Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Thu, 03 Sep 2026 21:52:48 -0700
+Subject: [PATCH] refactor: Rename and namespace all the tools
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/main.go b/main.go
+index 8f5c01ba08ba1f18e8c8a62f6f00ee74742a838d..b37c4a87ab133ad87ff44cce282b6820545cafeb 100644
+--- a/main.go
++++ b/main.go
+@@ -36,10 +36,10 @@ 			WebsiteURL:  "https://codeberg.org/pojntfx/pushrod",
+ 		},
+ 		nil,
+ 	)
+-	mcp.AddTool(handler, relay.GetConnectedBoardsTool, service.GetConnectedBoards)
+-	mcp.AddTool(handler, relay.GetRelaysStatusTool, service.GetRelaysStatus)
+-	mcp.AddTool(handler, relay.SetRelaysStatusTool, service.SetRelaysStatus)
+-	mcp.AddTool(handler, relay.PutIntoDownloadModeTool, service.PutIntoDownloadMode)
++	mcp.AddTool(handler, relay.GetBoardsTool, service.GetBoards)
++	mcp.AddTool(handler, relay.GetStatusesTool, service.GetStatuses)
++	mcp.AddTool(handler, relay.SetStatusesTool, service.SetStatuses)
++	mcp.AddTool(handler, relay.EnterFDLTool, service.EnterFDL)
+ 	mcp.AddTool(handler, relay.ResetTool, service.Reset)
+ 
+ 	log.Println("Listening on", *laddr)
+diff --git a/pkg/relay/get_connected_boards.go b/pkg/relay/get_boards.go
+rename from pkg/relay/get_connected_boards.go
+rename to pkg/relay/get_boards.go
+index c6ae260e94a6484f55581335bc4a10698d5df9d8..2d38bb31a80522128079532179f6bf6745c0d9bb 100644
+--- a/pkg/relay/get_connected_boards.go
++++ b/pkg/relay/get_boards.go
+@@ -9,10 +9,10 @@ 	"rafaelmartins.com/p/usbhid"
+ )
+ 
+ var (
+-	GetConnectedBoardsTool = &mcp.Tool{
+-		Name:        "getConnectedBoards",
+-		Title:       "Get connected boards",
+-		Description: "Get all currently connected boards",
++	GetBoardsTool = &mcp.Tool{
++		Name:        "relay.getBoards",
++		Title:       "Get relay boards",
++		Description: "Get all currently connected relay boards",
+ 	}
+ )
+ 
+@@ -23,15 +23,15 @@ 	TotalRelayCycleDuration time.Duration `json:"totalRelayCycleDuration" jsonschema:"cycle duration after which the relay on time resets"`
+ 	OnRelayCycleDuration    time.Duration `json:"onRelayCycleDuration" jsonschema:"how long a relay can be on during the total cycle"`
+ }
+ 
+-type GetConnectedBoardsOutput struct {
+-	Boards []Board `json:"devices" jsonschema:"connected boards"`
++type GetBoardsOutput struct {
++	Boards []Board `json:"boards" jsonschema:"connected relay boards"`
+ }
+ 
+ func isBoardRelay(d *usbhid.Device) bool {
+ 	return d.VendorId() == USB_RELAY_4_VENDOR_ID && d.ProductId() == USB_RELAY_4_PRODUCT_ID
+ }
+ 
+-func (s *Service) GetConnectedBoards(ctx context.Context, req *mcp.CallToolRequest, input struct{}) (*mcp.CallToolResult, *GetConnectedBoardsOutput, error) {
++func (s *Service) GetBoards(ctx context.Context, req *mcp.CallToolRequest, input struct{}) (*mcp.CallToolResult, *GetBoardsOutput, error) {
+ 	devices, err := usbhid.Enumerate(isBoardRelay)
+ 	if err != nil {
+ 		return nil, nil, err
+@@ -47,7 +47,7 @@ 			OnRelayCycleDuration:    s.onRelayCycleDuration,
+ 		}
+ 	}
+ 
+-	return nil, &GetConnectedBoardsOutput{
++	return nil, &GetBoardsOutput{
+ 		Boards: boards,
+ 	}, nil
+ }
+diff --git a/pkg/relay/get_relays_status.go b/pkg/relay/get_statuses.go
+rename from pkg/relay/get_relays_status.go
+rename to pkg/relay/get_statuses.go
+index 899f1490cf90a825a1638c5d05ed81f6baf50e80..fb74d01dfb3ce94276380e3bcd891b99dfa40ac9 100644
+--- a/pkg/relay/get_relays_status.go
++++ b/pkg/relay/get_statuses.go
+@@ -10,22 +10,22 @@ 	"rafaelmartins.com/p/usbhid"
+ )
+ 
+ var (
+-	GetRelaysStatusTool = &mcp.Tool{
+-		Name:        "getRelaysStatus",
+-		Title:       "Get relays' status",
+-		Description: "Get the status for a board's relays",
++	GetStatusesTool = &mcp.Tool{
++		Name:        "relay.getStatuses",
++		Title:       "Get relay statuses",
++		Description: "Get the statuses of a relay board's relays",
+ 	}
+ 
+ 	ErrCouldNotFindBoard    = errors.New("could not find board")
+ 	ErrInvalidFeatureReport = errors.New("invalid feature report")
+ )
+ 
+-type GetRelaysStatusInput struct {
++type GetStatusesInput struct {
+ 	Path string `json:"path" jsonschema:"path that uniquely identifies the relay board until it gets unplugged"`
+ }
+ 
+-type GetRelaysStatusOutput struct {
+-	Relays []RelayStatus `json:"relays" jsonschema:"status of each relay"`
++type GetStatusesOutput struct {
++	Relays []RelayStatus `json:"relays" jsonschema:"statuses of the board's relays"`
+ }
+ 
+ func (s *Service) relayOn(state byte, n uint) (bool, time.Duration) {
+@@ -50,7 +50,7 @@
+ 	return report[len(report)-1], nil // Last byte of the report is the bitmask
+ }
+ 
+-func (s *Service) GetRelaysStatus(ctx context.Context, req *mcp.CallToolRequest, input GetRelaysStatusInput) (*mcp.CallToolResult, *GetRelaysStatusOutput, error) {
++func (s *Service) GetStatuses(ctx context.Context, req *mcp.CallToolRequest, input GetStatusesInput) (*mcp.CallToolResult, *GetStatusesOutput, error) {
+ 	device, err := usbhid.Get(func(d *usbhid.Device) bool {
+ 		return isBoardRelay(d) && d.Path() == input.Path
+ 	}, true, false)
+@@ -75,7 +75,7 @@ 			RemainingOnRelayCycleDuration: remainingOnRelayCycleDuration,
+ 		}
+ 	}
+ 
+-	return nil, &GetRelaysStatusOutput{
++	return nil, &GetStatusesOutput{
+ 		Relays: relays,
+ 	}, nil
+ }
+diff --git a/pkg/relay/put_into_download_mode.go b/pkg/relay/enter_fdl.go
+rename from pkg/relay/put_into_download_mode.go
+rename to pkg/relay/enter_fdl.go
+index e41483f61a50cec3344afb38073f4ecc96acfec7..ea3ba4a25d47a0fb30075e6df6e9cdcab73e2167 100644
+--- a/pkg/relay/put_into_download_mode.go
++++ b/pkg/relay/enter_fdl.go
+@@ -8,20 +8,20 @@ 	"github.com/modelcontextprotocol/go-sdk/mcp"
+ )
+ 
+ var (
+-	PutIntoDownloadModeTool = &mcp.Tool{
+-		Name:        "putIntoDownloadMode",
+-		Title:       "Put into download mode",
+-		Description: "Put a development board into download mode via the relays",
++	EnterFDLTool = &mcp.Tool{
++		Name:        "target.enterFDL",
++		Title:       "Enter FDL mode",
++		Description: "Put a target board into FDL (firmware download) mode via the relays",
+ 	}
+ )
+ 
+-type PutIntoDownloadModeInput struct {
++type EnterFDLInput struct {
+ 	Path string `json:"path" jsonschema:"path that uniquely identifies the relay board until it gets unplugged"`
+ }
+ 
+-func (s *Service) PutIntoDownloadMode(ctx context.Context, req *mcp.CallToolRequest, input PutIntoDownloadModeInput) (*mcp.CallToolResult, *GetRelaysStatusOutput, error) {
++func (s *Service) EnterFDL(ctx context.Context, req *mcp.CallToolRequest, input EnterFDLInput) (*mcp.CallToolResult, *GetStatusesOutput, error) {
+ 	// Make sure the RST button and FDL buttons aren't pressed
+-	if _, _, err := s.SetRelaysStatus(ctx, req, SetRelaysStatusInput{
++	if _, _, err := s.SetStatuses(ctx, req, SetStatusesInput{
+ 		Path: input.Path,
+ 		Relays: []SetRelayStatus{
+ 			{
+@@ -38,7 +38,7 @@ 		return nil, nil, err
+ 	}
+ 
+ 	// Press the FDL button
+-	if _, _, err := s.SetRelaysStatus(ctx, req, SetRelaysStatusInput{
++	if _, _, err := s.SetStatuses(ctx, req, SetStatusesInput{
+ 		Path: input.Path,
+ 		Relays: []SetRelayStatus{
+ 			{
+@@ -57,7 +57,7 @@
+ 	time.Sleep(time.Millisecond * 500)
+ 
+ 	// Press the FDL and RST button
+-	if _, _, err := s.SetRelaysStatus(ctx, req, SetRelaysStatusInput{
++	if _, _, err := s.SetStatuses(ctx, req, SetStatusesInput{
+ 		Path: input.Path,
+ 		Relays: []SetRelayStatus{
+ 			{
+@@ -76,7 +76,7 @@
+ 	time.Sleep(time.Millisecond * 500)
+ 
+ 	// Release the RST and FDL buttons
+-	return s.SetRelaysStatus(ctx, req, SetRelaysStatusInput{
++	return s.SetStatuses(ctx, req, SetStatusesInput{
+ 		Path: input.Path,
+ 		Relays: []SetRelayStatus{
+ 			{
+diff --git a/pkg/relay/reset.go b/pkg/relay/reset.go
+index b969bb56116b62b0be8daa54fa638f307da6faf2..bba5f8e41c23438090be1a376c1d0843205490bc 100644
+--- a/pkg/relay/reset.go
++++ b/pkg/relay/reset.go
+@@ -9,9 +9,9 @@ )
+ 
+ var (
+ 	ResetTool = &mcp.Tool{
+-		Name:        "reset",
+-		Title:       "Reset",
+-		Description: "Reset the development board via the relays",
++		Name:        "target.reset",
++		Title:       "Reset target",
++		Description: "Reset a target board via the relays",
+ 	}
+ )
+ 
+@@ -19,9 +19,9 @@ type ResetInput struct {
+ 	Path string `json:"path" jsonschema:"path that uniquely identifies the relay board until it gets unplugged"`
+ }
+ 
+-func (s *Service) Reset(ctx context.Context, req *mcp.CallToolRequest, input ResetInput) (*mcp.CallToolResult, *GetRelaysStatusOutput, error) {
++func (s *Service) Reset(ctx context.Context, req *mcp.CallToolRequest, input ResetInput) (*mcp.CallToolResult, *GetStatusesOutput, error) {
+ 	// Make sure the RST button and FDL buttons aren't pressed
+-	if _, _, err := s.SetRelaysStatus(ctx, req, SetRelaysStatusInput{
++	if _, _, err := s.SetStatuses(ctx, req, SetStatusesInput{
+ 		Path: input.Path,
+ 		Relays: []SetRelayStatus{
+ 			{
+@@ -38,7 +38,7 @@ 		return nil, nil, err
+ 	}
+ 
+ 	// Press the RST button
+-	if _, _, err := s.SetRelaysStatus(ctx, req, SetRelaysStatusInput{
++	if _, _, err := s.SetStatuses(ctx, req, SetStatusesInput{
+ 		Path: input.Path,
+ 		Relays: []SetRelayStatus{
+ 			{
+@@ -57,7 +57,7 @@
+ 	time.Sleep(time.Millisecond * 500)
+ 
+ 	// Release the RST and FDL buttons
+-	return s.SetRelaysStatus(ctx, req, SetRelaysStatusInput{
++	return s.SetStatuses(ctx, req, SetStatusesInput{
+ 		Path: input.Path,
+ 		Relays: []SetRelayStatus{
+ 			{
+diff --git a/pkg/relay/set_relays_status.go b/pkg/relay/set_statuses.go
+rename from pkg/relay/set_relays_status.go
+rename to pkg/relay/set_statuses.go
+index eaa076d84cb88b644c4341286d708631b6a4587a..1e4448a06e40f3bfe7b3c3c8ed0d3162c026fb4a 100644
+--- a/pkg/relay/set_relays_status.go
++++ b/pkg/relay/set_statuses.go
+@@ -13,10 +13,10 @@ 	"rafaelmartins.com/p/usbhid"
+ )
+ 
+ var (
+-	SetRelaysStatusTool = &mcp.Tool{
+-		Name:        "setRelaysStatus",
+-		Title:       "Set relays' status",
+-		Description: "Turn relays on a board on or off",
++	SetStatusesTool = &mcp.Tool{
++		Name:        "relay.setStatuses",
++		Title:       "Set relay statuses",
++		Description: "Turn relays on a relay board on or off",
+ 	}
+ 
+ 	ErrInvalidRelay = errors.New("invalid relay")
+@@ -33,12 +33,12 @@ 	Relay uint `json:"relay" jsonschema:"relay number (1-4)"`
+ 	On    bool `json:"on" jsonschema:"whether to turn the relay on or off"`
+ }
+ 
+-type SetRelaysStatusInput struct {
++type SetStatusesInput struct {
+ 	Path   string           `json:"path" jsonschema:"path that uniquely identifies the relay board until it gets unplugged"`
+ 	Relays []SetRelayStatus `json:"relays" jsonschema:"relays to turn on or off"`
+ }
+ 
+-func (s *Service) SetRelaysStatus(ctx context.Context, req *mcp.CallToolRequest, input SetRelaysStatusInput) (*mcp.CallToolResult, *GetRelaysStatusOutput, error) {
++func (s *Service) SetStatuses(ctx context.Context, req *mcp.CallToolRequest, input SetStatusesInput) (*mcp.CallToolResult, *GetStatusesOutput, error) {
+ 	openDevice := func() (*usbhid.Device, error) {
+ 		device, err := usbhid.Get(func(d *usbhid.Device) bool {
+ 			return isBoardRelay(d) && d.Path() == input.Path
+@@ -151,7 +151,7 @@ 	}(); err != nil {
+ 		return nil, nil, err
+ 	}
+ 
+-	return s.GetRelaysStatus(ctx, req, GetRelaysStatusInput{
++	return s.GetStatuses(ctx, req, GetStatusesInput{
+ 		Path: input.Path,
+ 	})
+ }
+
