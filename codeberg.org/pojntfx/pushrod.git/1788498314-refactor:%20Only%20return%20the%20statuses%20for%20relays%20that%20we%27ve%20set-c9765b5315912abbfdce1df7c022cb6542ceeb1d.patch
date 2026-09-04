@@ -1,0 +1,108 @@
+From c9765b5315912abbfdce1df7c022cb6542ceeb1d Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Thu, 03 Sep 2026 22:05:14 -0700
+Subject: [PATCH] refactor: Only return the statuses for relays that we've set
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/pkg/relay/get_statuses.go b/pkg/relay/get_statuses.go
+index fb74d01dfb3ce94276380e3bcd891b99dfa40ac9..c14e5600864832413128528035b01e273b636b59 100644
+--- a/pkg/relay/get_statuses.go
++++ b/pkg/relay/get_statuses.go
+@@ -13,7 +13,7 @@ var (
+ 	GetStatusesTool = &mcp.Tool{
+ 		Name:        "relay.getStatuses",
+ 		Title:       "Get relay statuses",
+-		Description: "Get the statuses of a relay board's relays",
++		Description: "Get the statuses of all of a relay board's relays",
+ 	}
+ 
+ 	ErrCouldNotFindBoard    = errors.New("could not find board")
+@@ -25,7 +25,7 @@ 	Path string `json:"path" jsonschema:"path that uniquely identifies the relay board until it gets unplugged"`
+ }
+ 
+ type GetStatusesOutput struct {
+-	Relays []RelayStatus `json:"relays" jsonschema:"statuses of the board's relays"`
++	Relays []RelayStatus `json:"relays" jsonschema:"statuses of the relays"`
+ }
+ 
+ func (s *Service) relayOn(state byte, n uint) (bool, time.Duration) {
+@@ -50,6 +50,28 @@
+ 	return report[len(report)-1], nil // Last byte of the report is the bitmask
+ }
+ 
++func (s *Service) readStatuses(d *usbhid.Device, relays []uint) (*GetStatusesOutput, error) {
++	state, err := getRelaysState(d)
++	if err != nil {
++		return nil, err
++	}
++
++	statuses := make([]RelayStatus, len(relays))
++	for i, relay := range relays {
++		on, remainingOnRelayCycleDuration := s.relayOn(state, relay)
++
++		statuses[i] = RelayStatus{
++			Relay:                         relay,
++			On:                            on,
++			RemainingOnRelayCycleDuration: remainingOnRelayCycleDuration,
++		}
++	}
++
++	return &GetStatusesOutput{
++		Relays: statuses,
++	}, nil
++}
++
+ func (s *Service) GetStatuses(ctx context.Context, req *mcp.CallToolRequest, input GetStatusesInput) (*mcp.CallToolResult, *GetStatusesOutput, error) {
+ 	device, err := usbhid.Get(func(d *usbhid.Device) bool {
+ 		return isBoardRelay(d) && d.Path() == input.Path
+@@ -59,23 +81,10 @@ 		return nil, nil, errors.Join(ErrCouldNotFindBoard, err)
+ 	}
+ 	defer device.Close()
+ 
+-	state, err := getRelaysState(device)
++	statuses, err := s.readStatuses(device, []uint{1, 2, 3, 4}) // The board's relays are indexed from 1
+ 	if err != nil {
+ 		return nil, nil, err
+ 	}
+ 
+-	relays := make([]RelayStatus, 4)
+-	for i := range relays {
+-		on, remainingOnRelayCycleDuration := s.relayOn(state, uint(i+1)) // The board's relays are indexed from 1
+-
+-		relays[i] = RelayStatus{
+-			Relay:                         uint(i + 1),
+-			On:                            on,
+-			RemainingOnRelayCycleDuration: remainingOnRelayCycleDuration,
+-		}
+-	}
+-
+-	return nil, &GetStatusesOutput{
+-		Relays: relays,
+-	}, nil
++	return nil, statuses, nil
+ }
+diff --git a/pkg/relay/set_statuses.go b/pkg/relay/set_statuses.go
+index 1e4448a06e40f3bfe7b3c3c8ed0d3162c026fb4a..4a49d05d76f47dcc28dc355086ad17655da6de88 100644
+--- a/pkg/relay/set_statuses.go
++++ b/pkg/relay/set_statuses.go
+@@ -151,7 +151,15 @@ 	}(); err != nil {
+ 		return nil, nil, err
+ 	}
+ 
+-	return s.GetStatuses(ctx, req, GetStatusesInput{
+-		Path: input.Path,
+-	})
++	relays := make([]uint, len(input.Relays))
++	for i, inputRelay := range input.Relays {
++		relays[i] = inputRelay.Relay
++	}
++
++	statuses, err := s.readStatuses(device, relays)
++	if err != nil {
++		return nil, nil, err
++	}
++
++	return nil, statuses, nil
+ }
+
