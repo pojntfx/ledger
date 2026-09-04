@@ -1,0 +1,590 @@
+From cb038da24507f2e2046376bc9c2b579ce62bef6a Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Thu, 03 Sep 2026 22:18:42 -0700
+Subject: [PATCH] refactor: Hold locks across FDL and reset calls consistently, don't call other tools from wrapper tools
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/pkg/relay/enter_fdl.go b/pkg/relay/enter_fdl.go
+index ea3ba4a25d47a0fb30075e6df6e9cdcab73e2167..4e236bb07d83a699cc6be6b2e7e217676370196e 100644
+--- a/pkg/relay/enter_fdl.go
++++ b/pkg/relay/enter_fdl.go
+@@ -20,35 +20,44 @@ 	Path string `json:"path" jsonschema:"path that uniquely identifies the relay board until it gets unplugged"`
+ }
+ 
+ func (s *Service) EnterFDL(ctx context.Context, req *mcp.CallToolRequest, input EnterFDLInput) (*mcp.CallToolResult, *GetStatusesOutput, error) {
++	device, err := s.openBoard(input.Path)
++	if err != nil {
++		return nil, nil, err
++	}
++	defer device.Close()
++
++	relays := []uint{1, 2} // The board's relays are indexed from 1
++
++	// We hold the locks for our relays so that nothing else can interrupt the sequence
++	unlock, err := s.lockRelays(relays...)
++	if err != nil {
++		return nil, nil, err
++	}
++	defer unlock()
++
+ 	// Make sure the RST button and FDL buttons aren't pressed
+-	if _, _, err := s.SetStatuses(ctx, req, SetStatusesInput{
+-		Path: input.Path,
+-		Relays: []SetRelayStatus{
+-			{
+-				Relay: 1,
+-				On:    false,
+-			},
+-			{
+-				Relay: 2,
+-				On:    false,
+-			},
++	if err := s.setStatusesLocked(device, []SetRelayStatus{
++		{
++			Relay: 1,
++			On:    false,
++		},
++		{
++			Relay: 2,
++			On:    false,
+ 		},
+ 	}); err != nil {
+ 		return nil, nil, err
+ 	}
+ 
+ 	// Press the FDL button
+-	if _, _, err := s.SetStatuses(ctx, req, SetStatusesInput{
+-		Path: input.Path,
+-		Relays: []SetRelayStatus{
+-			{
+-				Relay: 1,
+-				On:    true,
+-			},
+-			{
+-				Relay: 2,
+-				On:    false,
+-			},
++	if err := s.setStatusesLocked(device, []SetRelayStatus{
++		{
++			Relay: 1,
++			On:    true,
++		},
++		{
++			Relay: 2,
++			On:    false,
+ 		},
+ 	}); err != nil {
+ 		return nil, nil, err
+@@ -57,17 +66,14 @@
+ 	time.Sleep(time.Millisecond * 500)
+ 
+ 	// Press the FDL and RST button
+-	if _, _, err := s.SetStatuses(ctx, req, SetStatusesInput{
+-		Path: input.Path,
+-		Relays: []SetRelayStatus{
+-			{
+-				Relay: 1,
+-				On:    true,
+-			},
+-			{
+-				Relay: 2,
+-				On:    true,
+-			},
++	if err := s.setStatusesLocked(device, []SetRelayStatus{
++		{
++			Relay: 1,
++			On:    true,
++		},
++		{
++			Relay: 2,
++			On:    true,
+ 		},
+ 	}); err != nil {
+ 		return nil, nil, err
+@@ -76,17 +82,23 @@
+ 	time.Sleep(time.Millisecond * 500)
+ 
+ 	// Release the RST and FDL buttons
+-	return s.SetStatuses(ctx, req, SetStatusesInput{
+-		Path: input.Path,
+-		Relays: []SetRelayStatus{
+-			{
+-				Relay: 1,
+-				On:    false,
+-			},
+-			{
+-				Relay: 2,
+-				On:    false,
+-			},
++	if err := s.setStatusesLocked(device, []SetRelayStatus{
++		{
++			Relay: 1,
++			On:    false,
++		},
++		{
++			Relay: 2,
++			On:    false,
+ 		},
+-	})
++	}); err != nil {
++		return nil, nil, err
++	}
++
++	statuses, err := s.readStatusesLocked(device, relays)
++	if err != nil {
++		return nil, nil, err
++	}
++
++	return nil, statuses, nil
+ }
+diff --git a/pkg/relay/get_statuses.go b/pkg/relay/get_statuses.go
+index c14e5600864832413128528035b01e273b636b59..05d79bea0944e663ee9d01f7ef2b54fe33205c28 100644
+--- a/pkg/relay/get_statuses.go
++++ b/pkg/relay/get_statuses.go
+@@ -3,7 +3,6 @@
+ import (
+ 	"context"
+ 	"errors"
+-	"time"
+ 
+ 	"github.com/modelcontextprotocol/go-sdk/mcp"
+ 	"rafaelmartins.com/p/usbhid"
+@@ -28,15 +27,6 @@ type GetStatusesOutput struct {
+ 	Relays []RelayStatus `json:"relays" jsonschema:"statuses of the relays"`
+ }
+ 
+-func (s *Service) relayOn(state byte, n uint) (bool, time.Duration) {
+-	relayCycle := s.relayCycles[n-1] // The board's relays are indexed from 1
+-
+-	relayCycle.lock.Lock()
+-	defer relayCycle.lock.Unlock()
+-
+-	return state&(1<<(n-1)) != 0, relayCycle.remainingOnRelayCycleDuration
+-}
+-
+ func getRelaysState(d *usbhid.Device) (byte, error) {
+ 	report, err := d.GetFeatureReport(0)
+ 	if err != nil {
+@@ -50,7 +40,7 @@
+ 	return report[len(report)-1], nil // Last byte of the report is the bitmask
+ }
+ 
+-func (s *Service) readStatuses(d *usbhid.Device, relays []uint) (*GetStatusesOutput, error) {
++func (s *Service) readStatusesLocked(d *usbhid.Device, relays []uint) (*GetStatusesOutput, error) {
+ 	state, err := getRelaysState(d)
+ 	if err != nil {
+ 		return nil, err
+@@ -58,12 +48,12 @@ 	}
+ 
+ 	statuses := make([]RelayStatus, len(relays))
+ 	for i, relay := range relays {
+-		on, remainingOnRelayCycleDuration := s.relayOn(state, relay)
++		relayCycle := s.relayCycles[relay-1] // The board's relays are indexed from 1
+ 
+ 		statuses[i] = RelayStatus{
+ 			Relay:                         relay,
+-			On:                            on,
+-			RemainingOnRelayCycleDuration: remainingOnRelayCycleDuration,
++			On:                            state&(1<<(relay-1)) != 0,
++			RemainingOnRelayCycleDuration: relayCycle.remainingOnRelayCycleDuration,
+ 		}
+ 	}
+ 
+@@ -73,15 +63,21 @@ 	}, nil
+ }
+ 
+ func (s *Service) GetStatuses(ctx context.Context, req *mcp.CallToolRequest, input GetStatusesInput) (*mcp.CallToolResult, *GetStatusesOutput, error) {
+-	device, err := usbhid.Get(func(d *usbhid.Device) bool {
+-		return isBoardRelay(d) && d.Path() == input.Path
+-	}, true, false)
++	device, err := s.openBoard(input.Path)
+ 	if err != nil {
+-		return nil, nil, errors.Join(ErrCouldNotFindBoard, err)
++		return nil, nil, err
+ 	}
+ 	defer device.Close()
+ 
+-	statuses, err := s.readStatuses(device, []uint{1, 2, 3, 4}) // The board's relays are indexed from 1
++	relays := []uint{1, 2, 3, 4} // The board's relays are indexed from 1
++
++	unlock, err := s.lockRelays(relays...)
++	if err != nil {
++		return nil, nil, err
++	}
++	defer unlock()
++
++	statuses, err := s.readStatusesLocked(device, relays)
+ 	if err != nil {
+ 		return nil, nil, err
+ 	}
+diff --git a/pkg/relay/reset.go b/pkg/relay/reset.go
+index bba5f8e41c23438090be1a376c1d0843205490bc..9d9c1d396267d8f410b02d412a3bfe19df1eecaa 100644
+--- a/pkg/relay/reset.go
++++ b/pkg/relay/reset.go
+@@ -20,35 +20,44 @@ 	Path string `json:"path" jsonschema:"path that uniquely identifies the relay board until it gets unplugged"`
+ }
+ 
+ func (s *Service) Reset(ctx context.Context, req *mcp.CallToolRequest, input ResetInput) (*mcp.CallToolResult, *GetStatusesOutput, error) {
++	device, err := s.openBoard(input.Path)
++	if err != nil {
++		return nil, nil, err
++	}
++	defer device.Close()
++
++	relays := []uint{1, 2} // The board's relays are indexed from 1
++
++	// We hold the locks for our relays so that nothing else can interrupt the sequence
++	unlock, err := s.lockRelays(relays...)
++	if err != nil {
++		return nil, nil, err
++	}
++	defer unlock()
++
+ 	// Make sure the RST button and FDL buttons aren't pressed
+-	if _, _, err := s.SetStatuses(ctx, req, SetStatusesInput{
+-		Path: input.Path,
+-		Relays: []SetRelayStatus{
+-			{
+-				Relay: 1,
+-				On:    false,
+-			},
+-			{
+-				Relay: 2,
+-				On:    false,
+-			},
++	if err := s.setStatusesLocked(device, []SetRelayStatus{
++		{
++			Relay: 1,
++			On:    false,
++		},
++		{
++			Relay: 2,
++			On:    false,
+ 		},
+ 	}); err != nil {
+ 		return nil, nil, err
+ 	}
+ 
+ 	// Press the RST button
+-	if _, _, err := s.SetStatuses(ctx, req, SetStatusesInput{
+-		Path: input.Path,
+-		Relays: []SetRelayStatus{
+-			{
+-				Relay: 1,
+-				On:    false,
+-			},
+-			{
+-				Relay: 2,
+-				On:    true,
+-			},
++	if err := s.setStatusesLocked(device, []SetRelayStatus{
++		{
++			Relay: 1,
++			On:    false,
++		},
++		{
++			Relay: 2,
++			On:    true,
+ 		},
+ 	}); err != nil {
+ 		return nil, nil, err
+@@ -57,17 +66,23 @@
+ 	time.Sleep(time.Millisecond * 500)
+ 
+ 	// Release the RST and FDL buttons
+-	return s.SetStatuses(ctx, req, SetStatusesInput{
+-		Path: input.Path,
+-		Relays: []SetRelayStatus{
+-			{
+-				Relay: 1,
+-				On:    false,
+-			},
+-			{
+-				Relay: 2,
+-				On:    false,
+-			},
++	if err := s.setStatusesLocked(device, []SetRelayStatus{
++		{
++			Relay: 1,
++			On:    false,
++		},
++		{
++			Relay: 2,
++			On:    false,
+ 		},
+-	})
++	}); err != nil {
++		return nil, nil, err
++	}
++
++	statuses, err := s.readStatusesLocked(device, relays)
++	if err != nil {
++		return nil, nil, err
++	}
++
++	return nil, statuses, nil
+ }
+diff --git a/pkg/relay/root.go b/pkg/relay/root.go
+index 43f8108bc77557df20fdc43f505260414bf53290..428b0bc6c14e90e19a8010af553d50ad4ca4fd1c 100644
+--- a/pkg/relay/root.go
++++ b/pkg/relay/root.go
+@@ -2,8 +2,12 @@ package relay
+ 
+ import (
+ 	"context"
++	"errors"
++	"slices"
+ 	"sync"
+ 	"time"
++
++	"rafaelmartins.com/p/usbhid"
+ )
+ 
+ const (
+@@ -98,6 +102,42 @@ 		}
+ 	}()
+ 
+ 	return s
++}
++
++func (s *Service) openBoard(path string) (*usbhid.Device, error) {
++	device, err := usbhid.Get(func(d *usbhid.Device) bool {
++		return isBoardRelay(d) && d.Path() == path
++	}, true, false)
++	if err != nil {
++		return nil, errors.Join(ErrCouldNotFindBoard, err)
++	}
++
++	return device, nil
++}
++
++func (s *Service) lockRelays(relays ...uint) (func(), error) {
++	seen := [4]bool{} // The board's relays are indexed from 1
++	for _, relay := range relays {
++		if relay < 1 || relay > 4 {
++			return nil, ErrInvalidRelay
++		}
++
++		if seen[relay-1] {
++			return nil, ErrInvalidRelay // Locking the same relay's lock twice would deadlock
++		}
++		seen[relay-1] = true
++	}
++
++	ordered := slices.Sorted(slices.Values(relays))
++	for _, relay := range ordered {
++		s.relayCycles[relay-1].lock.Lock()
++	}
++
++	return func() {
++		for _, relay := range slices.Backward(ordered) {
++			s.relayCycles[relay-1].lock.Unlock()
++		}
++	}, nil
+ }
+ 
+ func (s *Service) ShutdownContext() context.Context {
+diff --git a/pkg/relay/set_statuses.go b/pkg/relay/set_statuses.go
+index 4a49d05d76f47dcc28dc355086ad17655da6de88..8faeec8741715ea404b3794227c3e684a08549b6 100644
+--- a/pkg/relay/set_statuses.go
++++ b/pkg/relay/set_statuses.go
+@@ -38,125 +38,105 @@ 	Path   string           `json:"path" jsonschema:"path that uniquely identifies the relay board until it gets unplugged"`
+ 	Relays []SetRelayStatus `json:"relays" jsonschema:"relays to turn on or off"`
+ }
+ 
+-func (s *Service) SetStatuses(ctx context.Context, req *mcp.CallToolRequest, input SetStatusesInput) (*mcp.CallToolResult, *GetStatusesOutput, error) {
+-	openDevice := func() (*usbhid.Device, error) {
+-		device, err := usbhid.Get(func(d *usbhid.Device) bool {
+-			return isBoardRelay(d) && d.Path() == input.Path
+-		}, true, false)
+-		if err != nil {
+-			return nil, errors.Join(ErrCouldNotFindBoard, err)
+-		}
++func (s *Service) setStatusesLocked(device *usbhid.Device, inputRelays []SetRelayStatus) error {
++	path := device.Path()
+ 
+-		return device, nil
+-	}
+-
+-	device, err := openDevice()
+-	if err != nil {
+-		return nil, nil, err
+-	}
+-	defer device.Close()
+-
+-	// We sort the relays here so that concurrent calls always acquire locks in the same order to prevent deadlocks
+-	slices.SortFunc(input.Relays, func(a, b SetRelayStatus) int {
+-		return cmp.Compare(a.Relay, b.Relay)
+-	})
+-
+-	// We use a closure here to scope the locks
+-	if err := func() error {
+-		seen := [4]bool{} // The board's relays are indexed from 1
+-
+-		for _, inputRelay := range input.Relays {
+-			if inputRelay.Relay < 1 || inputRelay.Relay > 4 {
+-				return ErrInvalidRelay
++	for _, inputRelay := range inputRelays {
++		relay := s.relayCycles[inputRelay.Relay-1] // The board's relays are indexed from 1
++		if inputRelay.On {
++			if relay.poweredOffCancel != nil {
++				relay.poweredOffCancel()
+ 			}
+ 
+-			if seen[inputRelay.Relay-1] {
+-				return ErrInvalidRelay // Locking the same relay's lock twice would deadlock
+-			}
+-			seen[inputRelay.Relay-1] = true
++			poweredOffCtx, poweredOffCancel := context.WithCancel(context.Background())
++			relay.poweredOffCancel = poweredOffCancel
+ 
+-			relay := s.relayCycles[inputRelay.Relay-1] // The board's relays are indexed from 1
++			remainingOnRelayCycleDuration := relay.remainingOnRelayCycleDuration // We still hold the lock here
+ 
+-			// We acquire all the locks so that we can toggle all the relays at the same time (or close to the same time)
+-			relay.lock.Lock()
+-			defer relay.lock.Unlock()
+-		}
++			s.wg.Go(func() {
++				timer := time.NewTimer(remainingOnRelayCycleDuration)
++				defer timer.Stop()
+ 
+-		for _, inputRelay := range input.Relays {
+-			relay := s.relayCycles[inputRelay.Relay-1]
+-			if inputRelay.On {
+-				if relay.poweredOffCancel != nil {
+-					relay.poweredOffCancel()
++				select {
++				case <-s.baseCtx.Done():
++				case <-timer.C:
++				case <-poweredOffCtx.Done():
++					return
+ 				}
+ 
+-				poweredOffCtx, poweredOffCancel := context.WithCancel(context.Background())
+-				relay.poweredOffCancel = poweredOffCancel
+-
+-				remainingOnRelayCycleDuration := relay.remainingOnRelayCycleDuration // We still hold the lock here
+-
+-				s.wg.Go(func() {
+-					timer := time.NewTimer(remainingOnRelayCycleDuration)
+-					defer timer.Stop()
+-
+-					select {
+-					case <-s.baseCtx.Done():
+-					case <-timer.C:
+-					case <-poweredOffCtx.Done():
+-						return
+-					}
+-
+-					device, err := openDevice()
+-					if err != nil {
+-						slog.Error("Could not open device to power off relay, giving up", "err", err)
++				device, err := s.openBoard(path)
++				if err != nil {
++					slog.Error("Could not open device to power off relay, giving up", "err", err)
+ 
+-						return
+-					}
+-					defer device.Close()
++					return
++				}
++				defer device.Close()
+ 
+-					if err := relay.PowerOffWithRetry(device, time.Second, 5, slog.Default()); err != nil {
+-						slog.Error("Could not power off relay even after retries", "err", err)
+-					}
++				if err := relay.PowerOffWithRetry(device, time.Second, 5, slog.Default()); err != nil {
++					slog.Error("Could not power off relay even after retries", "err", err)
++				}
+ 
+-					relay.lock.Lock()
+-					defer relay.lock.Unlock()
++				relay.lock.Lock()
++				defer relay.lock.Unlock()
+ 
+-					relay.remainingOnRelayCycleDuration = 0
+-					relay.lastPowerOnTime = time.Time{}
+-				})
++				relay.remainingOnRelayCycleDuration = 0
++				relay.lastPowerOnTime = time.Time{}
++			})
+ 
+-				relay.lastPowerOnTime = time.Now()
++			relay.lastPowerOnTime = time.Now()
+ 
+-				if err := relay.PowerOn(device); err != nil {
+-					return err
+-				}
+-			} else {
+-				if relay.poweredOffCancel != nil {
+-					relay.poweredOffCancel()
+-					relay.poweredOffCancel = nil
+-				}
++			if err := relay.PowerOn(device); err != nil {
++				return err
++			}
++		} else {
++			if relay.poweredOffCancel != nil {
++				relay.poweredOffCancel()
++				relay.poweredOffCancel = nil
++			}
+ 
+-				if err := relay.PowerOff(device); err != nil {
+-					return err
+-				}
++			if err := relay.PowerOff(device); err != nil {
++				return err
++			}
+ 
+-				if !relay.lastPowerOnTime.IsZero() {
+-					relay.remainingOnRelayCycleDuration = max(relay.remainingOnRelayCycleDuration-time.Since(relay.lastPowerOnTime), 0) // If this were below zero the timer would instantly fire
+-					relay.lastPowerOnTime = time.Time{}
+-				}
++			if !relay.lastPowerOnTime.IsZero() {
++				relay.remainingOnRelayCycleDuration = max(relay.remainingOnRelayCycleDuration-time.Since(relay.lastPowerOnTime), 0) // If this were below zero the timer would instantly fire
++				relay.lastPowerOnTime = time.Time{}
+ 			}
+ 		}
++	}
+ 
+-		return nil
+-	}(); err != nil {
++	return nil
++}
++
++func (s *Service) SetStatuses(ctx context.Context, req *mcp.CallToolRequest, input SetStatusesInput) (*mcp.CallToolResult, *GetStatusesOutput, error) {
++	device, err := s.openBoard(input.Path)
++	if err != nil {
+ 		return nil, nil, err
+ 	}
++	defer device.Close()
++
++	// We sort them here so that we toggle and report back in a stable order
++	slices.SortFunc(input.Relays, func(a, b SetRelayStatus) int {
++		return cmp.Compare(a.Relay, b.Relay)
++	})
+ 
+ 	relays := make([]uint, len(input.Relays))
+ 	for i, inputRelay := range input.Relays {
+ 		relays[i] = inputRelay.Relay
+ 	}
+ 
+-	statuses, err := s.readStatuses(device, relays)
++	// We hold the locks for our relays so that nothing else can interrupt the sequence
++	unlock, err := s.lockRelays(relays...)
++	if err != nil {
++		return nil, nil, err
++	}
++	defer unlock()
++
++	if err := s.setStatusesLocked(device, input.Relays); err != nil {
++		return nil, nil, err
++	}
++
++	statuses, err := s.readStatusesLocked(device, relays)
+ 	if err != nil {
+ 		return nil, nil, err
+ 	}
+
