@@ -1,0 +1,32 @@
+From b36cb5af513b03516f8ca2b8313ab0a8b14e31fc Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Thu, 03 Sep 2026 21:24:44 -0700
+Subject: [PATCH] fix: Correctly calculate last power on time
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/pkg/relay/set_relays_status.go b/pkg/relay/set_relays_status.go
+index 05d5537016f34205cbfb120c1a08c4fc04ca48bb..eaa076d84cb88b644c4341286d708631b6a4587a 100644
+--- a/pkg/relay/set_relays_status.go
++++ b/pkg/relay/set_relays_status.go
+@@ -121,6 +121,7 @@ 					relay.lock.Lock()
+ 					defer relay.lock.Unlock()
+ 
+ 					relay.remainingOnRelayCycleDuration = 0
++					relay.lastPowerOnTime = time.Time{}
+ 				})
+ 
+ 				relay.lastPowerOnTime = time.Now()
+@@ -138,7 +139,10 @@ 				if err := relay.PowerOff(device); err != nil {
+ 					return err
+ 				}
+ 
+-				relay.remainingOnRelayCycleDuration = max(relay.remainingOnRelayCycleDuration-time.Since(relay.lastPowerOnTime), 0) // If this were below zero the timer would instantly fire
++				if !relay.lastPowerOnTime.IsZero() {
++					relay.remainingOnRelayCycleDuration = max(relay.remainingOnRelayCycleDuration-time.Since(relay.lastPowerOnTime), 0) // If this were below zero the timer would instantly fire
++					relay.lastPowerOnTime = time.Time{}
++				}
+ 			}
+ 		}
+ 
+
