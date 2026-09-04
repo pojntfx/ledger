@@ -1,0 +1,198 @@
+From 3aa2f9e063e9cf908365d1a163ceb311c6598d84 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Thu, 03 Sep 2026 21:25:52 -0700
+Subject: [PATCH] feat: Add more high-level "put into download mode" and "reset" tools
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/main.go b/main.go
+index 9be590753364039a9c2754ede4a30cc3455d151f..8f5c01ba08ba1f18e8c8a62f6f00ee74742a838d 100644
+--- a/main.go
++++ b/main.go
+@@ -39,6 +39,8 @@ 	)
+ 	mcp.AddTool(handler, relay.GetConnectedBoardsTool, service.GetConnectedBoards)
+ 	mcp.AddTool(handler, relay.GetRelaysStatusTool, service.GetRelaysStatus)
+ 	mcp.AddTool(handler, relay.SetRelaysStatusTool, service.SetRelaysStatus)
++	mcp.AddTool(handler, relay.PutIntoDownloadModeTool, service.PutIntoDownloadMode)
++	mcp.AddTool(handler, relay.ResetTool, service.Reset)
+ 
+ 	log.Println("Listening on", *laddr)
+ 
+diff --git a/pkg/relay/put_into_download_mode.go b/pkg/relay/put_into_download_mode.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..e41483f61a50cec3344afb38073f4ecc96acfec7
+--- /dev/null
++++ b/pkg/relay/put_into_download_mode.go
+@@ -0,0 +1,92 @@
++package relay
++
++import (
++	"context"
++	"time"
++
++	"github.com/modelcontextprotocol/go-sdk/mcp"
++)
++
++var (
++	PutIntoDownloadModeTool = &mcp.Tool{
++		Name:        "putIntoDownloadMode",
++		Title:       "Put into download mode",
++		Description: "Put a development board into download mode via the relays",
++	}
++)
++
++type PutIntoDownloadModeInput struct {
++	Path string `json:"path" jsonschema:"path that uniquely identifies the relay board until it gets unplugged"`
++}
++
++func (s *Service) PutIntoDownloadMode(ctx context.Context, req *mcp.CallToolRequest, input PutIntoDownloadModeInput) (*mcp.CallToolResult, *GetRelaysStatusOutput, error) {
++	// Make sure the RST button and FDL buttons aren't pressed
++	if _, _, err := s.SetRelaysStatus(ctx, req, SetRelaysStatusInput{
++		Path: input.Path,
++		Relays: []SetRelayStatus{
++			{
++				Relay: 1,
++				On:    false,
++			},
++			{
++				Relay: 2,
++				On:    false,
++			},
++		},
++	}); err != nil {
++		return nil, nil, err
++	}
++
++	// Press the FDL button
++	if _, _, err := s.SetRelaysStatus(ctx, req, SetRelaysStatusInput{
++		Path: input.Path,
++		Relays: []SetRelayStatus{
++			{
++				Relay: 1,
++				On:    true,
++			},
++			{
++				Relay: 2,
++				On:    false,
++			},
++		},
++	}); err != nil {
++		return nil, nil, err
++	}
++
++	time.Sleep(time.Millisecond * 500)
++
++	// Press the FDL and RST button
++	if _, _, err := s.SetRelaysStatus(ctx, req, SetRelaysStatusInput{
++		Path: input.Path,
++		Relays: []SetRelayStatus{
++			{
++				Relay: 1,
++				On:    true,
++			},
++			{
++				Relay: 2,
++				On:    true,
++			},
++		},
++	}); err != nil {
++		return nil, nil, err
++	}
++
++	time.Sleep(time.Millisecond * 500)
++
++	// Release the RST and FDL buttons
++	return s.SetRelaysStatus(ctx, req, SetRelaysStatusInput{
++		Path: input.Path,
++		Relays: []SetRelayStatus{
++			{
++				Relay: 1,
++				On:    false,
++			},
++			{
++				Relay: 2,
++				On:    false,
++			},
++		},
++	})
++}
+diff --git a/pkg/relay/reset.go b/pkg/relay/reset.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..b969bb56116b62b0be8daa54fa638f307da6faf2
+--- /dev/null
++++ b/pkg/relay/reset.go
+@@ -0,0 +1,73 @@
++package relay
++
++import (
++	"context"
++	"time"
++
++	"github.com/modelcontextprotocol/go-sdk/mcp"
++)
++
++var (
++	ResetTool = &mcp.Tool{
++		Name:        "reset",
++		Title:       "Reset",
++		Description: "Reset the development board via the relays",
++	}
++)
++
++type ResetInput struct {
++	Path string `json:"path" jsonschema:"path that uniquely identifies the relay board until it gets unplugged"`
++}
++
++func (s *Service) Reset(ctx context.Context, req *mcp.CallToolRequest, input ResetInput) (*mcp.CallToolResult, *GetRelaysStatusOutput, error) {
++	// Make sure the RST button and FDL buttons aren't pressed
++	if _, _, err := s.SetRelaysStatus(ctx, req, SetRelaysStatusInput{
++		Path: input.Path,
++		Relays: []SetRelayStatus{
++			{
++				Relay: 1,
++				On:    false,
++			},
++			{
++				Relay: 2,
++				On:    false,
++			},
++		},
++	}); err != nil {
++		return nil, nil, err
++	}
++
++	// Press the RST button
++	if _, _, err := s.SetRelaysStatus(ctx, req, SetRelaysStatusInput{
++		Path: input.Path,
++		Relays: []SetRelayStatus{
++			{
++				Relay: 1,
++				On:    false,
++			},
++			{
++				Relay: 2,
++				On:    true,
++			},
++		},
++	}); err != nil {
++		return nil, nil, err
++	}
++
++	time.Sleep(time.Millisecond * 500)
++
++	// Release the RST and FDL buttons
++	return s.SetRelaysStatus(ctx, req, SetRelaysStatusInput{
++		Path: input.Path,
++		Relays: []SetRelayStatus{
++			{
++				Relay: 1,
++				On:    false,
++			},
++			{
++				Relay: 2,
++				On:    false,
++			},
++		},
++	})
++}
+
