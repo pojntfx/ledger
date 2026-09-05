@@ -1,0 +1,54 @@
+From e2c925e2b877c3ef915ac7f3895c2db2217ea37c Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Fri, 04 Sep 2026 23:39:30 -0700
+Subject: [PATCH] refactor: Discard the first two frames, not just the first frame
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/pkg/svc/kvm_take_screenshot.go b/pkg/svc/kvm_take_screenshot.go
+index 36e15b5a0bc23fa4a3c66859865a4200393f72f6..40d74e2bbe9827e9e39e94aad0b4775266f09916 100644
+--- a/pkg/svc/kvm_take_screenshot.go
++++ b/pkg/svc/kvm_take_screenshot.go
+@@ -21,13 +21,12 @@ 	ErrUnsupportedVideoFormat = errors.New("video capture device does not support MJPEG")
+ )
+ 
+ const (
+-	// See  in /usr/include/linux/videodev2.h
+ 	videoCaptureFormatMJPEG webcam.PixelFormat = 0x47504a4d // `MJPG` (`V4L2_PIX_FMT_MJPEG`)
+ 	videoCaptureMIMEType                       = "image/jpeg"
+ )
+ 
+ type TakeScreenshotInput struct {
+-	Path string `json:"path" jsonschema:"path that uniquely identifies the video capture device until it gets unplugged"`
++	Path string `json:"path" jsonschema:"path that uniquely identifies the video capture device until it gets unplugged (NOT an KVM input device path, that one emulates keyboard and mouse input)"`
+ }
+ 
+ func nextFrame(device *webcam.Webcam) ([]byte, error) {
+@@ -69,7 +68,6 @@ 	if _, _, _, err := device.SetImageFormat(videoCaptureFormatMJPEG, frameSize.MaxWidth, frameSize.MaxHeight); err != nil {
+ 		return nil, nil, err
+ 	}
+ 
+-	// First frame is always incomplete, second frame is always complete
+ 	if err := device.SetBufferCount(2); err != nil {
+ 		return nil, nil, err
+ 	}
+@@ -79,12 +77,14 @@ 		return nil, nil, err
+ 	}
+ 	defer device.StopStreaming()
+ 
+-	// Discard first frame
+-	if _, err := nextFrame(device); err != nil {
+-		return nil, nil, err
++	// Discard the first two frames, those are stale
++	for range 2 {
++		if _, err := nextFrame(device); err != nil {
++			return nil, nil, err
++		}
+ 	}
+ 
+-	// Take second frame
++	// Take third frame
+ 	screenshot, err := nextFrame(device)
+ 	if err != nil {
+ 		return nil, nil, err
+
