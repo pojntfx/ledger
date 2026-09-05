@@ -1,0 +1,127 @@
+From dc34b4eef96d19e7ab9724ce42e78bd1e596f1f3 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Fri, 04 Sep 2026 20:53:38 -0700
+Subject: [PATCH] feat: Add `kvm.takeScreenshot` tool for the NanoKVM-USB
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/main.go b/main.go
+index 0c8cbcbd8ec08c63fde5d1d54da8f03d73c3b166..57fdebf828e68d738346c3917151f9c1e4edcdee 100644
+--- a/main.go
++++ b/main.go
+@@ -42,6 +42,7 @@ 	mcp.AddTool(handler, svc.SetStatusesTool, service.SetStatuses)
+ 	mcp.AddTool(handler, svc.EnterFDLTool, service.EnterFDL)
+ 	mcp.AddTool(handler, svc.ResetTool, service.Reset)
+ 	mcp.AddTool(handler, svc.GetVideoCaptureDevicesTool, service.GetVideoCaptureDevices)
++	mcp.AddTool(handler, svc.TakeScreenshotTool, service.TakeScreenshot)
+ 
+ 	log.Println("Listening on", *laddr)
+ 
+diff --git a/pkg/svc/kvm_take_screenshot.go b/pkg/svc/kvm_take_screenshot.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..36e15b5a0bc23fa4a3c66859865a4200393f72f6
+--- /dev/null
++++ b/pkg/svc/kvm_take_screenshot.go
+@@ -0,0 +1,101 @@
++package svc
++
++import (
++	"cmp"
++	"context"
++	"errors"
++	"slices"
++
++	"github.com/blackjack/webcam"
++	"github.com/modelcontextprotocol/go-sdk/mcp"
++)
++
++var (
++	TakeScreenshotTool = &mcp.Tool{
++		Name:        "kvm.takeScreenshot",
++		Title:       "Take screenshot",
++		Description: "Capture the current frame from a video capture device",
++	}
++
++	ErrUnsupportedVideoFormat = errors.New("video capture device does not support MJPEG")
++)
++
++const (
++	// See  in /usr/include/linux/videodev2.h
++	videoCaptureFormatMJPEG webcam.PixelFormat = 0x47504a4d // `MJPG` (`V4L2_PIX_FMT_MJPEG`)
++	videoCaptureMIMEType                       = "image/jpeg"
++)
++
++type TakeScreenshotInput struct {
++	Path string `json:"path" jsonschema:"path that uniquely identifies the video capture device until it gets unplugged"`
++}
++
++func nextFrame(device *webcam.Webcam) ([]byte, error) {
++	// 5 seconds maximum timeout
++	if err := device.WaitForFrame(5); err != nil {
++		return nil, err
++	}
++
++	frame, index, err := device.GetFrame()
++	if err != nil {
++		return nil, err
++	}
++	defer device.ReleaseFrame(index)
++
++	screenshot := make([]byte, len(frame))
++	copy(screenshot, frame)
++
++	return screenshot, nil
++}
++
++func (s *Service) TakeScreenshot(ctx context.Context, req *mcp.CallToolRequest, input TakeScreenshotInput) (*mcp.CallToolResult, any, error) {
++	device, err := webcam.Open(input.Path)
++	if err != nil {
++		return nil, nil, err
++	}
++	defer device.Close()
++
++	supportedFrameSizes := device.GetSupportedFrameSizes(videoCaptureFormatMJPEG)
++	if len(supportedFrameSizes) < 1 {
++		return nil, nil, ErrUnsupportedVideoFormat
++	}
++
++	// Largest frame that the device supports
++	frameSize := slices.MaxFunc(supportedFrameSizes, func(a, b webcam.FrameSize) int {
++		return cmp.Compare(a.MaxWidth*a.MaxHeight, b.MaxWidth*b.MaxHeight)
++	})
++
++	if _, _, _, err := device.SetImageFormat(videoCaptureFormatMJPEG, frameSize.MaxWidth, frameSize.MaxHeight); err != nil {
++		return nil, nil, err
++	}
++
++	// First frame is always incomplete, second frame is always complete
++	if err := device.SetBufferCount(2); err != nil {
++		return nil, nil, err
++	}
++
++	if err := device.StartStreaming(); err != nil {
++		return nil, nil, err
++	}
++	defer device.StopStreaming()
++
++	// Discard first frame
++	if _, err := nextFrame(device); err != nil {
++		return nil, nil, err
++	}
++
++	// Take second frame
++	screenshot, err := nextFrame(device)
++	if err != nil {
++		return nil, nil, err
++	}
++
++	return &mcp.CallToolResult{
++		Content: []mcp.Content{
++			&mcp.ImageContent{
++				Data:     screenshot,
++				MIMEType: videoCaptureMIMEType,
++			},
++		},
++	}, nil, nil
++}
+
