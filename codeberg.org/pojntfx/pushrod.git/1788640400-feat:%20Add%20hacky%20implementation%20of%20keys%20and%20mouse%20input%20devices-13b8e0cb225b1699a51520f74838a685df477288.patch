@@ -1,0 +1,532 @@
+From 13b8e0cb225b1699a51520f74838a685df477288 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Sat, 05 Sep 2026 13:33:20 -0700
+Subject: [PATCH] feat: Add hacky implementation of keys and mouse input devices
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/main.go b/main.go
+index 45d994dac9942ef8ebd38189ad4d6ada1a41e144..fca39686f711e49b165326496a48338f43e7cc9b 100644
+--- a/main.go
++++ b/main.go
+@@ -45,6 +45,7 @@ 	mcp.AddTool(handler, svc.GetVideoCaptureDevicesTool, service.GetVideoCaptureDevices)
+ 	mcp.AddTool(handler, svc.TakeScreenshotTool, service.TakeScreenshot)
+ 	mcp.AddTool(handler, svc.GetInputDevicesTool, service.GetInputDevices)
+ 	mcp.AddTool(handler, svc.PressKeysTool, service.PressKeys)
++	mcp.AddTool(handler, svc.SendMouseInputTool, service.SendMouseInput)
+ 
+ 	log.Println("Listening on", *laddr)
+ 
+diff --git a/pkg/svc/kvm.go b/pkg/svc/kvm.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..789fe502f3626ce337938926031b3b978a1c3171
+--- /dev/null
++++ b/pkg/svc/kvm.go
+@@ -0,0 +1,183 @@
++package svc
++
++import (
++	"encoding/binary"
++	"fmt"
++	"strings"
++
++	"go.bug.st/serial"
++	"golang.org/x/mobile/event/key"
++)
++
++type kvmCommand byte
++
++const (
++	kvmCommandSendKeyboardData      kvmCommand = 0x02
++	kvmCommandSendMouseAbsoluteData kvmCommand = 0x04
++	kvmCommandSendMouseRelativeData kvmCommand = 0x05
++
++	// Responses repeat the command that they are answering with this bit set
++	kvmCommandResponse kvmCommand = 0x80
++)
++
++const (
++	// The KVM's CH9329-style chip speaks a framed protocol at 57600 baud
++	// See https://github.com/sipeed/NanoKVM-USB
++	kvmBaudRate = 57600
++
++	kvmFrameHeaderFirst  = 0x57
++	kvmFrameHeaderSecond = 0xab
++	kvmFrameAddress      = 0x00
++
++	// Frames start with the two header bytes, the address, the command and the length
++	kvmFrameHeaderLength = 5
++
++	// HID boot protocol reports are a modifier bitmask, a reserved byte and up to six keys.
++	// Longer reports with more key slots are acknowledged by the chip but then dropped, so
++	// six is as many keys as a combination can hold. Modifiers don't take up a slot.
++	kvmReportLength     = 8
++	kvmMaxKeysPerReport = 6
++
++	// The eight modifiers are sent as a bitmask instead of as keys, where each one's
++	// bit is its offset from the first modifier's usage ID
++	kvmModifierFirst = key.CodeLeftControl
++	kvmModifierLast  = key.CodeRightGUI
++
++	// Mouse reports start with a mode tag; without it the chip acknowledges the frame
++	// but then silently drops it
++	kvmMouseModeAbsolute = 0x02
++	kvmMouseModeRelative = 0x01
++
++	// Absolute mouse reports are the mode tag, a button bitmask, little-endian
++	// coordinates and the wheel; relative ones are the mode tag, a button bitmask,
++	// the deltas and the wheel
++	kvmMouseAbsoluteReportLength = 7
++	kvmMouseRelativeReportLength = 5
++
++	// Absolute mouse coordinates are normalized to this range across the whole frame
++	kvmMouseCoordinateMax = 4096
++
++	// Deltas and wheel ticks in relative mouse reports are signed bytes
++	kvmMouseDeltaMax = 127
++
++	kvmMouseButtonLeft   = 0x01
++	kvmMouseButtonRight  = 0x02
++	kvmMouseButtonMiddle = 0x04
++)
++
++// readFull fills the buffer from the port. The port doesn't return an error when a
++// read times out, it just returns no bytes, so we can't use io.ReadFull here.
++func readFull(port serial.Port, buf []byte) error {
++	for read := 0; read < len(buf); {
++		n, err := port.Read(buf[read:])
++		if err != nil {
++			return err
++		}
++
++		if n == 0 {
++			return ErrNoResponse
++		}
++
++		read += n
++	}
++
++	return nil
++}
++
++// writeCommand writes a command frame and reads back the response that the KVM
++// acknowledges every command with
++func writeCommand(port serial.Port, command kvmCommand, data []byte) error {
++	frame := append([]byte{kvmFrameHeaderFirst, kvmFrameHeaderSecond, kvmFrameAddress, byte(command), byte(len(data))}, data...)
++
++	// The checksum is the low byte of the sum of all preceding bytes
++	var checksum byte
++	for _, b := range frame {
++		checksum += b
++	}
++
++	if _, err := port.Write(append(frame, checksum)); err != nil {
++		return err
++	}
++
++	header := make([]byte, kvmFrameHeaderLength)
++	if err := readFull(port, header); err != nil {
++		return err
++	}
++
++	if header[0] != kvmFrameHeaderFirst || header[1] != kvmFrameHeaderSecond {
++		return ErrInvalidResponse
++	}
++
++	if kvmCommand(header[3]) != command|kvmCommandResponse {
++		return ErrInvalidResponse
++	}
++
++	// The response carries its status followed by the checksum
++	status := make([]byte, int(header[4])+1)
++	if err := readFull(port, status); err != nil {
++		return err
++	}
++
++	if len(status) < 2 || status[0] != 0x00 {
++		return ErrInvalidResponse
++	}
++
++	return nil
++}
++
++// keyboardReport builds the HID boot protocol report for a combination of keys that
++// are pressed at the same time
++func keyboardReport(combination []string) ([]byte, error) {
++	report := make([]byte, kvmReportLength)
++
++	keys := 0
++	for _, name := range combination {
++		code, ok := keyCodes[name]
++		if !ok {
++			return nil, fmt.Errorf("%w %q, pick one of: %s", ErrUnknownKey, name, strings.Join(keyNames, ", "))
++		}
++
++		if code >= kvmModifierFirst && code <= kvmModifierLast {
++			report[0] |= 1 << (code - kvmModifierFirst)
++
++			continue
++		}
++
++		if keys >= kvmMaxKeysPerReport {
++			return nil, ErrTooManyKeys
++		}
++
++		report[2+keys] = byte(code)
++		keys++
++	}
++
++	return report, nil
++}
++
++// absoluteMouseReport builds the report that moves the pointer to a normalized
++// coordinate and sets the held-down buttons
++func absoluteMouseReport(buttons byte, x, y int) []byte {
++	report := make([]byte, kvmMouseAbsoluteReportLength)
++
++	report[0] = kvmMouseModeAbsolute
++	report[1] = buttons
++	binary.LittleEndian.PutUint16(report[2:4], uint16(x))
++	binary.LittleEndian.PutUint16(report[4:6], uint16(y))
++
++	return report
++}
++
++// relativeMouseReport builds the report that moves the pointer by a delta and sets
++// the held-down buttons; with zero deltas it presses or releases buttons and turns
++// the wheel without moving the pointer
++func relativeMouseReport(buttons byte, dx, dy, wheel int) []byte {
++	report := make([]byte, kvmMouseRelativeReportLength)
++
++	report[0] = kvmMouseModeRelative
++	report[1] = buttons
++	report[2] = byte(int8(dx))
++	report[3] = byte(int8(dy))
++	report[4] = byte(int8(wheel))
++
++	return report
++}
+diff --git a/pkg/svc/kvm_press_keys.go b/pkg/svc/kvm_press_keys.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..ac989d54a766ea04616f556beb8e7524711c1d6c
+--- /dev/null
++++ b/pkg/svc/kvm_press_keys.go
+@@ -0,0 +1,99 @@
++package svc
++
++import (
++	"context"
++	"errors"
++	"time"
++
++	"github.com/modelcontextprotocol/go-sdk/mcp"
++	"go.bug.st/serial"
++)
++
++var (
++	PressKeysTool = &mcp.Tool{
++		Name:        "kvm.pressKeys",
++		Title:       "Press keys",
++		Description: "Press key combinations on a target through a KVM",
++	}
++
++	ErrUnknownKey      = errors.New("unknown key")
++	ErrTooManyKeys     = errors.New("too many keys held down at the same time, a combination fits 6 keys plus any modifiers; keys that should be typed one after the other belong in separate combinations")
++	ErrInvalidResponse = errors.New("invalid response from the KVM")
++	ErrNoResponse      = errors.New("no response from the KVM, is the target powered on?")
++)
++
++const (
++	kvmResponseTimeout = time.Second
++
++	// The target only registers a key if it stays pressed for a moment, so acknowledged
++	// reports alone aren't enough to get it to react
++	kvmKeyHoldDuration = 30 * time.Millisecond
++)
++
++type PressKeysInput struct {
++	Path      string     `json:"path" jsonschema:"input device to press the keys with, like /dev/ttyACM0 from kvm.getInputDevices"`
++	Keys      [][]string `json:"keys" jsonschema:"key combinations to press one after the other, each a list of W3C KeyboardEvent.code values held down together, so [[MetaLeft,KeyW]] is one shortcut while [[KeyH],[KeyI]] types hi. MetaLeft is Command on macOS. Capitals and symbols are their unshifted key plus ShiftLeft, so S is [ShiftLeft,KeyS] and _ is [ShiftLeft,Minus]"`
++	VideoPath string     `json:"videoPath,omitempty" jsonschema:"video capture device to take a screenshot with once the keys have been pressed, like /dev/video0 from kvm.getVideoCaptureDevices, empty to not take one"`
++	WaitMs    int        `json:"waitMs,omitempty" jsonschema:"how long to wait before taking that screenshot in milliseconds, so that the target has time to react to the keys"`
++}
++
++func (s *Service) PressKeys(ctx context.Context, req *mcp.CallToolRequest, input PressKeysInput) (*mcp.CallToolResult, any, error) {
++	// We build all reports up front so that we don't press a part of the sequence
++	// before noticing that a later key is unknown
++	reports := make([][]byte, len(input.Keys))
++	for i, combination := range input.Keys {
++		report, err := keyboardReport(combination)
++		if err != nil {
++			return nil, nil, err
++		}
++
++		reports[i] = report
++	}
++
++	port, err := serial.Open(input.Path, &serial.Mode{BaudRate: kvmBaudRate})
++	if err != nil {
++		return nil, nil, err
++	}
++	defer port.Close()
++
++	if err := port.SetReadTimeout(kvmResponseTimeout); err != nil {
++		return nil, nil, err
++	}
++
++	// Anything that is still buffered from an earlier session would desync us from
++	// the KVM's responses
++	if err := port.ResetInputBuffer(); err != nil {
++		return nil, nil, err
++	}
++
++	release := make([]byte, kvmReportLength)
++
++	// Failing halfway through a combination would otherwise leave the keys pressed on
++	// the target, turning everything that is typed afterwards into shortcuts
++	defer writeCommand(port, kvmCommandSendKeyboardData, release)
++
++	for _, report := range reports {
++		if err := writeCommand(port, kvmCommandSendKeyboardData, report); err != nil {
++			return nil, nil, err
++		}
++
++		time.Sleep(kvmKeyHoldDuration)
++
++		// Releasing the keys again keeps the target from repeating them
++		if err := writeCommand(port, kvmCommandSendKeyboardData, release); err != nil {
++			return nil, nil, err
++		}
++
++		time.Sleep(kvmKeyHoldDuration)
++	}
++
++	if input.VideoPath == "" {
++		return nil, nil, nil
++	}
++
++	time.Sleep(time.Duration(input.WaitMs) * time.Millisecond)
++
++	return s.TakeScreenshot(ctx, req, TakeScreenshotInput{
++		Path: input.VideoPath,
++	})
++}
+diff --git a/pkg/svc/kvm_send_mouse_input.go b/pkg/svc/kvm_send_mouse_input.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..f9fcdff1b45f2ba01dbe894a1fde8c94e396f73e
+--- /dev/null
++++ b/pkg/svc/kvm_send_mouse_input.go
+@@ -0,0 +1,212 @@
++package svc
++
++import (
++	"context"
++	"errors"
++	"fmt"
++	"time"
++
++	"github.com/modelcontextprotocol/go-sdk/mcp"
++	"go.bug.st/serial"
++)
++
++var (
++	SendMouseInputTool = &mcp.Tool{
++		Name:        "kvm.sendMouseInput",
++		Title:       "Send mouse input",
++		Description: "Move the pointer, click and scroll on a target through a KVM",
++	}
++
++	ErrUnknownMouseAction         = errors.New("unknown mouse action")
++	ErrUnknownMouseButton         = errors.New("unknown mouse button")
++	ErrMissingMouseButton         = errors.New("missing mouse button")
++	ErrMissingMouseCoordinate     = errors.New("missing mouse coordinate")
++	ErrMouseCoordinateOutOfRange  = errors.New("mouse coordinate out of range, coordinates go from 0 to 4096 across the target's screen")
++	ErrUnsupportedScrollDirection = errors.New("the KVM's protocol only supports vertical scrolling, dx must be 0")
++)
++
++const (
++	mouseActionMove        = "move"
++	mouseActionClick       = "click"
++	mouseActionDoubleClick = "doubleClick"
++	mouseActionDown        = "down"
++	mouseActionUp          = "up"
++	mouseActionScroll      = "scroll"
++
++	mouseButtonLeft   = "left"
++	mouseButtonRight  = "right"
++	mouseButtonMiddle = "middle"
++
++	// Just like keys, the target only registers a click if the button stays pressed
++	// for a moment
++	kvmMouseHoldDuration = 30 * time.Millisecond
++)
++
++type SendMouseInputInput struct {
++	Path      string `json:"path" jsonschema:"input device to send the mouse action through, like /dev/ttyACM0 from kvm.getInputDevices"`
++	Action    string `json:"action" jsonschema:"what to do: move moves the pointer to x and y, click and doubleClick press and release the button there, down holds the button (at x and y if given) until a later up, up releases all buttons, scroll turns the wheel by dy ticks"`
++	X         *int   `json:"x,omitempty" jsonschema:"horizontal position of the pointer, 0 to 4096 from the left to the right edge of the target's screen, required for move, click and doubleClick"`
++	Y         *int   `json:"y,omitempty" jsonschema:"vertical position of the pointer, 0 to 4096 from the top to the bottom edge of the target's screen, required for move, click and doubleClick"`
++	Button    string `json:"button,omitempty" jsonschema:"button to press: left, right or middle, required for click, doubleClick and down"`
++	DX        int    `json:"dx,omitempty" jsonschema:"horizontal wheel ticks for scroll, the KVM only supports vertical scrolling so this must be 0"`
++	DY        int    `json:"dy,omitempty" jsonschema:"vertical wheel ticks for scroll, positive scrolls up, negative scrolls down"`
++	VideoPath string `json:"videoPath,omitempty" jsonschema:"video capture device to take a screenshot with once the mouse action has been performed, like /dev/video0 from kvm.getVideoCaptureDevices, empty to not take one"`
++	WaitMs    int    `json:"waitMs,omitempty" jsonschema:"how long to wait before taking that screenshot in milliseconds, so that the target has time to react to the mouse action"`
++}
++
++type mouseReport struct {
++	command kvmCommand
++	data    []byte
++}
++
++func (s *Service) SendMouseInput(ctx context.Context, req *mcp.CallToolRequest, input SendMouseInputInput) (*mcp.CallToolResult, any, error) {
++	button := byte(0)
++	if input.Button != "" {
++		switch input.Button {
++		case mouseButtonLeft:
++			button = kvmMouseButtonLeft
++		case mouseButtonRight:
++			button = kvmMouseButtonRight
++		case mouseButtonMiddle:
++			button = kvmMouseButtonMiddle
++		default:
++			return nil, nil, fmt.Errorf("%w %q, pick one of: %s, %s, %s", ErrUnknownMouseButton, input.Button, mouseButtonLeft, mouseButtonRight, mouseButtonMiddle)
++		}
++	}
++
++	coordinates := func() (int, int, error) {
++		if input.X == nil || input.Y == nil {
++			return 0, 0, ErrMissingMouseCoordinate
++		}
++
++		if *input.X < 0 || *input.X > kvmMouseCoordinateMax || *input.Y < 0 || *input.Y > kvmMouseCoordinateMax {
++			return 0, 0, ErrMouseCoordinateOutOfRange
++		}
++
++		return *input.X, *input.Y, nil
++	}
++
++	// We build all reports up front so that we don't perform a part of the action
++	// before noticing that a later argument is invalid
++	reports := []mouseReport{}
++
++	switch input.Action {
++	case mouseActionMove:
++		x, y, err := coordinates()
++		if err != nil {
++			return nil, nil, err
++		}
++
++		reports = append(reports, mouseReport{kvmCommandSendMouseAbsoluteData, absoluteMouseReport(0, x, y)})
++
++	case mouseActionClick, mouseActionDoubleClick:
++		x, y, err := coordinates()
++		if err != nil {
++			return nil, nil, err
++		}
++
++		if button == 0 {
++			return nil, nil, ErrMissingMouseButton
++		}
++
++		presses := 1
++		if input.Action == mouseActionDoubleClick {
++			presses = 2
++		}
++
++		for range presses {
++			reports = append(reports,
++				mouseReport{kvmCommandSendMouseAbsoluteData, absoluteMouseReport(button, x, y)},
++				mouseReport{kvmCommandSendMouseAbsoluteData, absoluteMouseReport(0, x, y)},
++			)
++		}
++
++	case mouseActionDown:
++		if button == 0 {
++			return nil, nil, ErrMissingMouseButton
++		}
++
++		// Without coordinates we press the button wherever the pointer is, which
++		// keeps it possible to drag along a path sent as earlier moves
++		if input.X == nil && input.Y == nil {
++			reports = append(reports, mouseReport{kvmCommandSendMouseRelativeData, relativeMouseReport(button, 0, 0, 0)})
++		} else {
++			x, y, err := coordinates()
++			if err != nil {
++				return nil, nil, err
++			}
++
++			reports = append(reports, mouseReport{kvmCommandSendMouseAbsoluteData, absoluteMouseReport(button, x, y)})
++		}
++
++	case mouseActionUp:
++		if input.X == nil && input.Y == nil {
++			reports = append(reports, mouseReport{kvmCommandSendMouseRelativeData, relativeMouseReport(0, 0, 0, 0)})
++		} else {
++			x, y, err := coordinates()
++			if err != nil {
++				return nil, nil, err
++			}
++
++			reports = append(reports, mouseReport{kvmCommandSendMouseAbsoluteData, absoluteMouseReport(0, x, y)})
++		}
++
++	case mouseActionScroll:
++		if input.DX != 0 {
++			return nil, nil, ErrUnsupportedScrollDirection
++		}
++
++		// A wheel tick fits in a signed byte, so longer scrolls are split into
++		// multiple reports
++		for remaining := input.DY; remaining != 0; {
++			tick := max(-kvmMouseDeltaMax, min(kvmMouseDeltaMax, remaining))
++
++			reports = append(reports, mouseReport{kvmCommandSendMouseRelativeData, relativeMouseReport(0, 0, 0, tick)})
++
++			remaining -= tick
++		}
++
++	default:
++		return nil, nil, fmt.Errorf("%w %q, pick one of: %s, %s, %s, %s, %s, %s", ErrUnknownMouseAction, input.Action, mouseActionMove, mouseActionClick, mouseActionDoubleClick, mouseActionDown, mouseActionUp, mouseActionScroll)
++	}
++
++	port, err := serial.Open(input.Path, &serial.Mode{BaudRate: kvmBaudRate})
++	if err != nil {
++		return nil, nil, err
++	}
++	defer port.Close()
++
++	if err := port.SetReadTimeout(kvmResponseTimeout); err != nil {
++		return nil, nil, err
++	}
++
++	// Anything that is still buffered from an earlier session would desync us from
++	// the KVM's responses
++	if err := port.ResetInputBuffer(); err != nil {
++		return nil, nil, err
++	}
++
++	// Failing halfway through a click would otherwise leave the button pressed on
++	// the target; down is exempt, holding the button until a later up is its point
++	if input.Action == mouseActionClick || input.Action == mouseActionDoubleClick {
++		defer writeCommand(port, kvmCommandSendMouseAbsoluteData, absoluteMouseReport(0, *input.X, *input.Y))
++	}
++
++	for _, report := range reports {
++		if err := writeCommand(port, report.command, report.data); err != nil {
++			return nil, nil, err
++		}
++
++		time.Sleep(kvmMouseHoldDuration)
++	}
++
++	if input.VideoPath == "" {
++		return nil, nil, nil
++	}
++
++	time.Sleep(time.Duration(input.WaitMs) * time.Millisecond)
++
++	return s.TakeScreenshot(ctx, req, TakeScreenshotInput{
++		Path: input.VideoPath,
++	})
++}
+
