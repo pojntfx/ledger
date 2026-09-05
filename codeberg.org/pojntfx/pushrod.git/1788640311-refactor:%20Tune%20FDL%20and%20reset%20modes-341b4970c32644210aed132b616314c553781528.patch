@@ -1,0 +1,59 @@
+From 341b4970c32644210aed132b616314c553781528 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Sat, 05 Sep 2026 13:31:51 -0700
+Subject: [PATCH] refactor: Tune FDL and reset modes
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/pkg/svc/target_enter_fdl.go b/pkg/svc/target_enter_fdl.go
+index 2ccf8dbfe1cbaa32493c1ec3f1d99875099b1860..0e0f3b4fc704ca2d89751166129c87f82992a42f 100644
+--- a/pkg/svc/target_enter_fdl.go
++++ b/pkg/svc/target_enter_fdl.go
+@@ -63,7 +63,7 @@ 	}); err != nil {
+ 		return nil, nil, err
+ 	}
+ 
+-	time.Sleep(time.Millisecond * 500)
++	time.Sleep(time.Millisecond * 150)
+ 
+ 	// Press the FDL and RST button
+ 	if err := s.setStatusesLocked(device, []SetRelayStatus{
+@@ -79,7 +79,23 @@ 	}); err != nil {
+ 		return nil, nil, err
+ 	}
+ 
+-	time.Sleep(time.Millisecond * 500)
++	time.Sleep(time.Millisecond * 150)
++
++	// Release the RST button but not the FDL button
++	if err := s.setStatusesLocked(device, []SetRelayStatus{
++		{
++			Relay: 1,
++			On:    true,
++		},
++		{
++			Relay: 2,
++			On:    false,
++		},
++	}); err != nil {
++		return nil, nil, err
++	}
++
++	time.Sleep(time.Millisecond * 150)
+ 
+ 	// Release the RST and FDL buttons
+ 	if err := s.setStatusesLocked(device, []SetRelayStatus{
+diff --git a/pkg/svc/target_reset.go b/pkg/svc/target_reset.go
+index d7e50e1d423c74fac3edb82211a005213717deb7..f240b83053e231cb538cd5b3e8c3ae200c0ee1fe 100644
+--- a/pkg/svc/target_reset.go
++++ b/pkg/svc/target_reset.go
+@@ -63,7 +63,7 @@ 	}); err != nil {
+ 		return nil, nil, err
+ 	}
+ 
+-	time.Sleep(time.Millisecond * 500)
++	time.Sleep(time.Millisecond * 150)
+ 
+ 	// Release the RST and FDL buttons
+ 	if err := s.setStatusesLocked(device, []SetRelayStatus{
+
