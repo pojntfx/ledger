@@ -1,0 +1,131 @@
+From bc5c17d53f5999ae16c5f6497b4f29069bbc38b8 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Fri, 04 Sep 2026 20:16:47 -0700
+Subject: [PATCH] refactor: Start reworking service structure for other tools
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/main.go b/main.go
+index b37c4a87ab133ad87ff44cce282b6820545cafeb..384ef0d9db2b8bbf92325c52d6b0b5944089947a 100644
+--- a/main.go
++++ b/main.go
+@@ -12,7 +12,7 @@ 	"os/signal"
+ 	"syscall"
+ 	"time"
+ 
+-	"codeberg.org/pojntfx/pushrod/pkg/relay"
++	"codeberg.org/pojntfx/pushrod/pkg/svc"
+ 	"github.com/modelcontextprotocol/go-sdk/mcp"
+ )
+ 
+@@ -24,7 +24,7 @@
+ 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+ 	defer cancel()
+ 
+-	service := relay.NewService(ctx, time.Second*10, time.Minute, time.Second*5)
++	service := svc.NewService(ctx, time.Second*10, time.Minute, time.Second*5)
+ 
+ 	handler := mcp.NewServer(
+ 		&mcp.Implementation{
+@@ -36,11 +36,11 @@ 			WebsiteURL:  "https://codeberg.org/pojntfx/pushrod",
+ 		},
+ 		nil,
+ 	)
+-	mcp.AddTool(handler, relay.GetBoardsTool, service.GetBoards)
+-	mcp.AddTool(handler, relay.GetStatusesTool, service.GetStatuses)
+-	mcp.AddTool(handler, relay.SetStatusesTool, service.SetStatuses)
+-	mcp.AddTool(handler, relay.EnterFDLTool, service.EnterFDL)
+-	mcp.AddTool(handler, relay.ResetTool, service.Reset)
++	mcp.AddTool(handler, svc.GetBoardsTool, service.GetBoards)
++	mcp.AddTool(handler, svc.GetStatusesTool, service.GetStatuses)
++	mcp.AddTool(handler, svc.SetStatusesTool, service.SetStatuses)
++	mcp.AddTool(handler, svc.EnterFDLTool, service.EnterFDL)
++	mcp.AddTool(handler, svc.ResetTool, service.Reset)
+ 
+ 	log.Println("Listening on", *laddr)
+ 
+diff --git a/pkg/relay/enter_fdl.go b/pkg/svc/target_enter_fdl.go
+rename from pkg/relay/enter_fdl.go
+rename to pkg/svc/target_enter_fdl.go
+index 4e236bb07d83a699cc6be6b2e7e217676370196e..2ccf8dbfe1cbaa32493c1ec3f1d99875099b1860 100644
+--- a/pkg/relay/enter_fdl.go
++++ b/pkg/svc/target_enter_fdl.go
+@@ -1,4 +1,4 @@
+-package relay
++package svc
+ 
+ import (
+ 	"context"
+diff --git a/pkg/relay/get_boards.go b/pkg/svc/relay_get_boards.go
+rename from pkg/relay/get_boards.go
+rename to pkg/svc/relay_get_boards.go
+index 2d38bb31a80522128079532179f6bf6745c0d9bb..f9774ea9379d85f89dc57bbcf9301fecb867d73e 100644
+--- a/pkg/relay/get_boards.go
++++ b/pkg/svc/relay_get_boards.go
+@@ -1,4 +1,4 @@
+-package relay
++package svc
+ 
+ import (
+ 	"context"
+diff --git a/pkg/relay/get_statuses.go b/pkg/svc/relay_get_statuses.go
+rename from pkg/relay/get_statuses.go
+rename to pkg/svc/relay_get_statuses.go
+index 05d79bea0944e663ee9d01f7ef2b54fe33205c28..0c05eb957c062bfcadff156f92635fe5a083f9c1 100644
+--- a/pkg/relay/get_statuses.go
++++ b/pkg/svc/relay_get_statuses.go
+@@ -1,4 +1,4 @@
+-package relay
++package svc
+ 
+ import (
+ 	"context"
+diff --git a/pkg/relay/relay.go b/pkg/svc/relay.go
+rename from pkg/relay/relay.go
+rename to pkg/svc/relay.go
+index a62eb2b879e846316a6b978a3eda118b702c9b8e..2de0b2ea5182b04869d4e120999c575621b2e92c 100644
+--- a/pkg/relay/relay.go
++++ b/pkg/svc/relay.go
+@@ -1,4 +1,4 @@
+-package relay
++package svc
+ 
+ import (
+ 	"context"
+diff --git a/pkg/relay/reset.go b/pkg/svc/target_reset.go
+rename from pkg/relay/reset.go
+rename to pkg/svc/target_reset.go
+index 9d9c1d396267d8f410b02d412a3bfe19df1eecaa..d7e50e1d423c74fac3edb82211a005213717deb7 100644
+--- a/pkg/relay/reset.go
++++ b/pkg/svc/target_reset.go
+@@ -1,4 +1,4 @@
+-package relay
++package svc
+ 
+ import (
+ 	"context"
+diff --git a/pkg/relay/root.go b/pkg/svc/root.go
+rename from pkg/relay/root.go
+rename to pkg/svc/root.go
+index 428b0bc6c14e90e19a8010af553d50ad4ca4fd1c..210062c50219a3048f87b926fd27330d33289311 100644
+--- a/pkg/relay/root.go
++++ b/pkg/svc/root.go
+@@ -1,4 +1,4 @@
+-package relay
++package svc
+ 
+ import (
+ 	"context"
+diff --git a/pkg/relay/set_statuses.go b/pkg/svc/relay_set_statuses.go
+rename from pkg/relay/set_statuses.go
+rename to pkg/svc/relay_set_statuses.go
+index 8faeec8741715ea404b3794227c3e684a08549b6..72143b6fbcb7c02e20233e4341c8d6d8fa8db0ba 100644
+--- a/pkg/relay/set_statuses.go
++++ b/pkg/svc/relay_set_statuses.go
+@@ -1,4 +1,4 @@
+-package relay
++package svc
+ 
+ import (
+ 	"cmp"
+
