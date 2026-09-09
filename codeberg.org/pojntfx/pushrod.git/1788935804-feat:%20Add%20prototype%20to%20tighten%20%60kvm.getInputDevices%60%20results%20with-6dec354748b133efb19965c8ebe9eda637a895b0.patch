@@ -1,0 +1,155 @@
+From 6dec354748b133efb19965c8ebe9eda637a895b0 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Tue, 08 Sep 2026 23:36:44 -0700
+Subject: [PATCH] feat: Add prototype to tighten `kvm.getInputDevices` results with
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/pkg/svc/kvm_get_input_devices.go b/pkg/svc/kvm_get_input_devices.go
+index bbe87d33afa5ec884d801c65502707947b7be8f5..a9a8712674647ca9f04effbe365023badd03aa90 100644
+--- a/pkg/svc/kvm_get_input_devices.go
++++ b/pkg/svc/kvm_get_input_devices.go
+@@ -2,7 +2,6 @@ package svc
+ 
+ import (
+ 	"context"
+-	"strings"
+ 
+ 	"github.com/modelcontextprotocol/go-sdk/mcp"
+ 	"go.bug.st/serial/enumerator"
+@@ -32,10 +31,7 @@ 	}
+ 
+ 	inputDevices := []InputDevice{}
+ 	for _, port := range ports {
+-		if !port.IsUSB ||
+-			!strings.EqualFold(port.VID, KVM_INPUT_VENDOR_ID) ||
+-			!strings.EqualFold(port.PID, KVM_INPUT_PRODUCT_ID) {
+-
++		if !port.IsUSB || !isKVMInput(port) {
+ 			continue
+ 		}
+ 
+diff --git a/pkg/svc/kvm_get_video_capture_devices.go b/pkg/svc/kvm_get_video_capture_devices.go
+index 1cb3a1c37dcae9ce66ab15f0aebed2608f5fa345..1703adfab8334634db76c8597fcaf2b03677203c 100644
+--- a/pkg/svc/kvm_get_video_capture_devices.go
++++ b/pkg/svc/kvm_get_video_capture_devices.go
+@@ -3,7 +3,9 @@
+ import (
+ 	"context"
+ 	"log/slog"
++	"os"
+ 	"path/filepath"
++	"strings"
+ 
+ 	"github.com/blackjack/webcam"
+ 	"github.com/modelcontextprotocol/go-sdk/mcp"
+@@ -13,26 +15,57 @@ var (
+ 	GetVideoCaptureDevicesTool = &mcp.Tool{
+ 		Name:        "kvm.getVideoCaptureDevices",
+ 		Title:       "Get video capture devices",
+-		Description: "Get all currently connected video capture devices",
++		Description: "Get all currently connected KVM video capture devices",
+ 	}
+ )
+ 
+ type VideoCaptureDevice struct {
+ 	Path string `json:"path" jsonschema:"path that uniquely identifies the video capture device until it gets unplugged"`
++	Name string `json:"name" jsonschema:"name that the video capture device reports for itself"`
+ }
+ 
+ type GetVideoCaptureDevicesOutput struct {
+ 	VideoCaptureDevices []VideoCaptureDevice `json:"videoCaptureDevices" jsonschema:"connected video capture devices"`
+ }
+ 
+-func isVideoCaptureDevice(path string) (bool, error) {
++func isKVMVideo(vendorID, productID string) bool {
++	return strings.EqualFold(vendorID, KVM_VIDEO_VENDOR_ID) && strings.EqualFold(productID, KVM_VIDEO_PRODUCT_ID)
++}
++
++// usbIDs resolves the VID and PID of the USB device that a video node belongs to;
++// non-USB video devices have no IDs and return empty strings
++func usbIDs(path string) (string, string, error) {
++	devicePath, err := filepath.EvalSymlinks(filepath.Join("/sys/class/video4linux", filepath.Base(path), "device"))
++	if err != nil {
++		return "", "", err
++	}
++
++	// The node belongs to a USB interface, so walk up to the USB device that has the IDs
++	for dir := devicePath; dir != "/"; dir = filepath.Dir(dir) {
++		vendorID, err := os.ReadFile(filepath.Join(dir, "idVendor"))
++		if err != nil {
++			continue
++		}
++
++		productID, err := os.ReadFile(filepath.Join(dir, "idProduct"))
++		if err != nil {
++			continue
++		}
++
++		return strings.TrimSpace(string(vendorID)), strings.TrimSpace(string(productID)), nil
++	}
++
++	return "", "", nil
++}
++
++func videoCaptureDeviceName(path string) (string, error) {
+ 	device, err := webcam.Open(path)
+ 	if err != nil {
+-		return false, err
++		return "", err
+ 	}
+ 	defer device.Close()
+ 
+-	return len(device.GetSupportedFormats()) > 0, nil
++	return device.GetName()
+ }
+ 
+ func (s *Service) GetVideoCaptureDevices(ctx context.Context, req *mcp.CallToolRequest, input struct{}) (*mcp.CallToolResult, *GetVideoCaptureDevicesOutput, error) {
+@@ -43,19 +76,28 @@ 	}
+ 
+ 	videoCaptureDevices := []VideoCaptureDevice{}
+ 	for _, path := range paths {
+-		isCaptureDevice, err := isVideoCaptureDevice(path)
++		vendorID, productID, err := usbIDs(path)
+ 		if err != nil {
+-			slog.Error("Could not check whether device is a video capture device, skipping", "path", path, "err", err)
++			slog.Error("Could not resolve USB IDs of video capture device, skipping", "path", path, "err", err)
+ 
+ 			continue
+ 		}
+ 
+-		if !isCaptureDevice {
++		// Webcams and other capture devices are unusable for the KVM, so skip them
++		if !isKVMVideo(vendorID, productID) {
++			continue
++		}
++
++		name, err := videoCaptureDeviceName(path)
++		if err != nil {
++			slog.Error("Could not get name of video capture device, skipping", "path", path, "err", err)
++
+ 			continue
+ 		}
+ 
+ 		videoCaptureDevices = append(videoCaptureDevices, VideoCaptureDevice{
+ 			Path: path,
++			Name: name,
+ 		})
+ 	}
+ 
+diff --git a/pkg/svc/root.go b/pkg/svc/root.go
+index 103cb400b5ae524b41b257f2fd4b4398708e0b57..e26f9df4fac9ae20ded067c51b70da29aedd17d4 100644
+--- a/pkg/svc/root.go
++++ b/pkg/svc/root.go
+@@ -20,6 +20,10 @@ 	// See https://the-sz.com/products/usbid/index.php?v=0x1a86&p=0x55d3&n=
+ 	// CH343 USB-serial bridge
+ 	KVM_INPUT_VENDOR_ID  = "1a86"
+ 	KVM_INPUT_PRODUCT_ID = "55d3"
++
++	// MacroSilicon MS2131 HDMI capture, the NanoKVM-USB's video device
++	KVM_VIDEO_VENDOR_ID  = "345f"
++	KVM_VIDEO_PRODUCT_ID = "2131"
+ )
+ 
+ type Service struct {
+
