@@ -1,0 +1,429 @@
+From af287f68d6fe75d09619a4e483bff54fc4421372 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Wed, 09 Sep 2026 23:38:46 -0700
+Subject: [PATCH] feat: Add basic file deletion, upload (via sidechannel) and listing to MCP server
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/go.mod b/go.mod
+index fcb7f06b093a5b25c6ffe9ca9df682d1f1d6daec..518cc023d523b3b0679ef0fafcf57e3b7b3e2a28 100644
+--- a/go.mod
++++ b/go.mod
+@@ -3,7 +3,9 @@
+ go 1.26.4
+ 
+ require (
++	github.com/adrg/xdg v0.5.3
+ 	github.com/blackjack/webcam v0.6.1
++	github.com/kennygrant/sanitize v1.2.4
+ 	github.com/modelcontextprotocol/go-sdk v1.7.0
+ 	go.bug.st/serial v1.8.0
+ 	golang.org/x/mobile v0.0.0-20260821190718-4776eadac327
+@@ -16,8 +18,9 @@ 	github.com/google/jsonschema-go v0.4.3 // indirect
+ 	github.com/segmentio/asm v1.1.3 // indirect
+ 	github.com/segmentio/encoding v0.5.4 // indirect
+ 	github.com/yosida95/uritemplate/v3 v3.0.2 // indirect
++	golang.org/x/net v0.59.0 // indirect
+ 	golang.org/x/oauth2 v0.35.0 // indirect
+ 	golang.org/x/sync v0.22.0 // indirect
+-	golang.org/x/sys v0.47.0 // indirect
++	golang.org/x/sys v0.48.0 // indirect
+ 	golang.org/x/time v0.15.0 // indirect
+ )
+diff --git a/go.sum b/go.sum
+index 7f73d32350c410742f6fae1e701d7fbfc656e21d..4c7f9b70c5e4cb4d82809b39e5a02cd5a918a4a1 100644
+--- a/go.sum
++++ b/go.sum
+@@ -1,5 +1,9 @@
++github.com/adrg/xdg v0.5.3 h1:xRnxJXne7+oWDatRhR1JLnvuccuIeCoBu2rtuLqQB78=
++github.com/adrg/xdg v0.5.3/go.mod h1:nlTsY+NNiCBGCK2tpm09vRqfVzrc2fLmXGpBLF0zlTQ=
+ github.com/blackjack/webcam v0.6.1 h1:K0T6Q0zto23U99gNAa5q/hFoye6uGcKr2aE6hFoxVoE=
+ github.com/blackjack/webcam v0.6.1/go.mod h1:zs+RkUZzqpFPHPiwBZ6U5B34ZXXe9i+SiHLKnnukJuI=
++github.com/davecgh/go-spew v1.1.1 h1:vj9j/u1bqnvCEfJOwUhtlOARqs3+rkHYY13jYWTU97c=
++github.com/davecgh/go-spew v1.1.1/go.mod h1:J7Y8YcW2NihsgmVo/mv3lAwl/skON4iLHjSsI+c5H38=
+ github.com/ebitengine/purego v0.9.1 h1:a/k2f2HQU3Pi399RPW1MOaZyhKJL9w/xFpKAg4q1s0A=
+ github.com/ebitengine/purego v0.9.1/go.mod h1:iIjxzd6CiRiOG0UyXP+V1+jWqUXVjPKLAI0mRfJZTmQ=
+ github.com/golang-jwt/jwt/v5 v5.3.1 h1:kYf81DTWFe7t+1VvL7eS+jKFVWaUnK9cB1qbwn63YCY=
+@@ -8,27 +12,37 @@ github.com/google/go-cmp v0.7.0 h1:wk8382ETsv4JYUZwIsn6YpYiWiBsYLSJiTsyBybVuN8=
+ github.com/google/go-cmp v0.7.0/go.mod h1:pXiqmnSA92OHEEa9HXL2W4E7lf9JzCmGVUdgjX3N/iU=
+ github.com/google/jsonschema-go v0.4.3 h1:/DBOLZTfDow7pe2GmaJNhltueGTtDKICi8V8p+DQPd0=
+ github.com/google/jsonschema-go v0.4.3/go.mod h1:r5quNTdLOYEz95Ru18zA0ydNbBuYoo9tgaYcxEYhJVE=
++github.com/kennygrant/sanitize v1.2.4 h1:gN25/otpP5vAsO2djbMhF/LQX6R7+O1TB4yv8NzpJ3o=
++github.com/kennygrant/sanitize v1.2.4/go.mod h1:LGsjYYtgxbetdg5owWB2mpgUL6e2nfw2eObZ0u0qvak=
+ github.com/modelcontextprotocol/go-sdk v1.7.0 h1:yqjY2dsbKAC0LSuWZVBMrHgiG8ukXv6NRo0JiALay44=
+ github.com/modelcontextprotocol/go-sdk v1.7.0/go.mod h1:dL7u98E/zjJTGzEq+j30jQ8K2k1mb6LeAH4inEcSGts=
++github.com/pmezard/go-difflib v1.0.0 h1:4DBwDE0NGyQoBHbLQYPwSUPoCMWR5BEzIk/f1lZbAQM=
++github.com/pmezard/go-difflib v1.0.0/go.mod h1:iKH77koFhYxTK1pcRnkKkqfTogsbg7gZNVY4sRDYZ/4=
+ github.com/segmentio/asm v1.1.3 h1:WM03sfUOENvvKexOLp+pCqgb/WDjsi7EK8gIsICtzhc=
+ github.com/segmentio/asm v1.1.3/go.mod h1:Ld3L4ZXGNcSLRg4JBsZ3//1+f/TjYl0Mzen/DQy1EJg=
+ github.com/segmentio/encoding v0.5.4 h1:OW1VRern8Nw6ITAtwSZ7Idrl3MXCFwXHPgqESYfvNt0=
+ github.com/segmentio/encoding v0.5.4/go.mod h1:HS1ZKa3kSN32ZHVZ7ZLPLXWvOVIiZtyJnO1gPH1sKt0=
++github.com/stretchr/testify v1.9.0 h1:HtqpIVDClZ4nwg75+f6Lvsy/wHu+3BoSGCbBAcpTsTg=
++github.com/stretchr/testify v1.9.0/go.mod h1:r2ic/lqez/lEtzL7wO/rwa5dbSLXVDPFyf8C91i36aY=
+ github.com/yosida95/uritemplate/v3 v3.0.2 h1:Ed3Oyj9yrmi9087+NczuL5BwkIc4wvTb5zIM+UJPGz4=
+ github.com/yosida95/uritemplate/v3 v3.0.2/go.mod h1:ILOh0sOhIJR3+L/8afwt/kE++YT040gmv5BQTMR2HP4=
+ go.bug.st/serial v1.8.0 h1:ZtnmN8aYXtPlTghwSvDWPHKBHL9TM6oFDa+KpSn4SQE=
+ go.bug.st/serial v1.8.0/go.mod h1:d0MmS16Qt9b1m06yoYRNUXhRRTJV5Qg2S5EKqQtnayQ=
+ golang.org/x/mobile v0.0.0-20260821190718-4776eadac327 h1:D/wiQ6AoTYjDtSD0HMPhU8O40NUP8EF0UmDhIYCnG4I=
+ golang.org/x/mobile v0.0.0-20260821190718-4776eadac327/go.mod h1:D9q8rgXu13Q3uuM+Vuy6F/DG1WF/giTPLtqQ9on5B1M=
++golang.org/x/net v0.59.0 h1:5zfYln+w5XCxwrnMMJPufRgNoXEaGxl0wo5GqPXyues=
++golang.org/x/net v0.59.0/go.mod h1:2DA/G1UfVbCpQPeWTmMPGY7Cs2PkBkwu743bVX5PIVg=
+ golang.org/x/oauth2 v0.35.0 h1:Mv2mzuHuZuY2+bkyWXIHMfhNdJAdwW3FuWeCPYN5GVQ=
+ golang.org/x/oauth2 v0.35.0/go.mod h1:lzm5WQJQwKZ3nwavOZ3IS5Aulzxi68dUSgRHujetwEA=
+ golang.org/x/sync v0.22.0 h1:SZjpbeLmrCk4xhRSZFNZW5gFUeCeFgjekvI/+gfScek=
+ golang.org/x/sync v0.22.0/go.mod h1:9xrNwdLfx4jkKbNva9FpL6vEN7evnE43NNNJQ2LF3+0=
+-golang.org/x/sys v0.47.0 h1:o7XGOvZQCADBQQ4Y7VNq2dRWQR7JmOUW8Kxx4ZsNgWs=
+-golang.org/x/sys v0.47.0/go.mod h1:4GL1E5IUh+htKOUEOaiffhrAeqysfVGipDYzABqnCmw=
++golang.org/x/sys v0.48.0 h1:bbX/i/6MgT9BVLM9RT1thmxL04yeTAhbEz4SyadbXoo=
++golang.org/x/sys v0.48.0/go.mod h1:hNLxWAXmnKAxqDtdwIYC4bM9oQPEecfsnNMuSxOs3og=
+ golang.org/x/time v0.15.0 h1:bbrp8t3bGUeFOx08pvsMYRTCVSMk89u4tKbNOZbp88U=
+ golang.org/x/time v0.15.0/go.mod h1:Y4YMaQmXwGQZoFaVFk4YpCt4FLQMYKZe9oeV/f4MSno=
+ golang.org/x/tools v0.49.0 h1:3NI7VXzL9+1WZD52Dx2ttoPwD5DWrFGpl9mFZDlmisI=
+ golang.org/x/tools v0.49.0/go.mod h1:SJNXV9DBKT0UbdttsQjbfJlAE/q+y36++zo3uL3N0Oo=
++gopkg.in/yaml.v3 v3.0.1 h1:fxVm/GzAzEWqLHuvctI91KS9hhNmmWOoWu0XTYJS7CA=
++gopkg.in/yaml.v3 v3.0.1/go.mod h1:K4uyk7z7BCEPqu6E+C64Yfv1cQ7kz7rIZviUmN+EgEM=
+ rafaelmartins.com/p/usbhid v0.0.0-20260811025057-543484740bef h1:R1IycbWCVegqAyyMyO7/bRKQjYi0aTvFX1kayxwWYko=
+ rafaelmartins.com/p/usbhid v0.0.0-20260811025057-543484740bef/go.mod h1:Rta/iJgy+IuDjpHCBFwHKTNDfHI2i2z7HfO/re/sOV8=
+diff --git a/main.go b/main.go
+index 17fc497c0dca348639c796217681fbe0132a80e2..c537c922a99b810b39e8c49d81f0a19a03b29231 100644
+--- a/main.go
++++ b/main.go
+@@ -9,22 +9,29 @@ 	"net"
+ 	"net/http"
+ 	"os"
+ 	"os/signal"
++	"path/filepath"
+ 	"syscall"
+ 	"time"
+ 
+ 	"codeberg.org/pojntfx/pushrod/pkg/svc"
++	"github.com/adrg/xdg"
+ 	"github.com/modelcontextprotocol/go-sdk/mcp"
+ )
+ 
+ func main() {
+ 	laddr := flag.String("laddr", ":1337", "Listen address")
++	filesDir := flag.String("files-dir", filepath.Join(xdg.DataHome, "pushrod", "files"), "Directory to store uploaded files in")
+ 
+ 	flag.Parse()
++
++	if err := os.MkdirAll(*filesDir, os.ModePerm); err != nil {
++		panic(err)
++	}
+ 
+ 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+ 	defer cancel()
+ 
+-	service := svc.NewService(ctx, time.Second*10, time.Minute, time.Second*5)
++	service := svc.NewService(ctx, time.Second*10, time.Minute, time.Second*5, *filesDir)
+ 
+ 	handler := mcp.NewServer(
+ 		&mcp.Implementation{
+@@ -51,14 +58,24 @@ 	mcp.AddTool(handler, svc.StartBufferingTool, service.StartBuffering)
+ 	mcp.AddTool(handler, svc.StopBufferingTool, service.StopBuffering)
+ 	mcp.AddTool(handler, svc.ReadFromTool, service.ReadFrom)
+ 	mcp.AddTool(handler, svc.WriteToTool, service.WriteTo)
++	mcp.AddTool(handler, svc.GetFilesTool, service.GetFiles)
++	mcp.AddTool(handler, svc.DeleteFileTool, service.DeleteFile)
+ 
+ 	log.Println("Listening on", *laddr)
++	log.Println("Storing uploaded files in", *filesDir)
++
++	mux := http.NewServeMux()
++	mux.Handle("/", mcp.NewStreamableHTTPHandler(func(r *http.Request) *mcp.Server {
++		return handler
++	}, nil))
++	mux.HandleFunc(svc.FilesUploadPath+"{name}", service.HandleUpload)
++	// Without this, an upload without a usable name falls through to the MCP
++	// handler, which can only answer that the method isn't allowed
++	mux.HandleFunc(svc.FilesUploadPath, service.HandleUpload)
+ 
+ 	server := &http.Server{
+-		Addr: *laddr,
+-		Handler: mcp.NewStreamableHTTPHandler(func(r *http.Request) *mcp.Server {
+-			return handler
+-		}, nil),
++		Addr:    *laddr,
++		Handler: mux,
+ 		BaseContext: func(l net.Listener) context.Context {
+ 			return ctx
+ 		},
+diff --git a/pkg/svc/files.go b/pkg/svc/files.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..b263121ff2ab1e065f5bc1946d95e7612a264e8b
+--- /dev/null
++++ b/pkg/svc/files.go
+@@ -0,0 +1,148 @@
++package svc
++
++import (
++	"crypto/sha256"
++	"encoding/hex"
++	"encoding/json"
++	"errors"
++	"io"
++	"net/http"
++	"os"
++	"path/filepath"
++	"strings"
++
++	"github.com/kennygrant/sanitize"
++)
++
++const (
++	// Uploads are streamed into a temporary file in the files directory and
++	// renamed once they have completed, so that a partial upload never shows up
++	// as a file that could be flashed
++	filesUploadPattern = ".upload-"
++
++	// The path that the upload endpoint is served on; the file's name is
++	// appended to it
++	FilesUploadPath = "/files/"
++)
++
++var (
++	ErrInvalidFileName = errors.New(`file name must be usable as a bare file name like "image.img", without any directories and without a leading dash`)
++)
++
++// sanitizeFileName normalizes a name into one that is safe to store in the
++// files directory and to later pass to a flashing tool as an argument. It is
++// idempotent, so the harness can keep referring to a file by the name that it
++// got back
++func sanitizeFileName(name string) (string, error) {
++	// Strips any directories, whitespace and shell metacharacters
++	sanitized := sanitize.Name(name)
++
++	// Sanitizing leaves these as-is, but none of them name a file, and a leading
++	// dash would look like a flag to the tools that consume the file
++	if sanitized == "" || sanitized == "." || sanitized == ".." ||
++		strings.HasPrefix(sanitized, "-") ||
++		sanitized != filepath.Base(sanitized) {
++		return "", ErrInvalidFileName
++	}
++
++	return sanitized, nil
++}
++
++// filePath resolves a name to a path in the files directory, and returns the
++// sanitized name that the file is actually stored under
++func (s *Service) filePath(name string) (string, string, error) {
++	sanitized, err := sanitizeFileName(name)
++	if err != nil {
++		return "", "", err
++	}
++
++	return filepath.Join(s.filesDir, sanitized), sanitized, nil
++}
++
++func (s *Service) getFiles() ([]string, error) {
++	entries, err := os.ReadDir(s.filesDir)
++	if err != nil {
++		return nil, err
++	}
++
++	files := []string{}
++	for _, entry := range entries {
++		// Uploads that are still in flight aren't files yet
++		if entry.IsDir() || strings.HasPrefix(entry.Name(), filesUploadPattern) {
++			continue
++		}
++
++		files = append(files, entry.Name())
++	}
++
++	return files, nil
++}
++
++type uploadResponse struct {
++	Name      string `json:"name"`
++	SizeBytes int64  `json:"sizeBytes"`
++	SHA256    string `json:"sha256"`
++}
++
++// HandleUpload streams an uploaded file to the files directory; it is served
++// next to the MCP endpoint on the same listener so that reaching the MCP server
++// is enough to be able to upload
++func (s *Service) HandleUpload(w http.ResponseWriter, r *http.Request) {
++	if r.Method != http.MethodPut && r.Method != http.MethodPost {
++		w.Header().Set("Allow", http.MethodPut)
++
++		http.Error(w, `upload a file with "curl --fail --upload-file <local path> <this URL>"`, http.StatusMethodNotAllowed)
++
++		return
++	}
++
++	path, name, err := s.filePath(r.PathValue("name"))
++	if err != nil {
++		http.Error(w, err.Error(), http.StatusBadRequest)
++
++		return
++	}
++
++	file, err := os.CreateTemp(s.filesDir, filesUploadPattern)
++	if err != nil {
++		http.Error(w, err.Error(), http.StatusInternalServerError)
++
++		return
++	}
++	defer func() {
++		file.Close()
++
++		// After the rename this removes nothing, before it it removes the partial
++		// upload
++		os.Remove(file.Name())
++	}()
++
++	hash := sha256.New()
++
++	size, err := io.Copy(io.MultiWriter(file, hash), r.Body)
++	if err != nil {
++		http.Error(w, err.Error(), http.StatusInternalServerError)
++
++		return
++	}
++
++	if err := file.Close(); err != nil {
++		http.Error(w, err.Error(), http.StatusInternalServerError)
++
++		return
++	}
++
++	if err := os.Rename(file.Name(), path); err != nil {
++		http.Error(w, err.Error(), http.StatusInternalServerError)
++
++		return
++	}
++
++	w.Header().Set("Content-Type", "application/json")
++
++	json.NewEncoder(w).Encode(uploadResponse{
++		Name:      name,
++		SizeBytes: size,
++		SHA256:    hex.EncodeToString(hash.Sum(nil)),
++	})
++}
+diff --git a/pkg/svc/files_delete_file.go b/pkg/svc/files_delete_file.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..6ee1ffa8b8e3e0286a9ea6eb2e8df51fb05b8746
+--- /dev/null
++++ b/pkg/svc/files_delete_file.go
+@@ -0,0 +1,49 @@
++package svc
++
++import (
++	"context"
++	"errors"
++	"fmt"
++	"os"
++
++	"github.com/modelcontextprotocol/go-sdk/mcp"
++)
++
++var (
++	DeleteFileTool = &mcp.Tool{
++		Name:        "files.deleteFile",
++		Title:       "Delete file",
++		Description: "Delete an uploaded file from the server to free up disk space; only files that have been uploaded can be deleted",
++	}
++
++	ErrFileNotFound = errors.New("file not found")
++)
++
++type DeleteFileInput struct {
++	Name string `json:"name" jsonschema:"name of the file to delete, like image.img from files.getFiles"`
++}
++
++func (s *Service) DeleteFile(ctx context.Context, req *mcp.CallToolRequest, input DeleteFileInput) (*mcp.CallToolResult, *GetFilesOutput, error) {
++	path, name, err := s.filePath(input.Name)
++	if err != nil {
++		return nil, nil, err
++	}
++
++	if err := os.Remove(path); err != nil {
++		if os.IsNotExist(err) {
++			// The server's paths are not the harness' business
++			return nil, nil, fmt.Errorf("%w: %v", ErrFileNotFound, name)
++		}
++
++		return nil, nil, err
++	}
++
++	files, err := s.getFiles()
++	if err != nil {
++		return nil, nil, err
++	}
++
++	return nil, &GetFilesOutput{
++		Files: files,
++	}, nil
++}
+diff --git a/pkg/svc/files_get_files.go b/pkg/svc/files_get_files.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..caaf16a7ce4d8dcce838acb57289089ac31ba638
+--- /dev/null
++++ b/pkg/svc/files_get_files.go
+@@ -0,0 +1,37 @@
++package svc
++
++import (
++	"context"
++
++	"github.com/modelcontextprotocol/go-sdk/mcp"
++)
++
++var (
++	// Files are uploaded with a shell command instead of a tool call so that
++	// images don't have to pass through the conversation
++	GetFilesTool = &mcp.Tool{
++		Name:  "files.getFiles",
++		Title: "Get files",
++		Description: `Get the files that have been uploaded to the server, which other tools can reference by name. ` +
++			`To upload a file, run "curl --fail --upload-file LOCAL_PATH SERVER` + FilesUploadPath + `NAME" on the machine that holds it, ` +
++			`where SERVER is the scheme, host and port that this MCP server is reachable on ` +
++			`and NAME is the name that the file should have on the server, like image.img; ` +
++			`the command prints the name that the file was actually stored under, which is a sanitized version of NAME, ` +
++			`and uploading a name that already exists replaces it`,
++	}
++)
++
++type GetFilesOutput struct {
++	Files []string `json:"files" jsonschema:"names of the files that are currently on the server"`
++}
++
++func (s *Service) GetFiles(ctx context.Context, req *mcp.CallToolRequest, input struct{}) (*mcp.CallToolResult, *GetFilesOutput, error) {
++	files, err := s.getFiles()
++	if err != nil {
++		return nil, nil, err
++	}
++
++	return nil, &GetFilesOutput{
++		Files: files,
++	}, nil
++}
+diff --git a/pkg/svc/root.go b/pkg/svc/root.go
+index 5a10bdc7345d4f1f2a689f6623bc84a0504e89a0..0b28e18d333d4d36dae2d6d938c03070f1f95e31 100644
+--- a/pkg/svc/root.go
++++ b/pkg/svc/root.go
+@@ -39,9 +39,11 @@ 	relayCycles [4]*relayCycle
+ 
+ 	consolesLock *sync.Mutex
+ 	consoles     map[string]*serialConsole
++
++	filesDir string
+ }
+ 
+-func NewService(baseCtx context.Context, shutdownTimeout, totalRelayCycleDuration, onRelayCycleDuration time.Duration) *Service {
++func NewService(baseCtx context.Context, shutdownTimeout, totalRelayCycleDuration, onRelayCycleDuration time.Duration, filesDir string) *Service {
+ 	shutdownCtx, shutdownCancel := context.WithCancel(context.Background())
+ 
+ 	go func() {
+@@ -68,6 +70,8 @@ 		onRelayCycleDuration:    onRelayCycleDuration,
+ 
+ 		consolesLock: &sync.Mutex{},
+ 		consoles:     map[string]*serialConsole{},
++
++		filesDir: filesDir,
+ 
+ 		relayCycles: [4]*relayCycle{
+ 			{
+
