@@ -1,0 +1,207 @@
+From c6798c394ae09f3e06e966266a2a7eafc6c2990d Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Fri, 11 Sep 2026 00:08:06 -0700
+Subject: [PATCH] feat: Add upload commands to delete and list files to hint clients about how to actually use the upload APIs
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/main.go b/main.go
+index 40e7c145407bede784314ae908c417b51b39933a..c8a898d37178bad43bf9df75e11ccc8b63a102cc 100644
+--- a/main.go
++++ b/main.go
+@@ -21,6 +21,7 @@
+ func main() {
+ 	laddr := flag.String("laddr", ":1337", "Listen address")
+ 	filesDir := flag.String("files-dir", filepath.Join(xdg.DataHome, "pushrod", "files"), "Directory to store uploaded files in")
++	publicURL := flag.String("public-url", "", "Publicly reachable base URL (scheme://host[:port]) to advertise for uploads, e.g. when behind a reverse proxy; if empty, it is derived from each request's Host header")
+ 
+ 	flag.Parse()
+ 
+@@ -31,7 +32,7 @@
+ 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+ 	defer cancel()
+ 
+-	service := svc.NewService(ctx, time.Second*10, time.Minute, time.Second*5, *filesDir)
++	service := svc.NewService(ctx, time.Second*10, time.Minute, time.Second*5, *filesDir, *publicURL)
+ 
+ 	handler := mcp.NewServer(
+ 		&mcp.Implementation{
+@@ -65,10 +66,17 @@
+ 	log.Println("Listening on", *laddr)
+ 	log.Println("Storing uploaded files in", *filesDir)
+ 
++	mcpHandler := mcp.NewStreamableHTTPHandler(func(r *http.Request) *mcp.Server {
++		return handler
++	}, nil)
++
+ 	mux := http.NewServeMux()
+-	mux.Handle("/", mcp.NewStreamableHTTPHandler(func(r *http.Request) *mcp.Server {
+-		return handler
+-	}, nil))
++	// Carry the URL each request came in on into the tool handlers, so that
++	// files.getFiles can advertise an upload command that points back here even
++	// without a configured public URL
++	mux.Handle("/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		mcpHandler.ServeHTTP(w, r.WithContext(svc.WithRequestBaseURL(r.Context(), svc.RequestBaseURL(r))))
++	}))
+ 	mux.HandleFunc(svc.FilesUploadPath+"{name}", service.HandleUpload)
+ 	// Without this, an upload without a usable name falls through to the MCP
+ 	// handler, which can only answer that the method isn't allowed
+diff --git a/pkg/svc/files.go b/pkg/svc/files.go
+index b263121ff2ab1e065f5bc1946d95e7612a264e8b..67db4fea87e5ab9e743b8fa73507a243e371c3d6 100644
+--- a/pkg/svc/files.go
++++ b/pkg/svc/files.go
+@@ -1,10 +1,12 @@
+ package svc
+ 
+ import (
++	"context"
+ 	"crypto/sha256"
+ 	"encoding/hex"
+ 	"encoding/json"
+ 	"errors"
++	"fmt"
+ 	"io"
+ 	"net/http"
+ 	"os"
+@@ -28,6 +30,54 @@
+ var (
+ 	ErrInvalidFileName = errors.New(`file name must be usable as a bare file name like "image.img", without any directories and without a leading dash`)
+ )
++
++// baseURLContextKey carries the base URL a request came in on, so that a tool
++// can advertise an upload command that points back at the same server
++type baseURLContextKey struct{}
++
++// RequestBaseURL derives the scheme and host that a request reached the server
++// on, honoring a reverse proxy's X-Forwarded-* headers
++func RequestBaseURL(r *http.Request) string {
++	scheme := "http"
++	if r.TLS != nil {
++		scheme = "https"
++	}
++	// A proxy can forward several hops as a comma-separated list; the first is
++	// the one closest to the client
++	if proto := r.Header.Get("X-Forwarded-Proto"); proto != "" {
++		scheme = strings.TrimSpace(strings.Split(proto, ",")[0])
++	}
++
++	host := r.Host
++	if forwarded := r.Header.Get("X-Forwarded-Host"); forwarded != "" {
++		host = strings.TrimSpace(strings.Split(forwarded, ",")[0])
++	}
++
++	if host == "" {
++		return ""
++	}
++
++	return scheme + "://" + host
++}
++
++// WithRequestBaseURL stashes the request's base URL for the tool handlers to
++// read back with uploadCommand
++func WithRequestBaseURL(ctx context.Context, baseURL string) context.Context {
++	return context.WithValue(ctx, baseURLContextKey{}, baseURL)
++}
++
++// uploadCommand builds the ready-to-run command that uploads a file to this
++// server; LOCAL_PATH and NAME are the only placeholders the caller fills in. It
++// prefers the configured public URL and falls back to the URL the request came
++// in on
++func (s *Service) uploadCommand(ctx context.Context) string {
++	baseURL := s.publicURL
++	if baseURL == "" {
++		baseURL, _ = ctx.Value(baseURLContextKey{}).(string)
++	}
++
++	return fmt.Sprintf("curl --fail --upload-file LOCAL_PATH %s%sNAME", baseURL, FilesUploadPath)
++}
+ 
+ // sanitizeFileName normalizes a name into one that is safe to store in the
+ // files directory and to later pass to a flashing tool as an argument. It is
+diff --git a/pkg/svc/files_delete_file.go b/pkg/svc/files_delete_file.go
+index f5a107fb4de41d895bf37c24f3d065c0ceafae71..a9c9bc9dc0e8daa721fcd2310fed45addc42e31c 100644
+--- a/pkg/svc/files_delete_file.go
++++ b/pkg/svc/files_delete_file.go
+@@ -45,6 +45,7 @@ 		return nil, nil, err
+ 	}
+ 
+ 	return nil, &GetFilesOutput{
+-		Files: files,
++		Files:         files,
++		UploadCommand: s.uploadCommand(ctx),
+ 	}, nil
+ }
+diff --git a/pkg/svc/files_get_files.go b/pkg/svc/files_get_files.go
+index 2bd6ff5222c92f64f75423efac850d7c6b7373fe..c9f9cd6f10cb0c7a5fe6c004feec77eda7370c5b 100644
+--- a/pkg/svc/files_get_files.go
++++ b/pkg/svc/files_get_files.go
+@@ -7,23 +7,19 @@ 	"github.com/modelcontextprotocol/go-sdk/mcp"
+ )
+ 
+ var (
+-	// Files are uploaded with a shell command instead of a tool call so that
+-	// images don't have to pass through the conversation
+ 	GetFilesTool = &mcp.Tool{
+-		Name:  "files.getFiles",
+-		Title: "Get files",
+-		Description: `Get the files that have been uploaded to the server, which other tools can reference by name. ` +
+-			`To upload a file, run "curl --fail --upload-file LOCAL_PATH SERVER` + FilesUploadPath + `NAME" on the machine that holds it, ` +
+-			`where SERVER is the scheme, host and port that this MCP server is reachable on ` +
+-			`and NAME is the name that the file should have on the server, like image.img; ` +
+-			`the command prints the name that the file was actually stored under, which is a sanitized version of NAME, ` +
+-			`and uploading a name that already exists replaces it`,
++		Name:        "files.getFiles",
++		Title:       "Get files",
++		Description: "Get the files uploaded to the server that other tools can reference by name, along with the command for uploading more",
+ 		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true},
+ 	}
+ )
+ 
+ type GetFilesOutput struct {
+ 	Files []string `json:"files" jsonschema:"names of the files that are currently on the server"`
++	// Files are uploaded with a shell command instead of a tool call so that
++	// images don't have to pass through the conversation
++	UploadCommand string `json:"uploadCommand" jsonschema:"shell command to upload a file, to run on the machine that holds it; replace LOCAL_PATH with the path to the file and NAME with the name it should have on the server, like image.img, and re-running with an existing NAME replaces it"`
+ }
+ 
+ func (s *Service) GetFiles(ctx context.Context, req *mcp.CallToolRequest, input struct{}) (*mcp.CallToolResult, *GetFilesOutput, error) {
+@@ -33,6 +29,7 @@ 		return nil, nil, err
+ 	}
+ 
+ 	return nil, &GetFilesOutput{
+-		Files: files,
++		Files:         files,
++		UploadCommand: s.uploadCommand(ctx),
+ 	}, nil
+ }
+diff --git a/pkg/svc/root.go b/pkg/svc/root.go
+index 0b28e18d333d4d36dae2d6d938c03070f1f95e31..392c4867a007ef294c4229d73cfe8f5ba0424708 100644
+--- a/pkg/svc/root.go
++++ b/pkg/svc/root.go
+@@ -41,9 +41,13 @@ 	consolesLock *sync.Mutex
+ 	consoles     map[string]*serialConsole
+ 
+ 	filesDir string
++
++	// The publicly reachable base URL (scheme://host[:port]) to advertise for
++	// uploads; if empty, it is derived from each request's Host header instead
++	publicURL string
+ }
+ 
+-func NewService(baseCtx context.Context, shutdownTimeout, totalRelayCycleDuration, onRelayCycleDuration time.Duration, filesDir string) *Service {
++func NewService(baseCtx context.Context, shutdownTimeout, totalRelayCycleDuration, onRelayCycleDuration time.Duration, filesDir, publicURL string) *Service {
+ 	shutdownCtx, shutdownCancel := context.WithCancel(context.Background())
+ 
+ 	go func() {
+@@ -71,7 +75,8 @@
+ 		consolesLock: &sync.Mutex{},
+ 		consoles:     map[string]*serialConsole{},
+ 
+-		filesDir: filesDir,
++		filesDir:  filesDir,
++		publicURL: publicURL,
+ 
+ 		relayCycles: [4]*relayCycle{
+ 			{
+
