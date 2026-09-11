@@ -1,0 +1,515 @@
+From 64c70a0f0d2dcefbe516defed7873ea18684b1cb Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Thu, 10 Sep 2026 23:50:27 -0700
+Subject: [PATCH] feat: Add initial prototype of fastboot device list tool and bootstrap flashserver Go implementation
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/go.mod b/go.mod
+index 518cc023d523b3b0679ef0fafcf57e3b7b3e2a28..515cbad42c88ed8926c595a8e3281f356925f669 100644
+--- a/go.mod
++++ b/go.mod
+@@ -5,6 +5,7 @@
+ require (
+ 	github.com/adrg/xdg v0.5.3
+ 	github.com/blackjack/webcam v0.6.1
++	github.com/google/gousb v1.1.3
+ 	github.com/kennygrant/sanitize v1.2.4
+ 	github.com/modelcontextprotocol/go-sdk v1.7.0
+ 	go.bug.st/serial v1.8.0
+diff --git a/go.sum b/go.sum
+index 4c7f9b70c5e4cb4d82809b39e5a02cd5a918a4a1..dbff83fd59ad7487d31257bc2039e78153863ac8 100644
+--- a/go.sum
++++ b/go.sum
+@@ -10,6 +10,8 @@ github.com/golang-jwt/jwt/v5 v5.3.1 h1:kYf81DTWFe7t+1VvL7eS+jKFVWaUnK9cB1qbwn63YCY=
+ github.com/golang-jwt/jwt/v5 v5.3.1/go.mod h1:fxCRLWMO43lRc8nhHWY6LGqRcf+1gQWArsqaEUEa5bE=
+ github.com/google/go-cmp v0.7.0 h1:wk8382ETsv4JYUZwIsn6YpYiWiBsYLSJiTsyBybVuN8=
+ github.com/google/go-cmp v0.7.0/go.mod h1:pXiqmnSA92OHEEa9HXL2W4E7lf9JzCmGVUdgjX3N/iU=
++github.com/google/gousb v1.1.3 h1:xt6M5TDsGSZ+rlomz5Si5Hmd/Fvbmo2YCJHN+yGaK4o=
++github.com/google/gousb v1.1.3/go.mod h1:GGWUkK0gAXDzxhwrzetW592aOmkkqSGcj5KLEgmCVUg=
+ github.com/google/jsonschema-go v0.4.3 h1:/DBOLZTfDow7pe2GmaJNhltueGTtDKICi8V8p+DQPd0=
+ github.com/google/jsonschema-go v0.4.3/go.mod h1:r5quNTdLOYEz95Ru18zA0ydNbBuYoo9tgaYcxEYhJVE=
+ github.com/kennygrant/sanitize v1.2.4 h1:gN25/otpP5vAsO2djbMhF/LQX6R7+O1TB4yv8NzpJ3o=
+diff --git a/main.go b/main.go
+index c537c922a99b810b39e8c49d81f0a19a03b29231..40e7c145407bede784314ae908c417b51b39933a 100644
+--- a/main.go
++++ b/main.go
+@@ -60,6 +60,7 @@ 	mcp.AddTool(handler, svc.ReadFromTool, service.ReadFrom)
+ 	mcp.AddTool(handler, svc.WriteToTool, service.WriteTo)
+ 	mcp.AddTool(handler, svc.GetFilesTool, service.GetFiles)
+ 	mcp.AddTool(handler, svc.DeleteFileTool, service.DeleteFile)
++	mcp.AddTool(handler, svc.GetFlashDevicesTool, service.GetFlashDevices)
+ 
+ 	log.Println("Listening on", *laddr)
+ 	log.Println("Storing uploaded files in", *filesDir)
+diff --git a/pkg/fastboot/fastboot.go b/pkg/fastboot/fastboot.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..79bd2765bdca5fa7bc773b15f42de9a47a6453a0
+--- /dev/null
++++ b/pkg/fastboot/fastboot.go
+@@ -0,0 +1,43 @@
++// Package fastboot detects and (eventually) talks to SpacemiT devices that are in
++// fastboot mode. Ported from the SpacemiT flashserver Go reimplementation.
++package fastboot
++
++import "codeberg.org/pojntfx/pushrod/pkg/fastboot/usb"
++
++const (
++	// A SpacemiT device in fastboot mode is identified by its vendor-specific USB
++	// interface rather than by vendor/product ID, matching flashserver's own probe
++	ifaceClass    = 255
++	ifaceSubclass = 66
++	ifaceProtocol = 3
++)
++
++// DeviceIsAvailable matches the fastboot interface on a candidate USB device
++var DeviceIsAvailable = usb.InterfaceMatcher(ifaceClass, ifaceSubclass, ifaceProtocol)
++
++// Device is a SpacemiT device found in fastboot mode
++type Device struct {
++	PortPath  []int
++	ProductID uint16
++	Serial    string
++}
++
++// Devices enumerates all SpacemiT devices currently in fastboot mode. Enumeration
++// opens each candidate to read its descriptors, so every handle is closed again
++// before returning; this is a long-running server, not the one-shot flashserver CLI
++func Devices() []Device {
++	handles := usb.FindDevices(DeviceIsAvailable, nil, "", 0)
++
++	devices := make([]Device, 0, len(handles))
++	for _, handle := range handles {
++		devices = append(devices, Device{
++			PortPath:  handle.PortPath(),
++			ProductID: handle.ProductID(),
++			Serial:    handle.SerialNumber(),
++		})
++
++		handle.Close()
++	}
++
++	return devices
++}
+diff --git a/pkg/fastboot/usb/usb.go b/pkg/fastboot/usb/usb.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..cd68eac161c7044795707ff29dbb9304ceaf2d23
+--- /dev/null
++++ b/pkg/fastboot/usb/usb.go
+@@ -0,0 +1,364 @@
++// Package usb wraps gousb with the enumeration and bulk-transfer helpers that the
++// fastboot layer needs to talk to SpacemiT devices in FDL/fastboot mode. Unlike the
++// relay, video and serial devices, a fastboot device has no kernel character-device
++// node, so it is reached over raw USB via libusb rather than through sysfs.
++//
++// It is ported from the SpacemiT flashserver Go reimplementation.
++package usb
++
++import (
++	"context"
++	"errors"
++	"fmt"
++	"strconv"
++	"strings"
++	"sync"
++	"time"
++
++	"github.com/google/gousb"
++)
++
++const DefaultTimeoutMs = 100000
++
++type ReadFailedError struct {
++	Msg      string
++	Timeout  bool
++	Wrapping error
++}
++
++func (e *ReadFailedError) Error() string { return e.Msg }
++func (e *ReadFailedError) Unwrap() error { return e.Wrapping }
++
++type WriteFailedError struct {
++	Msg      string
++	Wrapping error
++}
++
++func (e *WriteFailedError) Error() string { return e.Msg }
++func (e *WriteFailedError) Unwrap() error { return e.Wrapping }
++
++var DeviceNotFoundError = errors.New("No device available, or it is in the wrong configuration.")
++
++func PortPathString(portPath []int) string {
++	parts := make([]string, len(portPath))
++	for i, p := range portPath {
++		parts[i] = strconv.Itoa(p)
++	}
++	return strings.Join(parts, "-")
++}
++
++func EqualPortPath(a, b []int) bool {
++	if len(a) != len(b) {
++		return false
++	}
++	for i := range a {
++		if a[i] != b[i] {
++			return false
++		}
++	}
++	return true
++}
++
++type Setting struct {
++	ConfigNumber    int
++	InterfaceNumber int
++	InAddress       gousb.EndpointAddress
++	OutAddress      gousb.EndpointAddress
++	MaxInPacketLen  int
++}
++
++type SettingMatcher func(desc *gousb.DeviceDesc) *Setting
++
++func InterfaceMatcher(class, subclass, protocol int) SettingMatcher {
++	return func(desc *gousb.DeviceDesc) *Setting {
++		for _, cfg := range desc.Configs {
++			for _, ifc := range cfg.Interfaces {
++				for _, alt := range ifc.AltSettings {
++					if int(alt.Class) != class || int(alt.SubClass) != subclass || int(alt.Protocol) != protocol {
++						continue
++					}
++					s := &Setting{ConfigNumber: cfg.Number, InterfaceNumber: alt.Number}
++					for addr, ep := range alt.Endpoints {
++						if uint8(addr)&0x80 != 0 {
++							s.InAddress = addr
++							s.MaxInPacketLen = ep.MaxPacketSize
++						} else {
++							s.OutAddress = addr
++						}
++					}
++					return s
++				}
++			}
++		}
++		return nil
++	}
++}
++
++type DeviceMatcher func(h *Handle) bool
++
++type enumState struct {
++	ctx  *gousb.Context
++	mu   sync.Mutex
++	refs int
++}
++
++func (s *enumState) release() {
++	s.mu.Lock()
++	defer s.mu.Unlock()
++	s.refs--
++	if s.refs <= 0 {
++		s.ctx.Close()
++	}
++}
++
++type Handle struct {
++	state   *enumState
++	dev     *gousb.Device
++	setting *Setting
++
++	unclaim    func()
++	in         *gousb.InEndpoint
++	out        *gousb.OutEndpoint
++	timeoutMs  int
++	maxReadPkt int
++	opened     bool
++
++	portPath  []int
++	vendorID  uint16
++	productID uint16
++	speed     int
++	serial    string
++	info      string
++}
++
++var (
++	handleCache   = map[string]*Handle{}
++	handleCacheMu sync.Mutex
++)
++
++func (h *Handle) timeout(timeoutMs int) int {
++	if timeoutMs > 0 {
++		return timeoutMs
++	}
++	return h.timeoutMs
++}
++
++func (h *Handle) PortPath() []int  { return h.portPath }
++func (h *Handle) VendorID() uint16 { return h.vendorID }
++func (h *Handle) ProductID() uint16 {
++	return h.productID
++}
++func (h *Handle) Speed() int { return h.speed }
++
++func (h *Handle) SerialNumber() string {
++	if h.serial != "" {
++		return h.serial
++	}
++	sn, err := h.dev.SerialNumber()
++	if err != nil {
++		return ""
++	}
++	return sn
++}
++
++func (h *Handle) Info() string {
++	sn := h.SerialNumber()
++	if sn != "" && sn != h.info {
++		return h.info + " " + sn
++	}
++	return h.info
++}
++
++func (h *Handle) Open() error {
++	key := PortPathString(h.portPath)
++	handleCacheMu.Lock()
++	if old := handleCache[key]; old != nil && old != h {
++		old.Close()
++	}
++	handleCacheMu.Unlock()
++
++	if h.setting == nil {
++		return fmt.Errorf("no matching USB interface setting")
++	}
++	if h.setting.InAddress == 0 || h.setting.OutAddress == 0 {
++		return fmt.Errorf("interface has no bulk IN/OUT endpoints")
++	}
++	_ = h.dev.SetAutoDetach(true)
++
++	cfg, err := h.dev.Config(h.setting.ConfigNumber)
++	if err != nil {
++		return fmt.Errorf("select config %d: %w", h.setting.ConfigNumber, err)
++	}
++	done := func() { _ = cfg.Close() }
++	intf, err := cfg.Interface(h.setting.InterfaceNumber, 0)
++	if err != nil {
++		done()
++		return fmt.Errorf("claim interface %d: %w", h.setting.InterfaceNumber, err)
++	}
++	in, err := intf.InEndpoint(int(uint8(h.setting.InAddress) & 0x0f))
++	if err != nil {
++		done()
++		return err
++	}
++	out, err := intf.OutEndpoint(int(uint8(h.setting.OutAddress) & 0x0f))
++	if err != nil {
++		done()
++		return err
++	}
++	h.unclaim = done
++	h.in = in
++	h.out = out
++	h.maxReadPkt = h.setting.MaxInPacketLen
++	h.opened = true
++
++	handleCacheMu.Lock()
++	handleCache[key] = h
++	handleCacheMu.Unlock()
++	return nil
++}
++
++func (h *Handle) Close() {
++	if h.dev == nil {
++		return
++	}
++	if h.unclaim != nil {
++		h.unclaim()
++		h.unclaim = nil
++	}
++	h.dev.Close()
++	h.dev = nil
++	h.opened = false
++	if h.state != nil {
++		h.state.release()
++		h.state = nil
++	}
++}
++
++func (h *Handle) BulkWrite(data []byte, timeoutMs int) (int, error) {
++	if h.dev == nil || !h.opened {
++		return 0, &WriteFailedError{Msg: "This handle has been closed, probably due to another being opened."}
++	}
++	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(h.timeout(timeoutMs))*time.Millisecond)
++	defer cancel()
++	n, err := h.out.WriteContext(ctx, data)
++	if err != nil {
++		return n, &WriteFailedError{
++			Msg:      fmt.Sprintf("Could not send data to %s (timeout %dms)", h.Info(), h.timeout(timeoutMs)),
++			Wrapping: err,
++		}
++	}
++	return n, nil
++}
++
++func (h *Handle) BulkRead(length int, timeoutMs int) ([]byte, error) {
++	if h.dev == nil || !h.opened {
++		return nil, &ReadFailedError{Msg: "This handle has been closed, probably due to another being opened."}
++	}
++	buf := make([]byte, length)
++	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(h.timeout(timeoutMs))*time.Millisecond)
++	defer cancel()
++	n, err := h.in.ReadContext(ctx, buf)
++	if err != nil {
++		return nil, &ReadFailedError{
++			Msg:      fmt.Sprintf("Could not receive data from %s (timeout %dms)", h.Info(), h.timeout(timeoutMs)),
++			Timeout:  errors.Is(err, gousb.ErrorTimeout) || errors.Is(err, context.DeadlineExceeded),
++			Wrapping: err,
++		}
++	}
++	return buf[:n], nil
++}
++
++func (h *Handle) FlushBuffers() error {
++	for {
++		_, err := h.BulkRead(h.maxReadPkt, 10)
++		if err == nil {
++			continue
++		}
++		var rfe *ReadFailedError
++		if errors.As(err, &rfe) && rfe.Timeout {
++			return nil
++		}
++		return err
++	}
++}
++
++func FindDevices(settingMatcher SettingMatcher, deviceMatcher DeviceMatcher, info string, timeoutMs int) []*Handle {
++	state := &enumState{ctx: gousb.NewContext()}
++	devs, err := state.ctx.OpenDevices(func(desc *gousb.DeviceDesc) bool {
++		return settingMatcher(desc) != nil
++	})
++	if err != nil && len(devs) == 0 {
++		state.ctx.Close()
++		return nil
++	}
++	if timeoutMs == 0 {
++		timeoutMs = DefaultTimeoutMs
++	}
++	var handles []*Handle
++	for _, dev := range devs {
++		setting := settingMatcher(dev.Desc)
++		if setting == nil {
++			dev.Close()
++			continue
++		}
++		serial, _ := dev.SerialNumber()
++		h := &Handle{
++			state:     state,
++			dev:       dev,
++			setting:   setting,
++			timeoutMs: timeoutMs,
++			portPath:  append([]int{dev.Desc.Bus}, dev.Desc.Path...),
++			vendorID:  uint16(dev.Desc.Vendor),
++			productID: uint16(dev.Desc.Product),
++			speed:     int(dev.Desc.Speed),
++			serial:    serial,
++			info:      info,
++		}
++		if deviceMatcher == nil || deviceMatcher(h) {
++			state.refs++
++			handles = append(handles, h)
++		} else {
++			dev.Close()
++		}
++	}
++	if len(handles) == 0 {
++		state.ctx.Close()
++	}
++	return handles
++}
++
++func Find(settingMatcher SettingMatcher, portPath []int, serial string, timeoutMs int) (*Handle, error) {
++	var deviceMatcher DeviceMatcher
++	info := "first"
++	if len(portPath) > 0 {
++		deviceMatcher = func(h *Handle) bool { return EqualPortPath(h.PortPath(), portPath) }
++		info = PortPathString(portPath)
++	} else if serial != "" {
++		deviceMatcher = func(h *Handle) bool { return h.SerialNumber() == serial }
++		info = serial
++	}
++	handles := FindDevices(settingMatcher, deviceMatcher, info, timeoutMs)
++	if len(handles) == 0 {
++		return nil, DeviceNotFoundError
++	}
++	for _, extra := range handles[1:] {
++		extra.Close()
++	}
++	return handles[0], nil
++}
++
++func FindAndOpen(settingMatcher SettingMatcher, portPath []int, serial string, timeoutMs int) (*Handle, error) {
++	h, err := Find(settingMatcher, portPath, serial, timeoutMs)
++	if err != nil {
++		return nil, err
++	}
++	if err := h.Open(); err != nil {
++		h.Close()
++		return nil, err
++	}
++	if err := h.FlushBuffers(); err != nil {
++		h.Close()
++		return nil, err
++	}
++	return h, nil
++}
+diff --git a/pkg/svc/flash_get_devices.go b/pkg/svc/flash_get_devices.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..ce3ee2dcdc5d0106d324bc4e555bbcdff127c57b
+--- /dev/null
++++ b/pkg/svc/flash_get_devices.go
+@@ -0,0 +1,45 @@
++package svc
++
++import (
++	"context"
++	"fmt"
++
++	"codeberg.org/pojntfx/pushrod/pkg/fastboot"
++	"codeberg.org/pojntfx/pushrod/pkg/fastboot/usb"
++	"github.com/modelcontextprotocol/go-sdk/mcp"
++)
++
++var (
++	GetFlashDevicesTool = &mcp.Tool{
++		Name:        "flash.getDevices",
++		Title:       "Get flash devices",
++		Description: "Get all SpacemiT devices currently in fastboot mode and ready to be flashed; put a target into this mode with target.enterFDL first if none show up",
++	}
++)
++
++type FlashDevice struct {
++	Port      string `json:"port" jsonschema:"USB port path (BUS-PORT form, e.g. 1-2-3) that uniquely identifies the fastboot device until it gets unplugged; pass this to flash operations to select the device"`
++	Serial    string `json:"serial" jsonschema:"serial number the device reports, if any"`
++	ProductID string `json:"productId" jsonschema:"USB product ID as a four-digit hex string"`
++}
++
++type GetFlashDevicesOutput struct {
++	FlashDevices []FlashDevice `json:"flashDevices" jsonschema:"connected devices in fastboot mode"`
++}
++
++func (s *Service) GetFlashDevices(ctx context.Context, req *mcp.CallToolRequest, input struct{}) (*mcp.CallToolResult, *GetFlashDevicesOutput, error) {
++	devices := fastboot.Devices()
++
++	flashDevices := make([]FlashDevice, 0, len(devices))
++	for _, device := range devices {
++		flashDevices = append(flashDevices, FlashDevice{
++			Port:      usb.PortPathString(device.PortPath),
++			Serial:    device.Serial,
++			ProductID: fmt.Sprintf("%04x", device.ProductID),
++		})
++	}
++
++	return nil, &GetFlashDevicesOutput{
++		FlashDevices: flashDevices,
++	}, nil
++}
+
