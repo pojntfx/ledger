@@ -1,0 +1,453 @@
+From 21d2e1ff36e12df429033e9f18ce606fda60e6ca Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Fri, 11 Sep 2026 00:18:32 -0700
+Subject: [PATCH] feat: Add basic hacky fastboot flash MCP tool
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/main.go b/main.go
+index c8a898d37178bad43bf9df75e11ccc8b63a102cc..dc2fe52556e87827e5259385606f757f918d6d15 100644
+--- a/main.go
++++ b/main.go
+@@ -62,6 +62,7 @@ 	mcp.AddTool(handler, svc.WriteToTool, service.WriteTo)
+ 	mcp.AddTool(handler, svc.GetFilesTool, service.GetFiles)
+ 	mcp.AddTool(handler, svc.DeleteFileTool, service.DeleteFile)
+ 	mcp.AddTool(handler, svc.GetFlashDevicesTool, service.GetFlashDevices)
++	mcp.AddTool(handler, svc.FlashFileTool, service.FlashFile)
+ 
+ 	log.Println("Listening on", *laddr)
+ 	log.Println("Storing uploaded files in", *filesDir)
+diff --git a/pkg/fastboot/flash.go b/pkg/fastboot/flash.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..a92592c9b163e0e7b3763158e7f416d941df19fe
+--- /dev/null
++++ b/pkg/fastboot/flash.go
+@@ -0,0 +1,241 @@
++package fastboot
++
++import (
++	"encoding/binary"
++	"encoding/hex"
++	"fmt"
++	"io"
++	"os"
++	"strconv"
++	"strings"
++
++	"codeberg.org/pojntfx/pushrod/pkg/fastboot/usb"
++)
++
++const (
++	// The device is asked for its max-download-size, but fall back to fastboot's
++	// conventional default and hard cap if it does not report a usable one
++	defaultMaxDownloadSize = 268435456  // 256 MiB
++	maxDownloadSize        = 1073741824 // 1 GiB
++
++	// Bulk transfers are written in 1 MiB chunks, matching flashserver
++	protocolChunkKB = 1024
++
++	connectTimeoutMs = 30000
++	commandTimeoutMs = 10000
++	flashTimeoutMs   = 60000
++)
++
++// ProgressCallback reports how many bytes of the image have been sent so far out
++// of its total size
++type ProgressCallback func(sent, total int64)
++
++type RemoteFailure struct{ Msg string }
++
++func (e *RemoteFailure) Error() string { return e.Msg }
++
++type TransferError struct{ Msg string }
++
++func (e *TransferError) Error() string { return e.Msg }
++
++type StateMismatch struct{ Expected, Got string }
++
++func (e *StateMismatch) Error() string {
++	return fmt.Sprintf("expected %s response, got %s", e.Expected, e.Got)
++}
++
++type InvalidResponse struct{ Msg string }
++
++func (e *InvalidResponse) Error() string { return e.Msg }
++
++// protocol speaks the fastboot wire protocol over a USB bulk handle
++type protocol struct {
++	handle  *usb.Handle
++	chunkKB int
++}
++
++// sendCommand writes a fastboot command, appending its argument after a colon
++func (p *protocol) sendCommand(command, arg string, timeoutMs int) error {
++	if arg != "" {
++		command = command + ":" + arg
++	}
++
++	_, err := p.handle.BulkWrite([]byte(command), timeoutMs)
++
++	return err
++}
++
++// accept reads responses until it sees the expected header, forwarding INFO log
++// lines and turning FAIL into an error
++func (p *protocol) accept(expected string, timeoutMs int) ([]byte, error) {
++	for {
++		response, err := p.handle.BulkRead(65, timeoutMs)
++		if err != nil {
++			return nil, err
++		}
++
++		if len(response) < 4 {
++			continue
++		}
++
++		header, remaining := string(response[:4]), response[4:]
++		switch header {
++		case "INFO":
++			continue
++
++		case "OKAY", "DATA":
++			if header != expected {
++				return nil, &StateMismatch{Expected: expected, Got: header}
++			}
++
++			return remaining, nil
++
++		case "FAIL":
++			return nil, &RemoteFailure{Msg: "FAIL: " + string(remaining)}
++		}
++	}
++}
++
++// sendData performs the data phase of a download: the device acknowledges the
++// size with DATA, then the bytes are streamed and an OKAY is awaited
++func (p *protocol) sendData(r io.Reader, sourceLen int64, progress ProgressCallback, timeoutMs int) error {
++	accepted, err := p.accept("DATA", timeoutMs)
++	if err != nil {
++		return err
++	}
++
++	if len(accepted) < 8 {
++		return &InvalidResponse{Msg: fmt.Sprintf("invalid DATA response %q", accepted)}
++	}
++
++	raw, err := hex.DecodeString(string(accepted[:8]))
++	if err != nil || len(raw) < 4 {
++		return &InvalidResponse{Msg: fmt.Sprintf("invalid DATA response %q", accepted)}
++	}
++
++	if acceptedSize := int64(binary.BigEndian.Uint32(raw[:4])); acceptedSize != sourceLen {
++		return &TransferError{Msg: fmt.Sprintf("device refused to download %d bytes (accepts %d)", sourceLen, acceptedSize)}
++	}
++
++	if err := p.writeData(r, sourceLen, progress, timeoutMs); err != nil {
++		return err
++	}
++
++	_, err = p.accept("OKAY", timeoutMs)
++
++	return err
++}
++
++// writeData streams the image in fixed-size chunks, reporting progress after each
++func (p *protocol) writeData(r io.Reader, length int64, progress ProgressCallback, timeoutMs int) error {
++	chunk := int64(p.chunkKB) * 1024
++
++	var sent int64
++	for remaining := length; remaining > 0; {
++		n := chunk
++		if remaining < n {
++			n = remaining
++		}
++
++		buf := make([]byte, n)
++		if _, err := io.ReadFull(r, buf); err != nil {
++			return err
++		}
++
++		if _, err := p.handle.BulkWrite(buf, timeoutMs); err != nil {
++			return err
++		}
++
++		remaining -= n
++		sent += n
++
++		if progress != nil {
++			progress(sent, length)
++		}
++	}
++
++	return nil
++}
++
++// maxDownloadSize asks the device how many bytes it accepts per download, falling
++// back to the conventional default if it does not answer with a usable value
++func (p *protocol) maxDownloadSize() int64 {
++	if err := p.sendCommand("getvar", "max-download-size", commandTimeoutMs); err != nil {
++		return defaultMaxDownloadSize
++	}
++
++	value, err := p.accept("OKAY", commandTimeoutMs)
++	if err != nil {
++		return defaultMaxDownloadSize
++	}
++
++	// The device reports the size as bare hex, sometimes with an 0x prefix
++	n, err := strconv.ParseInt(strings.TrimPrefix(strings.TrimSpace(string(value)), "0x"), 16, 64)
++	if err != nil || n <= 0 {
++		return defaultMaxDownloadSize
++	}
++
++	if n > maxDownloadSize {
++		n = maxDownloadSize
++	}
++
++	return n
++}
++
++// Flash downloads sourceFile to the device at portPath, flashes it to partition
++// and optionally reboots. progress may be nil. Images larger than the device's
++// max-download-size need sparse or gzip splitting, which is not implemented yet,
++// so they are rejected up front rather than left to stall mid-transfer.
++func Flash(portPath []int, partition, sourceFile string, reboot bool, progress ProgressCallback) error {
++	info, err := os.Stat(sourceFile)
++	if err != nil {
++		return err
++	}
++	size := info.Size()
++
++	handle, err := usb.FindAndOpen(DeviceIsAvailable, portPath, "", connectTimeoutMs)
++	if err != nil {
++		return err
++	}
++	defer handle.Close()
++
++	p := &protocol{handle: handle, chunkKB: protocolChunkKB}
++
++	if limit := p.maxDownloadSize(); size > limit {
++		return fmt.Errorf("file is %d bytes but the device only accepts %d bytes per download, and sparse/gzip splitting is not implemented yet", size, limit)
++	}
++
++	f, err := os.Open(sourceFile)
++	if err != nil {
++		return err
++	}
++	defer f.Close()
++
++	if err := p.sendCommand("download", fmt.Sprintf("%08x", size), flashTimeoutMs); err != nil {
++		return err
++	}
++
++	if err := p.sendData(f, size, progress, flashTimeoutMs); err != nil {
++		return err
++	}
++
++	if err := p.sendCommand("flash", partition, flashTimeoutMs); err != nil {
++		return err
++	}
++
++	if _, err := p.accept("OKAY", flashTimeoutMs); err != nil {
++		return err
++	}
++
++	if reboot {
++		if err := p.sendCommand("reboot", "", commandTimeoutMs); err != nil {
++			return err
++		}
++
++		if _, err := p.accept("OKAY", commandTimeoutMs); err != nil {
++			return err
++		}
++	}
++
++	return nil
++}
+diff --git a/pkg/fastboot/usb/usb.go b/pkg/fastboot/usb/usb.go
+index cd68eac161c7044795707ff29dbb9304ceaf2d23..19a08cfc8056fec6263ab6c78d1fecdc27748731 100644
+--- a/pkg/fastboot/usb/usb.go
++++ b/pkg/fastboot/usb/usb.go
+@@ -47,6 +47,21 @@ 	}
+ 	return strings.Join(parts, "-")
+ }
+ 
++// ParsePortPath reverses PortPathString, turning a BUS-PORT string like "1-2-3"
++// back into the port path a matcher compares against
++func ParsePortPath(s string) ([]int, error) {
++	parts := strings.Split(s, "-")
++	out := make([]int, 0, len(parts))
++	for _, part := range parts {
++		n, err := strconv.Atoi(part)
++		if err != nil {
++			return nil, fmt.Errorf("invalid port path %q: %w", s, err)
++		}
++		out = append(out, n)
++	}
++	return out, nil
++}
++
+ func EqualPortPath(a, b []int) bool {
+ 	if len(a) != len(b) {
+ 		return false
+diff --git a/pkg/svc/files.go b/pkg/svc/files.go
+index 67db4fea87e5ab9e743b8fa73507a243e371c3d6..87bdc7251baddb931933c5791de3c611e3ef0feb 100644
+--- a/pkg/svc/files.go
++++ b/pkg/svc/files.go
+@@ -29,6 +29,7 @@ )
+ 
+ var (
+ 	ErrInvalidFileName = errors.New(`file name must be usable as a bare file name like "image.img", without any directories and without a leading dash`)
++	ErrNotRegularFile  = errors.New("not a regular file")
+ )
+ 
+ // baseURLContextKey carries the base URL a request came in on, so that a tool
+@@ -107,6 +108,32 @@ 		return "", "", err
+ 	}
+ 
+ 	return filepath.Join(s.filesDir, sanitized), sanitized, nil
++}
++
++// resolveUploadedFile resolves a bare file name to an existing regular file in
++// the files directory, so that a tool can only ever open a flat file that was
++// uploaded there. filePath already rejects directories and traversal; the Lstat
++// additionally rules out a symlink or directory being flashed in its place
++func (s *Service) resolveUploadedFile(name string) (string, string, error) {
++	path, sanitized, err := s.filePath(name)
++	if err != nil {
++		return "", "", err
++	}
++
++	info, err := os.Lstat(path)
++	if err != nil {
++		if os.IsNotExist(err) {
++			return "", "", fmt.Errorf("%w: %v", ErrFileNotFound, sanitized)
++		}
++
++		return "", "", err
++	}
++
++	if !info.Mode().IsRegular() {
++		return "", "", fmt.Errorf("%w: %v", ErrNotRegularFile, sanitized)
++	}
++
++	return path, sanitized, nil
+ }
+ 
+ func (s *Service) getFiles() ([]string, error) {
+diff --git a/pkg/svc/flash_flash_file.go b/pkg/svc/flash_flash_file.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..c0574ecfb7e14115a9385b11b8d312be1aaa1682
+--- /dev/null
++++ b/pkg/svc/flash_flash_file.go
+@@ -0,0 +1,85 @@
++package svc
++
++import (
++	"context"
++	"fmt"
++	"time"
++
++	"codeberg.org/pojntfx/pushrod/pkg/fastboot"
++	"codeberg.org/pojntfx/pushrod/pkg/fastboot/usb"
++	"github.com/modelcontextprotocol/go-sdk/mcp"
++)
++
++var (
++	FlashFileTool = &mcp.Tool{
++		Name:        "flash.flashFile",
++		Title:       "Flash file",
++		Description: "Flash an uploaded file to a partition on a device in fastboot mode, then optionally reboot it; take the file from files.getFiles and the port from flash.getDevices. Pass a progress token to stream progress while it runs",
++		Annotations: &mcp.ToolAnnotations{DestructiveHint: &[]bool{true}[0]},
++	}
++)
++
++type FlashFileInput struct {
++	File      string `json:"file" jsonschema:"name of the uploaded file to flash, like image.img from files.getFiles"`
++	Partition string `json:"partition" jsonschema:"partition to flash the file to, like boot or rootfs"`
++	Port      string `json:"port" jsonschema:"port of the device to flash, in BUS-PORT form (e.g. 1-2-3) from flash.getDevices"`
++	Reboot    bool   `json:"reboot" jsonschema:"whether to reboot the device after flashing so it boots the freshly flashed image"`
++}
++
++type FlashFileOutput struct {
++	File       string `json:"file" jsonschema:"name of the file that was flashed"`
++	Partition  string `json:"partition" jsonschema:"partition the file was flashed to"`
++	Rebooted   bool   `json:"rebooted" jsonschema:"whether the device was rebooted afterwards"`
++	DurationMs int64  `json:"durationMs" jsonschema:"how long the flash took, in milliseconds"`
++}
++
++func (s *Service) FlashFile(ctx context.Context, req *mcp.CallToolRequest, input FlashFileInput) (*mcp.CallToolResult, *FlashFileOutput, error) {
++	// Only a flat file that was uploaded to the files directory can be flashed
++	path, name, err := s.resolveUploadedFile(input.File)
++	if err != nil {
++		return nil, nil, err
++	}
++
++	portPath, err := usb.ParsePortPath(input.Port)
++	if err != nil {
++		return nil, nil, err
++	}
++
++	s.flashLock.Lock()
++	defer s.flashLock.Unlock()
++
++	// The flash reports every chunk, so only notify the client when the whole
++	// percentage changes, and only when it asked for progress
++	progressToken := req.Params.GetProgressToken()
++	lastPercent := -1
++	progress := func(sent, total int64) {
++		if progressToken == nil || total <= 0 {
++			return
++		}
++
++		percent := int(sent * 100 / total)
++		if percent == lastPercent {
++			return
++		}
++		lastPercent = percent
++
++		_ = req.Session.NotifyProgress(ctx, &mcp.ProgressNotificationParams{
++			ProgressToken: progressToken,
++			Progress:      float64(sent),
++			Total:         float64(total),
++			Message:       fmt.Sprintf("%d%%", percent),
++		})
++	}
++
++	start := time.Now()
++	if err := fastboot.Flash(portPath, input.Partition, path, input.Reboot, progress); err != nil {
++		return nil, nil, err
++	}
++
++	return nil, &FlashFileOutput{
++		File:       name,
++		Partition:  input.Partition,
++		Rebooted:   input.Reboot,
++		DurationMs: time.Since(start).Milliseconds(),
++	}, nil
++}
+diff --git a/pkg/svc/root.go b/pkg/svc/root.go
+index 392c4867a007ef294c4229d73cfe8f5ba0424708..0be83d52c422aa134e0707c869e57e9fa6c9962b 100644
+--- a/pkg/svc/root.go
++++ b/pkg/svc/root.go
+@@ -40,6 +40,10 @@
+ 	consolesLock *sync.Mutex
+ 	consoles     map[string]*serialConsole
+ 
++	// Flashes run one at a time, since a USB device only does one operation at
++	// once and they can run for minutes
++	flashLock *sync.Mutex
++
+ 	filesDir string
+ 
+ 	// The publicly reachable base URL (scheme://host[:port]) to advertise for
+@@ -74,6 +78,8 @@ 		onRelayCycleDuration:    onRelayCycleDuration,
+ 
+ 		consolesLock: &sync.Mutex{},
+ 		consoles:     map[string]*serialConsole{},
++
++		flashLock: &sync.Mutex{},
+ 
+ 		filesDir:  filesDir,
+ 		publicURL: publicURL,
+
