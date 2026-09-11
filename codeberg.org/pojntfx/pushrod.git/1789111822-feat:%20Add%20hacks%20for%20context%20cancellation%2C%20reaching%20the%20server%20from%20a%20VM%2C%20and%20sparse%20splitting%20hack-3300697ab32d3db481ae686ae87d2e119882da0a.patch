@@ -1,0 +1,681 @@
+From 3300697ab32d3db481ae686ae87d2e119882da0a Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Fri, 11 Sep 2026 00:30:22 -0700
+Subject: [PATCH] feat: Add hacks for context cancellation, reaching the server from a VM, and sparse splitting hack
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/main.go b/main.go
+index dc2fe52556e87827e5259385606f757f918d6d15..7ae0eb87107494dc15585d298422f2957a8288d5 100644
+--- a/main.go
++++ b/main.go
+@@ -22,6 +22,7 @@ func main() {
+ 	laddr := flag.String("laddr", ":1337", "Listen address")
+ 	filesDir := flag.String("files-dir", filepath.Join(xdg.DataHome, "pushrod", "files"), "Directory to store uploaded files in")
+ 	publicURL := flag.String("public-url", "", "Publicly reachable base URL (scheme://host[:port]) to advertise for uploads, e.g. when behind a reverse proxy; if empty, it is derived from each request's Host header")
++	allowAnyHost := flag.Bool("allow-any-host", false, "Accept any Host header instead of only localhost ones; required to reach the server from another machine by IP or hostname, but disables DNS rebinding protection")
+ 
+ 	flag.Parse()
+ 
+@@ -69,7 +70,9 @@ 	log.Println("Storing uploaded files in", *filesDir)
+ 
+ 	mcpHandler := mcp.NewStreamableHTTPHandler(func(r *http.Request) *mcp.Server {
+ 		return handler
+-	}, nil)
++	}, &mcp.StreamableHTTPOptions{
++		DisableLocalhostProtection: *allowAnyHost,
++	})
+ 
+ 	mux := http.NewServeMux()
+ 	// Carry the URL each request came in on into the tool handlers, so that
+diff --git a/pkg/fastboot/flash.go b/pkg/fastboot/flash.go
+index a92592c9b163e0e7b3763158e7f416d941df19fe..74f041747640cd55e8a12f4ed0c34c77a06de6f0 100644
+--- a/pkg/fastboot/flash.go
++++ b/pkg/fastboot/flash.go
+@@ -1,6 +1,8 @@
+ package fastboot
+ 
+ import (
++	"bytes"
++	"context"
+ 	"encoding/binary"
+ 	"encoding/hex"
+ 	"fmt"
+@@ -55,21 +57,21 @@ 	chunkKB int
+ }
+ 
+ // sendCommand writes a fastboot command, appending its argument after a colon
+-func (p *protocol) sendCommand(command, arg string, timeoutMs int) error {
++func (p *protocol) sendCommand(ctx context.Context, command, arg string, timeoutMs int) error {
+ 	if arg != "" {
+ 		command = command + ":" + arg
+ 	}
+ 
+-	_, err := p.handle.BulkWrite([]byte(command), timeoutMs)
++	_, err := p.handle.BulkWrite(ctx, []byte(command), timeoutMs)
+ 
+ 	return err
+ }
+ 
+-// accept reads responses until it sees the expected header, forwarding INFO log
++// accept reads responses until it sees the expected header, skipping INFO log
+ // lines and turning FAIL into an error
+-func (p *protocol) accept(expected string, timeoutMs int) ([]byte, error) {
++func (p *protocol) accept(ctx context.Context, expected string, timeoutMs int) ([]byte, error) {
+ 	for {
+-		response, err := p.handle.BulkRead(65, timeoutMs)
++		response, err := p.handle.BulkRead(ctx, 65, timeoutMs)
+ 		if err != nil {
+ 			return nil, err
+ 		}
+@@ -98,8 +100,8 @@ }
+ 
+ // sendData performs the data phase of a download: the device acknowledges the
+ // size with DATA, then the bytes are streamed and an OKAY is awaited
+-func (p *protocol) sendData(r io.Reader, sourceLen int64, progress ProgressCallback, timeoutMs int) error {
+-	accepted, err := p.accept("DATA", timeoutMs)
++func (p *protocol) sendData(ctx context.Context, r io.Reader, sourceLen int64, progress ProgressCallback, timeoutMs int) error {
++	accepted, err := p.accept(ctx, "DATA", timeoutMs)
+ 	if err != nil {
+ 		return err
+ 	}
+@@ -117,21 +119,26 @@ 	if acceptedSize := int64(binary.BigEndian.Uint32(raw[:4])); acceptedSize != sourceLen {
+ 		return &TransferError{Msg: fmt.Sprintf("device refused to download %d bytes (accepts %d)", sourceLen, acceptedSize)}
+ 	}
+ 
+-	if err := p.writeData(r, sourceLen, progress, timeoutMs); err != nil {
++	if err := p.writeData(ctx, r, sourceLen, progress, timeoutMs); err != nil {
+ 		return err
+ 	}
+ 
+-	_, err = p.accept("OKAY", timeoutMs)
++	_, err = p.accept(ctx, "OKAY", timeoutMs)
+ 
+ 	return err
+ }
+ 
+ // writeData streams the image in fixed-size chunks, reporting progress after each
+-func (p *protocol) writeData(r io.Reader, length int64, progress ProgressCallback, timeoutMs int) error {
++// and stopping promptly when the context is cancelled
++func (p *protocol) writeData(ctx context.Context, r io.Reader, length int64, progress ProgressCallback, timeoutMs int) error {
+ 	chunk := int64(p.chunkKB) * 1024
+ 
+ 	var sent int64
+ 	for remaining := length; remaining > 0; {
++		if err := ctx.Err(); err != nil {
++			return err
++		}
++
+ 		n := chunk
+ 		if remaining < n {
+ 			n = remaining
+@@ -142,7 +149,7 @@ 		if _, err := io.ReadFull(r, buf); err != nil {
+ 			return err
+ 		}
+ 
+-		if _, err := p.handle.BulkWrite(buf, timeoutMs); err != nil {
++		if _, err := p.handle.BulkWrite(ctx, buf, timeoutMs); err != nil {
+ 			return err
+ 		}
+ 
+@@ -157,14 +164,33 @@
+ 	return nil
+ }
+ 
++// downloadAndFlash downloads length bytes from r and flashes them to partition
++func (p *protocol) downloadAndFlash(ctx context.Context, partition string, r io.Reader, length int64, progress ProgressCallback) error {
++	if err := p.sendCommand(ctx, "download", fmt.Sprintf("%08x", length), flashTimeoutMs); err != nil {
++		return err
++	}
++
++	if err := p.sendData(ctx, r, length, progress, flashTimeoutMs); err != nil {
++		return err
++	}
++
++	if err := p.sendCommand(ctx, "flash", partition, flashTimeoutMs); err != nil {
++		return err
++	}
++
++	_, err := p.accept(ctx, "OKAY", flashTimeoutMs)
++
++	return err
++}
++
+ // maxDownloadSize asks the device how many bytes it accepts per download, falling
+ // back to the conventional default if it does not answer with a usable value
+-func (p *protocol) maxDownloadSize() int64 {
+-	if err := p.sendCommand("getvar", "max-download-size", commandTimeoutMs); err != nil {
++func (p *protocol) maxDownloadSize(ctx context.Context) int64 {
++	if err := p.sendCommand(ctx, "getvar", "max-download-size", commandTimeoutMs); err != nil {
+ 		return defaultMaxDownloadSize
+ 	}
+ 
+-	value, err := p.accept("OKAY", commandTimeoutMs)
++	value, err := p.accept(ctx, "OKAY", commandTimeoutMs)
+ 	if err != nil {
+ 		return defaultMaxDownloadSize
+ 	}
+@@ -183,17 +209,17 @@ 	return n
+ }
+ 
+ // Flash downloads sourceFile to the device at portPath, flashes it to partition
+-// and optionally reboots. progress may be nil. Images larger than the device's
+-// max-download-size need sparse or gzip splitting, which is not implemented yet,
+-// so they are rejected up front rather than left to stall mid-transfer.
+-func Flash(portPath []int, partition, sourceFile string, reboot bool, progress ProgressCallback) error {
++// and optionally reboots. progress may be nil, and cancelling ctx aborts the
++// transfer. Images larger than the device's max-download-size are split into
++// sparse chunks and flashed one at a time.
++func Flash(ctx context.Context, portPath []int, partition, sourceFile string, reboot bool, progress ProgressCallback) error {
+ 	info, err := os.Stat(sourceFile)
+ 	if err != nil {
+ 		return err
+ 	}
+ 	size := info.Size()
+ 
+-	handle, err := usb.FindAndOpen(DeviceIsAvailable, portPath, "", connectTimeoutMs)
++	handle, err := usb.FindAndOpen(ctx, DeviceIsAvailable, portPath, "", connectTimeoutMs)
+ 	if err != nil {
+ 		return err
+ 	}
+@@ -201,41 +227,63 @@ 	defer handle.Close()
+ 
+ 	p := &protocol{handle: handle, chunkKB: protocolChunkKB}
+ 
+-	if limit := p.maxDownloadSize(); size > limit {
+-		return fmt.Errorf("file is %d bytes but the device only accepts %d bytes per download, and sparse/gzip splitting is not implemented yet", size, limit)
+-	}
++	limit := p.maxDownloadSize(ctx)
++	if size <= limit {
++		f, err := os.Open(sourceFile)
++		if err != nil {
++			return err
++		}
++		defer f.Close()
+ 
+-	f, err := os.Open(sourceFile)
+-	if err != nil {
++		if err := p.downloadAndFlash(ctx, partition, f, size, progress); err != nil {
++			return err
++		}
++	} else if err := flashSparse(ctx, p, partition, sourceFile, size, limit, progress); err != nil {
+ 		return err
+ 	}
+-	defer f.Close()
+ 
+-	if err := p.sendCommand("download", fmt.Sprintf("%08x", size), flashTimeoutMs); err != nil {
+-		return err
+-	}
++	if reboot {
++		if err := p.sendCommand(ctx, "reboot", "", commandTimeoutMs); err != nil {
++			return err
++		}
+ 
+-	if err := p.sendData(f, size, progress, flashTimeoutMs); err != nil {
+-		return err
++		if _, err := p.accept(ctx, "OKAY", commandTimeoutMs); err != nil {
++			return err
++		}
+ 	}
+ 
+-	if err := p.sendCommand("flash", partition, flashTimeoutMs); err != nil {
+-		return err
+-	}
++	return nil
++}
+ 
+-	if _, err := p.accept("OKAY", flashTimeoutMs); err != nil {
+-		return err
++// flashSparse splits sourceFile into sparse chunks that each fit under the
++// device's download limit and flashes them to partition, reporting progress in
++// original-image bytes after each chunk
++func flashSparse(ctx context.Context, p *protocol, partition, sourceFile string, size, limit int64, progress ProgressCallback) error {
++	// Keep each sparse chunk a little under the limit, as flashserver does, so
++	// the sparse header and chunk overhead still fit
++	splitMB := limit >> 20
++	if splitMB > 2 {
++		splitMB--
+ 	}
+ 
+-	if reboot {
+-		if err := p.sendCommand("reboot", "", commandTimeoutMs); err != nil {
++	var flashed int64
++	return sparseImageChunks(sourceFile, splitMB, func(data []byte, chunkSize int64) error {
++		if err := ctx.Err(); err != nil {
+ 			return err
+ 		}
+ 
+-		if _, err := p.accept("OKAY", commandTimeoutMs); err != nil {
++		if err := p.downloadAndFlash(ctx, partition, bytes.NewReader(data), int64(len(data)), nil); err != nil {
+ 			return err
+ 		}
+-	}
+ 
+-	return nil
++		flashed += chunkSize
++		if progress != nil {
++			if flashed > size {
++				flashed = size
++			}
++			progress(flashed, size)
++		}
++
++		return nil
++	})
+ }
+diff --git a/pkg/fastboot/sparse.go b/pkg/fastboot/sparse.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..8fd7fd0ab0cbafaeb03ad6d62e5a5fd5e170468d
+--- /dev/null
++++ b/pkg/fastboot/sparse.go
+@@ -0,0 +1,333 @@
++// This file ports the Android sparse-image writer from the SpacemiT flashserver
++// Go reimplementation. It splits an image that is larger than the device's
++// max-download-size into sparse chunks small enough to download one at a time;
++// the device reassembles them into the partition.
++package fastboot
++
++import (
++	"bytes"
++	"encoding/binary"
++	"fmt"
++	"io"
++	"os"
++)
++
++const (
++	sparseMagic     = 0xed26ff3a
++	chunkTypeRaw    = 0xCAC1
++	chunkTypeFill   = 0xCAC2
++	chunkTypeDontCa = 0xCAC3
++
++	sparseBlockSize      = 4096
++	sparseFileHeaderSize = 28
++	sparseChunkHdrSize   = 12
++)
++
++type seekBuffer struct {
++	data []byte
++	pos  int64
++}
++
++func (b *seekBuffer) Write(p []byte) (int, error) {
++	end := b.pos + int64(len(p))
++	if end > int64(len(b.data)) {
++		grown := make([]byte, end)
++		copy(grown, b.data)
++		b.data = grown
++	}
++	copy(b.data[b.pos:end], p)
++	b.pos = end
++	return len(p), nil
++}
++
++func (b *seekBuffer) Seek(offset int64, whence int) (int64, error) {
++	var abs int64
++	switch whence {
++	case io.SeekStart:
++		abs = offset
++	case io.SeekCurrent:
++		abs = b.pos + offset
++	case io.SeekEnd:
++		abs = int64(len(b.data)) + offset
++	}
++	if abs < 0 {
++		return 0, fmt.Errorf("negative seek position")
++	}
++	b.pos = abs
++	return abs, nil
++}
++
++func (b *seekBuffer) Tell() int64 { return b.pos }
++
++func (b *seekBuffer) End() int64 { return int64(len(b.data)) }
++
++type simgWriter struct {
++	out            *seekBuffer
++	startBlockOff  int64
++	endBlockOff    int64
++	hasEndBlockOff bool
++	blocksize      int64
++	nchunks        int64
++	nblocks        int64
++	ctype          uint16
++	cval           []byte
++	csize          int64
++	buf            []byte
++}
++
++func newSimgWriter(out *seekBuffer, startBlockOffset, endBlockOffset int64, hasEnd bool, blocksize int64) (*simgWriter, error) {
++	if blocksize <= 0 || blocksize%4 != 0 {
++		return nil, fmt.Errorf("blocksize must be a positive multiple of 4")
++	}
++	w := &simgWriter{
++		out:            out,
++		startBlockOff:  startBlockOffset,
++		endBlockOff:    endBlockOffset,
++		hasEndBlockOff: hasEnd,
++		blocksize:      blocksize,
++	}
++	if _, err := w.out.Write(make([]byte, sparseFileHeaderSize)); err != nil {
++		return nil, err
++	}
++	if err := w.addPadBlocks(w.startBlockOff); err != nil {
++		return nil, err
++	}
++	return w, nil
++}
++
++func (w *simgWriter) tell() int64 { return w.out.Tell() }
++
++func (w *simgWriter) flush() error { return w.closeChunk() }
++
++func (w *simgWriter) close() error {
++	if len(w.buf) > 0 {
++		return fmt.Errorf("%d leftover bytes (data written must be a multiple of blocksize %d)", len(w.buf), w.blocksize)
++	}
++	if err := w.closeChunk(); err != nil {
++		return err
++	}
++	if w.hasEndBlockOff {
++		if err := w.addPadBlocks(w.endBlockOff - w.nblocks); err != nil {
++			return err
++		}
++		if err := w.closeChunk(); err != nil {
++			return err
++		}
++	}
++	if _, err := w.out.Seek(0, io.SeekStart); err != nil {
++		return err
++	}
++	hdr := make([]byte, sparseFileHeaderSize)
++	binary.LittleEndian.PutUint32(hdr[0:], sparseMagic)
++	binary.LittleEndian.PutUint16(hdr[4:], 1)
++	binary.LittleEndian.PutUint16(hdr[6:], 0)
++	binary.LittleEndian.PutUint16(hdr[8:], sparseFileHeaderSize)
++	binary.LittleEndian.PutUint16(hdr[10:], sparseChunkHdrSize)
++	binary.LittleEndian.PutUint32(hdr[12:], uint32(w.blocksize))
++	binary.LittleEndian.PutUint32(hdr[16:], uint32(w.nblocks))
++	binary.LittleEndian.PutUint32(hdr[20:], uint32(w.nchunks))
++	binary.LittleEndian.PutUint32(hdr[24:], 0)
++	if _, err := w.out.Write(hdr); err != nil {
++		return err
++	}
++	_, err := w.out.Seek(0, io.SeekStart)
++	return err
++}
++
++func (w *simgWriter) closeChunk() error {
++	if w.csize == 0 {
++		return nil
++	}
++	var databytes int64
++	switch w.ctype {
++	case chunkTypeRaw:
++		databytes = w.csize * w.blocksize
++		if _, err := w.out.Seek(-databytes-sparseChunkHdrSize, io.SeekCurrent); err != nil {
++			return err
++		}
++	case chunkTypeDontCa:
++		databytes = 0
++	default:
++		databytes = int64(len(w.cval))
++	}
++	hdr := make([]byte, sparseChunkHdrSize)
++	binary.LittleEndian.PutUint16(hdr[0:], w.ctype)
++	binary.LittleEndian.PutUint16(hdr[2:], 0)
++	binary.LittleEndian.PutUint32(hdr[4:], uint32(w.csize))
++	binary.LittleEndian.PutUint32(hdr[8:], uint32(sparseChunkHdrSize+databytes))
++	if _, err := w.out.Write(hdr); err != nil {
++		return err
++	}
++	switch w.ctype {
++	case chunkTypeRaw:
++		if _, err := w.out.Seek(0, io.SeekEnd); err != nil {
++			return err
++		}
++	case chunkTypeDontCa:
++	default:
++		if _, err := w.out.Write(w.cval); err != nil {
++			return err
++		}
++	}
++	w.csize = 0
++	w.nchunks++
++	return nil
++}
++
++func (w *simgWriter) addPadBlocks(n int64) error {
++	if len(w.buf) > 0 {
++		return fmt.Errorf("%d leftover bytes (data written must be a multiple of blocksize %d)", len(w.buf), w.blocksize)
++	}
++	if n <= 0 {
++		return nil
++	}
++	if w.ctype != chunkTypeDontCa {
++		if err := w.closeChunk(); err != nil {
++			return err
++		}
++	}
++	w.ctype = chunkTypeDontCa
++	w.cval = nil
++	w.csize += n
++	w.nblocks += n
++	return nil
++}
++
++func (w *simgWriter) addDataBlock() error {
++	block := w.buf
++	w.buf = nil
++	cval := block[:4]
++	repeated := bytes.Repeat(cval, int(w.blocksize)/4)
++	ctype := uint16(chunkTypeRaw)
++	var val []byte
++	if bytes.Equal(block, repeated) {
++		ctype = chunkTypeFill
++		val = cval
++	}
++	if w.ctype != ctype || !bytes.Equal(w.cval, val) {
++		if err := w.closeChunk(); err != nil {
++			return err
++		}
++	}
++	if ctype == chunkTypeRaw {
++		if ctype != w.ctype {
++			if _, err := w.out.Write(make([]byte, sparseChunkHdrSize)); err != nil {
++				return err
++			}
++		}
++		if _, err := w.out.Write(block); err != nil {
++			return err
++		}
++	}
++	w.ctype = ctype
++	w.cval = val
++	w.csize++
++	w.nblocks++
++	return nil
++}
++
++func (w *simgWriter) write(data []byte) (int64, error) {
++	var nblocks int64
++	pos := 0
++	if len(w.buf) > 0 {
++		need := int(w.blocksize) - len(w.buf)
++		take := min(need, len(data))
++		w.buf = append(w.buf, data[:take]...)
++		pos = take
++		if int64(len(w.buf)) == w.blocksize {
++			if err := w.addDataBlock(); err != nil {
++				return nblocks, err
++			}
++			nblocks++
++		}
++	}
++	for ; pos < len(data); pos += int(w.blocksize) {
++		end := pos + int(w.blocksize)
++		if end > len(data) {
++			end = len(data)
++		}
++		w.buf = append(w.buf[:0], data[pos:end]...)
++		if int64(len(w.buf)) == w.blocksize {
++			if err := w.addDataBlock(); err != nil {
++				return nblocks, err
++			}
++			nblocks++
++		}
++	}
++	return nblocks, nil
++}
++
++// sparseImageChunks splits sourceImg into sparse chunks no larger than splitMB
++// megabytes, calling yield with each chunk's bytes and the number of original
++// image bytes it represents
++func sparseImageChunks(sourceImg string, splitMB int64, yield func(data []byte, size int64) error) error {
++	st, err := os.Stat(sourceImg)
++	if err != nil {
++		return err
++	}
++	var imgTotalBlocks int64
++	hasTotal := false
++	if st.Mode().IsRegular() {
++		imgTotalBlocks = st.Size() / sparseBlockSize
++		hasTotal = true
++	}
++	fh, err := os.Open(sourceImg)
++	if err != nil {
++		return err
++	}
++	defer fh.Close()
++
++	var startBlock int64
++	done := false
++	for !done {
++		if startBlock > 0 {
++			startBlock++
++		}
++		out := &seekBuffer{}
++		wr, err := newSimgWriter(out, startBlock, imgTotalBlocks, hasTotal, sparseBlockSize)
++		if err != nil {
++			return err
++		}
++		var nb int64 = -1
++		broke := false
++		for {
++			block := make([]byte, sparseBlockSize)
++			n, rerr := io.ReadFull(fh, block)
++			if n > 0 {
++				nb++
++				if _, err := wr.write(block[:n]); err != nil {
++					return err
++				}
++				if splitMB > 0 && (wr.tell()+sparseBlockSize)>>20 >= splitMB {
++					broke = true
++				}
++			}
++			if rerr == io.EOF || rerr == io.ErrUnexpectedEOF {
++				if !broke {
++					done = true
++				}
++				break
++			}
++			if rerr != nil {
++				return rerr
++			}
++			if broke {
++				break
++			}
++		}
++		if nb < 0 {
++			return fmt.Errorf("image %s yielded no blocks", sourceImg)
++		}
++		if err := wr.flush(); err != nil {
++			return err
++		}
++		startBlock += nb
++		if err := wr.close(); err != nil {
++			return err
++		}
++		if err := yield(out.data, (nb+1)*sparseBlockSize); err != nil {
++			return err
++		}
++	}
++	return nil
++}
+diff --git a/pkg/fastboot/usb/usb.go b/pkg/fastboot/usb/usb.go
+index 19a08cfc8056fec6263ab6c78d1fecdc27748731..36d54595f815df659e2bccea9b58e056f9ac10b6 100644
+--- a/pkg/fastboot/usb/usb.go
++++ b/pkg/fastboot/usb/usb.go
+@@ -249,11 +249,11 @@ 		h.state = nil
+ 	}
+ }
+ 
+-func (h *Handle) BulkWrite(data []byte, timeoutMs int) (int, error) {
++func (h *Handle) BulkWrite(ctx context.Context, data []byte, timeoutMs int) (int, error) {
+ 	if h.dev == nil || !h.opened {
+ 		return 0, &WriteFailedError{Msg: "This handle has been closed, probably due to another being opened."}
+ 	}
+-	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(h.timeout(timeoutMs))*time.Millisecond)
++	ctx, cancel := context.WithTimeout(ctx, time.Duration(h.timeout(timeoutMs))*time.Millisecond)
+ 	defer cancel()
+ 	n, err := h.out.WriteContext(ctx, data)
+ 	if err != nil {
+@@ -265,12 +265,12 @@ 	}
+ 	return n, nil
+ }
+ 
+-func (h *Handle) BulkRead(length int, timeoutMs int) ([]byte, error) {
++func (h *Handle) BulkRead(ctx context.Context, length int, timeoutMs int) ([]byte, error) {
+ 	if h.dev == nil || !h.opened {
+ 		return nil, &ReadFailedError{Msg: "This handle has been closed, probably due to another being opened."}
+ 	}
+ 	buf := make([]byte, length)
+-	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(h.timeout(timeoutMs))*time.Millisecond)
++	ctx, cancel := context.WithTimeout(ctx, time.Duration(h.timeout(timeoutMs))*time.Millisecond)
+ 	defer cancel()
+ 	n, err := h.in.ReadContext(ctx, buf)
+ 	if err != nil {
+@@ -283,9 +283,9 @@ 	}
+ 	return buf[:n], nil
+ }
+ 
+-func (h *Handle) FlushBuffers() error {
++func (h *Handle) FlushBuffers(ctx context.Context) error {
+ 	for {
+-		_, err := h.BulkRead(h.maxReadPkt, 10)
++		_, err := h.BulkRead(ctx, h.maxReadPkt, 10)
+ 		if err == nil {
+ 			continue
+ 		}
+@@ -362,7 +362,7 @@ 	}
+ 	return handles[0], nil
+ }
+ 
+-func FindAndOpen(settingMatcher SettingMatcher, portPath []int, serial string, timeoutMs int) (*Handle, error) {
++func FindAndOpen(ctx context.Context, settingMatcher SettingMatcher, portPath []int, serial string, timeoutMs int) (*Handle, error) {
+ 	h, err := Find(settingMatcher, portPath, serial, timeoutMs)
+ 	if err != nil {
+ 		return nil, err
+@@ -371,7 +371,7 @@ 	if err := h.Open(); err != nil {
+ 		h.Close()
+ 		return nil, err
+ 	}
+-	if err := h.FlushBuffers(); err != nil {
++	if err := h.FlushBuffers(ctx); err != nil {
+ 		h.Close()
+ 		return nil, err
+ 	}
+diff --git a/pkg/svc/flash_flash_file.go b/pkg/svc/flash_flash_file.go
+index c0574ecfb7e14115a9385b11b8d312be1aaa1682..6ea5a441dc69b08dc61c3ea146fb313971d25041 100644
+--- a/pkg/svc/flash_flash_file.go
++++ b/pkg/svc/flash_flash_file.go
+@@ -72,7 +72,7 @@ 		})
+ 	}
+ 
+ 	start := time.Now()
+-	if err := fastboot.Flash(portPath, input.Partition, path, input.Reboot, progress); err != nil {
++	if err := fastboot.Flash(ctx, portPath, input.Partition, path, input.Reboot, progress); err != nil {
+ 		return nil, nil, err
+ 	}
+ 
+
