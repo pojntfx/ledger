@@ -1,0 +1,1327 @@
+From 6bcad0e0f7bd2dab7c31891d851e3b78e6e58227 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Fri, 11 Sep 2026 18:57:14 -0700
+Subject: [PATCH] feat: Add plumbing to expose rest of necessary Fastboot tools
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/main.go b/main.go
+index 7ae0eb87107494dc15585d298422f2957a8288d5..d2f8f3886bba07948300facdfe2ef27b31de84f6 100644
+--- a/main.go
++++ b/main.go
+@@ -63,7 +63,14 @@ 	mcp.AddTool(handler, svc.WriteToTool, service.WriteTo)
+ 	mcp.AddTool(handler, svc.GetFilesTool, service.GetFiles)
+ 	mcp.AddTool(handler, svc.DeleteFileTool, service.DeleteFile)
+ 	mcp.AddTool(handler, svc.GetFlashDevicesTool, service.GetFlashDevices)
++	mcp.AddTool(handler, svc.GetVarTool, service.GetVar)
++	mcp.AddTool(handler, svc.StageTool, service.Stage)
++	mcp.AddTool(handler, svc.ContinueTool, service.Continue)
++	mcp.AddTool(handler, svc.OemTool, service.Oem)
++	mcp.AddTool(handler, svc.MultiFlashTool, service.MultiFlash)
+ 	mcp.AddTool(handler, svc.FlashFileTool, service.FlashFile)
++	mcp.AddTool(handler, svc.RebootTool, service.Reboot)
++	mcp.AddTool(handler, svc.GetFlashJobsTool, service.GetFlashJobs)
+ 
+ 	log.Println("Listening on", *laddr)
+ 	log.Println("Storing uploaded files in", *filesDir)
+diff --git a/pkg/fastboot/flash.go b/pkg/fastboot/flash.go
+index 74f041747640cd55e8a12f4ed0c34c77a06de6f0..3d585253a5150e61e04c49ac9d5b6af12051153a 100644
+--- a/pkg/fastboot/flash.go
++++ b/pkg/fastboot/flash.go
+@@ -26,6 +26,11 @@
+ 	connectTimeoutMs = 30000
+ 	commandTimeoutMs = 10000
+ 	flashTimeoutMs   = 60000
++
++	// The device erases and writes a whole downloaded block before it answers
++	// the flash command, which can take minutes for a large block on slow
++	// media; flashserver uses per-action timeouts in the same range
++	writeTimeoutMs = 600000
+ )
+ 
+ // ProgressCallback reports how many bytes of the image have been sent so far out
+@@ -178,7 +183,7 @@ 	if err := p.sendCommand(ctx, "flash", partition, flashTimeoutMs); err != nil {
+ 		return err
+ 	}
+ 
+-	_, err := p.accept(ctx, "OKAY", flashTimeoutMs)
++	_, err := p.accept(ctx, "OKAY", writeTimeoutMs)
+ 
+ 	return err
+ }
+@@ -208,51 +213,67 @@
+ 	return n
+ }
+ 
+-// Flash downloads sourceFile to the device at portPath, flashes it to partition
+-// and optionally reboots. progress may be nil, and cancelling ctx aborts the
+-// transfer. Images larger than the device's max-download-size are split into
+-// sparse chunks and flashed one at a time.
+-func Flash(ctx context.Context, portPath []int, partition, sourceFile string, reboot bool, progress ProgressCallback) error {
+-	info, err := os.Stat(sourceFile)
++// Flasher holds a device open across multiple flash operations, as the device
++// keeps state between commands within one session — a multi-flash writes the
++// partition table first and then flashes against it
++type Flasher struct {
++	handle *usb.Handle
++	p      *protocol
++	limit  int64
++}
++
++// OpenFlasher connects to the device at portPath and reads its download limit
++func OpenFlasher(ctx context.Context, portPath []int) (*Flasher, error) {
++	handle, err := usb.FindAndOpen(ctx, DeviceIsAvailable, portPath, "", connectTimeoutMs)
+ 	if err != nil {
+-		return err
++		return nil, err
+ 	}
+-	size := info.Size()
++
++	p := &protocol{handle: handle, chunkKB: protocolChunkKB}
+ 
+-	handle, err := usb.FindAndOpen(ctx, DeviceIsAvailable, portPath, "", connectTimeoutMs)
++	return &Flasher{handle: handle, p: p, limit: p.maxDownloadSize(ctx)}, nil
++}
++
++func (f *Flasher) Close() { f.handle.Close() }
++
++// FlashFile downloads sourceFile to the device and flashes it to partition.
++// progress may be nil, and cancelling ctx aborts the transfer. When gzipLevel
++// is set, the image is gzipped in blocks and the device decompresses them as
++// it receives them; otherwise images larger than the device's max-download-size
++// are split into sparse chunks and flashed one at a time.
++func (f *Flasher) FlashFile(ctx context.Context, partition, sourceFile string, gzipLevel *int, progress ProgressCallback) error {
++	info, err := os.Stat(sourceFile)
+ 	if err != nil {
+ 		return err
+ 	}
+-	defer handle.Close()
++	size := info.Size()
+ 
+-	p := &protocol{handle: handle, chunkKB: protocolChunkKB}
++	if gzipLevel != nil {
++		return flashGzip(ctx, f.p, partition, sourceFile, size, f.limit, *gzipLevel, progress)
++	}
+ 
+-	limit := p.maxDownloadSize(ctx)
+-	if size <= limit {
+-		f, err := os.Open(sourceFile)
++	if size <= f.limit {
++		file, err := os.Open(sourceFile)
+ 		if err != nil {
+ 			return err
+ 		}
+-		defer f.Close()
++		defer file.Close()
+ 
+-		if err := p.downloadAndFlash(ctx, partition, f, size, progress); err != nil {
+-			return err
+-		}
+-	} else if err := flashSparse(ctx, p, partition, sourceFile, size, limit, progress); err != nil {
+-		return err
++		return f.p.downloadAndFlash(ctx, partition, file, size, progress)
+ 	}
+ 
+-	if reboot {
+-		if err := p.sendCommand(ctx, "reboot", "", commandTimeoutMs); err != nil {
+-			return err
+-		}
++	return flashSparse(ctx, f.p, partition, sourceFile, size, f.limit, progress)
++}
+ 
+-		if _, err := p.accept(ctx, "OKAY", commandTimeoutMs); err != nil {
+-			return err
+-		}
++// Reboot reboots the device out of fastboot mode
++func (f *Flasher) Reboot(ctx context.Context) error {
++	if err := f.p.sendCommand(ctx, "reboot", "", commandTimeoutMs); err != nil {
++		return err
+ 	}
+ 
+-	return nil
++	_, err := f.p.accept(ctx, "OKAY", commandTimeoutMs)
++
++	return err
+ }
+ 
+ // flashSparse splits sourceFile into sparse chunks that each fit under the
+diff --git a/pkg/fastboot/gzip.go b/pkg/fastboot/gzip.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..66c77ab945c16917aff71e1fc7f9454538f7e912
+--- /dev/null
++++ b/pkg/fastboot/gzip.go
+@@ -0,0 +1,97 @@
++// This file ports the gzip flashing path from the SpacemiT flashserver Go
++// reimplementation. The image is read in blocks of the device's
++// max-download-size, each block is gzip-compressed on its own and flashed with
++// the plain download/flash commands; the device decompresses each block as it
++// receives it and appends it to the partition.
++package fastboot
++
++import (
++	"bytes"
++	"compress/gzip"
++	"context"
++	"io"
++	"os"
++)
++
++// compressBlock gzip-compresses data at the given level
++func compressBlock(data []byte, level int) ([]byte, error) {
++	var buf bytes.Buffer
++	w, err := gzip.NewWriterLevel(&buf, level)
++	if err != nil {
++		return nil, err
++	}
++	if _, err := w.Write(data); err != nil {
++		return nil, err
++	}
++	if err := w.Close(); err != nil {
++		return nil, err
++	}
++	return buf.Bytes(), nil
++}
++
++// gzipBlocks reads sourceFile in blocks of blockSize bytes, calling yield with
++// each block's gzipped bytes and the number of original image bytes the block
++// represents. A level of 0 yields the block raw, as flashserver does. The
++// context is checked before compressing each block, since compressing a large
++// block is the one long stretch with no USB traffic to notice a cancellation
++func gzipBlocks(ctx context.Context, sourceFile string, blockSize int64, level int, yield func(data []byte, size int64) error) error {
++	f, err := os.Open(sourceFile)
++	if err != nil {
++		return err
++	}
++	defer f.Close()
++
++	for {
++		if err := ctx.Err(); err != nil {
++			return err
++		}
++
++		block := make([]byte, blockSize)
++		n, rerr := io.ReadFull(f, block)
++		if n > 0 {
++			block = block[:n]
++			if level > 0 {
++				compressed, err := compressBlock(block, level)
++				if err != nil {
++					return err
++				}
++				block = compressed
++			}
++			if err := yield(block, int64(n)); err != nil {
++				return err
++			}
++		}
++		if rerr == io.EOF || rerr == io.ErrUnexpectedEOF {
++			return nil
++		}
++		if rerr != nil {
++			return rerr
++		}
++	}
++}
++
++// flashGzip gzips sourceFile in blocks that each fit under the device's
++// download limit and flashes them to partition, reporting progress in
++// original-image bytes after each block
++func flashGzip(ctx context.Context, p *protocol, partition, sourceFile string, size, limit int64, level int, progress ProgressCallback) error {
++	var flashed int64
++	return gzipBlocks(ctx, sourceFile, limit, level, func(data []byte, blockSize int64) error {
++		if err := ctx.Err(); err != nil {
++			return err
++		}
++
++		if err := p.downloadAndFlash(ctx, partition, bytes.NewReader(data), int64(len(data)), nil); err != nil {
++			return err
++		}
++
++		flashed += blockSize
++		if progress != nil {
++			if flashed > size {
++				flashed = size
++			}
++			progress(flashed, size)
++		}
++
++		return nil
++	})
++}
+diff --git a/pkg/svc/files.go b/pkg/svc/files.go
+index 87bdc7251baddb931933c5791de3c611e3ef0feb..dbef9c51b992261d82731120f15af379d2e68a2d 100644
+--- a/pkg/svc/files.go
++++ b/pkg/svc/files.go
+@@ -123,14 +123,14 @@
+ 	info, err := os.Lstat(path)
+ 	if err != nil {
+ 		if os.IsNotExist(err) {
+-			return "", "", fmt.Errorf("%w: %v", ErrFileNotFound, sanitized)
++			return "", sanitized, fmt.Errorf("%w: %v", ErrFileNotFound, sanitized)
+ 		}
+ 
+ 		return "", "", err
+ 	}
+ 
+ 	if !info.Mode().IsRegular() {
+-		return "", "", fmt.Errorf("%w: %v", ErrNotRegularFile, sanitized)
++		return "", sanitized, fmt.Errorf("%w: %v", ErrNotRegularFile, sanitized)
+ 	}
+ 
+ 	return path, sanitized, nil
+diff --git a/pkg/svc/flash_continue.go b/pkg/svc/flash_continue.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..0b1636a8f7d60b8b22a7b6c14bcf1f1e57774760
+--- /dev/null
++++ b/pkg/svc/flash_continue.go
+@@ -0,0 +1,47 @@
++package svc
++
++import (
++	"context"
++
++	"codeberg.org/pojntfx/pushrod/pkg/fastboot"
++	"codeberg.org/pojntfx/pushrod/pkg/fastboot/usb"
++	"github.com/modelcontextprotocol/go-sdk/mcp"
++)
++
++var (
++	ContinueTool = &mcp.Tool{
++		Name:        "flash.continue",
++		Title:       "Continue",
++		Description: "Leave fastboot mode so the device boots the image last staged into its memory (flash.stage); after the board re-enumerates, list devices again to pick up its new port",
++		Annotations: &mcp.ToolAnnotations{DestructiveHint: &[]bool{false}[0]},
++	}
++)
++
++type ContinueInput struct {
++	Port string `json:"port" jsonschema:"port of the device to continue, in BUS-PORT form (e.g. 1-2-3) from flash.getDevices"`
++}
++
++type ContinueOutput struct {
++	Response string `json:"response" jsonschema:"text the device returned, if any"`
++}
++
++func (s *Service) Continue(ctx context.Context, req *mcp.CallToolRequest, input ContinueInput) (*mcp.CallToolResult, *ContinueOutput, error) {
++	portPath, err := usb.ParsePortPath(input.Port)
++	if err != nil {
++		return nil, nil, err
++	}
++
++	if err := s.lockFlash(ctx); err != nil {
++		return nil, nil, err
++	}
++	defer s.flashLock.Unlock()
++
++	response, err := fastboot.Continue(ctx, portPath)
++	if err != nil {
++		return nil, nil, err
++	}
++
++	return nil, &ContinueOutput{
++		Response: response,
++	}, nil
++}
+diff --git a/pkg/svc/flash_flash_file.go b/pkg/svc/flash_flash_file.go
+index 6ea5a441dc69b08dc61c3ea146fb313971d25041..e8709d20281ac6541f90ea442a3233f75830f4d4 100644
+--- a/pkg/svc/flash_flash_file.go
++++ b/pkg/svc/flash_flash_file.go
+@@ -2,21 +2,31 @@ package svc
+ 
+ import (
+ 	"context"
++	"errors"
+ 	"fmt"
++	"os"
++	"strconv"
++	"strings"
+ 	"time"
+ 
+ 	"codeberg.org/pojntfx/pushrod/pkg/fastboot"
+ 	"codeberg.org/pojntfx/pushrod/pkg/fastboot/usb"
+ 	"github.com/modelcontextprotocol/go-sdk/mcp"
+ )
++
++// Progress notifications get a bounded write timeout so a client that has
++// gone away without the connection noticing cannot stall a running flash
++const notifyProgressTimeout = time.Second * 5
+ 
+ var (
+ 	FlashFileTool = &mcp.Tool{
+ 		Name:        "flash.flashFile",
+ 		Title:       "Flash file",
+-		Description: "Flash an uploaded file to a partition on a device in fastboot mode, then optionally reboot it; take the file from files.getFiles and the port from flash.getDevices. Pass a progress token to stream progress while it runs",
++		Description: "Flash an uploaded file to a partition on a device in fastboot mode, then optionally reboot it; take the file from files.getFiles and the port from flash.getDevices. For large files, pass the compress the partition JSON declares for the image (like gzip-5) to gzip the transfer. To flash a whole partition layout, use flash.multiFlash instead. Pass a progress token to stream progress while it runs",
+ 		Annotations: &mcp.ToolAnnotations{DestructiveHint: &[]bool{true}[0]},
+ 	}
++
++	ErrCompressNotValid = errors.New(`compress must be in gzip-N form with N from 0 to 9, like gzip-5`)
+ )
+ 
+ type FlashFileInput struct {
+@@ -24,13 +34,38 @@ 	File      string `json:"file" jsonschema:"name of the uploaded file to flash, like image.img from files.getFiles"`
+ 	Partition string `json:"partition" jsonschema:"partition to flash the file to, like boot or rootfs"`
+ 	Port      string `json:"port" jsonschema:"port of the device to flash, in BUS-PORT form (e.g. 1-2-3) from flash.getDevices"`
+ 	Reboot    bool   `json:"reboot" jsonschema:"whether to reboot the device after flashing so it boots the freshly flashed image"`
++	Compress  string `json:"compress,omitempty" jsonschema:"compression to use for the transfer, in gzip-N form (e.g. gzip-5) as declared by the partition table; empty flashes raw, which is slower for large files"`
++	// Large flashes can outlive the client's request timeout even compressed,
++	// since the device-side erase and write are slow
++	Background bool `json:"background,omitempty" jsonschema:"return a job ID immediately instead of waiting for the flash, then poll flash.getJobs for progress and the result; recommended for large images like rootfs"`
++}
++
++// parseCompress turns the partition JSON's compress syntax (gzip-N) into a gzip
++// level; empty means no compression
++func parseCompress(compress string) (*int, error) {
++	if compress == "" {
++		return nil, nil
++	}
++
++	parts := strings.Split(compress, "-")
++	if len(parts) != 2 || parts[0] != "gzip" {
++		return nil, ErrCompressNotValid
++	}
++
++	level, err := strconv.Atoi(parts[1])
++	if err != nil || level < 0 || level > 9 {
++		return nil, ErrCompressNotValid
++	}
++
++	return &level, nil
+ }
+ 
+ type FlashFileOutput struct {
+-	File       string `json:"file" jsonschema:"name of the file that was flashed"`
+-	Partition  string `json:"partition" jsonschema:"partition the file was flashed to"`
+-	Rebooted   bool   `json:"rebooted" jsonschema:"whether the device was rebooted afterwards"`
+-	DurationMs int64  `json:"durationMs" jsonschema:"how long the flash took, in milliseconds"`
++	JobID      string `json:"jobId,omitempty" jsonschema:"ID of the background job, to poll with flash.getJobs; only set with background:true"`
++	File       string `json:"file,omitempty" jsonschema:"name of the file that was flashed"`
++	Partition  string `json:"partition,omitempty" jsonschema:"partition the file was flashed to"`
++	Rebooted   bool   `json:"rebooted,omitempty" jsonschema:"whether the device was rebooted afterwards"`
++	DurationMs int64  `json:"durationMs,omitempty" jsonschema:"how long the flash took, in milliseconds"`
+ }
+ 
+ func (s *Service) FlashFile(ctx context.Context, req *mcp.CallToolRequest, input FlashFileInput) (*mcp.CallToolResult, *FlashFileOutput, error) {
+@@ -45,41 +80,63 @@ 	if err != nil {
+ 		return nil, nil, err
+ 	}
+ 
+-	s.flashLock.Lock()
+-	defer s.flashLock.Unlock()
++	gzipLevel, err := parseCompress(input.Compress)
++	if err != nil {
++		return nil, nil, err
++	}
++
++	run := func(ctx context.Context, progress func(label string, sent, total int64)) (*FlashFileOutput, error) {
++		flasher, err := fastboot.OpenFlasher(ctx, portPath)
++		if err != nil {
++			return nil, err
++		}
++		defer flasher.Close()
+ 
+-	// The flash reports every chunk, so only notify the client when the whole
+-	// percentage changes, and only when it asked for progress
+-	progressToken := req.Params.GetProgressToken()
+-	lastPercent := -1
+-	progress := func(sent, total int64) {
+-		if progressToken == nil || total <= 0 {
+-			return
++		start := time.Now()
++		if err := flasher.FlashFile(ctx, input.Partition, path, gzipLevel, func(sent, total int64) {
++			progress(input.Partition, sent, total)
++		}); err != nil {
++			return nil, err
+ 		}
+ 
+-		percent := int(sent * 100 / total)
+-		if percent == lastPercent {
+-			return
++		if input.Reboot {
++			if err := flasher.Reboot(ctx); err != nil {
++				return nil, err
++			}
+ 		}
+-		lastPercent = percent
+ 
+-		_ = req.Session.NotifyProgress(ctx, &mcp.ProgressNotificationParams{
+-			ProgressToken: progressToken,
+-			Progress:      float64(sent),
+-			Total:         float64(total),
+-			Message:       fmt.Sprintf("%d%%", percent),
+-		})
++		return &FlashFileOutput{
++			File:       name,
++			Partition:  input.Partition,
++			Rebooted:   input.Reboot,
++			DurationMs: time.Since(start).Milliseconds(),
++		}, nil
+ 	}
+ 
+-	start := time.Now()
+-	if err := fastboot.Flash(ctx, portPath, input.Partition, path, input.Reboot, progress); err != nil {
++	if input.Background {
++		return nil, &FlashFileOutput{
++			JobID: s.startFlashJob("flash.flashFile", fmt.Sprintf("%s → %s", name, input.Partition), func(ctx context.Context, progress func(label string, sent, total int64)) (any, error) {
++				return run(ctx, progress)
++			}),
++		}, nil
++	}
++
++	if err := s.lockFlash(ctx); err != nil {
+ 		return nil, nil, err
+ 	}
++	defer s.flashLock.Unlock()
+ 
+-	return nil, &FlashFileOutput{
+-		File:       name,
+-		Partition:  input.Partition,
+-		Rebooted:   input.Reboot,
+-		DurationMs: time.Since(start).Milliseconds(),
+-	}, nil
++	// The flash reports every chunk, so only notify the client when the whole
++	// percentage changes, and only when it asked for progress
++	info, err := os.Stat(path)
++	if err != nil {
++		return nil, nil, err
++	}
++
++	output, err := run(ctx, notifyProgress(ctx, req, info.Size()))
++	if err != nil {
++		return nil, nil, err
++	}
++
++	return nil, output, nil
+ }
+diff --git a/pkg/svc/flash_get_var.go b/pkg/svc/flash_get_var.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..f5ef57e5ad52d58ddea768c9f944c3e0c04fa406
+--- /dev/null
++++ b/pkg/svc/flash_get_var.go
+@@ -0,0 +1,50 @@
++package svc
++
++import (
++	"context"
++
++	"codeberg.org/pojntfx/pushrod/pkg/fastboot"
++	"codeberg.org/pojntfx/pushrod/pkg/fastboot/usb"
++	"github.com/modelcontextprotocol/go-sdk/mcp"
++)
++
++var (
++	GetVarTool = &mcp.Tool{
++		Name:        "flash.getVar",
++		Title:       "Get fastboot variable",
++		Description: "Read a fastboot variable from a device, like mtd-size or blk-size, to work out which partition table applies before flashing",
++		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true},
++	}
++)
++
++type GetVarInput struct {
++	Variable string `json:"variable" jsonschema:"the fastboot variable to read, like mtd-size, blk-size or max-download-size"`
++	Port     string `json:"port" jsonschema:"port of the device to read from, in BUS-PORT form (e.g. 1-2-3) from flash.getDevices"`
++}
++
++type GetVarOutput struct {
++	Variable string `json:"variable" jsonschema:"the variable that was read"`
++	Value    string `json:"value" jsonschema:"the value the device reported for the variable"`
++}
++
++func (s *Service) GetVar(ctx context.Context, req *mcp.CallToolRequest, input GetVarInput) (*mcp.CallToolResult, *GetVarOutput, error) {
++	portPath, err := usb.ParsePortPath(input.Port)
++	if err != nil {
++		return nil, nil, err
++	}
++
++	if err := s.lockFlash(ctx); err != nil {
++		return nil, nil, err
++	}
++	defer s.flashLock.Unlock()
++
++	value, err := fastboot.GetVar(ctx, portPath, input.Variable)
++	if err != nil {
++		return nil, nil, err
++	}
++
++	return nil, &GetVarOutput{
++		Variable: input.Variable,
++		Value:    value,
++	}, nil
++}
+diff --git a/pkg/svc/flash_jobs.go b/pkg/svc/flash_jobs.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..470a6f28c98ba24e08da5e078113d9f8d5889d02
+--- /dev/null
++++ b/pkg/svc/flash_jobs.go
+@@ -0,0 +1,211 @@
++package svc
++
++import (
++	"context"
++	"crypto/rand"
++	"encoding/hex"
++	"fmt"
++	"time"
++
++	"github.com/modelcontextprotocol/go-sdk/mcp"
++)
++
++const (
++	flashJobQueued    = "queued"
++	flashJobRunning   = "running"
++	flashJobSucceeded = "succeeded"
++	flashJobFailed    = "failed"
++
++	// Finished jobs are kept so their results can be read back, but not forever
++	flashJobsKept = 16
++)
++
++// flashJob is one flashing operation running detached from the MCP request that
++// started it, so an operation that outlives the client's request timeout can
++// still be watched to completion
++type flashJob struct {
++	id      string
++	kind    string
++	detail  string
++	status  string
++	err     string
++	label   string
++	sent    int64
++	total   int64
++	result  any
++	started time.Time
++	ended   time.Time
++}
++
++type FlashJobStatus struct {
++	ID         string `json:"id" jsonschema:"ID of the job"`
++	Kind       string `json:"kind" jsonschema:"the operation the job runs, like flash.multiFlash or flash.flashFile"`
++	Detail     string `json:"detail" jsonschema:"what the job flashes, like the partition JSONs or the file and partition"`
++	Status     string `json:"status" jsonschema:"queued (another flash is still running), running, succeeded or failed"`
++	Error      string `json:"error,omitempty" jsonschema:"why the job failed, if it did"`
++	Label      string `json:"label,omitempty" jsonschema:"partition currently being flashed"`
++	SentBytes  int64  `json:"sentBytes" jsonschema:"bytes flashed so far, across the whole job"`
++	TotalBytes int64  `json:"totalBytes" jsonschema:"total bytes the job will flash"`
++	Result     any    `json:"result,omitempty" jsonschema:"the operation's result once it succeeded, with the same fields as the synchronous call"`
++	StartedAt  int64  `json:"startedAt" jsonschema:"when the job was started, in milliseconds since the epoch"`
++	DurationMs int64  `json:"durationMs" jsonschema:"how long the job has been running or took, in milliseconds"`
++}
++
++var (
++	GetFlashJobsTool = &mcp.Tool{
++		Name:        "flash.getJobs",
++		Title:       "Get flash jobs",
++		Description: "List the flashing jobs started with background:true on flash.multiFlash or flash.flashFile, with their progress and results; poll this while a job runs, and read the serial console for device-side details",
++		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true},
++	}
++)
++
++// notifyProgress returns a progress callback that notifies the client when the
++// whole percentage changes, and only when it asked for progress
++func notifyProgress(ctx context.Context, req *mcp.CallToolRequest, totalBytes int64) func(label string, sent, total int64) {
++	progressToken := req.Params.GetProgressToken()
++	lastPercent := -1
++
++	return func(label string, sent, total int64) {
++		if progressToken == nil || totalBytes <= 0 || ctx.Err() != nil {
++			return
++		}
++
++		percent := int(sent * 100 / totalBytes)
++		if percent == lastPercent {
++			return
++		}
++		lastPercent = percent
++
++		notifyCtx, cancel := context.WithTimeout(ctx, notifyProgressTimeout)
++
++		_ = req.Session.NotifyProgress(notifyCtx, &mcp.ProgressNotificationParams{
++			ProgressToken: progressToken,
++			Progress:      float64(sent),
++			Total:         float64(totalBytes),
++			Message:       fmt.Sprintf("%s: %d%%", label, percent),
++		})
++
++		cancel()
++	}
++}
++
++type GetFlashJobsInput struct{}
++
++type GetFlashJobsOutput struct {
++	Jobs []FlashJobStatus `json:"jobs" jsonschema:"all flash jobs, oldest first"`
++}
++
++// startFlashJob runs a flashing operation detached from the caller's request
++// context and returns the job's ID
++func (s *Service) startFlashJob(kind, detail string, run func(ctx context.Context, progress func(label string, sent, total int64)) (any, error)) string {
++	id := make([]byte, 4)
++	if _, err := rand.Read(id); err != nil {
++		panic(err)
++	}
++
++	job := &flashJob{
++		id:      hex.EncodeToString(id),
++		kind:    kind,
++		detail:  detail,
++		status:  flashJobQueued,
++		started: time.Now(),
++	}
++
++	s.flashJobsLock.Lock()
++	s.flashJobs = append(s.flashJobs, job)
++
++	// Drop the oldest finished jobs past the retention limit
++	finished := 0
++	for _, j := range s.flashJobs {
++		if j.status == flashJobSucceeded || j.status == flashJobFailed {
++			finished++
++		}
++	}
++	for finished > flashJobsKept {
++		for i, j := range s.flashJobs {
++			if j.status == flashJobSucceeded || j.status == flashJobFailed {
++				s.flashJobs = append(s.flashJobs[:i], s.flashJobs[i+1:]...)
++				finished--
++
++				break
++			}
++		}
++	}
++	s.flashJobsLock.Unlock()
++
++	s.wg.Add(1)
++	go func() {
++		defer s.wg.Done()
++
++		if err := s.lockFlash(s.baseCtx); err != nil {
++			s.finishFlashJob(job, nil, err)
++
++			return
++		}
++		defer s.flashLock.Unlock()
++
++		s.flashJobsLock.Lock()
++		job.status = flashJobRunning
++		s.flashJobsLock.Unlock()
++
++		result, err := run(s.baseCtx, func(label string, sent, total int64) {
++			s.flashJobsLock.Lock()
++			defer s.flashJobsLock.Unlock()
++
++			job.label = label
++			job.sent = sent
++			job.total = total
++		})
++
++		s.finishFlashJob(job, result, err)
++	}()
++
++	return job.id
++}
++
++func (s *Service) finishFlashJob(job *flashJob, result any, err error) {
++	s.flashJobsLock.Lock()
++	defer s.flashJobsLock.Unlock()
++
++	job.ended = time.Now()
++
++	if err != nil {
++		job.status = flashJobFailed
++		job.err = err.Error()
++
++		return
++	}
++
++	job.status = flashJobSucceeded
++	job.result = result
++}
++
++func (s *Service) GetFlashJobs(ctx context.Context, req *mcp.CallToolRequest, input GetFlashJobsInput) (*mcp.CallToolResult, *GetFlashJobsOutput, error) {
++	s.flashJobsLock.Lock()
++	defer s.flashJobsLock.Unlock()
++
++	jobs := []FlashJobStatus{}
++	for _, job := range s.flashJobs {
++		end := job.ended
++		if end.IsZero() {
++			end = time.Now()
++		}
++
++		jobs = append(jobs, FlashJobStatus{
++			ID:         job.id,
++			Kind:       job.kind,
++			Detail:     job.detail,
++			Status:     job.status,
++			Error:      job.err,
++			Label:      job.label,
++			SentBytes:  job.sent,
++			TotalBytes: job.total,
++			Result:     job.result,
++			StartedAt:  job.started.UnixMilli(),
++			DurationMs: end.Sub(job.started).Milliseconds(),
++		})
++	}
++
++	return nil, &GetFlashJobsOutput{Jobs: jobs}, nil
++}
+diff --git a/pkg/svc/flash_multi_flash.go b/pkg/svc/flash_multi_flash.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..c21c067eb1998a5ce2e74799c3af5e1d32297fb7
+--- /dev/null
++++ b/pkg/svc/flash_multi_flash.go
+@@ -0,0 +1,275 @@
++package svc
++
++import (
++	"context"
++	"encoding/json"
++	"errors"
++	"fmt"
++	"os"
++	"strings"
++	"time"
++
++	"codeberg.org/pojntfx/pushrod/pkg/fastboot"
++	"codeberg.org/pojntfx/pushrod/pkg/fastboot/usb"
++	"github.com/modelcontextprotocol/go-sdk/mcp"
++)
++
++var (
++	MultiFlashTool = &mcp.Tool{
++		Name:        "flash.multiFlash",
++		Title:       "Flash partition layout",
++		Description: "Write whole partition layouts to a device in one session, like fastboot.yaml's multi_flash: apply each uploaded partition JSON in order — the MTD one for the device's mtd-size first (fall back to the next smaller power of two when no exact one exists, e.g. partition_4m.json for 8M), then the block one for its blk-size (e.g. partition_universal.json; read both via flash.getVar). For each JSON this writes the table it declares, then flashes every partition it lists, honoring each entry's compress. Upload every referenced image first (files.getFiles); a missing one fails before anything is flashed. The device keeps a layout only for one session, so flashing partitions with separate flash.flashFile calls does not work. Pass a progress token to stream progress while it runs",
++		Annotations: &mcp.ToolAnnotations{DestructiveHint: &[]bool{true}[0]},
++	}
++
++	ErrNoPartitionJSONs  = errors.New("no partition JSONs given")
++	ErrNoFormatPartition = errors.New(`partition JSON has no "format" field naming the partition to write the table to`)
++	ErrImagesNotUploaded = errors.New("images referenced by the partition JSON are not uploaded yet")
++)
++
++// partitionTable mirrors the SpacemiT partition JSON: the table is written by
++// flashing the JSON itself to the partition named in "format", and each entry
++// in "partitions" is then flashed individually
++type partitionTable struct {
++	Format     string `json:"format"`
++	Partitions []struct {
++		Name     string `json:"name"`
++		Image    string `json:"image"`
++		Compress string `json:"compress"`
++	} `json:"partitions"`
++}
++
++type MultiFlashInput struct {
++	Files  []string `json:"files" jsonschema:"names of the uploaded partition JSONs to apply in order, like [partition_4m.json, partition_universal.json] from files.getFiles"`
++	Port   string   `json:"port" jsonschema:"port of the device to flash, in BUS-PORT form (e.g. 1-2-3) from flash.getDevices"`
++	Reboot bool     `json:"reboot" jsonschema:"whether to reboot the device afterwards so it boots the freshly flashed images"`
++	// Flashing a whole layout takes minutes because the device erases and
++	// writes NOR itself, so the default is to run in the background
++	Background bool `json:"background,omitempty" jsonschema:"return a job ID immediately instead of waiting for the flash, then poll flash.getJobs for progress and the result; recommended, since a full layout flash outlives most clients' request timeouts"`
++}
++
++type FlashedPartition struct {
++	Partition  string `json:"partition" jsonschema:"partition that was flashed"`
++	File       string `json:"file" jsonschema:"uploaded file that was flashed to the partition"`
++	DurationMs int64  `json:"durationMs" jsonschema:"how long the partition took to flash, in milliseconds"`
++}
++
++type MultiFlashOutput struct {
++	JobID            string             `json:"jobId,omitempty" jsonschema:"ID of the background job, to poll with flash.getJobs; only set with background:true"`
++	Files            []string           `json:"files,omitempty" jsonschema:"names of the partition JSONs that were applied, in order"`
++	FormatPartitions []string           `json:"formatPartitions,omitempty" jsonschema:"partitions the tables were written to, in the same order"`
++	Flashed          []FlashedPartition `json:"flashed,omitempty" jsonschema:"partitions that were flashed, in the order the JSONs list them"`
++	Rebooted         bool               `json:"rebooted,omitempty" jsonschema:"whether the device was rebooted afterwards"`
++	DurationMs       int64              `json:"durationMs,omitempty" jsonschema:"how long the whole flash took, in milliseconds"`
++}
++
++// partitionImage is one partition from a JSON resolved to its uploaded file
++type partitionImage struct {
++	partition string
++	name      string
++	path      string
++	gzipLevel *int
++	size      int64
++}
++
++// parsedTable is a partition JSON resolved to its on-disk files, ready to flash
++type parsedTable struct {
++	name   string
++	format string
++	path   string
++	size   int64
++	images []partitionImage
++}
++
++// parsePartitionTable loads and validates one uploaded partition JSON and
++// resolves every image it references to an uploaded file, so a missing one
++// fails before anything is flashed. The JSON's image paths flatten to the same
++// names the uploads were stored under.
++func (s *Service) parsePartitionTable(file string) (*parsedTable, []string, error) {
++	path, name, err := s.resolveUploadedFile(file)
++	if err != nil {
++		return nil, nil, err
++	}
++
++	contents, err := os.ReadFile(path)
++	if err != nil {
++		return nil, nil, err
++	}
++
++	var table partitionTable
++	if err := json.Unmarshal(contents, &table); err != nil {
++		return nil, nil, err
++	}
++
++	if table.Format == "" {
++		return nil, nil, ErrNoFormatPartition
++	}
++
++	parsed := &parsedTable{
++		name:   name,
++		format: table.Format,
++		path:   path,
++		size:   int64(len(contents)),
++	}
++
++	missing := []string{}
++	for _, partition := range table.Partitions {
++		// Entries without both a name and an image are placeholders, not
++		// something to flash
++		if partition.Name == "" || partition.Image == "" {
++			continue
++		}
++
++		imagePath, imageName, err := s.resolveUploadedFile(partition.Image)
++		if err != nil {
++			if errors.Is(err, ErrFileNotFound) {
++				missing = append(missing, imageName)
++
++				continue
++			}
++
++			return nil, nil, err
++		}
++
++		gzipLevel, err := parseCompress(partition.Compress)
++		if err != nil {
++			return nil, nil, err
++		}
++
++		info, err := os.Stat(imagePath)
++		if err != nil {
++			return nil, nil, err
++		}
++
++		parsed.images = append(parsed.images, partitionImage{
++			partition: partition.Name,
++			name:      imageName,
++			path:      imagePath,
++			gzipLevel: gzipLevel,
++			size:      info.Size(),
++		})
++	}
++
++	return parsed, missing, nil
++}
++
++func (s *Service) MultiFlash(ctx context.Context, req *mcp.CallToolRequest, input MultiFlashInput) (*mcp.CallToolResult, *MultiFlashOutput, error) {
++	if len(input.Files) == 0 {
++		return nil, nil, ErrNoPartitionJSONs
++	}
++
++	// Parse every JSON and resolve every referenced image before touching the
++	// device, so a missing one fails before anything is flashed
++	tables := []*parsedTable{}
++	missing := []string{}
++	for _, file := range input.Files {
++		parsed, missingImages, err := s.parsePartitionTable(file)
++		if err != nil {
++			return nil, nil, err
++		}
++
++		tables = append(tables, parsed)
++		missing = append(missing, missingImages...)
++	}
++
++	if len(missing) > 0 {
++		return nil, nil, fmt.Errorf("%w: %s", ErrImagesNotUploaded, strings.Join(missing, ", "))
++	}
++
++	portPath, err := usb.ParsePortPath(input.Port)
++	if err != nil {
++		return nil, nil, err
++	}
++
++	// Progress is reported across the whole flash: the JSONs plus every image
++	var totalBytes int64
++	names := []string{}
++	for _, table := range tables {
++		names = append(names, table.name)
++
++		totalBytes += table.size
++		for _, image := range table.images {
++			totalBytes += image.size
++		}
++	}
++
++	run := func(ctx context.Context, progress func(label string, sent, total int64)) (*MultiFlashOutput, error) {
++		var sentBase int64
++		progressFor := func(label string) fastboot.ProgressCallback {
++			return func(sent, total int64) {
++				progress(label, sentBase+sent, totalBytes)
++			}
++		}
++
++		flasher, err := fastboot.OpenFlasher(ctx, portPath)
++		if err != nil {
++			return nil, err
++		}
++		defer flasher.Close()
++
++		start := time.Now()
++
++		formatPartitions := []string{}
++		flashed := []FlashedPartition{}
++		for _, table := range tables {
++			// The table is created by flashing the JSON itself to the "format"
++			// partition, exactly as flashserver's multi_flash does; the file is
++			// tiny
++			if err := flasher.FlashFile(ctx, table.format, table.path, nil, progressFor(table.format)); err != nil {
++				return nil, err
++			}
++			sentBase += table.size
++
++			formatPartitions = append(formatPartitions, table.format)
++
++			for _, image := range table.images {
++				partitionStart := time.Now()
++
++				if err := flasher.FlashFile(ctx, image.partition, image.path, image.gzipLevel, progressFor(image.partition)); err != nil {
++					return nil, err
++				}
++				sentBase += image.size
++
++				flashed = append(flashed, FlashedPartition{
++					Partition:  image.partition,
++					File:       image.name,
++					DurationMs: time.Since(partitionStart).Milliseconds(),
++				})
++			}
++		}
++
++		if input.Reboot {
++			if err := flasher.Reboot(ctx); err != nil {
++				return nil, err
++			}
++		}
++
++		return &MultiFlashOutput{
++			Files:            names,
++			FormatPartitions: formatPartitions,
++			Flashed:          flashed,
++			Rebooted:         input.Reboot,
++			DurationMs:       time.Since(start).Milliseconds(),
++		}, nil
++	}
++
++	if input.Background {
++		return nil, &MultiFlashOutput{
++			JobID: s.startFlashJob("flash.multiFlash", strings.Join(names, ", "), func(ctx context.Context, progress func(label string, sent, total int64)) (any, error) {
++				return run(ctx, progress)
++			}),
++		}, nil
++	}
++
++	if err := s.lockFlash(ctx); err != nil {
++		return nil, nil, err
++	}
++	defer s.flashLock.Unlock()
++
++	output, err := run(ctx, notifyProgress(ctx, req, totalBytes))
++	if err != nil {
++		return nil, nil, err
++	}
++
++	return nil, output, nil
++}
+diff --git a/pkg/svc/flash_oem.go b/pkg/svc/flash_oem.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..f484d0e88f87be00ee6d9cb56f50db4dcd703501
+--- /dev/null
++++ b/pkg/svc/flash_oem.go
+@@ -0,0 +1,48 @@
++package svc
++
++import (
++	"context"
++
++	"codeberg.org/pojntfx/pushrod/pkg/fastboot"
++	"codeberg.org/pojntfx/pushrod/pkg/fastboot/usb"
++	"github.com/modelcontextprotocol/go-sdk/mcp"
++)
++
++var (
++	OemTool = &mcp.Tool{
++		Name:        "flash.oem",
++		Title:       "Run OEM command",
++		Description: "Run a fastboot oem command on a device, like ec:flash to flash the EC or speed:super-speed to switch to USB 3.0 (verify with the superSpeed field of flash.getDevices after re-listing)",
++		Annotations: &mcp.ToolAnnotations{DestructiveHint: &[]bool{true}[0]},
++	}
++)
++
++type OemInput struct {
++	Command string `json:"command" jsonschema:"the oem command to run, without the leading oem, like ec:flash or speed:super-speed"`
++	Port    string `json:"port" jsonschema:"port of the device to run the command on, in BUS-PORT form (e.g. 1-2-3) from flash.getDevices"`
++}
++
++type OemOutput struct {
++	Response string `json:"response" jsonschema:"text the device returned, if any"`
++}
++
++func (s *Service) Oem(ctx context.Context, req *mcp.CallToolRequest, input OemInput) (*mcp.CallToolResult, *OemOutput, error) {
++	portPath, err := usb.ParsePortPath(input.Port)
++	if err != nil {
++		return nil, nil, err
++	}
++
++	if err := s.lockFlash(ctx); err != nil {
++		return nil, nil, err
++	}
++	defer s.flashLock.Unlock()
++
++	response, err := fastboot.Oem(ctx, portPath, input.Command)
++	if err != nil {
++		return nil, nil, err
++	}
++
++	return nil, &OemOutput{
++		Response: response,
++	}, nil
++}
+diff --git a/pkg/svc/flash_reboot.go b/pkg/svc/flash_reboot.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..61b6d83dbe148c2563b3392732dd241ee14fe7bf
+--- /dev/null
++++ b/pkg/svc/flash_reboot.go
+@@ -0,0 +1,47 @@
++package svc
++
++import (
++	"context"
++
++	"codeberg.org/pojntfx/pushrod/pkg/fastboot"
++	"codeberg.org/pojntfx/pushrod/pkg/fastboot/usb"
++	"github.com/modelcontextprotocol/go-sdk/mcp"
++)
++
++var (
++	RebootTool = &mcp.Tool{
++		Name:        "flash.reboot",
++		Title:       "Reboot",
++		Description: "Reboot a device out of fastboot mode so it boots the freshly flashed images; prefer this over a relay power cycle after flashing so the device finishes its writes cleanly. After it boots, list devices again to pick up any new port",
++		Annotations: &mcp.ToolAnnotations{DestructiveHint: &[]bool{false}[0]},
++	}
++)
++
++type RebootInput struct {
++	Port string `json:"port" jsonschema:"port of the device to reboot, in BUS-PORT form (e.g. 1-2-3) from flash.getDevices"`
++}
++
++type RebootOutput struct {
++	Response string `json:"response" jsonschema:"text the device returned, if any"`
++}
++
++func (s *Service) Reboot(ctx context.Context, req *mcp.CallToolRequest, input RebootInput) (*mcp.CallToolResult, *RebootOutput, error) {
++	portPath, err := usb.ParsePortPath(input.Port)
++	if err != nil {
++		return nil, nil, err
++	}
++
++	if err := s.lockFlash(ctx); err != nil {
++		return nil, nil, err
++	}
++	defer s.flashLock.Unlock()
++
++	response, err := fastboot.Reboot(ctx, portPath)
++	if err != nil {
++		return nil, nil, err
++	}
++
++	return nil, &RebootOutput{
++		Response: response,
++	}, nil
++}
+diff --git a/pkg/svc/flash_stage.go b/pkg/svc/flash_stage.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..25a8365d48546bbfd740a6e131d90a460fdba787
+--- /dev/null
++++ b/pkg/svc/flash_stage.go
+@@ -0,0 +1,78 @@
++package svc
++
++import (
++	"context"
++	"fmt"
++
++	"codeberg.org/pojntfx/pushrod/pkg/fastboot"
++	"codeberg.org/pojntfx/pushrod/pkg/fastboot/usb"
++	"github.com/modelcontextprotocol/go-sdk/mcp"
++)
++
++var (
++	StageTool = &mcp.Tool{
++		Name:        "flash.stage",
++		Title:       "Stage file",
++		Description: "Download an uploaded file into a device's memory without flashing it, to bootstrap a board that is still in ROM/FDL mode up into u-boot fastboot mode; stage the FSBL and u-boot images, running flash.continue after each. Pass a progress token to stream progress while it runs",
++		Annotations: &mcp.ToolAnnotations{DestructiveHint: &[]bool{false}[0]},
++	}
++)
++
++type StageInput struct {
++	File string `json:"file" jsonschema:"name of the uploaded file to stage, like FSBL.bin from files.getFiles"`
++	Port string `json:"port" jsonschema:"port of the device to stage to, in BUS-PORT form (e.g. 1-2-3) from flash.getDevices"`
++}
++
++type StageOutput struct {
++	File string `json:"file" jsonschema:"name of the file that was staged"`
++}
++
++func (s *Service) Stage(ctx context.Context, req *mcp.CallToolRequest, input StageInput) (*mcp.CallToolResult, *StageOutput, error) {
++	path, name, err := s.resolveUploadedFile(input.File)
++	if err != nil {
++		return nil, nil, err
++	}
++
++	portPath, err := usb.ParsePortPath(input.Port)
++	if err != nil {
++		return nil, nil, err
++	}
++
++	if err := s.lockFlash(ctx); err != nil {
++		return nil, nil, err
++	}
++	defer s.flashLock.Unlock()
++
++	progressToken := req.Params.GetProgressToken()
++	lastPercent := -1
++	progress := func(sent, total int64) {
++		if progressToken == nil || total <= 0 || ctx.Err() != nil {
++			return
++		}
++
++		percent := int(sent * 100 / total)
++		if percent == lastPercent {
++			return
++		}
++		lastPercent = percent
++
++		notifyCtx, cancel := context.WithTimeout(ctx, notifyProgressTimeout)
++
++		_ = req.Session.NotifyProgress(notifyCtx, &mcp.ProgressNotificationParams{
++			ProgressToken: progressToken,
++			Progress:      float64(sent),
++			Total:         float64(total),
++			Message:       fmt.Sprintf("%d%%", percent),
++		})
++
++		cancel()
++	}
++
++	if err := fastboot.Stage(ctx, portPath, path, progress); err != nil {
++		return nil, nil, err
++	}
++
++	return nil, &StageOutput{
++		File: name,
++	}, nil
++}
+diff --git a/pkg/svc/root.go b/pkg/svc/root.go
+index 0be83d52c422aa134e0707c869e57e9fa6c9962b..8a483d5efe90a46ecb87a038fba4f73ca3a687f7 100644
+--- a/pkg/svc/root.go
++++ b/pkg/svc/root.go
+@@ -3,6 +3,7 @@
+ import (
+ 	"context"
+ 	"errors"
++	"fmt"
+ 	"slices"
+ 	"sync"
+ 	"time"
+@@ -26,6 +27,32 @@ 	KVM_VIDEO_VENDOR_ID  = "345f"
+ 	KVM_VIDEO_PRODUCT_ID = "2131"
+ )
+ 
++// ctxLock is a mutex whose Lock honors the caller's context, so a request
++// whose client has already gone away fails instead of queueing behind a
++// running operation and executing after nobody is listening anymore
++type ctxLock chan struct{}
++
++func newCtxLock() ctxLock {
++	l := make(ctxLock, 1)
++	l <- struct{}{}
++	return l
++}
++
++func (l ctxLock) Lock(ctx context.Context) error {
++	select {
++	case <-l:
++		return nil
++	case <-ctx.Done():
++		return ctx.Err()
++	}
++}
++
++func (l ctxLock) Unlock() { l <- struct{}{} }
++
++// ErrFlashBusy is returned when a flash operation could not start because
++// another one was still running when the caller's context was cancelled
++var ErrFlashBusy = errors.New("another flash operation is still running")
++
+ type Service struct {
+ 	baseCtx,
+ 	shutdownCtx context.Context
+@@ -42,7 +69,12 @@ 	consoles     map[string]*serialConsole
+ 
+ 	// Flashes run one at a time, since a USB device only does one operation at
+ 	// once and they can run for minutes
+-	flashLock *sync.Mutex
++	flashLock ctxLock
++
++	// Flashing operations started in the background, detached from their MCP
++	// request so they can outlive the client's request timeout
++	flashJobsLock *sync.Mutex
++	flashJobs     []*flashJob
+ 
+ 	filesDir string
+ 
+@@ -79,7 +111,9 @@
+ 		consolesLock: &sync.Mutex{},
+ 		consoles:     map[string]*serialConsole{},
+ 
+-		flashLock: &sync.Mutex{},
++		flashLock: newCtxLock(),
++
++		flashJobsLock: &sync.Mutex{},
+ 
+ 		filesDir:  filesDir,
+ 		publicURL: publicURL,
+@@ -138,6 +172,15 @@ 		s.closeConsoles()
+ 	}()
+ 
+ 	return s
++}
++
++// lockFlash takes the flash lock, failing with ErrFlashBusy when the caller's
++// context is cancelled while another flash operation is still running
++func (s *Service) lockFlash(ctx context.Context) error {
++	if err := s.flashLock.Lock(ctx); err != nil {
++		return fmt.Errorf("%w: %w", ErrFlashBusy, err)
++	}
++	return nil
+ }
+ 
+ func (s *Service) openBoard(path string) (*usbhid.Device, error) {
+
