@@ -1,0 +1,54 @@
+From 5db1f2dd79251ef9e3e850d84c378d6d6131e808 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Fri, 11 Sep 2026 18:47:18 -0700
+Subject: [PATCH] fix: Immediately close new interfaces after using them to prevent deadlocks on serial commands
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/pkg/fastboot/usb/usb.go b/pkg/fastboot/usb/usb.go
+index 36d54595f815df659e2bccea9b58e056f9ac10b6..92ab51f22cd4fb526404bb9ffe971bf03d3e3932 100644
+--- a/pkg/fastboot/usb/usb.go
++++ b/pkg/fastboot/usb/usb.go
+@@ -204,11 +204,17 @@ 	cfg, err := h.dev.Config(h.setting.ConfigNumber)
+ 	if err != nil {
+ 		return fmt.Errorf("select config %d: %w", h.setting.ConfigNumber, err)
+ 	}
+-	done := func() { _ = cfg.Close() }
+ 	intf, err := cfg.Interface(h.setting.InterfaceNumber, 0)
+ 	if err != nil {
+-		done()
++		_ = cfg.Close()
+ 		return fmt.Errorf("claim interface %d: %w", h.setting.InterfaceNumber, err)
++	}
++	// The interface must be released before the config, and the config before
++	// the device; gousb refuses to close either while something under it is
++	// still claimed, so a wrong order leaves the device busy for the next open
++	done := func() {
++		intf.Close()
++		_ = cfg.Close()
+ 	}
+ 	in, err := intf.InEndpoint(int(uint8(h.setting.InAddress) & 0x0f))
+ 	if err != nil {
+@@ -284,16 +290,14 @@ 	return buf[:n], nil
+ }
+ 
+ func (h *Handle) FlushBuffers(ctx context.Context) error {
++	// Draining any stale input is best-effort: the first read that fails, for
++	// any reason (a timeout when nothing is buffered, or a device that simply
++	// will not be read from yet), just means there is nothing more to drain, so
++	// it must not fail the open
+ 	for {
+-		_, err := h.BulkRead(ctx, h.maxReadPkt, 10)
+-		if err == nil {
+-			continue
+-		}
+-		var rfe *ReadFailedError
+-		if errors.As(err, &rfe) && rfe.Timeout {
++		if _, err := h.BulkRead(ctx, h.maxReadPkt, 10); err != nil {
+ 			return nil
+ 		}
+-		return err
+ 	}
+ }
+ 
+
