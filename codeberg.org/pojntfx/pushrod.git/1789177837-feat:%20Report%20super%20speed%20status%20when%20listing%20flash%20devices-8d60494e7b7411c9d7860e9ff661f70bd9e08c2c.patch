@@ -1,0 +1,66 @@
+From 8d60494e7b7411c9d7860e9ff661f70bd9e08c2c Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Fri, 11 Sep 2026 18:50:37 -0700
+Subject: [PATCH] feat: Report super speed status when listing flash devices
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/pkg/fastboot/fastboot.go b/pkg/fastboot/fastboot.go
+index 79bd2765bdca5fa7bc773b15f42de9a47a6453a0..b2d0b1af9b0cc20a2ebc3bde4da38371782ff69e 100644
+--- a/pkg/fastboot/fastboot.go
++++ b/pkg/fastboot/fastboot.go
+@@ -20,6 +20,13 @@ type Device struct {
+ 	PortPath  []int
+ 	ProductID uint16
+ 	Serial    string
++	Speed     int
++}
++
++// SuperSpeed reports whether a gousb link speed is USB 3.0 or faster, which the
++// board only negotiates after an "oem speed:super-speed"
++func SuperSpeed(speed int) bool {
++	return speed >= 4
+ }
+ 
+ // Devices enumerates all SpacemiT devices currently in fastboot mode. Enumeration
+@@ -34,6 +41,7 @@ 		devices = append(devices, Device{
+ 			PortPath:  handle.PortPath(),
+ 			ProductID: handle.ProductID(),
+ 			Serial:    handle.SerialNumber(),
++			Speed:     handle.Speed(),
+ 		})
+ 
+ 		handle.Close()
+diff --git a/pkg/svc/flash_get_devices.go b/pkg/svc/flash_get_devices.go
+index b4432c2ae801408a605ca4b126f315b2291184d7..d23d19561445a6c678fddc64f6e5609161c110df 100644
+--- a/pkg/svc/flash_get_devices.go
++++ b/pkg/svc/flash_get_devices.go
+@@ -19,9 +19,10 @@ 	}
+ )
+ 
+ type FlashDevice struct {
+-	Port      string `json:"port" jsonschema:"USB port path (BUS-PORT form, e.g. 1-2-3) that uniquely identifies the fastboot device until it gets unplugged; pass this to flash operations to select the device"`
+-	Serial    string `json:"serial" jsonschema:"serial number the device reports, if any"`
+-	ProductID string `json:"productId" jsonschema:"USB product ID as a four-digit hex string"`
++	Port       string `json:"port" jsonschema:"USB port path (BUS-PORT form, e.g. 1-2-3) that uniquely identifies the fastboot device until it gets unplugged; pass this to flash operations to select the device"`
++	Serial     string `json:"serial" jsonschema:"serial number the device reports, if any"`
++	ProductID  string `json:"productId" jsonschema:"USB product ID as a four-digit hex string"`
++	SuperSpeed bool   `json:"superSpeed" jsonschema:"whether the device is connected at USB 3.0 or faster; use this to confirm an oem speed:super-speed took effect after re-listing"`
+ }
+ 
+ type GetFlashDevicesOutput struct {
+@@ -34,9 +35,10 @@
+ 	flashDevices := make([]FlashDevice, 0, len(devices))
+ 	for _, device := range devices {
+ 		flashDevices = append(flashDevices, FlashDevice{
+-			Port:      usb.PortPathString(device.PortPath),
+-			Serial:    device.Serial,
+-			ProductID: fmt.Sprintf("%04x", device.ProductID),
++			Port:       usb.PortPathString(device.PortPath),
++			Serial:     device.Serial,
++			ProductID:  fmt.Sprintf("%04x", device.ProductID),
++			SuperSpeed: fastboot.SuperSpeed(device.Speed),
+ 		})
+ 	}
+ 
+
