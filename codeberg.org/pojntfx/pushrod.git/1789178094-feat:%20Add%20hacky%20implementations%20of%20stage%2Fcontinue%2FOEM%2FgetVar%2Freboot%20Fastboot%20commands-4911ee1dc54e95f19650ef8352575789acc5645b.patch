@@ -1,0 +1,199 @@
+From 4911ee1dc54e95f19650ef8352575789acc5645b Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Fri, 11 Sep 2026 18:54:54 -0700
+Subject: [PATCH] feat: Add hacky implementations of stage/continue/OEM/getVar/reboot Fastboot commands
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/pkg/fastboot/commands.go b/pkg/fastboot/commands.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..5557469a9341bbba3e68a22db460ed277046e55e
+--- /dev/null
++++ b/pkg/fastboot/commands.go
+@@ -0,0 +1,185 @@
++package fastboot
++
++import (
++	"context"
++	"fmt"
++	"os"
++	"strings"
++
++	"codeberg.org/pojntfx/pushrod/pkg/fastboot/usb"
++)
++
++// collectResponse reads until OKAY, gathering the INFO and OKAY payload text the
++// device returns and turning FAIL into an error
++func (p *protocol) collectResponse(ctx context.Context, timeoutMs int) (string, error) {
++	var lines []string
++	for {
++		response, err := p.handle.BulkRead(ctx, 65, timeoutMs)
++		if err != nil {
++			return "", err
++		}
++
++		if len(response) < 4 {
++			continue
++		}
++
++		header, remaining := string(response[:4]), strings.TrimRight(string(response[4:]), "\x00")
++		switch header {
++		case "INFO":
++			if remaining != "" {
++				lines = append(lines, remaining)
++			}
++
++		case "OKAY":
++			if remaining != "" {
++				lines = append(lines, remaining)
++			}
++
++			return strings.Join(lines, "\n"), nil
++
++		case "DATA":
++			return "", &StateMismatch{Expected: "OKAY", Got: "DATA"}
++
++		case "FAIL":
++			return "", &RemoteFailure{Msg: "FAIL: " + remaining}
++		}
++	}
++}
++
++// simpleCommand sends a command that takes no data phase and returns the device's
++// response text
++func (p *protocol) simpleCommand(ctx context.Context, command string, timeoutMs int) (string, error) {
++	if err := p.sendCommand(ctx, command, "", timeoutMs); err != nil {
++		return "", err
++	}
++
++	return p.collectResponse(ctx, timeoutMs)
++}
++
++// getVar reads a fastboot variable, returning the last value the device reports
++// (in an INFO or the final OKAY), stripped at the first NUL as fastboot pads them
++func (p *protocol) getVar(ctx context.Context, variable string, timeoutMs int) (string, error) {
++	if err := p.sendCommand(ctx, "getvar", variable, timeoutMs); err != nil {
++		return "", err
++	}
++
++	var last string
++	for {
++		response, err := p.handle.BulkRead(ctx, 65, timeoutMs)
++		if err != nil {
++			return "", err
++		}
++
++		if len(response) < 4 {
++			continue
++		}
++
++		header, remaining := string(response[:4]), strings.SplitN(string(response[4:]), "\x00", 2)[0]
++		switch header {
++		case "INFO":
++			if remaining != "" {
++				last = remaining
++			}
++
++		case "OKAY":
++			if remaining != "" {
++				last = remaining
++			}
++
++			return last, nil
++
++		case "DATA":
++			return "", &StateMismatch{Expected: "OKAY", Got: "DATA"}
++
++		case "FAIL":
++			return "", &RemoteFailure{Msg: "FAIL: " + remaining}
++		}
++	}
++}
++
++// Stage downloads sourceFile into the device's memory without flashing it, used
++// to bootstrap a board in ROM/FDL mode up into u-boot fastboot mode. progress
++// may be nil, and cancelling ctx aborts the transfer.
++func Stage(ctx context.Context, portPath []int, sourceFile string, progress ProgressCallback) error {
++	info, err := os.Stat(sourceFile)
++	if err != nil {
++		return err
++	}
++	size := info.Size()
++
++	handle, err := usb.FindAndOpen(ctx, DeviceIsAvailable, portPath, "", connectTimeoutMs)
++	if err != nil {
++		return err
++	}
++	defer handle.Close()
++
++	p := &protocol{handle: handle, chunkKB: protocolChunkKB}
++
++	f, err := os.Open(sourceFile)
++	if err != nil {
++		return err
++	}
++	defer f.Close()
++
++	if err := p.sendCommand(ctx, "download", fmt.Sprintf("%08x", size), flashTimeoutMs); err != nil {
++		return err
++	}
++
++	return p.sendData(ctx, f, size, progress, flashTimeoutMs)
++}
++
++// Continue sends "fastboot continue", leaving fastboot mode so the device boots
++// the image staged into its memory
++func Continue(ctx context.Context, portPath []int) (string, error) {
++	handle, err := usb.FindAndOpen(ctx, DeviceIsAvailable, portPath, "", connectTimeoutMs)
++	if err != nil {
++		return "", err
++	}
++	defer handle.Close()
++
++	p := &protocol{handle: handle, chunkKB: protocolChunkKB}
++
++	return p.simpleCommand(ctx, "continue", commandTimeoutMs)
++}
++
++// Reboot sends "fastboot reboot", rebooting the device out of fastboot mode so
++// it boots the freshly flashed images
++func Reboot(ctx context.Context, portPath []int) (string, error) {
++	handle, err := usb.FindAndOpen(ctx, DeviceIsAvailable, portPath, "", connectTimeoutMs)
++	if err != nil {
++		return "", err
++	}
++	defer handle.Close()
++
++	p := &protocol{handle: handle, chunkKB: protocolChunkKB}
++
++	return p.simpleCommand(ctx, "reboot", commandTimeoutMs)
++}
++
++// Oem sends "fastboot oem <command>" and returns the device's response text
++func Oem(ctx context.Context, portPath []int, command string) (string, error) {
++	handle, err := usb.FindAndOpen(ctx, DeviceIsAvailable, portPath, "", connectTimeoutMs)
++	if err != nil {
++		return "", err
++	}
++	defer handle.Close()
++
++	p := &protocol{handle: handle, chunkKB: protocolChunkKB}
++
++	// oem commands can run for a while (e.g. oem ec:flash), so give them the
++	// same headroom as a flash rather than the short command timeout
++	return p.simpleCommand(ctx, "oem "+command, flashTimeoutMs)
++}
++
++// GetVar reads a fastboot variable from the device, like mtd-size or blk-size
++func GetVar(ctx context.Context, portPath []int, variable string) (string, error) {
++	handle, err := usb.FindAndOpen(ctx, DeviceIsAvailable, portPath, "", connectTimeoutMs)
++	if err != nil {
++		return "", err
++	}
++	defer handle.Close()
++
++	p := &protocol{handle: handle, chunkKB: protocolChunkKB}
++
++	return p.getVar(ctx, variable, commandTimeoutMs)
++}
+
