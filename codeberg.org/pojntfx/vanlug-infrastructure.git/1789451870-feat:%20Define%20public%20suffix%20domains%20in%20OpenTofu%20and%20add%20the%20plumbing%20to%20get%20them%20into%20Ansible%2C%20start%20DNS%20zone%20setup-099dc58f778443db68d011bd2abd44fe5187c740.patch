@@ -1,0 +1,107 @@
+From 099dc58f778443db68d011bd2abd44fe5187c740 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Mon, 14 Sep 2026 22:57:50 -0700
+Subject: [PATCH] feat: Define public suffix domains in OpenTofu and add the plumbing to get them into Ansible, start DNS zone setup
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/README.md b/README.md
+index 19a8f9307086eb18be89d897bad5dec228496b61..e1e69619e7b9edcd643816c240ae43a2a646ec40 100644
+--- a/README.md
++++ b/README.md
+@@ -43,17 +43,17 @@ ```shell
+ $ tofu workspace select
+ ```
+ 
+-You can then deploy the physical infrastructure by running:
++Then, configure the public suffix root domain, public suffix suffix domain and other variables you'd like to change for OpenTofu in [`variables.tofu`](variables.tofu) (e.g. `vanlug.dummy.p8.lu` for the public suffix root domain and `users` for the public suffix suffix domain during development or `vanlug.org` and `users` in production, as we'll be using in the following), and deploy the physical infrastructure by running:
+ 
+ ```shell
+ $ tofu apply
+ ```
+ 
+-Then, configure the domain and other variables you'd like to change in [`group_vars/all.yaml`](group_vars/all.yaml) (e.g. `vanlug.p8.lu` for the domain during development or `vanlug.ca` in production, as we'll be using in the following), and use [Ansible](https://docs.ansible.com/projects/ansible/latest/index.html) to provision the hosts by running:
++Then, configure the primary domain and other variables you'd like to change for [Ansible](https://docs.ansible.com/projects/ansible/latest/index.html) in [`group_vars/all.yaml`](group_vars/all.yaml) (e.g. `vanlug.p8.lu` for the primary domain during development or `vanlug.ca` in production, as we'll be using in the following), and use it to provision the hosts by running:
+ 
+ ```shell
+ $ ansible-galaxy collection install cloud.terraform ansible.posix community.general community.docker
+-$ ansible-playbook site.yaml # You might want to change `binary_path` in `inventory.yaml` first
++$ ansible-playbook site.yaml # You might want to change `binary_path` in `inventory.yaml` and `group_vars/all.yaml` first
+ ```
+ 
+ Everything should now be up and running, and auto-updates should be enabled for all components, including the quadlets and OS itself. Updates to the VanLUG API should be rolled out automatically as well; there is no need to re-run these playbooks unless they have changed. To get logs for the components, run the following:
+diff --git a/group_vars/all.yaml b/group_vars/all.yaml
+index 62972fd86dc1352967dadfb7905920cc0bf3a479..2d45e4a368d876d9c9a3828147de21288e1cf7b5 100644
+--- a/group_vars/all.yaml
++++ b/group_vars/all.yaml
+@@ -1,5 +1,9 @@
+ # Primary domain all services are served under
+ vanlug_domain: vanlug.p8.lu
++# Root of the secondary domain (public suffix) all user pages are served under by git-pages, from OpenTofu
++vanlug_public_suffix_root_domain: '{{ lookup("cloud.terraform.tf_output", "vanlug_public_suffix_root_domain", binary_path="/home/linuxbrew/.linuxbrew/bin/tofu") }}'
++# Secondary domain (public suffix) all user pages are served under by git-pages, from OpenTofu
++vanlug_public_suffix_domain: '{{ lookup("cloud.terraform.tf_output", "vanlug_public_suffix_domain", binary_path="/home/linuxbrew/.linuxbrew/bin/tofu") }}'
+ # Forgejo admin user used for initial/admin API access
+ forgejo_admin_username: vanlug-admin
+ # Email for Forgejo admin user
+diff --git a/main.tofu b/main.tofu
+index 3a9d33ef430d70c8b86ba2a4d9e3c1176d303f37..8d69fd757f120a57cf2df14c43caa5b972dec958 100644
+--- a/main.tofu
++++ b/main.tofu
+@@ -138,3 +138,16 @@     ansible_host = hcloud_server.vanlug_forgejo_runner.ipv6_address
+     ansible_user = var.ssh_setup_user
+   }
+ }
++
++# TODO: Re-enable this when we've added a conditional renderer
++# since when we're developping this, we usually don't have a secondary
++# domain handy so for those cases we'll need to be able to re-use the primary
++# root domain
++# resource "hcloud_zone" "vanlug_public_suffix" {
++#   name = var.vanlug_public_suffix_root_domain
++#   mode = "primary"
++
++#   ttl = 10800
++
++#   delete_protection = true
++# }
+diff --git a/outputs.tofu b/outputs.tofu
+index 8c282ff503e421da4bd55205ce21f51187d8dfaf..2c3749c2abc02cf5e4566fde7037b13643ac6d53 100644
+--- a/outputs.tofu
++++ b/outputs.tofu
+@@ -22,3 +22,13 @@ output "ssh_setup_user" {
+   description = "SSH setup user of the server"
+   value       = var.ssh_setup_user
+ }
++
++output "vanlug_public_suffix_root_domain" {
++  description = "Root of the secondary domain (public suffix) all user pages are served under by git-pages"
++  value       = var.vanlug_public_suffix_root_domain
++}
++
++output "vanlug_public_suffix_domain" {
++  description = "Secondary domain (public suffix) all user pages are served under by git-pages"
++  value       = "${var.vanlug_public_suffix_suffix_domain}.${var.vanlug_public_suffix_root_domain}"
++}
+diff --git a/variables.tofu b/variables.tofu
+index 9d65c3a856427e41f50e5ee106995935daa69469..116b978b21f3bed425c65c6907aadf4f1c2aba35 100644
+--- a/variables.tofu
++++ b/variables.tofu
+@@ -14,3 +14,15 @@   description = "Hetzner API key"
+   type        = string
+   sensitive   = true
+ }
++
++variable "vanlug_public_suffix_root_domain" {
++  description = "Root of the secondary domain (public suffix) all user pages are served under by git-pages"
++  type        = string
++  default     = "vanlug.dummy.p8.lu"
++}
++
++variable "vanlug_public_suffix_suffix_domain" {
++  description = "Suffix of the secondary domain (public suffix) all user pages are served under by git-pages"
++  type        = string
++  default     = "users"
++}
+\ No newline at end of file
+
