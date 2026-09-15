@@ -1,0 +1,53 @@
+From 68692f40fb4867e3e774afbb7a50cdf9a4bdbd97 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Tue, 15 Sep 2026 16:57:55 -0700
+Subject: [PATCH] feat: Block domain spoofing for public suffix domain
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/main.tofu b/main.tofu
+index 4df1040c9289b28a14f47349969b3b19e2d0078e..9eaf402e43db431bcee983a77d4c55d83b308230 100644
+--- a/main.tofu
++++ b/main.tofu
+@@ -173,3 +173,40 @@   records = [
+     { value = hcloud_server.vanlug_main.ipv4_address },
+   ]
+ }
++
++# See https://github.com/nozaq/terraform-google-parked-domain-baseline#features
++resource "hcloud_zone_rrset" "vanlug_public_suffix_mx" {
++  count = var.public_suffix_zone_managed ? 1 : 0
++
++  zone = one(hcloud_zone.vanlug_public_suffix[*].name)
++  name = "@"
++  type = "MX"
++
++  records = [
++    { value = "0 ." },
++  ]
++}
++
++resource "hcloud_zone_rrset" "vanlug_public_suffix_spf" {
++  count = var.public_suffix_zone_managed ? 1 : 0
++
++  zone = one(hcloud_zone.vanlug_public_suffix[*].name)
++  name = "@"
++  type = "TXT"
++
++  records = [
++    { value = provider::hcloud::txt_record("v=spf1 -all") },
++  ]
++}
++
++resource "hcloud_zone_rrset" "vanlug_public_suffix_dmarc" {
++  count = var.public_suffix_zone_managed ? 1 : 0
++
++  zone = one(hcloud_zone.vanlug_public_suffix[*].name)
++  name = "_dmarc"
++  type = "TXT"
++
++  records = [
++    { value = provider::hcloud::txt_record("v=DMARC1; p=reject;") },
++  ]
++}
+
