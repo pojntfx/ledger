@@ -1,0 +1,105 @@
+From 345dd2e9a4cd9c4e37a54a744f5d580fb92ce942 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Tue, 15 Sep 2026 16:06:59 -0700
+Subject: [PATCH] feat: Make Hetzner-managed zone configurable for public suffix domain with fallback to manual configuration
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/README.md b/README.md
+index e1e69619e7b9edcd643816c240ae43a2a646ec40..3025feb2fce1f020b14f303a056f83e9e7912c76 100644
+--- a/README.md
++++ b/README.md
+@@ -43,13 +43,24 @@ ```shell
+ $ tofu workspace select
+ ```
+ 
+-Then, configure the public suffix root domain, public suffix suffix domain and other variables you'd like to change for OpenTofu in [`variables.tofu`](variables.tofu) (e.g. `vanlug.dummy.p8.lu` for the public suffix root domain and `users` for the public suffix suffix domain during development or `vanlug.org` and `users` in production, as we'll be using in the following), and deploy the physical infrastructure by running:
++Then, configure the public suffix root domain, public suffix suffix domain and other variables you'd like to change for OpenTofu in [`variables.tofu`](variables.tofu) (e.g. `notp8.lu` for the public suffix root domain and `users` for the public suffix suffix domain during development or `vanlug.org` and `users` in production, as we'll be using in the following). Creating the Hetzner zone is optional; if you leave `vanlug_public_suffix_zone_managed` set to false, manually point the public suffix domains etc. at the IPv6 and IPv4 address outputs as described below. To deploy the physical infrastructure, run:
+ 
+ ```shell
+ $ tofu apply
+ ```
+ 
+-Then, configure the primary domain and other variables you'd like to change for [Ansible](https://docs.ansible.com/projects/ansible/latest/index.html) in [`group_vars/all.yaml`](group_vars/all.yaml) (e.g. `vanlug.p8.lu` for the primary domain during development or `vanlug.ca` in production, as we'll be using in the following), and use it to provision the hosts by running:
++If you've set the `vanlug_public_suffix_zone_managed` variable to `true`, the `vanlug_public_suffix_zone_nameservers` output will tell you which nameservers to set at your registrar next. If you didn't set the variable to `true`, then manually add the records like so:
++
++```zone
++@        IN AAAA ${vanlug_main_ipv6_address}
++@        IN A    ${vanlug_main_ipv4_address}
++users    IN AAAA ${vanlug_main_ipv6_address}
++users    IN A    ${vanlug_main_ipv4_address}
++*.users  IN AAAA ${vanlug_main_ipv6_address}
++*.users  IN A    ${vanlug_main_ipv4_address}
++```
++
++Then, configure the primary domain and other variables you'd like to change for [Ansible](https://docs.ansible.com/projects/ansible/latest/index.html) in [`group_vars/all.yaml`](group_vars/all.yaml) (e.g. `vanlug.p8.lu` for the primary domain during development or `vanlug.ca` in production, and `vanlug.org` for the public suffix root domain in production, as we'll be using in the following), and use it to provision the hosts by running:
+ 
+ ```shell
+ $ ansible-galaxy collection install cloud.terraform ansible.posix community.general community.docker
+diff --git a/main.tofu b/main.tofu
+index 8d69fd757f120a57cf2df14c43caa5b972dec958..7ca7986339d9b3e4633f7e2676ed0810cba4e839 100644
+--- a/main.tofu
++++ b/main.tofu
+@@ -139,15 +139,13 @@     ansible_user = var.ssh_setup_user
+   }
+ }
+ 
+-# TODO: Re-enable this when we've added a conditional renderer
+-# since when we're developping this, we usually don't have a secondary
+-# domain handy so for those cases we'll need to be able to re-use the primary
+-# root domain
+-# resource "hcloud_zone" "vanlug_public_suffix" {
+-#   name = var.vanlug_public_suffix_root_domain
+-#   mode = "primary"
++resource "hcloud_zone" "vanlug_public_suffix" {
++  count = var.vanlug_public_suffix_zone_managed ? 1 : 0
+ 
+-#   ttl = 10800
++  name = var.vanlug_public_suffix_root_domain
++  mode = "primary"
++
++  ttl = 10800
+ 
+-#   delete_protection = true
+-# }
++  delete_protection = true
++}
+diff --git a/outputs.tofu b/outputs.tofu
+index 2c3749c2abc02cf5e4566fde7037b13643ac6d53..6393403aca15bf474a72d6e5e99ae463dd6f39bf 100644
+--- a/outputs.tofu
++++ b/outputs.tofu
+@@ -32,3 +32,8 @@ output "vanlug_public_suffix_domain" {
+   description = "Secondary domain (public suffix) all user pages are served under by git-pages"
+   value       = "${var.vanlug_public_suffix_suffix_domain}.${var.vanlug_public_suffix_root_domain}"
+ }
++
++output "vanlug_public_suffix_zone_nameservers" {
++  description = "Authoritative nameservers of the DNS zone of the public suffix root domain if managed via Hetzner"
++  value       = try(hcloud_zone.vanlug_public_suffix[0].authoritative_nameservers.assigned, [])
++}
+diff --git a/variables.tofu b/variables.tofu
+index 116b978b21f3bed425c65c6907aadf4f1c2aba35..5572a08ec07eb0810284e3e820484e9da03e4932 100644
+--- a/variables.tofu
++++ b/variables.tofu
+@@ -18,11 +18,17 @@
+ variable "vanlug_public_suffix_root_domain" {
+   description = "Root of the secondary domain (public suffix) all user pages are served under by git-pages"
+   type        = string
+-  default     = "vanlug.dummy.p8.lu"
++  default     = "notp8.lu"
+ }
+ 
+ variable "vanlug_public_suffix_suffix_domain" {
+   description = "Suffix of the secondary domain (public suffix) all user pages are served under by git-pages"
+   type        = string
+   default     = "users"
+-}
+\ No newline at end of file
++}
++
++variable "vanlug_public_suffix_zone_managed" {
++  description = "Whether the DNS zone of the public suffix root domain is managed via Hetzner"
++  type        = bool
++  default     = false
++}
+
