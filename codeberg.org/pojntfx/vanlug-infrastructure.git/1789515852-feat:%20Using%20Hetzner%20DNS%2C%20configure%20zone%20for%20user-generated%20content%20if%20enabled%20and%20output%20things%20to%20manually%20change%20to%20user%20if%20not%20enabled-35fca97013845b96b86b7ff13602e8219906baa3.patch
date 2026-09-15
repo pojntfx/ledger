@@ -1,0 +1,189 @@
+From 35fca97013845b96b86b7ff13602e8219906baa3 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Tue, 15 Sep 2026 16:44:12 -0700
+Subject: [PATCH] feat: Using Hetzner DNS, configure zone for user-generated content if enabled and output things to manually change to user if not enabled
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/README.md b/README.md
+index 3025feb2fce1f020b14f303a056f83e9e7912c76..db1fccf9f90d22c191eea89124470e04333cdf23 100644
+--- a/README.md
++++ b/README.md
+@@ -43,24 +43,18 @@ ```shell
+ $ tofu workspace select
+ ```
+ 
+-Then, configure the public suffix root domain, public suffix suffix domain and other variables you'd like to change for OpenTofu in [`variables.tofu`](variables.tofu) (e.g. `notp8.lu` for the public suffix root domain and `users` for the public suffix suffix domain during development or `vanlug.org` and `users` in production, as we'll be using in the following). Creating the Hetzner zone is optional; if you leave `vanlug_public_suffix_zone_managed` set to false, manually point the public suffix domains etc. at the IPv6 and IPv4 address outputs as described below. To deploy the physical infrastructure, run:
++Then, configure the public suffix apex, public suffix suffix and other variables you'd like to change for OpenTofu in [`variables.tofu`](variables.tofu) (e.g. `notp8.lu` for the public suffix apex and `users` for the public suffix suffix during development or `vanlug.org` and `users` in production, as we'll be using in the following). Creating the Hetzner zone is optional; if you leave `public_suffix_zone_managed` set to false, manually point the public suffix domains etc. at the IPv6 and IPv4 address outputs as described below. To deploy the physical infrastructure, run:
+ 
+ ```shell
+ $ tofu apply
+ ```
+ 
+-If you've set the `vanlug_public_suffix_zone_managed` variable to `true`, the `vanlug_public_suffix_zone_nameservers` output will tell you which nameservers to set at your registrar next. If you didn't set the variable to `true`, then manually add the records like so:
++If you've set the `public_suffix_zone_managed` variable to `true`, the `public_suffix_zone_nameservers` output will tell you which nameservers to set at your registrar next. If you didn't set the variable to `true`, then manually add the records in the `public_suffix_records` output. That output lists the name, the type and the address of each record.
+ 
+-```zone
+-@        IN AAAA ${vanlug_main_ipv6_address}
+-@        IN A    ${vanlug_main_ipv4_address}
+-users    IN AAAA ${vanlug_main_ipv6_address}
+-users    IN A    ${vanlug_main_ipv4_address}
+-*.users  IN AAAA ${vanlug_main_ipv6_address}
+-*.users  IN A    ${vanlug_main_ipv4_address}
+-```
++> [!WARNING]
++> Do not use one root domain, for example `p8.lu`, for both the primary domain and the public suffix domain, outside of a development workspace. git-pages serves user-generated content under the public suffix domain.
+ 
+-Then, configure the primary domain and other variables you'd like to change for [Ansible](https://docs.ansible.com/projects/ansible/latest/index.html) in [`group_vars/all.yaml`](group_vars/all.yaml) (e.g. `vanlug.p8.lu` for the primary domain during development or `vanlug.ca` in production, and `vanlug.org` for the public suffix root domain in production, as we'll be using in the following), and use it to provision the hosts by running:
++Then, configure the primary domain and other variables you'd like to change for [Ansible](https://docs.ansible.com/projects/ansible/latest/index.html) in [`group_vars/all.yaml`](group_vars/all.yaml) (e.g. `vanlug.p8.lu` for the primary domain during development or `vanlug.ca` in production, and `vanlug.org` for the public suffix apex in production, as we'll be using in the following), and use it to provision the hosts by running:
+ 
+ ```shell
+ $ ansible-galaxy collection install cloud.terraform ansible.posix community.general community.docker
+diff --git a/group_vars/all.yaml b/group_vars/all.yaml
+index 2d45e4a368d876d9c9a3828147de21288e1cf7b5..26f597bfe542897b1861c81ecad719cf91a14f0d 100644
+--- a/group_vars/all.yaml
++++ b/group_vars/all.yaml
+@@ -1,9 +1,9 @@
+ # Primary domain all services are served under
+ vanlug_domain: vanlug.p8.lu
+-# Root of the secondary domain (public suffix) all user pages are served under by git-pages, from OpenTofu
+-vanlug_public_suffix_root_domain: '{{ lookup("cloud.terraform.tf_output", "vanlug_public_suffix_root_domain", binary_path="/home/linuxbrew/.linuxbrew/bin/tofu") }}'
++# Apex of the secondary domain (public suffix) all user pages are served under by git-pages, from OpenTofu
++public_suffix_apex: '{{ lookup("cloud.terraform.tf_output", "public_suffix_apex", binary_path="/home/linuxbrew/.linuxbrew/bin/tofu") }}'
+ # Secondary domain (public suffix) all user pages are served under by git-pages, from OpenTofu
+-vanlug_public_suffix_domain: '{{ lookup("cloud.terraform.tf_output", "vanlug_public_suffix_domain", binary_path="/home/linuxbrew/.linuxbrew/bin/tofu") }}'
++public_suffix_domain: '{{ lookup("cloud.terraform.tf_output", "public_suffix_domain", binary_path="/home/linuxbrew/.linuxbrew/bin/tofu") }}'
+ # Forgejo admin user used for initial/admin API access
+ forgejo_admin_username: vanlug-admin
+ # Email for Forgejo admin user
+diff --git a/locals.tofu b/locals.tofu
+index 9ee4b204f98f5dbaaa69f41dbc5adf024cc47c3a..e4e5dda4d8d4b4f1e9bfa7aeaefa18bb4ff7735e 100644
+--- a/locals.tofu
++++ b/locals.tofu
+@@ -1,3 +1,13 @@
+ locals {
+   name_prefix = terraform.workspace == "default" ? "" : "${terraform.workspace}-"
++
++  public_suffix_record_names = {
++    apex     = var.public_suffix_apex
++    suffix   = var.public_suffix_suffix
++    wildcard = "*.${var.public_suffix_suffix}"
++  }
++
++  # Hetzner does not accept the raw apex domain for the root instead of `@`,
++  # nor does it support DNS sub-zones, we always need to use `@`
++  public_suffix_rrset_names = merge(local.public_suffix_record_names, { apex = "@" })
+ }
+diff --git a/main.tofu b/main.tofu
+index 7ca7986339d9b3e4633f7e2676ed0810cba4e839..4df1040c9289b28a14f47349969b3b19e2d0078e 100644
+--- a/main.tofu
++++ b/main.tofu
+@@ -140,12 +140,36 @@   }
+ }
+ 
+ resource "hcloud_zone" "vanlug_public_suffix" {
+-  count = var.vanlug_public_suffix_zone_managed ? 1 : 0
++  count = var.public_suffix_zone_managed ? 1 : 0
+ 
+-  name = var.vanlug_public_suffix_root_domain
++  name = var.public_suffix_apex
+   mode = "primary"
+ 
+   ttl = 10800
+ 
+   delete_protection = true
+ }
++
++resource "hcloud_zone_rrset" "vanlug_public_suffix_aaaa" {
++  for_each = var.public_suffix_zone_managed ? local.public_suffix_record_names : {}
++
++  zone = one(hcloud_zone.vanlug_public_suffix[*].name)
++  name = local.public_suffix_rrset_names[each.key]
++  type = "AAAA"
++
++  records = [
++    { value = hcloud_server.vanlug_main.ipv6_address },
++  ]
++}
++
++resource "hcloud_zone_rrset" "vanlug_public_suffix_a" {
++  for_each = var.public_suffix_zone_managed ? local.public_suffix_record_names : {}
++
++  zone = one(hcloud_zone.vanlug_public_suffix[*].name)
++  name = local.public_suffix_rrset_names[each.key]
++  type = "A"
++
++  records = [
++    { value = hcloud_server.vanlug_main.ipv4_address },
++  ]
++}
+diff --git a/outputs.tofu b/outputs.tofu
+index 6393403aca15bf474a72d6e5e99ae463dd6f39bf..990fde7446d65816601b3fa9c0523f81673e6b74 100644
+--- a/outputs.tofu
++++ b/outputs.tofu
+@@ -23,17 +23,27 @@   description = "SSH setup user of the server"
+   value       = var.ssh_setup_user
+ }
+ 
+-output "vanlug_public_suffix_root_domain" {
+-  description = "Root of the secondary domain (public suffix) all user pages are served under by git-pages"
+-  value       = var.vanlug_public_suffix_root_domain
++output "public_suffix_apex" {
++  description = "Apex of the secondary domain (public suffix) all user pages are served under by git-pages"
++  value       = var.public_suffix_apex
+ }
+ 
+-output "vanlug_public_suffix_domain" {
++output "public_suffix_domain" {
+   description = "Secondary domain (public suffix) all user pages are served under by git-pages"
+-  value       = "${var.vanlug_public_suffix_suffix_domain}.${var.vanlug_public_suffix_root_domain}"
++  value       = "${var.public_suffix_suffix}.${var.public_suffix_apex}"
+ }
+ 
+-output "vanlug_public_suffix_zone_nameservers" {
+-  description = "Authoritative nameservers of the DNS zone of the public suffix root domain if managed via Hetzner"
++output "public_suffix_records" {
++  description = "DNS records the public suffix domains need for the main server"
++  value = flatten([
++    for name in values(local.public_suffix_record_names) : [
++      { name = name, type = "AAAA", address = hcloud_server.vanlug_main.ipv6_address },
++      { name = name, type = "A", address = hcloud_server.vanlug_main.ipv4_address },
++    ]
++  ])
++}
++
++output "public_suffix_zone_nameservers" {
++  description = "Authoritative nameservers of the DNS zone of the public suffix apex if managed via Hetzner"
+   value       = try(hcloud_zone.vanlug_public_suffix[0].authoritative_nameservers.assigned, [])
+ }
+diff --git a/variables.tofu b/variables.tofu
+index 5572a08ec07eb0810284e3e820484e9da03e4932..a494a82d5cfd2a83e4c1dc4472684c55389dddaa 100644
+--- a/variables.tofu
++++ b/variables.tofu
+@@ -15,20 +15,20 @@   type        = string
+   sensitive   = true
+ }
+ 
+-variable "vanlug_public_suffix_root_domain" {
+-  description = "Root of the secondary domain (public suffix) all user pages are served under by git-pages"
++variable "public_suffix_apex" {
++  description = "Apex of the secondary domain (public suffix) all user pages are served under by git-pages"
+   type        = string
+   default     = "notp8.lu"
+ }
+ 
+-variable "vanlug_public_suffix_suffix_domain" {
++variable "public_suffix_suffix" {
+   description = "Suffix of the secondary domain (public suffix) all user pages are served under by git-pages"
+   type        = string
+   default     = "users"
+ }
+ 
+-variable "vanlug_public_suffix_zone_managed" {
+-  description = "Whether the DNS zone of the public suffix root domain is managed via Hetzner"
++variable "public_suffix_zone_managed" {
++  description = "Whether the DNS zone of the public suffix apex is managed via Hetzner"
+   type        = bool
+   default     = false
+ }
+
