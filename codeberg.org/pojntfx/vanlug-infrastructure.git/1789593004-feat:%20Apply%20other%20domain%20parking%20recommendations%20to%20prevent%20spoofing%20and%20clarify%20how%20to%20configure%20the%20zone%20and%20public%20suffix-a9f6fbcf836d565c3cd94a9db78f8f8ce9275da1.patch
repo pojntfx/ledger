@@ -1,0 +1,177 @@
+From a9f6fbcf836d565c3cd94a9db78f8f8ce9275da1 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Wed, 16 Sep 2026 14:10:04 -0700
+Subject: [PATCH] feat: Apply other domain parking recommendations to prevent spoofing and clarify how to configure the zone and public suffix
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/README.md b/README.md
+index db1fccf9f90d22c191eea89124470e04333cdf23..d466473312fc7e5f9912c57a0fe2f039ba9ce3a8 100644
+--- a/README.md
++++ b/README.md
+@@ -43,13 +43,13 @@ ```shell
+ $ tofu workspace select
+ ```
+ 
+-Then, configure the public suffix apex, public suffix suffix and other variables you'd like to change for OpenTofu in [`variables.tofu`](variables.tofu) (e.g. `notp8.lu` for the public suffix apex and `users` for the public suffix suffix during development or `vanlug.org` and `users` in production, as we'll be using in the following). Creating the Hetzner zone is optional; if you leave `public_suffix_zone_managed` set to false, manually point the public suffix domains etc. at the IPv6 and IPv4 address outputs as described below. To deploy the physical infrastructure, run:
++Configure the public suffix apex, the public suffix suffix and other OpenTofu variables in [`variables.tofu`](variables.tofu). The public suffix apex is the apex of the DNS zone, and the public suffix domain is that apex with the suffix in front. For development, use `vanlugusercontent.p8.lu` for the apex, `users` for the suffix and `p8.lu` for `public_suffix_manual_zone`, the zone that holds the records. In production, we will use `vanlug.org` and `users`. Set `public_suffix_zone_managed` to `true` to create the zone in Hetzner, or leave it at `false` to add the records by hand. Then deploy the physical infrastructure:
+ 
+ ```shell
+ $ tofu apply
+ ```
+ 
+-If you've set the `public_suffix_zone_managed` variable to `true`, the `public_suffix_zone_nameservers` output will tell you which nameservers to set at your registrar next. If you didn't set the variable to `true`, then manually add the records in the `public_suffix_records` output. That output lists the name, the type and the address of each record.
++When OpenTofu manages the zone, the `public_suffix_zone_nameservers` output lists the nameservers to set at your registrar. If OpenTofu does not manage the zone, the `public_suffix_records` output lists the name, the type and the value of each record. The `public_suffix_records` output prints each name relative to `public_suffix_manual_zone`.
+ 
+ > [!WARNING]
+ > Do not use one root domain, for example `p8.lu`, for both the primary domain and the public suffix domain, outside of a development workspace. git-pages serves user-generated content under the public suffix domain.
+diff --git a/locals.tofu b/locals.tofu
+index e4e5dda4d8d4b4f1e9bfa7aeaefa18bb4ff7735e..ed9a39bb2a0ea72b54df0beea29a61770accfa45 100644
+--- a/locals.tofu
++++ b/locals.tofu
+@@ -3,11 +3,15 @@   name_prefix = terraform.workspace == "default" ? "" : "${terraform.workspace}-"
+ 
+   public_suffix_record_names = {
+     apex     = var.public_suffix_apex
+-    suffix   = var.public_suffix_suffix
+-    wildcard = "*.${var.public_suffix_suffix}"
++    suffix   = "${var.public_suffix_suffix}.${var.public_suffix_apex}"
++    wildcard = "*.${var.public_suffix_suffix}.${var.public_suffix_apex}"
+   }
+ 
+   # Hetzner does not accept the raw apex domain for the root instead of `@`,
+   # nor does it support DNS sub-zones, we always need to use `@`
+-  public_suffix_rrset_names = merge(local.public_suffix_record_names, { apex = "@" })
++  public_suffix_rrset_names = {
++    apex     = "@"
++    suffix   = var.public_suffix_suffix
++    wildcard = "*.${var.public_suffix_suffix}"
++  }
+ }
+diff --git a/main.tofu b/main.tofu
+index 9eaf402e43db431bcee983a77d4c55d83b308230..556f27e5600b70436afb8c1b5784b025ad2a91ba 100644
+--- a/main.tofu
++++ b/main.tofu
+@@ -187,6 +187,30 @@     { value = "0 ." },
+   ]
+ }
+ 
++resource "hcloud_zone_rrset" "vanlug_public_suffix_suffix_mx" {
++  count = var.public_suffix_zone_managed ? 1 : 0
++
++  zone = one(hcloud_zone.vanlug_public_suffix[*].name)
++  name = var.public_suffix_suffix
++  type = "MX"
++
++  records = [
++    { value = "0 ." },
++  ]
++}
++
++resource "hcloud_zone_rrset" "vanlug_public_suffix_wildcard_mx" {
++  count = var.public_suffix_zone_managed ? 1 : 0
++
++  zone = one(hcloud_zone.vanlug_public_suffix[*].name)
++  name = "*.${var.public_suffix_suffix}"
++  type = "MX"
++
++  records = [
++    { value = "0 ." },
++  ]
++}
++
+ resource "hcloud_zone_rrset" "vanlug_public_suffix_spf" {
+   count = var.public_suffix_zone_managed ? 1 : 0
+ 
+@@ -199,6 +223,18 @@     { value = provider::hcloud::txt_record("v=spf1 -all") },
+   ]
+ }
+ 
++resource "hcloud_zone_rrset" "vanlug_public_suffix_dkim" {
++  count = var.public_suffix_zone_managed ? 1 : 0
++
++  zone = one(hcloud_zone.vanlug_public_suffix[*].name)
++  name = "*._domainkey"
++  type = "TXT"
++
++  records = [
++    { value = provider::hcloud::txt_record("v=DKIM1; p=") },
++  ]
++}
++
+ resource "hcloud_zone_rrset" "vanlug_public_suffix_dmarc" {
+   count = var.public_suffix_zone_managed ? 1 : 0
+ 
+@@ -207,6 +243,6 @@   name = "_dmarc"
+   type = "TXT"
+ 
+   records = [
+-    { value = provider::hcloud::txt_record("v=DMARC1; p=reject;") },
++    { value = provider::hcloud::txt_record("v=DMARC1; p=reject; sp=reject; adkim=s; aspf=s;") },
+   ]
+ }
+diff --git a/outputs.tofu b/outputs.tofu
+index 990fde7446d65816601b3fa9c0523f81673e6b74..de0b99cc28003d9150a972a2a6ab58b2ec0365aa 100644
+--- a/outputs.tofu
++++ b/outputs.tofu
+@@ -34,13 +34,29 @@   value       = "${var.public_suffix_suffix}.${var.public_suffix_apex}"
+ }
+ 
+ output "public_suffix_records" {
+-  description = "DNS records the public suffix domains need for the main server"
+-  value = flatten([
+-    for name in values(local.public_suffix_record_names) : [
+-      { name = name, type = "AAAA", address = hcloud_server.vanlug_main.ipv6_address },
+-      { name = name, type = "A", address = hcloud_server.vanlug_main.ipv4_address },
+-    ]
+-  ])
++  description = "DNS records the public suffix domains need"
++  value = [
++    for record in concat(
++      flatten([
++        for name in values(local.public_suffix_record_names) : [
++          { name = name, type = "AAAA", value = hcloud_server.vanlug_main.ipv6_address },
++          { name = name, type = "A", value = hcloud_server.vanlug_main.ipv4_address },
++        ]
++      ]),
++      [
++        { name = var.public_suffix_apex, type = "MX", value = "0 ." },
++        { name = "${var.public_suffix_suffix}.${var.public_suffix_apex}", type = "MX", value = "0 ." },
++        { name = "*.${var.public_suffix_suffix}.${var.public_suffix_apex}", type = "MX", value = "0 ." },
++        { name = var.public_suffix_apex, type = "TXT", value = "v=spf1 -all" },
++        { name = "*._domainkey.${var.public_suffix_apex}", type = "TXT", value = "v=DKIM1; p=" },
++        { name = "_dmarc.${var.public_suffix_apex}", type = "TXT", value = "v=DMARC1; p=reject; sp=reject; adkim=s; aspf=s;" },
++      ],
++      ) : {
++      name  = trimsuffix(record.name, ".${var.public_suffix_manual_zone}")
++      type  = record.type
++      value = record.value
++    }
++  ]
+ }
+ 
+ output "public_suffix_zone_nameservers" {
+diff --git a/variables.tofu b/variables.tofu
+index a494a82d5cfd2a83e4c1dc4472684c55389dddaa..e1dc7bf1789a0b9c7c6b40ba0d814e24d9978d34 100644
+--- a/variables.tofu
++++ b/variables.tofu
+@@ -18,7 +18,7 @@
+ variable "public_suffix_apex" {
+   description = "Apex of the secondary domain (public suffix) all user pages are served under by git-pages"
+   type        = string
+-  default     = "notp8.lu"
++  default     = "vanlugusercontent.p8.lu"
+ }
+ 
+ variable "public_suffix_suffix" {
+@@ -32,3 +32,9 @@   description = "Whether the DNS zone of the public suffix apex is managed via Hetzner"
+   type        = bool
+   default     = false
+ }
++
++variable "public_suffix_manual_zone" {
++  description = "Zone that holds the public suffix records when Hetzner does not manage them"
++  type        = string
++  default     = "p8.lu"
++}
+
