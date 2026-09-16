@@ -1,0 +1,31 @@
+From 94e7aaaf79450928fe3d10f3d33ee65f582002c7 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Wed, 16 Sep 2026 15:07:28 -0700
+Subject: [PATCH] fix: Don't try to commit Forgejo runner meta state if there are no changes
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/playbooks/forgejo-runner-meta.yaml b/playbooks/forgejo-runner-meta.yaml
+index 25e9b38c821c6a8a7409004b8c4eb97adf1ba176..31c4df900f54f581a10f515b0fd44fc4df3d5acf 100644
+--- a/playbooks/forgejo-runner-meta.yaml
++++ b/playbooks/forgejo-runner-meta.yaml
+@@ -6,7 +6,7 @@   tasks:
+     - name: Build Forgejo runner OCI image with Docker preinstalled
+       community.docker.docker_image_build:
+         name: git.{{ vanlug_domain }}/{{ forgejo_genesis_username }}/forgejo-runner-meta:latest
+-        path: forgejo-runner-meta
++        path: "{{ playbook_dir }}/../config/forgejo-runner-meta"
+         dockerfile: Containerfile
+     - name: Fetch user for Forgejo
+       become: true
+@@ -169,6 +169,9 @@       ansible.builtin.shell: # noqa: command-instead-of-module # We can't do these actions with the git module
+         cmd: |
+           set -e
+           git add -A
++          if git diff --cached --quiet; then
++            exit 0
++          fi
+           git \
+             -c user.name='{{ forgejo_genesis_username }}' \
+             -c user.email='{{ forgejo_genesis_username }}@git.{{ vanlug_domain }}' \
+
