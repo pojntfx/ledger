@@ -1,0 +1,156 @@
+From 8f9f1a2abb86a3213321426a8bf6dac90814e77c Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Wed, 16 Sep 2026 15:39:23 -0700
+Subject: [PATCH] feat: Pass primary domain etc. through OpenTofu to centralize its configuration
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/README.md b/README.md
+index d466473312fc7e5f9912c57a0fe2f039ba9ce3a8..e5a4b5840ca21a97dbe4f978e3afd27b93a46693 100644
+--- a/README.md
++++ b/README.md
+@@ -43,18 +43,18 @@ ```shell
+ $ tofu workspace select
+ ```
+ 
+-Configure the public suffix apex, the public suffix suffix and other OpenTofu variables in [`variables.tofu`](variables.tofu). The public suffix apex is the apex of the DNS zone, and the public suffix domain is that apex with the suffix in front. For development, use `vanlugusercontent.p8.lu` for the apex, `users` for the suffix and `p8.lu` for `public_suffix_manual_zone`, the zone that holds the records. In production, we will use `vanlug.org` and `users`. Set `public_suffix_zone_managed` to `true` to create the zone in Hetzner, or leave it at `false` to add the records by hand. Then deploy the physical infrastructure:
++Configure the primary domain, the public suffix apex, the public suffix suffix and other OpenTofu variables in [`variables.tofu`](variables.tofu). The public suffix apex is the apex of the DNS zone, and the public suffix domain is that apex with the suffix in front. For development, use `vanlug.p8.lu` for the primary domain, `vanlugusercontent.p8.lu` for the apex, `users` for the suffix and `p8.lu` for `public_suffix_manual_zone`. In production, we will use `vanlug.ca` for the primary domain, and `vanlug.org` with `users` for the public suffix. Set `public_suffix_zone_managed` to `true` to create the zone in Hetzner, or leave it at `false` to add the records by hand. Then deploy the physical infrastructure:
+ 
+ ```shell
+ $ tofu apply
+ ```
+ 
+-When OpenTofu manages the zone, the `public_suffix_zone_nameservers` output lists the nameservers to set at your registrar. If OpenTofu does not manage the zone, the `public_suffix_records` output lists the name, the type and the value of each record. The `public_suffix_records` output prints each name relative to `public_suffix_manual_zone`.
++When OpenTofu manages the zone, the `public_suffix_zone_nameservers` output lists the nameservers to set at your registrar. If OpenTofu does not manage the zone, the `public_suffix_records` output lists the name, the type and the value of each record. The `public_suffix_records` output prints each name relative to `public_suffix_manual_zone`. The `vanlug_domain_records` output lists the DNS records the primary domain needs for the server, the forge and git-pages.
+ 
+ > [!WARNING]
+ > Do not use one root domain, for example `p8.lu`, for both the primary domain and the public suffix domain, outside of a development workspace. git-pages serves user-generated content under the public suffix domain.
+ 
+-Then, configure the primary domain and other variables you'd like to change for [Ansible](https://docs.ansible.com/projects/ansible/latest/index.html) in [`group_vars/all.yaml`](group_vars/all.yaml) (e.g. `vanlug.p8.lu` for the primary domain during development or `vanlug.ca` in production, and `vanlug.org` for the public suffix apex in production, as we'll be using in the following), and use it to provision the hosts by running:
++Then, set the Forgejo account names and emails in [`group_vars/all.yaml`](group_vars/all.yaml). Provision the hosts with [Ansible](https://docs.ansible.com/projects/ansible/latest/index.html) by running:
+ 
+ ```shell
+ $ ansible-galaxy collection install cloud.terraform ansible.posix community.general community.docker
+diff --git a/config/Caddyfile b/config/Caddyfile
+index d6fe7320d3179c6b3c00c21d2e21640ef9db5837..d4a007028240fb554f8f86cf885d49441e31df14 100644
+--- a/config/Caddyfile
++++ b/config/Caddyfile
+@@ -73,6 +73,31 @@ 		reverse_proxy host.containers.internal:3003
+ 	}
+ }
+ 
++https://[[ public_suffix_apex ]], https://[[ public_suffix_domain ]] {
++	import workarounds
++
++	header Content-Type text/html
++
++	respond <<HTML
++		<!doctype html>
++		<html lang=en>
++		<head>
++		<meta charset=utf-8>
++		<title>[[ public_suffix_domain ]]</title>
++		</head>
++		<body>
++		<p>This is <code>[[ public_suffix_domain ]]</code>, the <a target="_blank" href="https://publicsuffix.org/">public suffix</a> that hosts the sites of VanLUG members. Those sites are not official VanLUG material.</p>
++		<ul>
++		<li><a target="_blank" href="https://[[ vanlug_domain ]]/">[[ vanlug_domain ]]</a></li>
++		<li><a target="_blank" href="https://[[ vanlug_domain ]]/conduct/">Code of Conduct</a></li>
++		<li><a target="_blank" href="https://[[ vanlug_domain ]]/terms/">Terms</a></li>
++		<li><a target="_blank" href="https://[[ vanlug_domain ]]/privacy/">Privacy</a></li>
++		</ul>
++		</body>
++		</html>
++		HTML
++}
++
+ # git-pages
+ https:// {
+ 	tls {
+diff --git a/group_vars/all.yaml b/group_vars/all.yaml
+index 26f597bfe542897b1861c81ecad719cf91a14f0d..1e628ca20010d3aa9e856e0dd34cd9b1cb696dda 100644
+--- a/group_vars/all.yaml
++++ b/group_vars/all.yaml
+@@ -1,5 +1,5 @@
+-# Primary domain all services are served under
+-vanlug_domain: vanlug.p8.lu
++# Primary domain all services are served under, from OpenTofu
++vanlug_domain: '{{ lookup("cloud.terraform.tf_output", "vanlug_domain", binary_path="/home/linuxbrew/.linuxbrew/bin/tofu") }}'
+ # Apex of the secondary domain (public suffix) all user pages are served under by git-pages, from OpenTofu
+ public_suffix_apex: '{{ lookup("cloud.terraform.tf_output", "public_suffix_apex", binary_path="/home/linuxbrew/.linuxbrew/bin/tofu") }}'
+ # Secondary domain (public suffix) all user pages are served under by git-pages, from OpenTofu
+@@ -8,7 +8,7 @@ # Forgejo admin user used for initial/admin API access
+ forgejo_admin_username: vanlug-admin
+ # Email for Forgejo admin user
+ forgejo_admin_email: felicitas@pojtinger.com
+-# Forgejo genesis user (owner of the internal repos and used for non-admin API access)
+-forgejo_genesis_username: pojntfx
++# Forgejo genesis user (owner of the internal repos and used for non-admin API access), from OpenTofu
++forgejo_genesis_username: '{{ lookup("cloud.terraform.tf_output", "forgejo_genesis_username", binary_path="/home/linuxbrew/.linuxbrew/bin/tofu") }}'
+ # Email for Forgejo genesis user
+ forgejo_genesis_email: felicitas.pojtinger@gmail.com
+diff --git a/outputs.tofu b/outputs.tofu
+index de0b99cc28003d9150a972a2a6ab58b2ec0365aa..65197f1d35c3233b0a16c07eaacad6461a64da67 100644
+--- a/outputs.tofu
++++ b/outputs.tofu
+@@ -63,3 +63,26 @@ output "public_suffix_zone_nameservers" {
+   description = "Authoritative nameservers of the DNS zone of the public suffix apex if managed via Hetzner"
+   value       = try(hcloud_zone.vanlug_public_suffix[0].authoritative_nameservers.assigned, [])
+ }
++
++output "vanlug_domain" {
++  description = "Primary domain all services are served under"
++  value       = var.vanlug_domain
++}
++
++output "forgejo_genesis_username" {
++  description = "Forgejo user that owns the website repository"
++  value       = var.forgejo_genesis_username
++}
++
++output "vanlug_domain_records" {
++  description = "DNS records the primary domain needs for the server and the forge"
++  value = [
++    { name = var.vanlug_domain, type = "AAAA", value = hcloud_server.vanlug_main.ipv6_address },
++    { name = var.vanlug_domain, type = "A", value = hcloud_server.vanlug_main.ipv4_address },
++    { name = "www.${var.vanlug_domain}", type = "AAAA", value = hcloud_server.vanlug_main.ipv6_address },
++    { name = "www.${var.vanlug_domain}", type = "A", value = hcloud_server.vanlug_main.ipv4_address },
++    { name = "git.${var.vanlug_domain}", type = "AAAA", value = hcloud_server.vanlug_main.ipv6_address },
++    { name = "git.${var.vanlug_domain}", type = "A", value = hcloud_server.vanlug_main.ipv4_address },
++    { name = "_git-pages-forge-allowlist.${var.vanlug_domain}", type = "TXT", value = "https://git.${var.vanlug_domain}/${var.forgejo_genesis_username}/${var.vanlug_domain}" },
++  ]
++}
+diff --git a/units/git-pages.container b/units/git-pages.container
+index 934622503b2a72c2e6ade0028de6d7b5c27e8070..38f4866952e914fa763c2474a30ad7ec5b7f21f8 100644
+--- a/units/git-pages.container
++++ b/units/git-pages.container
+@@ -12,7 +12,7 @@ Volume=git_pages_data:/app/data
+ AddHost=git.{{ vanlug_domain }}:host-gateway
+ # See https://git-pages.org/running-a-server/#wildcard-domains
+ # "Unofficial" user pages live on the public suffix domain, the primary domain is reserved for "official" VanLUG pages
+-Environment="PAGES_WILDCARD=[{\"Domain\":\"{{ public_suffix_domain }}\",\"CloneURL\":\"https://git.{{ vanlug_domain }}/<user>/<project>.git\",\"IndexRepo\":\"<user>.{{ public_suffix_domain }}\",\"IndexRepoBranch\":\"main\",\"Authorization\":\"forgejo\"},{\"Domain\":\"pages.{{ vanlug_domain }}\",\"CloneURL\":\"https://git.{{ vanlug_domain }}/<user>/<project>.git\",\"IndexRepo\":\"<user>.pages.{{ vanlug_domain }}\",\"IndexRepoBranch\":\"main\",\"Authorization\":\"forgejo\"}]"
++Environment="PAGES_WILDCARD=[{\"Domain\":\"{{ public_suffix_domain }}\",\"CloneURL\":\"https://git.{{ vanlug_domain }}/<user>/<project>.git\",\"IndexRepo\":\"<user>.{{ public_suffix_domain }}\",\"IndexRepoBranch\":\"main\",\"Authorization\":\"forgejo\"}]"
+ LogDriver=journald
+ ReadOnly=true
+ 
+diff --git a/variables.tofu b/variables.tofu
+index e1dc7bf1789a0b9c7c6b40ba0d814e24d9978d34..2b5a2106f41d935581abdcb8b51afb16edc295e9 100644
+--- a/variables.tofu
++++ b/variables.tofu
+@@ -38,3 +38,15 @@   description = "Zone that holds the public suffix records when Hetzner does not manage them"
+   type        = string
+   default     = "p8.lu"
+ }
++
++variable "vanlug_domain" {
++  description = "Primary domain all services are served under"
++  type        = string
++  default     = "vanlug.p8.lu"
++}
++
++variable "forgejo_genesis_username" {
++  description = "Forgejo user that owns the website repository"
++  type        = string
++  default     = "pojntfx"
++}
+
