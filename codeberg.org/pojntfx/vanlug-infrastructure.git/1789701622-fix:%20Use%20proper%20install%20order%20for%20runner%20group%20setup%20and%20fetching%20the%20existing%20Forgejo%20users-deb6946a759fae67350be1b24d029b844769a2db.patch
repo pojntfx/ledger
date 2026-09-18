@@ -1,0 +1,70 @@
+From deb6946a759fae67350be1b24d029b844769a2db Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Thu, 17 Sep 2026 20:20:22 -0700
+Subject: [PATCH] fix: Use proper install order for runner group setup and fetching the existing Forgejo users
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/playbooks/forgejo-runner.yaml b/playbooks/forgejo-runner.yaml
+index 4d7f97992d34748c823fcddc56bd34689056cd05..69cc45ce59996985596d0281e5c0ea625c238557 100644
+--- a/playbooks/forgejo-runner.yaml
++++ b/playbooks/forgejo-runner.yaml
+@@ -5,11 +5,16 @@   gather_facts: false
+   vars:
+     forgejo_runner_data_dir: /home/forgejo-runner/.local/share/containers/storage/volumes/forgejo_runner_data/_data
+   tasks:
++    - name: Create group for Forgejo runner
++      become: true
++      ansible.builtin.group:
++        name: forgejo-runner
+     - name: Create user for Forgejo runner
+       become: true
+       register: forgejo_runner_user
+       ansible.builtin.user:
+         name: forgejo-runner
++        group: forgejo-runner
+     - name: Enable linger for Forgejo runner user # See https://old.reddit.com/r/systemd/comments/suaa5x/proper_way_to_enable_lingering_ansible/
+       become: true
+       ansible.builtin.command: loginctl enable-linger forgejo-runner
+diff --git a/playbooks/forgejo.yaml b/playbooks/forgejo.yaml
+index 477a07432ae21ccfb3bbd9236409508272c69dbe..987522489df43ce1e6153875ed5674f252535c67 100644
+--- a/playbooks/forgejo.yaml
++++ b/playbooks/forgejo.yaml
+@@ -232,7 +232,7 @@     - name: Set up Forgejo admin user
+       become: true
+       become_user: forgejo
+       # This is a bit brittle since we could also match a column, but that's fine for a one-time setup task
+-      when: forgejo_admin_username not in forgejo_users.stdout
++      when: forgejo_admin_username not in forgejo_users.stdout.split()
+       changed_when: true
+       ansible.builtin.command: |
+         podman exec forgejo forgejo admin user create \
+@@ -247,7 +247,7 @@     - name: Set up Forgejo genesis user
+       become: true
+       become_user: forgejo
+       # This is a bit brittle since we could also match a column, but that's fine for a one-time setup task
+-      when: forgejo_genesis_username not in forgejo_users.stdout
++      when: forgejo_genesis_username not in forgejo_users.stdout.split()
+       changed_when: true
+       ansible.builtin.command: |
+         podman exec forgejo forgejo admin user create \
+diff --git a/site.yaml b/site.yaml
+index aa1283c10b327b8666a9665aa2d3aae2d515c9d3..771f2ab1e0154081715d55b0fbe3aa0c6c977e4a 100644
+--- a/site.yaml
++++ b/site.yaml
+@@ -19,12 +19,12 @@ - name: Configure Forgejo
+   ansible.builtin.import_playbook: playbooks/forgejo.yaml
+ - name: Configure Forgejo runner
+   ansible.builtin.import_playbook: playbooks/forgejo-runner.yaml
+-- name: Configure Forgejo runner meta
+-  ansible.builtin.import_playbook: playbooks/forgejo-runner-meta.yaml
+ - name: Configure git-pages
+   ansible.builtin.import_playbook: playbooks/git-pages.yaml
+ - name: Configure Anubis
+   ansible.builtin.import_playbook: playbooks/anubis.yaml
++- name: Configure Forgejo runner meta
++  ansible.builtin.import_playbook: playbooks/forgejo-runner-meta.yaml
+ - name: Configure vanlug-website
+   ansible.builtin.import_playbook: playbooks/vanlug-website.yaml
+ # vanlug-api depends on vanlug-website since the latter builds and publishes the former's OCI image
+
