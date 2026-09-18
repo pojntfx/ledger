@@ -1,0 +1,95 @@
+From 42d6c11693bc540f06908c49519f5759e4d3ab48 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Thu, 17 Sep 2026 20:03:05 -0700
+Subject: [PATCH] fix: Configure dependency packages for Docker and fix Caddy setup order in playbook
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/playbooks/caddy.yaml b/playbooks/caddy.yaml
+index 21c237a90e7ed7a32e897b2c574a24f9fe5546cf..9b9656fc61a8592860f2815dee1f4ed617d2c9d3 100644
+--- a/playbooks/caddy.yaml
++++ b/playbooks/caddy.yaml
+@@ -59,19 +59,6 @@       when: caddy_policy.changed
+       changed_when: true
+       ansible.builtin.command: semodule -i /usr/local/share/selinux/targeted/caddy.cil
+       notify: Restart Caddy system service
+-    - name: Enable Caddy system socket
+-      become: true
+-      ansible.builtin.systemd_service:
+-        name: caddy.socket
+-        state: started
+-        enabled: true
+-        daemon_reload: true
+-    - name: Enable Caddy system service
+-      become: true
+-      ansible.builtin.systemd_service:
+-        name: caddy.service
+-        state: started
+-        daemon_reload: true
+     - name: Create config directory for Caddyfile
+       become: true
+       ansible.builtin.file:
+@@ -91,6 +78,19 @@         mode: "0644"
+         variable_start_string: "[[" # `{{` breaks the Caddy formatter
+         variable_end_string: "]]" # `{{` breaks the Caddy formatter
+       notify: Reload Caddy system service
++    - name: Enable Caddy system socket
++      become: true
++      ansible.builtin.systemd_service:
++        name: caddy.socket
++        state: started
++        enabled: true
++        daemon_reload: true
++    - name: Enable Caddy system service
++      become: true
++      ansible.builtin.systemd_service:
++        name: caddy.service
++        state: started
++        daemon_reload: true
+     - name: Write polkit rule to allow the caddy user to be able to restart the caddy system service
+       become: true
+       ansible.builtin.copy:
+diff --git a/playbooks/docker.yaml b/playbooks/docker.yaml
+index 730b382db3a65214e3adddf8272f13f0c4425695..67db8b611734c226d6eb0c24ac6b3fc6813fda74 100644
+--- a/playbooks/docker.yaml
++++ b/playbooks/docker.yaml
+@@ -21,7 +21,12 @@         name:
+           - docker-ce
+           - docker-ce-cli
+           - containerd.io
++          - kernel-modules-extra # Docker needs xt_addrtype for firewall setup
+         state: present
++    - name: Create group for Forgejo runner # We need this here because we allow the user below access to the socket
++      become: true
++      ansible.builtin.group:
++        name: forgejo-runner
+     - name: Create systemd drop-in directory for Docker socket
+       become: true
+       ansible.builtin.file:
+diff --git a/site.yaml b/site.yaml
+index 7f6b8187ae961f4e1790045e7e5f0ee544d7b09c..aa1283c10b327b8666a9665aa2d3aae2d515c9d3 100644
+--- a/site.yaml
++++ b/site.yaml
+@@ -17,8 +17,8 @@ - name: Configure Caddy
+   ansible.builtin.import_playbook: playbooks/caddy.yaml
+ - name: Configure Forgejo
+   ansible.builtin.import_playbook: playbooks/forgejo.yaml
+-- name: Configure Forgejo
+-  ansible.builtin.import_playbook: playbooks/forgejo.yaml
++- name: Configure Forgejo runner
++  ansible.builtin.import_playbook: playbooks/forgejo-runner.yaml
+ - name: Configure Forgejo runner meta
+   ansible.builtin.import_playbook: playbooks/forgejo-runner-meta.yaml
+ - name: Configure git-pages
+diff --git a/variables.tofu b/variables.tofu
+index 2b5a2106f41d935581abdcb8b51afb16edc295e9..081b312ee4148a0f9e72615fb5aa67ec17714958 100644
+--- a/variables.tofu
++++ b/variables.tofu
+@@ -48,5 +48,5 @@
+ variable "forgejo_genesis_username" {
+   description = "Forgejo user that owns the website repository"
+   type        = string
+-  default     = "pojntfx"
++  default     = "vanlug"
+ }
+
