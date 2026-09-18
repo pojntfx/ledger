@@ -1,0 +1,31 @@
+From dcef198058f8880b66822f19f57fa9add2fe06f9 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Thu, 17 Sep 2026 20:21:12 -0700
+Subject: [PATCH] refactor: Increase retries to work around flaky Hetzner networking, output `www` VanLUG site prefix
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/ansible.cfg b/ansible.cfg
+index f3a9a5f136531cefc8c5a6ed7d961f17cad47a7a..64c36a5a2e45c67c3269c1d2525808cf65f3fa28 100644
+--- a/ansible.cfg
++++ b/ansible.cfg
+@@ -3,5 +3,7 @@ inventory = inventory.yaml
+ 
+ [ssh_connection]
+ pipelining = true
++# Hetzner drops the occasional connection, so retry instead of failing the whole play
++retries = 3
+ # On the first connection, we need to be able to connect to the hosts with the new host keys
+ ssh_args = -o StrictHostKeyChecking=accept-new
+diff --git a/outputs.tofu b/outputs.tofu
+index 65197f1d35c3233b0a16c07eaacad6461a64da67..1ddda37bd042bda0b103830d03faf2165bb3e60a 100644
+--- a/outputs.tofu
++++ b/outputs.tofu
+@@ -84,5 +84,6 @@     { name = "www.${var.vanlug_domain}", type = "A", value = hcloud_server.vanlug_main.ipv4_address },
+     { name = "git.${var.vanlug_domain}", type = "AAAA", value = hcloud_server.vanlug_main.ipv6_address },
+     { name = "git.${var.vanlug_domain}", type = "A", value = hcloud_server.vanlug_main.ipv4_address },
+     { name = "_git-pages-forge-allowlist.${var.vanlug_domain}", type = "TXT", value = "https://git.${var.vanlug_domain}/${var.forgejo_genesis_username}/${var.vanlug_domain}" },
++    { name = "_git-pages-forge-allowlist.www.${var.vanlug_domain}", type = "TXT", value = "https://git.${var.vanlug_domain}/${var.forgejo_genesis_username}/${var.vanlug_domain}" },
+   ]
+ }
+
