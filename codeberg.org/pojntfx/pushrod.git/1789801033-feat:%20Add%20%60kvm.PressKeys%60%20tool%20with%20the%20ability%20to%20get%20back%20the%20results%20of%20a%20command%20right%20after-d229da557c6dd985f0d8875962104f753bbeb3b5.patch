@@ -1,0 +1,228 @@
+From d229da557c6dd985f0d8875962104f753bbeb3b5 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Fri, 18 Sep 2026 23:57:13 -0700
+Subject: [PATCH] feat: Add `kvm.PressKeys` tool with the ability to get back the results of a command right after
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/pkg/svc/kvm.go b/pkg/svc/kvm.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..38b28c46a9da5f85864cd56fceca3e7473607237
+--- /dev/null
++++ b/pkg/svc/kvm.go
+@@ -0,0 +1,88 @@
++package svc
++
++import (
++	"go.bug.st/serial"
++	"golang.org/x/mobile/event/key"
++)
++
++type kvmCommand byte
++
++const (
++	kvmCommandSendKeyboardData kvmCommand = 0x02
++
++	kvmCommandResponse kvmCommand = 0x80
++)
++
++const (
++	// See https://github.com/sipeed/NanoKVM-USB/blob/main/browser/src/libs/device/proto.ts
++	// and https://github.com/sipeed/NanoKVM-USB/blob/main/browser/src/libs/device/serial-port.ts
++	// for all the KVM constants and protocol definition
++	kvmBaudRate = 57600
++
++	kvmFrameHeaderFirst  = 0x57
++	kvmFrameHeaderSecond = 0xab
++	kvmFrameAddress      = 0x00
++
++	kvmFrameHeaderLength = 5
++
++	kvmReportLength     = 8
++	kvmMaxKeysPerReport = 6
++
++	kvmModifierFirst = key.CodeLeftControl
++	kvmModifierLast  = key.CodeRightGUI
++)
++
++func writeCommand(port serial.Port, command kvmCommand, data []byte) error {
++	frame := append([]byte{kvmFrameHeaderFirst, kvmFrameHeaderSecond, kvmFrameAddress, byte(command), byte(len(data))}, data...)
++
++	var checksum byte
++	for _, b := range frame {
++		checksum += b
++	}
++
++	if _, err := port.Write(append(frame, checksum)); err != nil {
++		return err
++	}
++
++	// The status length is only known once the header is in, so the response grows as it is read
++	response := make([]byte, kvmFrameHeaderLength)
++	for read := 0; read < len(response); {
++		n, err := port.Read(response[read:])
++		if err != nil {
++			return err
++		}
++
++		if n == 0 {
++			return ErrNoResponse
++		}
++
++		read += n
++
++		if read == kvmFrameHeaderLength {
++			response = append(response, make([]byte, int(response[4])+1)...)
++		}
++	}
++
++	if response[0] != kvmFrameHeaderFirst || response[1] != kvmFrameHeaderSecond {
++		return ErrInvalidResponse
++	}
++
++	var sum byte
++	for _, b := range response[:len(response)-1] {
++		sum += b
++	}
++
++	if sum != response[len(response)-1] {
++		return ErrInvalidResponse
++	}
++
++	if kvmCommand(response[3]) != command|kvmCommandResponse {
++		return ErrInvalidResponse
++	}
++
++	if response[kvmFrameHeaderLength] != 0x00 {
++		return ErrInvalidResponse
++	}
++
++	return nil
++}
+diff --git a/pkg/svc/kvm_press_keys.go b/pkg/svc/kvm_press_keys.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..dbc10739c9c638a7135316a90c3a75392af66a96
+--- /dev/null
++++ b/pkg/svc/kvm_press_keys.go
+@@ -0,0 +1,120 @@
++package svc
++
++import (
++	"context"
++	"errors"
++	"fmt"
++	"strings"
++	"time"
++
++	"github.com/modelcontextprotocol/go-sdk/mcp"
++	"go.bug.st/serial"
++)
++
++var (
++	PressKeysTool = &mcp.Tool{
++		Name:        "kvm.pressKeys",
++		Title:       "Press keys",
++		Description: "Press key combinations on a target through a KVM input device",
++	}
++
++	ErrUnknownKey      = errors.New("unknown key")
++	ErrTooManyKeys     = errors.New("too many keys held down at the same time, a combination fits 6 keys plus modifiers")
++	ErrInvalidResponse = errors.New("invalid response from the KVM")
++	ErrNoResponse      = errors.New("no response from the KVM, is the target powered on?")
++)
++
++const (
++	kvmResponseTimeout = time.Second
++
++	kvmKeyHoldDuration = 30 * time.Millisecond
++)
++
++type PressKeysInput struct {
++	Path      string     `json:"path" jsonschema:"path that uniquely identifies the input device until it gets unplugged"`
++	Keys      [][]string `json:"keys" jsonschema:"key combinations to press one after the other, each a list of W3C KeyboardEvent.code values held down together, so [[MetaLeft,KeyW]] is one shortcut while [[KeyH],[KeyI]] types hi"`
++	VideoPath string     `json:"videoPath,omitempty" jsonschema:"path that uniquely identifies the video capture device to take a screenshot with, empty to not take one"`
++	WaitMs    int        `json:"waitMs,omitempty" jsonschema:"how long to wait before taking the screenshot in milliseconds"`
++}
++
++type keyPress struct {
++	modifiers byte
++	keys      []byte
++}
++
++func (p keyPress) report() []byte {
++	report := make([]byte, kvmReportLength)
++	report[0] = p.modifiers
++	copy(report[2:], p.keys)
++
++	return report
++}
++
++func (s *Service) PressKeys(ctx context.Context, req *mcp.CallToolRequest, input PressKeysInput) (*mcp.CallToolResult, any, error) {
++	presses := make([]keyPress, len(input.Keys))
++	for i, combination := range input.Keys {
++		for _, name := range combination {
++			code, ok := keyCodes[name]
++			if !ok {
++				// Callers don't get the code values right on complex sequences, only returning all the options fixes it
++				return nil, nil, fmt.Errorf("%w %q, pick one of: %s", ErrUnknownKey, name, strings.Join(keyNames, ", "))
++			}
++
++			// Modifiers set bits in byte 0 instead of taking a key slot
++			if code >= kvmModifierFirst && code <= kvmModifierLast {
++				presses[i].modifiers |= 1 << (code - kvmModifierFirst)
++
++				continue
++			}
++
++			presses[i].keys = append(presses[i].keys, byte(code))
++		}
++
++		if len(presses[i].keys) > kvmMaxKeysPerReport {
++			return nil, nil, ErrTooManyKeys
++		}
++	}
++
++	port, err := serial.Open(input.Path, &serial.Mode{BaudRate: kvmBaudRate})
++	if err != nil {
++		return nil, nil, err
++	}
++	defer port.Close()
++
++	if err := port.SetReadTimeout(kvmResponseTimeout); err != nil {
++		return nil, nil, err
++	}
++
++	// `Open()` doesn't flush or anything, so we need to reset the input buffer manually
++	if err := port.ResetInputBuffer(); err != nil {
++		return nil, nil, err
++	}
++
++	release := make([]byte, kvmReportLength)
++
++	defer writeCommand(port, kvmCommandSendKeyboardData, release)
++
++	for _, press := range presses {
++		if err := writeCommand(port, kvmCommandSendKeyboardData, press.report()); err != nil {
++			return nil, nil, err
++		}
++
++		time.Sleep(kvmKeyHoldDuration)
++
++		if err := writeCommand(port, kvmCommandSendKeyboardData, release); err != nil {
++			return nil, nil, err
++		}
++
++		time.Sleep(kvmKeyHoldDuration)
++	}
++
++	if input.VideoPath == "" {
++		return nil, nil, nil
++	}
++
++	time.Sleep(time.Duration(input.WaitMs) * time.Millisecond)
++
++	return s.TakeScreenshot(ctx, req, TakeScreenshotInput{
++		Path: input.VideoPath,
++	})
++}
+
