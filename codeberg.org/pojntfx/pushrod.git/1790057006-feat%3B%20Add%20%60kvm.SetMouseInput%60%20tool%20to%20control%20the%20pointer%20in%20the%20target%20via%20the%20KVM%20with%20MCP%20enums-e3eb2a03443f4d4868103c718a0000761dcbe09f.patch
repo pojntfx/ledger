@@ -1,0 +1,328 @@
+From e3eb2a03443f4d4868103c718a0000761dcbe09f Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Mon, 21 Sep 2026 23:03:26 -0700
+Subject: [PATCH] feat; Add `kvm.SetMouseInput` tool to control the pointer in the target via the KVM with MCP enums
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/go.mod b/go.mod
+index fcb7f06b093a5b25c6ffe9ca9df682d1f1d6daec..d7b98b8ed79e958c0f2db51a231c44300c5b475c 100644
+--- a/go.mod
++++ b/go.mod
+@@ -4,6 +4,7 @@ go 1.26.4
+ 
+ require (
+ 	github.com/blackjack/webcam v0.6.1
++	github.com/google/jsonschema-go v0.4.3
+ 	github.com/modelcontextprotocol/go-sdk v1.7.0
+ 	go.bug.st/serial v1.8.0
+ 	golang.org/x/mobile v0.0.0-20260821190718-4776eadac327
+@@ -12,7 +13,6 @@ )
+ 
+ require (
+ 	github.com/ebitengine/purego v0.9.1 // indirect
+-	github.com/google/jsonschema-go v0.4.3 // indirect
+ 	github.com/segmentio/asm v1.1.3 // indirect
+ 	github.com/segmentio/encoding v0.5.4 // indirect
+ 	github.com/yosida95/uritemplate/v3 v3.0.2 // indirect
+diff --git a/main.go b/main.go
+index 45d994dac9942ef8ebd38189ad4d6ada1a41e144..fca39686f711e49b165326496a48338f43e7cc9b 100644
+--- a/main.go
++++ b/main.go
+@@ -45,6 +45,7 @@ 	mcp.AddTool(handler, svc.GetVideoCaptureDevicesTool, service.GetVideoCaptureDevices)
+ 	mcp.AddTool(handler, svc.TakeScreenshotTool, service.TakeScreenshot)
+ 	mcp.AddTool(handler, svc.GetInputDevicesTool, service.GetInputDevices)
+ 	mcp.AddTool(handler, svc.PressKeysTool, service.PressKeys)
++	mcp.AddTool(handler, svc.SendMouseInputTool, service.SendMouseInput)
+ 
+ 	log.Println("Listening on", *laddr)
+ 
+diff --git a/pkg/svc/kvm.go b/pkg/svc/kvm.go
+index 38b28c46a9da5f85864cd56fceca3e7473607237..b3b10704cbede2bde4ff5c6747ec9d5e661127c7 100644
+--- a/pkg/svc/kvm.go
++++ b/pkg/svc/kvm.go
+@@ -1,6 +1,8 @@
+ package svc
+ 
+ import (
++	"encoding/binary"
++
+ 	"go.bug.st/serial"
+ 	"golang.org/x/mobile/event/key"
+ )
+@@ -8,7 +10,9 @@
+ type kvmCommand byte
+ 
+ const (
+-	kvmCommandSendKeyboardData kvmCommand = 0x02
++	kvmCommandSendKeyboardData      kvmCommand = 0x02
++	kvmCommandSendMouseAbsoluteData kvmCommand = 0x04
++	kvmCommandSendMouseRelativeData kvmCommand = 0x05
+ 
+ 	kvmCommandResponse kvmCommand = 0x80
+ )
+@@ -30,6 +34,20 @@ 	kvmMaxKeysPerReport = 6
+ 
+ 	kvmModifierFirst = key.CodeLeftControl
+ 	kvmModifierLast  = key.CodeRightGUI
++
++	kvmMouseModeAbsolute = 0x02
++	kvmMouseModeRelative = 0x01
++
++	kvmMouseAbsoluteReportLength = 7
++	kvmMouseRelativeReportLength = 5
++
++	kvmMouseCoordinateMax = 4096
++
++	kvmMouseDeltaMax = 127
++
++	kvmMouseButtonLeft   = 0x01
++	kvmMouseButtonRight  = 0x02
++	kvmMouseButtonMiddle = 0x04
+ )
+ 
+ func writeCommand(port serial.Port, command kvmCommand, data []byte) error {
+@@ -86,3 +104,26 @@ 	}
+ 
+ 	return nil
+ }
++
++func absoluteMouseReport(buttons byte, x, y int) []byte {
++	report := make([]byte, kvmMouseAbsoluteReportLength)
++
++	report[0] = kvmMouseModeAbsolute
++	report[1] = buttons
++	binary.LittleEndian.PutUint16(report[2:4], uint16(x))
++	binary.LittleEndian.PutUint16(report[4:6], uint16(y))
++
++	return report
++}
++
++func relativeMouseReport(buttons byte, dx, dy, wheel int) []byte {
++	report := make([]byte, kvmMouseRelativeReportLength)
++
++	report[0] = kvmMouseModeRelative
++	report[1] = buttons
++	report[2] = byte(int8(dx))
++	report[3] = byte(int8(dy))
++	report[4] = byte(int8(wheel))
++
++	return report
++}
+diff --git a/pkg/svc/kvm_send_mouse_input.go b/pkg/svc/kvm_send_mouse_input.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..54fa054a70acca3f01fb77a518c9fc18b1a36b86
+--- /dev/null
++++ b/pkg/svc/kvm_send_mouse_input.go
+@@ -0,0 +1,210 @@
++package svc
++
++import (
++	"context"
++	"errors"
++	"time"
++
++	"github.com/google/jsonschema-go/jsonschema"
++	"github.com/modelcontextprotocol/go-sdk/mcp"
++	"go.bug.st/serial"
++)
++
++var (
++	SendMouseInputTool = &mcp.Tool{
++		Name:        "kvm.sendMouseInput",
++		Title:       "Send mouse input",
++		Description: "Move the pointer and click on a target through a KVM input device",
++		Annotations: &mcp.ToolAnnotations{DestructiveHint: &[]bool{true}[0]},
++		InputSchema: mouseInputSchema(),
++	}
++
++	ErrUnknownMouseAction         = errors.New("unknown mouse action")
++	ErrMissingMouseButton         = errors.New("missing mouse button")
++	ErrMissingMouseCoordinate     = errors.New("missing mouse coordinate")
++	ErrUnsupportedScrollDirection = errors.New("the KVM scrolls vertically only, dx must be 0")
++)
++
++type mouseAction string
++
++type mouseButton string
++
++const (
++	mouseActionMove        mouseAction = "move"
++	mouseActionClick       mouseAction = "click"
++	mouseActionDoubleClick mouseAction = "doubleClick"
++	mouseActionDown        mouseAction = "down"
++	mouseActionUp          mouseAction = "up"
++	mouseActionScroll      mouseAction = "scroll"
++
++	mouseButtonLeft   mouseButton = "left"
++	mouseButtonRight  mouseButton = "right"
++	mouseButtonMiddle mouseButton = "middle"
++
++	kvmMouseHoldDuration = 30 * time.Millisecond
++)
++
++type SendMouseInputInput struct {
++	Path      string      `json:"path" jsonschema:"path that uniquely identifies the input device until it gets unplugged"`
++	Action    mouseAction `json:"action" jsonschema:"mouse action to perform"`
++	X         *int        `json:"x,omitempty" jsonschema:"pointer position from 0 to 4096 from the left to the right edge of the target's screen, required for move, click and doubleClick"`
++	Y         *int        `json:"y,omitempty" jsonschema:"pointer position from 0 to 4096 from the top to the bottom edge of the target's screen, required for move, click and doubleClick"`
++	Button    mouseButton `json:"button,omitempty" jsonschema:"button to press, required for click, doubleClick and down"`
++	DX        int         `json:"dx,omitempty" jsonschema:"horizontal wheel ticks, must be 0 since the KVM scrolls vertically only"`
++	DY        int         `json:"dy,omitempty" jsonschema:"vertical wheel ticks, positive scrolls up"`
++	VideoPath string      `json:"videoPath,omitempty" jsonschema:"path that uniquely identifies the video capture device to take a screenshot with, empty to not take one"`
++	WaitMs    int         `json:"waitMs,omitempty" jsonschema:"how long to wait before taking the screenshot in milliseconds"`
++}
++
++type mouseReport struct {
++	command kvmCommand
++	data    []byte
++}
++
++var mouseButtons = map[mouseButton]byte{
++	mouseButtonLeft:   kvmMouseButtonLeft,
++	mouseButtonRight:  kvmMouseButtonRight,
++	mouseButtonMiddle: kvmMouseButtonMiddle,
++}
++
++func mouseInputSchema() *jsonschema.Schema {
++	schema, err := jsonschema.For[SendMouseInputInput](nil)
++	if err != nil {
++		panic(err)
++	}
++
++	schema.Properties["action"].Enum = []any{mouseActionMove, mouseActionClick, mouseActionDoubleClick, mouseActionDown, mouseActionUp, mouseActionScroll}
++	schema.Properties["button"].Enum = []any{mouseButtonLeft, mouseButtonRight, mouseButtonMiddle}
++
++	return schema
++}
++
++func clampCoordinate(value int) int {
++	return min(max(value, 0), kvmMouseCoordinateMax)
++}
++
++func mouseCoordinates(input SendMouseInputInput) (int, int, error) {
++	if input.X == nil || input.Y == nil {
++		return 0, 0, ErrMissingMouseCoordinate
++	}
++
++	return clampCoordinate(*input.X), clampCoordinate(*input.Y), nil
++}
++
++func (s *Service) SendMouseInput(ctx context.Context, req *mcp.CallToolRequest, input SendMouseInputInput) (*mcp.CallToolResult, any, error) {
++	button := mouseButtons[input.Button]
++
++	reports := []mouseReport{}
++
++	switch input.Action {
++	case mouseActionMove:
++		x, y, err := mouseCoordinates(input)
++		if err != nil {
++			return nil, nil, err
++		}
++
++		reports = append(reports, mouseReport{kvmCommandSendMouseAbsoluteData, absoluteMouseReport(0, x, y)})
++
++	case mouseActionClick, mouseActionDoubleClick:
++		x, y, err := mouseCoordinates(input)
++		if err != nil {
++			return nil, nil, err
++		}
++
++		if button == 0 {
++			return nil, nil, ErrMissingMouseButton
++		}
++
++		presses := 1
++		if input.Action == mouseActionDoubleClick {
++			presses = 2
++		}
++
++		for range presses {
++			reports = append(reports,
++				mouseReport{kvmCommandSendMouseAbsoluteData, absoluteMouseReport(button, x, y)},
++				mouseReport{kvmCommandSendMouseAbsoluteData, absoluteMouseReport(0, x, y)},
++			)
++		}
++
++	case mouseActionDown:
++		if button == 0 {
++			return nil, nil, ErrMissingMouseButton
++		}
++
++		if input.X == nil && input.Y == nil {
++			reports = append(reports, mouseReport{kvmCommandSendMouseRelativeData, relativeMouseReport(button, 0, 0, 0)})
++		} else {
++			x, y, err := mouseCoordinates(input)
++			if err != nil {
++				return nil, nil, err
++			}
++
++			reports = append(reports, mouseReport{kvmCommandSendMouseAbsoluteData, absoluteMouseReport(button, x, y)})
++		}
++
++	case mouseActionUp:
++		if input.X == nil && input.Y == nil {
++			reports = append(reports, mouseReport{kvmCommandSendMouseRelativeData, relativeMouseReport(0, 0, 0, 0)})
++		} else {
++			x, y, err := mouseCoordinates(input)
++			if err != nil {
++				return nil, nil, err
++			}
++
++			reports = append(reports, mouseReport{kvmCommandSendMouseAbsoluteData, absoluteMouseReport(0, x, y)})
++		}
++
++	case mouseActionScroll:
++		if input.DX != 0 {
++			return nil, nil, ErrUnsupportedScrollDirection
++		}
++
++		for remaining := input.DY; remaining != 0; {
++			tick := max(-kvmMouseDeltaMax, min(kvmMouseDeltaMax, remaining))
++
++			reports = append(reports, mouseReport{kvmCommandSendMouseRelativeData, relativeMouseReport(0, 0, 0, tick)})
++
++			remaining -= tick
++		}
++
++	default:
++		return nil, nil, ErrUnknownMouseAction
++	}
++
++	port, err := serial.Open(input.Path, &serial.Mode{BaudRate: kvmBaudRate})
++	if err != nil {
++		return nil, nil, err
++	}
++	defer port.Close()
++
++	if err := port.SetReadTimeout(kvmResponseTimeout); err != nil {
++		return nil, nil, err
++	}
++
++	if err := port.ResetInputBuffer(); err != nil {
++		return nil, nil, err
++	}
++
++	if input.Action == mouseActionClick || input.Action == mouseActionDoubleClick {
++		defer writeCommand(port, kvmCommandSendMouseAbsoluteData, absoluteMouseReport(0, clampCoordinate(*input.X), clampCoordinate(*input.Y)))
++	}
++
++	for _, report := range reports {
++		if err := writeCommand(port, report.command, report.data); err != nil {
++			return nil, nil, err
++		}
++
++		time.Sleep(kvmMouseHoldDuration)
++	}
++
++	if input.VideoPath == "" {
++		return nil, nil, nil
++	}
++
++	time.Sleep(time.Duration(input.WaitMs) * time.Millisecond)
++
++	return s.TakeScreenshot(ctx, req, TakeScreenshotInput{
++		Path: input.VideoPath,
++	})
++}
+
