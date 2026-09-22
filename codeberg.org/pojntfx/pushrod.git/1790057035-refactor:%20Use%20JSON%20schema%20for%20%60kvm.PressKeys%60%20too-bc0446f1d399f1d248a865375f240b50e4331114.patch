@@ -1,0 +1,65 @@
+From bc0446f1d399f1d248a865375f240b50e4331114 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Mon, 21 Sep 2026 23:03:55 -0700
+Subject: [PATCH] refactor: Use JSON schema for `kvm.PressKeys` too
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/pkg/svc/kvm_press_keys.go b/pkg/svc/kvm_press_keys.go
+index 6cf632b4a6328df248449747b29ec9ad72fe7d52..b8472107129701689b62f58a9d9d7c115ef38c5d 100644
+--- a/pkg/svc/kvm_press_keys.go
++++ b/pkg/svc/kvm_press_keys.go
+@@ -3,10 +3,9 @@
+ import (
+ 	"context"
+ 	"errors"
+-	"fmt"
+-	"strings"
+ 	"time"
+ 
++	"github.com/google/jsonschema-go/jsonschema"
+ 	"github.com/modelcontextprotocol/go-sdk/mcp"
+ 	"go.bug.st/serial"
+ )
+@@ -17,6 +16,7 @@ 		Name:        "kvm.pressKeys",
+ 		Title:       "Press keys",
+ 		Description: "Press key combinations on a target through a KVM input device",
+ 		Annotations: &mcp.ToolAnnotations{DestructiveHint: &[]bool{true}[0]},
++		InputSchema: pressKeysSchema(),
+ 	}
+ 
+ 	ErrUnknownKey      = errors.New("unknown key")
+@@ -38,6 +38,22 @@ 	VideoPath string     `json:"videoPath,omitempty" jsonschema:"path that uniquely identifies the video capture device to take a screenshot with, empty to not take one"`
+ 	WaitMs    int        `json:"waitMs,omitempty" jsonschema:"how long to wait before taking the screenshot in milliseconds"`
+ }
+ 
++func pressKeysSchema() *jsonschema.Schema {
++	schema, err := jsonschema.For[PressKeysInput](nil)
++	if err != nil {
++		panic(err)
++	}
++
++	names := make([]any, 0, len(keyNames))
++	for _, name := range keyNames {
++		names = append(names, name)
++	}
++
++	schema.Properties["keys"].Items.Items.Enum = names
++
++	return schema
++}
++
+ type keyPress struct {
+ 	modifiers byte
+ 	keys      []byte
+@@ -57,8 +73,7 @@ 	for i, combination := range input.Keys {
+ 		for _, name := range combination {
+ 			code, ok := keyCodes[name]
+ 			if !ok {
+-				// Callers don't get the code values right on complex sequences, only returning all the options fixes it
+-				return nil, nil, fmt.Errorf("%w %q, pick one of: %s", ErrUnknownKey, name, strings.Join(keyNames, ", "))
++				return nil, nil, ErrUnknownKey
+ 			}
+ 
+ 			// Modifiers set bits in byte 0 instead of taking a key slot
+
