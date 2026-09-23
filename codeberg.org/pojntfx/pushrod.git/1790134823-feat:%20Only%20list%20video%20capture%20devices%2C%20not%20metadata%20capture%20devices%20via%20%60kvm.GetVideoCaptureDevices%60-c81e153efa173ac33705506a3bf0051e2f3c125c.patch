@@ -1,0 +1,62 @@
+From c81e153efa173ac33705506a3bf0051e2f3c125c Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Tue, 22 Sep 2026 20:40:23 -0700
+Subject: [PATCH] feat: Only list video capture devices, not metadata capture devices via `kvm.GetVideoCaptureDevices`
+---
+diff --git a/pkg/svc/kvm_get_video_capture_devices.go b/pkg/svc/kvm_get_video_capture_devices.go
+index 3b8fe35e53fb0811d73f24ca33f16db728d14984..1e8dfaf5b9fed757db8b2eaf26c787eab3823428 100644
+--- a/pkg/svc/kvm_get_video_capture_devices.go
++++ b/pkg/svc/kvm_get_video_capture_devices.go
+@@ -80,14 +80,19 @@
+ 	return USBIdentity{}, nil
+ }
+ 
+-func videoCaptureDeviceName(path string) (string, error) {
++func videoCaptureDevice(path string) (string, bool, error) {
+ 	device, err := webcam.Open(path)
+ 	if err != nil {
+-		return "", err
++		return "", false, err
+ 	}
+ 	defer device.Close()
+ 
+-	return device.GetName()
++	name, err := device.GetName()
++	if err != nil {
++		return "", false, err
++	}
++
++	return name, len(device.GetSupportedFrameSizes(videoCaptureFormatMJPEG)) > 0, nil
+ }
+ 
+ func (s *Service) GetVideoCaptureDevices(ctx context.Context, req *mcp.CallToolRequest, input struct{}) (*mcp.CallToolResult, *GetVideoCaptureDevicesOutput, error) {
+@@ -98,9 +103,9 @@ 	}
+ 
+ 	videoCaptureDevices := []VideoCaptureDevice{}
+ 	for _, path := range paths {
+-		vendorID, productID, err := usbIDs(path)
++		identity, err := videoUSBIdentity(path)
+ 		if err != nil {
+-			slog.Error("Could not resolve USB IDs of video capture device, skipping", "path", path, "err", err)
++			slog.Error("Could not resolve USB identity of video capture device, skipping", "path", path, "err", err)
+ 
+ 			continue
+ 		}
+@@ -110,10 +115,15 @@ 		if !isKVMVideo(identity.VendorID, identity.ProductID) {
+ 			continue
+ 		}
+ 
+-		name, err := videoCaptureDeviceName(path)
++		name, supportsMJPEG, err := videoCaptureDevice(path)
+ 		if err != nil {
+ 			slog.Error("Could not get name of video capture device, skipping", "path", path, "err", err)
+ 
++			continue
++		}
++
++		// Skip any metadata nodes; we only need the videos nodes
++		if !supportsMJPEG {
+ 			continue
+ 		}
+ 
+
