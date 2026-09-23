@@ -1,0 +1,193 @@
+From ad12d0922606d233d569dde1d679a32e25dbadc0 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Tue, 22 Sep 2026 20:38:34 -0700
+Subject: [PATCH] feat: Return vendor ID, product ID, manufacturer, product name and serial number for all device listing paths
+---
+diff --git a/pkg/svc/kvm_get_input_devices.go b/pkg/svc/kvm_get_input_devices.go
+index b0db2e9394bb4ea3f9be1875688d19c0b8ca08a2..af55303540edbe5c8eedbab1fcdaf2ae193059c3 100644
+--- a/pkg/svc/kvm_get_input_devices.go
++++ b/pkg/svc/kvm_get_input_devices.go
+@@ -19,6 +19,7 @@ )
+ 
+ type InputDevice struct {
+ 	Path string `json:"path" jsonschema:"path that uniquely identifies the input device until it gets unplugged"`
++	USBIdentity
+ }
+ 
+ type GetInputDevicesOutput struct {
+@@ -42,7 +43,8 @@ 			continue
+ 		}
+ 
+ 		inputDevices = append(inputDevices, InputDevice{
+-			Path: port.Name,
++			Path:        port.Name,
++			USBIdentity: usbIdentityFromPort(port),
+ 		})
+ 	}
+ 
+diff --git a/pkg/svc/kvm_get_video_capture_devices.go b/pkg/svc/kvm_get_video_capture_devices.go
+index 1fcdaf7a7c4a3a6adf95e1a9a369bfc07aa267c2..3b8fe35e53fb0811d73f24ca33f16db728d14984 100644
+--- a/pkg/svc/kvm_get_video_capture_devices.go
++++ b/pkg/svc/kvm_get_video_capture_devices.go
+@@ -28,6 +28,7 @@
+ type VideoCaptureDevice struct {
+ 	Path string `json:"path" jsonschema:"path that uniquely identifies the video capture device until it gets unplugged"`
+ 	Name string `json:"name" jsonschema:"name that the video capture device reports for itself"`
++	USBIdentity
+ }
+ 
+ type GetVideoCaptureDevicesOutput struct {
+@@ -38,10 +39,10 @@ func isKVMVideo(vendorID, productID string) bool {
+ 	return strings.EqualFold(vendorID, KVM_VIDEO_VENDOR_ID) && strings.EqualFold(productID, KVM_VIDEO_PRODUCT_ID)
+ }
+ 
+-func usbIDs(path string) (string, string, error) {
++func videoUSBIdentity(path string) (USBIdentity, error) {
+ 	devicePath, err := filepath.EvalSymlinks(filepath.Join(video4linuxClassPath, filepath.Base(path), "device"))
+ 	if err != nil {
+-		return "", "", err
++		return USBIdentity{}, err
+ 	}
+ 
+ 	// The node belongs to a USB interface, so walk up to the USB device that has the IDs
+@@ -56,10 +57,27 @@ 		if err != nil {
+ 			continue
+ 		}
+ 
+-		return strings.TrimSpace(string(vendorID)), strings.TrimSpace(string(productID)), nil
++		identity := USBIdentity{
++			VendorID:  strings.ToLower(strings.TrimSpace(string(vendorID))),
++			ProductID: strings.ToLower(strings.TrimSpace(string(productID))),
++		}
++
++		if manufacturer, err := os.ReadFile(filepath.Join(dir, "manufacturer")); err == nil {
++			identity.Manufacturer = strings.TrimSpace(string(manufacturer))
++		}
++
++		if product, err := os.ReadFile(filepath.Join(dir, "product")); err == nil {
++			identity.Product = strings.TrimSpace(string(product))
++		}
++
++		if serialNumber, err := os.ReadFile(filepath.Join(dir, "serial")); err == nil {
++			identity.SerialNumber = strings.TrimSpace(string(serialNumber))
++		}
++
++		return identity, nil
+ 	}
+ 
+-	return "", "", nil
++	return USBIdentity{}, nil
+ }
+ 
+ func videoCaptureDeviceName(path string) (string, error) {
+@@ -88,7 +106,7 @@ 			continue
+ 		}
+ 
+ 		// Skip regular webcams and other video devices
+-		if !isKVMVideo(vendorID, productID) {
++		if !isKVMVideo(identity.VendorID, identity.ProductID) {
+ 			continue
+ 		}
+ 
+@@ -100,8 +118,9 @@ 			continue
+ 		}
+ 
+ 		videoCaptureDevices = append(videoCaptureDevices, VideoCaptureDevice{
+-			Path: path,
+-			Name: name,
++			Path:        path,
++			Name:        name,
++			USBIdentity: identity,
+ 		})
+ 	}
+ 
+diff --git a/pkg/svc/relay_get_boards.go b/pkg/svc/relay_get_boards.go
+index 822c596185a27c9d41f061a478f8239e7d70533e..d44ba9b6f861cebb643ae95c7a9edebe838171d9 100644
+--- a/pkg/svc/relay_get_boards.go
++++ b/pkg/svc/relay_get_boards.go
+@@ -18,7 +18,8 @@ 	}
+ )
+ 
+ type Board struct {
+-	Path                    string        `json:"path" jsonschema:"path that uniquely identifies the relay board until it gets unplugged"`
++	Path string `json:"path" jsonschema:"path that uniquely identifies the relay board until it gets unplugged"`
++	USBIdentity
+ 	IsInUse                 bool          `json:"isInUse" jsonschema:"whether the relay board is currently in use or not"`
+ 	TotalRelayCycleDuration time.Duration `json:"totalRelayCycleDuration" jsonschema:"cycle duration after which the relay on time resets"`
+ 	OnRelayCycleDuration    time.Duration `json:"onRelayCycleDuration" jsonschema:"how long a relay can be on during the total cycle"`
+@@ -41,7 +42,14 @@
+ 	boards := make([]Board, len(devices))
+ 	for i, device := range devices {
+ 		boards[i] = Board{
+-			Path:                    device.Path(),
++			Path: device.Path(),
++			USBIdentity: USBIdentity{
++				VendorID:     formatUSBID(device.VendorId()),
++				ProductID:    formatUSBID(device.ProductId()),
++				Manufacturer: device.Manufacturer(),
++				Product:      device.Product(),
++				SerialNumber: device.SerialNumber(),
++			},
+ 			IsInUse:                 device.IsOpen(),
+ 			TotalRelayCycleDuration: s.totalRelayCycleDuration,
+ 			OnRelayCycleDuration:    s.onRelayCycleDuration,
+diff --git a/pkg/svc/serial_get_consoles.go b/pkg/svc/serial_get_consoles.go
+index d944b580d1120200ec59b1fdd983d9824077632a..863b0617e7815175f7752ec324243e7ffc7975dd 100644
+--- a/pkg/svc/serial_get_consoles.go
++++ b/pkg/svc/serial_get_consoles.go
+@@ -18,6 +18,7 @@ )
+ 
+ type Console struct {
+ 	Path string `json:"path" jsonschema:"path that uniquely identifies the serial console until it gets unplugged"`
++	USBIdentity
+ }
+ 
+ type GetConsolesOutput struct {
+@@ -37,7 +38,8 @@ 			continue
+ 		}
+ 
+ 		consoles = append(consoles, Console{
+-			Path: port.Name,
++			Path:        port.Name,
++			USBIdentity: usbIdentityFromPort(port),
+ 		})
+ 	}
+ 
+diff --git a/pkg/svc/usb.go b/pkg/svc/usb.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..41fec106f65f12125190725790af603612321e97
+--- /dev/null
++++ b/pkg/svc/usb.go
+@@ -0,0 +1,31 @@
++package svc
++
++import (
++	"fmt"
++	"strings"
++
++	"go.bug.st/serial/enumerator"
++)
++
++type USBIdentity struct {
++	VendorID     string `json:"vendorId" jsonschema:"USB vendor ID as a four-digit hex string"`
++	ProductID    string `json:"productId" jsonschema:"USB product ID as a four-digit hex string"`
++	Manufacturer string `json:"manufacturer" jsonschema:"manufacturer that the device reports for itself"`
++	Product      string `json:"product" jsonschema:"product name that the device reports for itself"`
++	SerialNumber string `json:"serialNumber" jsonschema:"serial number that the device reports, if any"`
++}
++
++func usbIdentityFromPort(port *enumerator.PortDetails) USBIdentity {
++	return USBIdentity{
++		VendorID:     strings.ToLower(port.VID),
++		ProductID:    strings.ToLower(port.PID),
++		Manufacturer: port.Manufacturer,
++		Product:      port.Product,
++		SerialNumber: port.SerialNumber,
++	}
++}
++
++func formatUSBID(id uint16) string {
++	// There isn't really a better way to do this that avoids `fmt`
++	return fmt.Sprintf("%04x", id)
++}
+
