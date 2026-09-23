@@ -1,0 +1,71 @@
+From 81cc456babf4ea3472f19c21211e8dca1d1f9960 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Tue, 22 Sep 2026 20:15:24 -0700
+Subject: [PATCH] feat: Add `serial.GetConsoles` tool to list connected UARTs
+---
+diff --git a/main.go b/main.go
+index fca39686f711e49b165326496a48338f43e7cc9b..76b8412b01644d685a92d20a35932e90f8380a24 100644
+--- a/main.go
++++ b/main.go
+@@ -46,6 +46,7 @@ 	mcp.AddTool(handler, svc.TakeScreenshotTool, service.TakeScreenshot)
+ 	mcp.AddTool(handler, svc.GetInputDevicesTool, service.GetInputDevices)
+ 	mcp.AddTool(handler, svc.PressKeysTool, service.PressKeys)
+ 	mcp.AddTool(handler, svc.SendMouseInputTool, service.SendMouseInput)
++	mcp.AddTool(handler, svc.GetConsolesTool, service.GetConsoles)
+ 
+ 	log.Println("Listening on", *laddr)
+ 
+diff --git a/pkg/svc/serial_get_consoles.go b/pkg/svc/serial_get_consoles.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..d944b580d1120200ec59b1fdd983d9824077632a
+--- /dev/null
++++ b/pkg/svc/serial_get_consoles.go
+@@ -0,0 +1,47 @@
++package svc
++
++import (
++	"context"
++
++	"github.com/modelcontextprotocol/go-sdk/mcp"
++	"go.bug.st/serial/enumerator"
++)
++
++var (
++	GetConsolesTool = &mcp.Tool{
++		Name:        "serial.getConsoles",
++		Title:       "Get serial consoles",
++		Description: "Get all currently connected serial consoles",
++		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true},
++	}
++)
++
++type Console struct {
++	Path string `json:"path" jsonschema:"path that uniquely identifies the serial console until it gets unplugged"`
++}
++
++type GetConsolesOutput struct {
++	Consoles []Console `json:"consoles" jsonschema:"connected serial consoles"`
++}
++
++func (s *Service) GetConsoles(ctx context.Context, req *mcp.CallToolRequest, input struct{}) (*mcp.CallToolResult, *GetConsolesOutput, error) {
++	ports, err := enumerator.GetDetailedPortsList()
++	if err != nil {
++		return nil, nil, err
++	}
++
++	consoles := []Console{}
++	for _, port := range ports {
++		if !port.IsUSB || isKVMInput(port) {
++			continue
++		}
++
++		consoles = append(consoles, Console{
++			Path: port.Name,
++		})
++	}
++
++	return nil, &GetConsolesOutput{
++		Consoles: consoles,
++	}, nil
++}
+
