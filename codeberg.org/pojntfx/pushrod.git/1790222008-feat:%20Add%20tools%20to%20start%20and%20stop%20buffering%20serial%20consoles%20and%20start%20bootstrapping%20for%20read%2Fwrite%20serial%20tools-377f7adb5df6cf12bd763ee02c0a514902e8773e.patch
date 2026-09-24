@@ -1,0 +1,424 @@
+From 377f7adb5df6cf12bd763ee02c0a514902e8773e Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Wed, 23 Sep 2026 20:53:28 -0700
+Subject: [PATCH] feat: Add tools to start and stop buffering serial consoles and start bootstrapping for read/write serial tools
+---
+diff --git a/main.go b/main.go
+index 76b8412b01644d685a92d20a35932e90f8380a24..d6aac83b475c194d18ee5fc90d8ef6cf3b5e7eaf 100644
+--- a/main.go
++++ b/main.go
+@@ -47,6 +47,9 @@ 	mcp.AddTool(handler, svc.GetInputDevicesTool, service.GetInputDevices)
+ 	mcp.AddTool(handler, svc.PressKeysTool, service.PressKeys)
+ 	mcp.AddTool(handler, svc.SendMouseInputTool, service.SendMouseInput)
+ 	mcp.AddTool(handler, svc.GetConsolesTool, service.GetConsoles)
++	mcp.AddTool(handler, svc.StartBufferingTool, service.StartBuffering)
++	mcp.AddTool(handler, svc.StopBufferingTool, service.StopBuffering)
++	mcp.AddTool(handler, svc.ClearBufferTool, service.ClearBuffer)
+ 
+ 	log.Println("Listening on", *laddr)
+ 
+diff --git a/pkg/svc/root.go b/pkg/svc/root.go
+index a6fbf1aa954f423fca6c238117dd19f211f443ab..9029c8fb581857f641f2adc9e612006ca44c7caa 100644
+--- a/pkg/svc/root.go
++++ b/pkg/svc/root.go
+@@ -38,6 +38,9 @@ 	totalRelayCycleDuration,
+ 	onRelayCycleDuration time.Duration
+ 
+ 	relayCycles [4]*relayCycle
++
++	consolesLock *sync.Mutex
++	consoles     map[string]*serialConsole
+ }
+ 
+ func NewService(baseCtx context.Context, shutdownTimeout, totalRelayCycleDuration, onRelayCycleDuration time.Duration) *Service {
+@@ -64,6 +67,9 @@ 		wg: &sync.WaitGroup{},
+ 
+ 		totalRelayCycleDuration: totalRelayCycleDuration,
+ 		onRelayCycleDuration:    onRelayCycleDuration,
++
++		consolesLock: &sync.Mutex{},
++		consoles:     map[string]*serialConsole{},
+ 
+ 		relayCycles: [4]*relayCycle{
+ 			{
+@@ -111,6 +117,25 @@ 				return
+ 			}
+ 		}
+ 	}()
++
++	s.wg.Go(func() {
++		<-s.baseCtx.Done()
++
++		s.consolesLock.Lock()
++		defer s.consolesLock.Unlock()
++
++		for _, console := range s.consoles {
++			func() {
++				console.lock.Lock()
++				defer console.lock.Unlock()
++
++				if console.port != nil {
++					console.port.Close()
++					console.port = nil
++				}
++			}()
++		}
++	})
+ 
+ 	return s
+ }
+diff --git a/pkg/svc/serial.go b/pkg/svc/serial.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..5dd099e8e560f728eb8e0b6b8120d79db262d22f
+--- /dev/null
++++ b/pkg/svc/serial.go
+@@ -0,0 +1,108 @@
++package svc
++
++import (
++	"io"
++	"log/slog"
++	"slices"
++	"sync"
++
++	"go.bug.st/serial"
++	"go.bug.st/serial/enumerator"
++)
++
++const (
++	consoleBaudRate = 115200
++
++	maxConsoleBuffer = 1 << 20
++)
++
++type serialConsole struct {
++	path     string
++	identity USBIdentity
++
++	port serial.Port
++
++	buffer []byte
++
++	lock *sync.Mutex
++}
++
++func newSerialConsole(port *enumerator.PortDetails) *serialConsole {
++	return &serialConsole{
++		path:     port.Name,
++		identity: usbIdentityFromPort(port),
++		lock:     &sync.Mutex{},
++	}
++}
++
++func (c *serialConsole) Write(data []byte) (int, error) {
++	c.lock.Lock()
++	defer c.lock.Unlock()
++
++	c.buffer = append(c.buffer, data...)
++
++	if len(c.buffer) > maxConsoleBuffer {
++		c.buffer = slices.Clone(c.buffer[len(c.buffer)-maxConsoleBuffer/2:])
++	}
++
++	return len(data), nil
++}
++
++func (c *serialConsole) state() Console {
++	return Console{
++		Path:          c.path,
++		USBIdentity:   c.identity,
++		IsBuffering:   c.port != nil,
++		BufferedBytes: len(c.buffer),
++	}
++}
++
++func (s *Service) getConsole(port *enumerator.PortDetails) *serialConsole {
++	s.consolesLock.Lock()
++	defer s.consolesLock.Unlock()
++
++	console, ok := s.consoles[port.Name]
++	if !ok {
++		console = newSerialConsole(port)
++		s.consoles[port.Name] = console
++	}
++
++	return console
++}
++
++func (s *Service) openConsoleLocked(console *serialConsole) error {
++	if console.port != nil {
++		return nil
++	}
++
++	port, err := serial.Open(console.path, &serial.Mode{BaudRate: consoleBaudRate, DataBits: 8})
++	if err != nil {
++		return err
++	}
++
++	console.port = port
++
++	s.wg.Go(func() {
++		readLoop(console, port)
++	})
++
++	return nil
++}
++
++func readLoop(console *serialConsole, port serial.Port) {
++	defer port.Close()
++
++	_, err := io.Copy(console, port)
++
++	console.lock.Lock()
++	if console.port != port {
++		console.lock.Unlock()
++
++		return
++	}
++
++	console.port = nil
++	console.lock.Unlock()
++
++	slog.Error("Could not read from serial console, stopping buffering", "path", console.path, "err", err)
++}
+diff --git a/pkg/svc/serial_clear_buffer.go b/pkg/svc/serial_clear_buffer.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..e7afa391badb33e108f495477dd0c0070fef5f69
+--- /dev/null
++++ b/pkg/svc/serial_clear_buffer.go
+@@ -0,0 +1,36 @@
++package svc
++
++import (
++	"context"
++
++	"github.com/modelcontextprotocol/go-sdk/mcp"
++)
++
++var (
++	ClearBufferTool = &mcp.Tool{
++		Name:        "serial.clearBuffer",
++		Title:       "Clear serial console buffer",
++		Description: "Discard the captured output history of a serial console",
++		Annotations: &mcp.ToolAnnotations{DestructiveHint: &[]bool{true}[0]},
++	}
++)
++
++type ClearBufferInput struct {
++	Path string `json:"path" jsonschema:"path that uniquely identifies the serial console until it gets unplugged"`
++}
++
++func (s *Service) ClearBuffer(ctx context.Context, req *mcp.CallToolRequest, input ClearBufferInput) (*mcp.CallToolResult, *GetConsolesOutput, error) {
++	console, err := s.findConsole(input.Path)
++	if err != nil {
++		return nil, nil, err
++	}
++
++	console.lock.Lock()
++	defer console.lock.Unlock()
++
++	console.buffer = nil
++
++	return nil, &GetConsolesOutput{
++		Consoles: []Console{console.state()},
++	}, nil
++}
+diff --git a/pkg/svc/serial_get_consoles.go b/pkg/svc/serial_get_consoles.go
+index 863b0617e7815175f7752ec324243e7ffc7975dd..5352055ac3a1af63a8b89a63575986110c190059 100644
+--- a/pkg/svc/serial_get_consoles.go
++++ b/pkg/svc/serial_get_consoles.go
+@@ -2,6 +2,7 @@ package svc
+ 
+ import (
+ 	"context"
++	"errors"
+ 
+ 	"github.com/modelcontextprotocol/go-sdk/mcp"
+ 	"go.bug.st/serial/enumerator"
+@@ -14,33 +15,90 @@ 		Title:       "Get serial consoles",
+ 		Description: "Get all currently connected serial consoles",
+ 		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true},
+ 	}
++
++	ErrCouldNotFindConsole = errors.New("could not find serial console")
+ )
+ 
+ type Console struct {
+ 	Path string `json:"path" jsonschema:"path that uniquely identifies the serial console until it gets unplugged"`
+ 	USBIdentity
++	IsBuffering   bool `json:"isBuffering" jsonschema:"whether this server is currently capturing the serial console's output; while false, anything the target prints is lost, so start buffering (serial.startBuffering) before resetting or powering on the target to capture its boot log"`
++	BufferedBytes int  `json:"bufferedBytes" jsonschema:"how many bytes of captured output history the server holds for the serial console"`
+ }
+ 
+ type GetConsolesOutput struct {
+ 	Consoles []Console `json:"consoles" jsonschema:"connected serial consoles"`
+ }
+ 
+-func (s *Service) GetConsoles(ctx context.Context, req *mcp.CallToolRequest, input struct{}) (*mcp.CallToolResult, *GetConsolesOutput, error) {
++func (s *Service) listConsoles() ([]Console, error) {
+ 	ports, err := enumerator.GetDetailedPortsList()
+ 	if err != nil {
+-		return nil, nil, err
++		return nil, err
+ 	}
+ 
+ 	consoles := []Console{}
++	enumerated := map[string]bool{}
+ 	for _, port := range ports {
+ 		if !port.IsUSB || isKVMInput(port) {
+ 			continue
+ 		}
+ 
+-		consoles = append(consoles, Console{
+-			Path:        port.Name,
+-			USBIdentity: usbIdentityFromPort(port),
+-		})
++		enumerated[port.Name] = true
++
++		console := s.getConsole(port)
++
++		console.lock.Lock()
++		state := console.state()
++		console.lock.Unlock()
++
++		consoles = append(consoles, state)
++	}
++
++	s.pruneConsoles(enumerated)
++
++	return consoles, nil
++}
++
++func (s *Service) pruneConsoles(enumerated map[string]bool) {
++	s.consolesLock.Lock()
++	defer s.consolesLock.Unlock()
++
++	for path, console := range s.consoles {
++		if enumerated[path] {
++			continue
++		}
++
++		console.lock.Lock()
++		stopped := console.port == nil
++		console.lock.Unlock()
++
++		if stopped {
++			delete(s.consoles, path)
++		}
++	}
++}
++
++func (s *Service) findConsole(path string) (*serialConsole, error) {
++	ports, err := enumerator.GetDetailedPortsList()
++	if err != nil {
++		return nil, err
++	}
++
++	for _, port := range ports {
++		if !port.IsUSB || isKVMInput(port) || port.Name != path {
++			continue
++		}
++
++		return s.getConsole(port), nil
++	}
++
++	return nil, ErrCouldNotFindConsole
++}
++
++func (s *Service) GetConsoles(ctx context.Context, req *mcp.CallToolRequest, input struct{}) (*mcp.CallToolResult, *GetConsolesOutput, error) {
++	consoles, err := s.listConsoles()
++	if err != nil {
++		return nil, nil, err
+ 	}
+ 
+ 	return nil, &GetConsolesOutput{
+diff --git a/pkg/svc/serial_start_buffering.go b/pkg/svc/serial_start_buffering.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..a76fca8bbe70497feb0fb1b85ec1a9ae7cbf0954
+--- /dev/null
++++ b/pkg/svc/serial_start_buffering.go
+@@ -0,0 +1,38 @@
++package svc
++
++import (
++	"context"
++
++	"github.com/modelcontextprotocol/go-sdk/mcp"
++)
++
++var (
++	StartBufferingTool = &mcp.Tool{
++		Name:        "serial.startBuffering",
++		Title:       "Start buffering serial console",
++		Description: "Start capturing a serial console's output, opening the console if needed; call this before resetting or powering on the target so that its boot log is captured. Consoles keep buffering until serial.stopBuffering is called or the server exits",
++		Annotations: &mcp.ToolAnnotations{DestructiveHint: &[]bool{false}[0]},
++	}
++)
++
++type StartBufferingInput struct {
++	Path string `json:"path" jsonschema:"path that uniquely identifies the serial console until it gets unplugged"`
++}
++
++func (s *Service) StartBuffering(ctx context.Context, req *mcp.CallToolRequest, input StartBufferingInput) (*mcp.CallToolResult, *GetConsolesOutput, error) {
++	console, err := s.findConsole(input.Path)
++	if err != nil {
++		return nil, nil, err
++	}
++
++	console.lock.Lock()
++	defer console.lock.Unlock()
++
++	if err := s.openConsoleLocked(console); err != nil {
++		return nil, nil, err
++	}
++
++	return nil, &GetConsolesOutput{
++		Consoles: []Console{console.state()},
++	}, nil
++}
+diff --git a/pkg/svc/serial_stop_buffering.go b/pkg/svc/serial_stop_buffering.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..2ea4d92c85bc9ce8c010afef2341cef0cae1c1ed
+--- /dev/null
++++ b/pkg/svc/serial_stop_buffering.go
+@@ -0,0 +1,39 @@
++package svc
++
++import (
++	"context"
++
++	"github.com/modelcontextprotocol/go-sdk/mcp"
++)
++
++var (
++	StopBufferingTool = &mcp.Tool{
++		Name:        "serial.stopBuffering",
++		Title:       "Stop buffering serial console",
++		Description: "Stop capturing a serial console's output and close the console; the output captured so far stays available",
++		Annotations: &mcp.ToolAnnotations{DestructiveHint: &[]bool{false}[0]},
++	}
++)
++
++type StopBufferingInput struct {
++	Path string `json:"path" jsonschema:"path that uniquely identifies the serial console until it gets unplugged"`
++}
++
++func (s *Service) StopBuffering(ctx context.Context, req *mcp.CallToolRequest, input StopBufferingInput) (*mcp.CallToolResult, *GetConsolesOutput, error) {
++	console, err := s.findConsole(input.Path)
++	if err != nil {
++		return nil, nil, err
++	}
++
++	console.lock.Lock()
++	defer console.lock.Unlock()
++
++	if console.port != nil {
++		console.port.Close()
++		console.port = nil
++	}
++
++	return nil, &GetConsolesOutput{
++		Consoles: []Console{console.state()},
++	}, nil
++}
+
