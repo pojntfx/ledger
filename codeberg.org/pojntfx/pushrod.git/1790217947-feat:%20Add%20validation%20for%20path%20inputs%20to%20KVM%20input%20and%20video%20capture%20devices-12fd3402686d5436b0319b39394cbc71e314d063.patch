@@ -1,0 +1,246 @@
+From 12fd3402686d5436b0319b39394cbc71e314d063 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Wed, 23 Sep 2026 19:45:47 -0700
+Subject: [PATCH] feat: Add validation for path inputs to KVM input and video capture devices
+---
+diff --git a/pkg/svc/kvm_get_input_devices.go b/pkg/svc/kvm_get_input_devices.go
+index af55303540edbe5c8eedbab1fcdaf2ae193059c3..53e55fb7dd955937206a2ddeb62a85144086b6c7 100644
+--- a/pkg/svc/kvm_get_input_devices.go
++++ b/pkg/svc/kvm_get_input_devices.go
+@@ -2,6 +2,7 @@ package svc
+ 
+ import (
+ 	"context"
++	"errors"
+ 	"strings"
+ 
+ 	"github.com/modelcontextprotocol/go-sdk/mcp"
+@@ -15,6 +16,8 @@ 		Title:       "Get input devices",
+ 		Description: "Get all currently connected KVM devices that can emulate keyboard and mouse input on a target",
+ 		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true},
+ 	}
++
++	ErrCouldNotFindInputDevice = errors.New("could not find input device")
+ )
+ 
+ type InputDevice struct {
+@@ -30,10 +33,10 @@ func isKVMInput(port *enumerator.PortDetails) bool {
+ 	return strings.EqualFold(port.VID, KVM_INPUT_VENDOR_ID) && strings.EqualFold(port.PID, KVM_INPUT_PRODUCT_ID)
+ }
+ 
+-func (s *Service) GetInputDevices(ctx context.Context, req *mcp.CallToolRequest, input struct{}) (*mcp.CallToolResult, *GetInputDevicesOutput, error) {
++func listInputDevices() ([]InputDevice, error) {
+ 	ports, err := enumerator.GetDetailedPortsList()
+ 	if err != nil {
+-		return nil, nil, err
++		return nil, err
+ 	}
+ 
+ 	inputDevices := []InputDevice{}
+@@ -46,6 +49,30 @@ 		inputDevices = append(inputDevices, InputDevice{
+ 			Path:        port.Name,
+ 			USBIdentity: usbIdentityFromPort(port),
+ 		})
++	}
++
++	return inputDevices, nil
++}
++
++func findInputDevice(path string) (*InputDevice, error) {
++	inputDevices, err := listInputDevices()
++	if err != nil {
++		return nil, err
++	}
++
++	for _, inputDevice := range inputDevices {
++		if inputDevice.Path == path {
++			return &inputDevice, nil
++		}
++	}
++
++	return nil, ErrCouldNotFindInputDevice
++}
++
++func (s *Service) GetInputDevices(ctx context.Context, req *mcp.CallToolRequest, input struct{}) (*mcp.CallToolResult, *GetInputDevicesOutput, error) {
++	inputDevices, err := listInputDevices()
++	if err != nil {
++		return nil, nil, err
+ 	}
+ 
+ 	return nil, &GetInputDevicesOutput{
+diff --git a/pkg/svc/kvm_get_video_capture_devices.go b/pkg/svc/kvm_get_video_capture_devices.go
+index 1e8dfaf5b9fed757db8b2eaf26c787eab3823428..51329e1937ee8561eaf29d2734ae5981693cce55 100644
+--- a/pkg/svc/kvm_get_video_capture_devices.go
++++ b/pkg/svc/kvm_get_video_capture_devices.go
+@@ -2,6 +2,7 @@ package svc
+ 
+ import (
+ 	"context"
++	"errors"
+ 	"log/slog"
+ 	"os"
+ 	"path/filepath"
+@@ -18,6 +19,8 @@ 		Title:       "Get video capture devices",
+ 		Description: "Get all currently connected KVM video capture devices",
+ 		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true},
+ 	}
++
++	ErrCouldNotFindVideoCaptureDevice = errors.New("could not find video capture device")
+ )
+ 
+ const (
+@@ -95,43 +98,76 @@
+ 	return name, len(device.GetSupportedFrameSizes(videoCaptureFormatMJPEG)) > 0, nil
+ }
+ 
+-func (s *Service) GetVideoCaptureDevices(ctx context.Context, req *mcp.CallToolRequest, input struct{}) (*mcp.CallToolResult, *GetVideoCaptureDevicesOutput, error) {
++func videoCaptureDeviceAt(path string) (VideoCaptureDevice, bool, error) {
++	identity, err := videoUSBIdentity(path)
++	if err != nil {
++		return VideoCaptureDevice{}, false, err
++	}
++
++	// Skip regular webcams and other video devices
++	if !isKVMVideo(identity.VendorID, identity.ProductID) {
++		return VideoCaptureDevice{}, false, nil
++	}
++
++	name, supportsMJPEG, err := videoCaptureDevice(path)
++	if err != nil {
++		return VideoCaptureDevice{}, false, err
++	}
++
++	// Skip nodes that cannot capture MJPEG, such as metadata nodes
++	if !supportsMJPEG {
++		return VideoCaptureDevice{}, false, nil
++	}
++
++	return VideoCaptureDevice{
++		Path:        path,
++		Name:        name,
++		USBIdentity: identity,
++	}, true, nil
++}
++
++func listVideoCaptureDevices() ([]VideoCaptureDevice, error) {
+ 	paths, err := filepath.Glob(videoDeviceGlob)
+ 	if err != nil {
+-		return nil, nil, err
++		return nil, err
+ 	}
+ 
+ 	videoCaptureDevices := []VideoCaptureDevice{}
+ 	for _, path := range paths {
+-		identity, err := videoUSBIdentity(path)
++		videoCaptureDevice, ok, err := videoCaptureDeviceAt(path)
+ 		if err != nil {
+-			slog.Error("Could not resolve USB identity of video capture device, skipping", "path", path, "err", err)
++			slog.Error("Could not get video capture device, skipping", "path", path, "err", err)
+ 
+ 			continue
+ 		}
+ 
+-		// Skip regular webcams and other video devices
+-		if !isKVMVideo(identity.VendorID, identity.ProductID) {
++		if !ok {
+ 			continue
+ 		}
+ 
+-		name, supportsMJPEG, err := videoCaptureDevice(path)
+-		if err != nil {
+-			slog.Error("Could not get name of video capture device, skipping", "path", path, "err", err)
++		videoCaptureDevices = append(videoCaptureDevices, videoCaptureDevice)
++	}
+ 
+-			continue
+-		}
++	return videoCaptureDevices, nil
++}
+ 
+-		// Skip any metadata nodes; we only need the videos nodes
+-		if !supportsMJPEG {
+-			continue
+-		}
++func findVideoCaptureDevice(path string) (*VideoCaptureDevice, error) {
++	videoCaptureDevice, ok, err := videoCaptureDeviceAt(path)
++	if err != nil {
++		return nil, err
++	}
++
++	if !ok {
++		return nil, ErrCouldNotFindVideoCaptureDevice
++	}
++
++	return &videoCaptureDevice, nil
++}
+ 
+-		videoCaptureDevices = append(videoCaptureDevices, VideoCaptureDevice{
+-			Path:        path,
+-			Name:        name,
+-			USBIdentity: identity,
+-		})
++func (s *Service) GetVideoCaptureDevices(ctx context.Context, req *mcp.CallToolRequest, input struct{}) (*mcp.CallToolResult, *GetVideoCaptureDevicesOutput, error) {
++	videoCaptureDevices, err := listVideoCaptureDevices()
++	if err != nil {
++		return nil, nil, err
+ 	}
+ 
+ 	return nil, &GetVideoCaptureDevicesOutput{
+diff --git a/pkg/svc/kvm_press_keys.go b/pkg/svc/kvm_press_keys.go
+index b8472107129701689b62f58a9d9d7c115ef38c5d..d7b68788850a0818ce7c6e7482bbc59caa5b634d 100644
+--- a/pkg/svc/kvm_press_keys.go
++++ b/pkg/svc/kvm_press_keys.go
+@@ -68,6 +68,16 @@ 	return report
+ }
+ 
+ func (s *Service) PressKeys(ctx context.Context, req *mcp.CallToolRequest, input PressKeysInput) (*mcp.CallToolResult, any, error) {
++	if _, err := findInputDevice(input.Path); err != nil {
++		return nil, nil, err
++	}
++
++	if input.VideoPath != "" {
++		if _, err := findVideoCaptureDevice(input.VideoPath); err != nil {
++			return nil, nil, err
++		}
++	}
++
+ 	presses := make([]keyPress, len(input.Keys))
+ 	for i, combination := range input.Keys {
+ 		for _, name := range combination {
+diff --git a/pkg/svc/kvm_send_mouse_input.go b/pkg/svc/kvm_send_mouse_input.go
+index 54fa054a70acca3f01fb77a518c9fc18b1a36b86..e82742e798b315da3f322ad84fc13f867d8696a7 100644
+--- a/pkg/svc/kvm_send_mouse_input.go
++++ b/pkg/svc/kvm_send_mouse_input.go
+@@ -92,6 +92,16 @@ 	return clampCoordinate(*input.X), clampCoordinate(*input.Y), nil
+ }
+ 
+ func (s *Service) SendMouseInput(ctx context.Context, req *mcp.CallToolRequest, input SendMouseInputInput) (*mcp.CallToolResult, any, error) {
++	if _, err := findInputDevice(input.Path); err != nil {
++		return nil, nil, err
++	}
++
++	if input.VideoPath != "" {
++		if _, err := findVideoCaptureDevice(input.VideoPath); err != nil {
++			return nil, nil, err
++		}
++	}
++
+ 	button := mouseButtons[input.Button]
+ 
+ 	reports := []mouseReport{}
+diff --git a/pkg/svc/kvm_take_screenshot.go b/pkg/svc/kvm_take_screenshot.go
+index 8a3724c067f57b184c7a7292f34426505298cfcf..c7ce08c41e3d91c69e07089a708b640bd1f99eb6 100644
+--- a/pkg/svc/kvm_take_screenshot.go
++++ b/pkg/svc/kvm_take_screenshot.go
+@@ -49,6 +49,10 @@ 	return screenshot, nil
+ }
+ 
+ func (s *Service) TakeScreenshot(ctx context.Context, req *mcp.CallToolRequest, input TakeScreenshotInput) (*mcp.CallToolResult, any, error) {
++	if _, err := findVideoCaptureDevice(input.Path); err != nil {
++		return nil, nil, err
++	}
++
+ 	device, err := webcam.Open(input.Path)
+ 	if err != nil {
+ 		return nil, nil, err
+
