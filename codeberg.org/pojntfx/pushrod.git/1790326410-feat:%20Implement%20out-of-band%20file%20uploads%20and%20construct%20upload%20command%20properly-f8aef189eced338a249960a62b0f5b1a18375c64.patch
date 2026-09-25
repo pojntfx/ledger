@@ -1,0 +1,300 @@
+From f8aef189eced338a249960a62b0f5b1a18375c64 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Fri, 25 Sep 2026 01:53:30 -0700
+Subject: [PATCH] feat: Implement out-of-band file uploads and construct upload command properly
+---
+diff --git a/go.mod b/go.mod
+index eeb70af1de18ba63f0d4d0522447f8d525463bcf..875ed4d06f851d70f0f1c3afbc834bc1ae1ab083 100644
+--- a/go.mod
++++ b/go.mod
+@@ -3,9 +3,11 @@
+ go 1.26.4
+ 
+ require (
++	al.essio.dev/pkg/shellescape v1.6.1
+ 	github.com/adrg/xdg v0.5.3
+ 	github.com/blackjack/webcam v0.6.1
+ 	github.com/google/jsonschema-go v0.4.3
++	github.com/google/renameio/v2 v2.0.2
+ 	github.com/modelcontextprotocol/go-sdk v1.8.0
+ 	go.bug.st/serial v1.8.0
+ 	golang.org/x/mobile v0.0.0-20260908204917-8b95e45f8d3e
+diff --git a/go.sum b/go.sum
+index a0260450a8230910cfb2010786ffe84046c28832..e5f697c4c2fcaee6a41e33aa480c067ebddfd792 100644
+--- a/go.sum
++++ b/go.sum
+@@ -1,3 +1,5 @@
++al.essio.dev/pkg/shellescape v1.6.1 h1:ki/kUs/D3dDbZpyKbNRhwY/ajgAEIJFagVKDWKnofQ8=
++al.essio.dev/pkg/shellescape v1.6.1/go.mod h1:6sIqp7X2P6mThCQ7twERpZTuigpr6KbZWtls1U8I890=
+ github.com/adrg/xdg v0.5.3 h1:xRnxJXne7+oWDatRhR1JLnvuccuIeCoBu2rtuLqQB78=
+ github.com/adrg/xdg v0.5.3/go.mod h1:nlTsY+NNiCBGCK2tpm09vRqfVzrc2fLmXGpBLF0zlTQ=
+ github.com/blackjack/webcam v0.6.1 h1:K0T6Q0zto23U99gNAa5q/hFoye6uGcKr2aE6hFoxVoE=
+@@ -12,6 +14,10 @@ github.com/google/go-cmp v0.7.0 h1:wk8382ETsv4JYUZwIsn6YpYiWiBsYLSJiTsyBybVuN8=
+ github.com/google/go-cmp v0.7.0/go.mod h1:pXiqmnSA92OHEEa9HXL2W4E7lf9JzCmGVUdgjX3N/iU=
+ github.com/google/jsonschema-go v0.4.3 h1:/DBOLZTfDow7pe2GmaJNhltueGTtDKICi8V8p+DQPd0=
+ github.com/google/jsonschema-go v0.4.3/go.mod h1:r5quNTdLOYEz95Ru18zA0ydNbBuYoo9tgaYcxEYhJVE=
++github.com/google/renameio/v2 v2.0.2 h1:qKZs+tfn+arruZZhQ7TKC/ergJunuJicWS6gLDt/dGw=
++github.com/google/renameio/v2 v2.0.2/go.mod h1:OX+G6WHHpHq3NVj7cAOleLOwJfcQ1s3uUJQCrr78SWo=
++github.com/google/shlex v0.0.0-20191202100458-e7afc7fbc510 h1:El6M4kTTCOh6aBiKaUGG7oYTSPP8MxqL4YI3kZKwcP4=
++github.com/google/shlex v0.0.0-20191202100458-e7afc7fbc510/go.mod h1:pupxD2MaaD3pAXIBCelhxNneeOaAeabZDe5s4K6zSpQ=
+ github.com/modelcontextprotocol/go-sdk v1.8.0 h1:KIvahhYqwtbeniWVPs3TcXEA7b8jEtwfBpOTAI+Urx4=
+ github.com/modelcontextprotocol/go-sdk v1.8.0/go.mod h1:dL7u98E/zjJTGzEq+j30jQ8K2k1mb6LeAH4inEcSGts=
+ github.com/pmezard/go-difflib v1.0.0 h1:4DBwDE0NGyQoBHbLQYPwSUPoCMWR5BEzIk/f1lZbAQM=
+diff --git a/main.go b/main.go
+index 5e3981d60b994d9c6df7803676a3aa8f5dc57757..7ab615bc4577dc27ebad0ef98b61c35758746517 100644
+--- a/main.go
++++ b/main.go
+@@ -8,6 +8,7 @@ 	"log"
+ 	"log/slog"
+ 	"net"
+ 	"net/http"
++	"net/url"
+ 	"os"
+ 	"os/signal"
+ 	"path/filepath"
+@@ -21,7 +22,7 @@ )
+ 
+ func main() {
+ 	laddr := flag.String("laddr", ":1337", "Listen address")
+-	disableLocalhostProtection := flag.Bool("disable-localhost-protection", false, "Disable the automatic DNS rebinding protection. If you do not understand the security risk, keep the protection enabled. See https://modelcontextprotocol.io/specification/2025-11-25/basic/security_best_practices#local-mcp-server-compromise")
++	publicURL := flag.String("public-url", "", "Base URL to advertise for uploads, empty to use the request address. Setting it disables the localhost protection. See https://modelcontextprotocol.io/specification/2025-11-25/basic/security_best_practices#local-mcp-server-compromise")
+ 
+ 	flag.Parse()
+ 
+@@ -33,10 +34,15 @@ 	if err := os.MkdirAll(filesDir, os.ModePerm); err != nil {
+ 		panic(err)
+ 	}
+ 
++	advertisedURL, err := url.Parse(*publicURL)
++	if err != nil {
++		panic(err)
++	}
++
+ 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+ 	defer cancel()
+ 
+-	service := svc.NewService(ctx, logger, time.Second*10, time.Minute, time.Second*5, filesDir)
++	service := svc.NewService(ctx, logger, time.Second*10, time.Minute, time.Second*5, filesDir, advertisedURL)
+ 
+ 	handler := mcp.NewServer(
+ 		&mcp.Implementation{
+@@ -74,16 +80,23 @@ 	mcp.AddTool(handler, svc.DeleteFileTool, service.DeleteFile)
+ 
+ 	log.Println("Listening on", *laddr)
+ 
++	mcpHandler := mcp.NewStreamableHTTPHandler(
++		func(r *http.Request) *mcp.Server {
++			return handler
++		},
++		&mcp.StreamableHTTPOptions{
++			DisableLocalhostProtection: *publicURL != "",
++		},
++	)
++
++	mux := http.NewServeMux()
++	mux.HandleFunc("PUT "+svc.FilesUploadPath+"{name}", service.HandleUpload)
++	mux.HandleFunc("POST "+svc.FilesUploadPath+"{name}", service.HandleUpload)
++	mux.Handle("/{$}", mcpHandler)
++
+ 	server := &http.Server{
+-		Addr: *laddr,
+-		Handler: mcp.NewStreamableHTTPHandler(
+-			func(r *http.Request) *mcp.Server {
+-				return handler
+-			},
+-			&mcp.StreamableHTTPOptions{
+-				DisableLocalhostProtection: *disableLocalhostProtection,
+-			},
+-		),
++		Addr:    *laddr,
++		Handler: service.WithRequestBaseURL(mux),
+ 		BaseContext: func(l net.Listener) context.Context {
+ 			return ctx
+ 		},
+diff --git a/pkg/svc/files.go b/pkg/svc/files.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..9a79e28f2f6721f83835d58b7bdce69f23cbb4bc
+--- /dev/null
++++ b/pkg/svc/files.go
+@@ -0,0 +1,85 @@
++package svc
++
++import (
++	"context"
++	"errors"
++	"fmt"
++	"io"
++	"net/http"
++	"net/url"
++	"os"
++	"strings"
++
++	"al.essio.dev/pkg/shellescape"
++	"github.com/google/renameio/v2"
++)
++
++const FilesUploadPath = "/files/"
++
++var (
++	ErrInvalidFileName = errors.New("invalid file name")
++)
++
++type baseURLContextKey struct{}
++
++func (s *Service) WithRequestBaseURL(next http.Handler) http.Handler {
++	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		baseURL := s.publicURL
++		if baseURL.Host == "" {
++			// No proxy support or anything, the user is expected to
++			// set the public URL flag for complex deployments
++			baseURL = &url.URL{Scheme: "http", Host: r.Host}
++		}
++
++		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), baseURLContextKey{}, baseURL)))
++	})
++}
++
++func (s *Service) uploadCommand(ctx context.Context) string {
++	baseURL, ok := ctx.Value(baseURLContextKey{}).(*url.URL)
++	if !ok {
++		return ""
++	}
++
++	return fmt.Sprintf("curl --upload-file LOCAL_PATH %s", shellescape.Quote(baseURL.JoinPath(FilesUploadPath, "NAME").String()))
++}
++
++func (s *Service) HandleUpload(w http.ResponseWriter, r *http.Request) {
++	name := r.PathValue("name")
++	// Path traversal etc. is handled by `os.OpenRoot` below, this is
++	// just to prevent some additional patterns we'd like to avoid.
++	// Also see `files.getFiles` tool where we hide hidden files
++	if strings.Contains(name, "/") || strings.HasPrefix(name, ".") {
++		http.Error(w, ErrInvalidFileName.Error(), http.StatusBadRequest)
++
++		return
++	}
++
++	if err := s.storeUpload(name, r.Body); err != nil {
++		http.Error(w, err.Error(), http.StatusInternalServerError)
++
++		return
++	}
++
++	w.WriteHeader(http.StatusNoContent)
++}
++
++func (s *Service) storeUpload(name string, body io.Reader) error {
++	root, err := os.OpenRoot(s.filesDir)
++	if err != nil {
++		return err
++	}
++	defer root.Close()
++
++	pending, err := renameio.NewPendingFile(name, renameio.WithRoot(root))
++	if err != nil {
++		return err
++	}
++	defer pending.Cleanup()
++
++	if _, err := io.Copy(pending, body); err != nil {
++		return err
++	}
++
++	return pending.CloseAtomicallyReplace()
++}
+diff --git a/pkg/svc/files_delete_file.go b/pkg/svc/files_delete_file.go
+index 2dc152251bfca44f45f474bf2bcccf37a701d72c..745043b09e7cc300765331052233777b4e8a2b5b 100644
+--- a/pkg/svc/files_delete_file.go
++++ b/pkg/svc/files_delete_file.go
+@@ -37,6 +37,7 @@ 		return nil, nil, err
+ 	}
+ 
+ 	return nil, &GetFilesOutput{
+-		Files: files,
++		Files:         files,
++		UploadCommand: s.uploadCommand(ctx),
+ 	}, nil
+ }
+diff --git a/pkg/svc/files_get_files.go b/pkg/svc/files_get_files.go
+index da5b3f536ee912ff2939584411561eb5333be293..1ef86d916a4a13b65378ac6e657ddb1c366da2ab 100644
+--- a/pkg/svc/files_get_files.go
++++ b/pkg/svc/files_get_files.go
+@@ -3,6 +3,7 @@
+ import (
+ 	"context"
+ 	"os"
++	"strings"
+ 
+ 	"github.com/modelcontextprotocol/go-sdk/mcp"
+ )
+@@ -17,7 +18,8 @@ 	}
+ )
+ 
+ type GetFilesOutput struct {
+-	Files []string `json:"files" jsonschema:"names of the files on the server"`
++	Files         []string `json:"files" jsonschema:"names of the files on the server"`
++	UploadCommand string   `json:"uploadCommand" jsonschema:"shell command that uploads a file from the machine that holds it. Replace LOCAL_PATH with the file path and NAME with the name on the server."`
+ }
+ 
+ func (s *Service) listFiles() ([]string, error) {
+@@ -28,6 +30,11 @@ 	}
+ 
+ 	files := []string{}
+ 	for _, entry := range entries {
++		// Skip hidden files, also in upload path
++		if strings.HasPrefix(entry.Name(), ".") {
++			continue
++		}
++
+ 		files = append(files, entry.Name())
+ 	}
+ 
+@@ -41,6 +48,7 @@ 		return nil, nil, err
+ 	}
+ 
+ 	return nil, &GetFilesOutput{
+-		Files: files,
++		Files:         files,
++		UploadCommand: s.uploadCommand(ctx),
+ 	}, nil
+ }
+diff --git a/pkg/svc/root.go b/pkg/svc/root.go
+index 72fd93c486fba29ed00e3c7d5adf730f7bd10c3d..19799862ef5e19d0332ad649c775427220b1260e 100644
+--- a/pkg/svc/root.go
++++ b/pkg/svc/root.go
+@@ -4,6 +4,7 @@ import (
+ 	"context"
+ 	"errors"
+ 	"log/slog"
++	"net/url"
+ 	"slices"
+ 	"sync"
+ 	"time"
+@@ -37,6 +38,8 @@ 	log *slog.Logger
+ 
+ 	filesDir string
+ 
++	publicURL *url.URL
++
+ 	wg *sync.WaitGroup
+ 
+ 	totalRelayCycleDuration,
+@@ -48,7 +51,7 @@ 	consolesLock *sync.Mutex
+ 	consoles     map[string]*serialConsole
+ }
+ 
+-func NewService(baseCtx context.Context, log *slog.Logger, shutdownTimeout, totalRelayCycleDuration, onRelayCycleDuration time.Duration, filesDir string) *Service {
++func NewService(baseCtx context.Context, log *slog.Logger, shutdownTimeout, totalRelayCycleDuration, onRelayCycleDuration time.Duration, filesDir string, publicURL *url.URL) *Service {
+ 	shutdownCtx, shutdownCancel := context.WithCancel(context.Background())
+ 
+ 	go func() {
+@@ -71,6 +74,8 @@
+ 		log: log,
+ 
+ 		filesDir: filesDir,
++
++		publicURL: publicURL,
+ 
+ 		wg: &sync.WaitGroup{},
+ 
+
