@@ -1,0 +1,79 @@
+From 8a1ccd4577c887bc624350104b50d49430b2a1f5 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Thu, 24 Sep 2026 23:22:32 -0700
+Subject: [PATCH] feat: Add basic structured request logging with slog
+---
+diff --git a/main.go b/main.go
+index cb479831ba051cc808f5808fa952d8b0e50246b7..34cb8709167237b982b5070204b5589944d269dd 100644
+--- a/main.go
++++ b/main.go
+@@ -21,6 +21,8 @@ 	laddr := flag.String("laddr", ":1337", "Listen address")
+ 
+ 	flag.Parse()
+ 
++	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
++
+ 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+ 	defer cancel()
+ 
+@@ -34,8 +36,13 @@ 			Description: "Hands-off hardware enablement for SpacemiT K3-based systems.",
+ 			Version:     "1.0.0",
+ 			WebsiteURL:  "https://codeberg.org/pojntfx/pushrod",
+ 		},
+-		nil,
++		&mcp.ServerOptions{
++			Logger: logger,
++		},
+ 	)
++	handler.AddReceivingMiddleware(svc.LogIncoming(logger))
++	handler.AddSendingMiddleware(svc.LogOutgoing(logger))
++
+ 	mcp.AddTool(handler, svc.GetBoardsTool, service.GetBoards)
+ 	mcp.AddTool(handler, svc.GetStatusesTool, service.GetStatuses)
+ 	mcp.AddTool(handler, svc.SetStatusesTool, service.SetStatuses)
+diff --git a/pkg/svc/log.go b/pkg/svc/log.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..74712eccf6e670603fe86a3ed32cf5e32d814449
+--- /dev/null
++++ b/pkg/svc/log.go
+@@ -0,0 +1,39 @@
++package svc
++
++import (
++	"context"
++	"log/slog"
++	"time"
++
++	"github.com/modelcontextprotocol/go-sdk/mcp"
++)
++
++func LogIncoming(log *slog.Logger) mcp.Middleware {
++	return logged(log, "Handled request")
++}
++
++func LogOutgoing(log *slog.Logger) mcp.Middleware {
++	return logged(log, "Handled response")
++}
++
++func logged(log *slog.Logger, message string) mcp.Middleware {
++	return func(next mcp.MethodHandler) mcp.MethodHandler {
++		return func(ctx context.Context, method string, req mcp.Request) (mcp.Result, error) {
++			start := time.Now()
++
++			result, err := next(ctx, method, req)
++
++			attributes := []any{"method", method}
++
++			if params, ok := req.GetParams().(*mcp.CallToolParamsRaw); ok {
++				attributes = append(attributes, "tool", params.Name)
++			}
++
++			attributes = append(attributes, "duration", time.Since(start), "err", err)
++
++			log.Info(message, attributes...)
++
++			return result, err
++		}
++	}
++}
+
