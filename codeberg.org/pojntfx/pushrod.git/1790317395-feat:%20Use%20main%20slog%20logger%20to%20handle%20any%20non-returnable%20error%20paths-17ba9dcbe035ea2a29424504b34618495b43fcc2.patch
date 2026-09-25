@@ -1,0 +1,191 @@
+From 17ba9dcbe035ea2a29424504b34618495b43fcc2 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Thu, 24 Sep 2026 23:23:15 -0700
+Subject: [PATCH] feat: Use main slog logger to handle any non-returnable error paths
+---
+diff --git a/main.go b/main.go
+index 34cb8709167237b982b5070204b5589944d269dd..338cbfb40a03ed868b05fb31a215f20fd6f46b4f 100644
+--- a/main.go
++++ b/main.go
+@@ -5,6 +5,7 @@ 	"context"
+ 	"errors"
+ 	"flag"
+ 	"log"
++	"log/slog"
+ 	"net"
+ 	"net/http"
+ 	"os"
+@@ -26,7 +27,7 @@
+ 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+ 	defer cancel()
+ 
+-	service := svc.NewService(ctx, time.Second*10, time.Minute, time.Second*5)
++	service := svc.NewService(ctx, logger, time.Second*10, time.Minute, time.Second*5)
+ 
+ 	handler := mcp.NewServer(
+ 		&mcp.Implementation{
+diff --git a/pkg/svc/kvm_get_video_capture_devices.go b/pkg/svc/kvm_get_video_capture_devices.go
+index 51329e1937ee8561eaf29d2734ae5981693cce55..495959f3048e3ac2d7dbbcccfc4d1b870c865983 100644
+--- a/pkg/svc/kvm_get_video_capture_devices.go
++++ b/pkg/svc/kvm_get_video_capture_devices.go
+@@ -3,7 +3,6 @@
+ import (
+ 	"context"
+ 	"errors"
+-	"log/slog"
+ 	"os"
+ 	"path/filepath"
+ 	"strings"
+@@ -126,7 +125,7 @@ 		USBIdentity: identity,
+ 	}, true, nil
+ }
+ 
+-func listVideoCaptureDevices() ([]VideoCaptureDevice, error) {
++func (s *Service) listVideoCaptureDevices() ([]VideoCaptureDevice, error) {
+ 	paths, err := filepath.Glob(videoDeviceGlob)
+ 	if err != nil {
+ 		return nil, err
+@@ -136,7 +135,7 @@ 	videoCaptureDevices := []VideoCaptureDevice{}
+ 	for _, path := range paths {
+ 		videoCaptureDevice, ok, err := videoCaptureDeviceAt(path)
+ 		if err != nil {
+-			slog.Error("Could not get video capture device, skipping", "path", path, "err", err)
++			s.log.Error("Could not get video capture device, skipping", "path", path, "err", err)
+ 
+ 			continue
+ 		}
+@@ -165,7 +164,7 @@ 	return &videoCaptureDevice, nil
+ }
+ 
+ func (s *Service) GetVideoCaptureDevices(ctx context.Context, req *mcp.CallToolRequest, input struct{}) (*mcp.CallToolResult, *GetVideoCaptureDevicesOutput, error) {
+-	videoCaptureDevices, err := listVideoCaptureDevices()
++	videoCaptureDevices, err := s.listVideoCaptureDevices()
+ 	if err != nil {
+ 		return nil, nil, err
+ 	}
+diff --git a/pkg/svc/relay_set_statuses.go b/pkg/svc/relay_set_statuses.go
+index 33738104ed4f997981d5d4d1a1b59a571bbd6091..1564ac88f862d4e501aa8cfedfea56e78289fc74 100644
+--- a/pkg/svc/relay_set_statuses.go
++++ b/pkg/svc/relay_set_statuses.go
+@@ -4,7 +4,6 @@ import (
+ 	"cmp"
+ 	"context"
+ 	"errors"
+-	"log/slog"
+ 	"slices"
+ 	"time"
+ 
+@@ -67,14 +66,14 @@ 				}
+ 
+ 				device, err := s.openBoard(path)
+ 				if err != nil {
+-					slog.Error("Could not open device to power off relay, giving up", "err", err)
++					s.log.Error("Could not open device to power off relay, giving up", "err", err)
+ 
+ 					return
+ 				}
+ 				defer device.Close()
+ 
+-				if err := relay.PowerOffWithRetry(device, time.Second, 5, slog.Default()); err != nil {
+-					slog.Error("Could not power off relay even after retries", "err", err)
++				if err := relay.PowerOffWithRetry(device, time.Second, 5, s.log); err != nil {
++					s.log.Error("Could not power off relay even after retries", "err", err)
+ 				}
+ 
+ 				relay.lock.Lock()
+diff --git a/pkg/svc/root.go b/pkg/svc/root.go
+index 9029c8fb581857f641f2adc9e612006ca44c7caa..bf58adabb1a392bc9f994b5d550c9a82edab3dbc 100644
+--- a/pkg/svc/root.go
++++ b/pkg/svc/root.go
+@@ -3,6 +3,7 @@
+ import (
+ 	"context"
+ 	"errors"
++	"log/slog"
+ 	"slices"
+ 	"sync"
+ 	"time"
+@@ -32,6 +33,8 @@ type Service struct {
+ 	baseCtx,
+ 	shutdownCtx context.Context
+ 
++	log *slog.Logger
++
+ 	wg *sync.WaitGroup
+ 
+ 	totalRelayCycleDuration,
+@@ -43,7 +46,7 @@ 	consolesLock *sync.Mutex
+ 	consoles     map[string]*serialConsole
+ }
+ 
+-func NewService(baseCtx context.Context, shutdownTimeout, totalRelayCycleDuration, onRelayCycleDuration time.Duration) *Service {
++func NewService(baseCtx context.Context, log *slog.Logger, shutdownTimeout, totalRelayCycleDuration, onRelayCycleDuration time.Duration) *Service {
+ 	shutdownCtx, shutdownCancel := context.WithCancel(context.Background())
+ 
+ 	go func() {
+@@ -62,6 +65,8 @@
+ 	s := &Service{
+ 		baseCtx:     baseCtx,
+ 		shutdownCtx: shutdownCtx,
++
++		log: log,
+ 
+ 		wg: &sync.WaitGroup{},
+ 
+diff --git a/pkg/svc/serial.go b/pkg/svc/serial.go
+index 5dd099e8e560f728eb8e0b6b8120d79db262d22f..24e620b78b61f4b5722896cfb743dbeb528f2047 100644
+--- a/pkg/svc/serial.go
++++ b/pkg/svc/serial.go
+@@ -2,7 +2,6 @@ package svc
+ 
+ import (
+ 	"io"
+-	"log/slog"
+ 	"slices"
+ 	"sync"
+ 
+@@ -83,13 +82,13 @@
+ 	console.port = port
+ 
+ 	s.wg.Go(func() {
+-		readLoop(console, port)
++		s.readLoop(console, port)
+ 	})
+ 
+ 	return nil
+ }
+ 
+-func readLoop(console *serialConsole, port serial.Port) {
++func (s *Service) readLoop(console *serialConsole, port serial.Port) {
+ 	defer port.Close()
+ 
+ 	_, err := io.Copy(console, port)
+@@ -104,5 +103,5 @@
+ 	console.port = nil
+ 	console.lock.Unlock()
+ 
+-	slog.Error("Could not read from serial console, stopping buffering", "path", console.path, "err", err)
++	s.log.Error("Could not read from serial console, stopping buffering", "path", console.path, "err", err)
+ }
+diff --git a/pkg/svc/serial_read_from.go b/pkg/svc/serial_read_from.go
+index 030cd30f5b9bd634c0fbebe896f8f4896fba987a..913dc97db1857f07cbe2a72719a6340105ab382a 100644
+--- a/pkg/svc/serial_read_from.go
++++ b/pkg/svc/serial_read_from.go
+@@ -2,7 +2,6 @@ package svc
+ 
+ import (
+ 	"context"
+-	"log/slog"
+ 
+ 	"github.com/modelcontextprotocol/go-sdk/mcp"
+ )
+@@ -39,7 +38,7 @@ 			// Without history we return the error since we can't fall back to returning the captured history
+ 			return nil, nil, err
+ 		}
+ 
+-		slog.Warn("Could not open serial console, returning the captured history", "path", console.path, "err", err)
++		s.log.Warn("Could not open serial console, returning the captured history", "path", console.path, "err", err)
+ 	}
+ 
+ 	return nil, &ReadFromOutput{
+
