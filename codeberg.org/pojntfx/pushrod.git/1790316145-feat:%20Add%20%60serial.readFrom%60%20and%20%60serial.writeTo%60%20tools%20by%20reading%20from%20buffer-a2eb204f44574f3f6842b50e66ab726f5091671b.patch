@@ -1,0 +1,138 @@
+From a2eb204f44574f3f6842b50e66ab726f5091671b Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Thu, 24 Sep 2026 23:02:25 -0700
+Subject: [PATCH] feat: Add `serial.readFrom` and `serial.writeTo` tools by reading from buffer
+---
+diff --git a/main.go b/main.go
+index d6aac83b475c194d18ee5fc90d8ef6cf3b5e7eaf..cb479831ba051cc808f5808fa952d8b0e50246b7 100644
+--- a/main.go
++++ b/main.go
+@@ -50,6 +50,8 @@ 	mcp.AddTool(handler, svc.GetConsolesTool, service.GetConsoles)
+ 	mcp.AddTool(handler, svc.StartBufferingTool, service.StartBuffering)
+ 	mcp.AddTool(handler, svc.StopBufferingTool, service.StopBuffering)
+ 	mcp.AddTool(handler, svc.ClearBufferTool, service.ClearBuffer)
++	mcp.AddTool(handler, svc.ReadFromTool, service.ReadFrom)
++	mcp.AddTool(handler, svc.WriteToTool, service.WriteTo)
+ 
+ 	log.Println("Listening on", *laddr)
+ 
+diff --git a/pkg/svc/serial_read_from.go b/pkg/svc/serial_read_from.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..030cd30f5b9bd634c0fbebe896f8f4896fba987a
+--- /dev/null
++++ b/pkg/svc/serial_read_from.go
+@@ -0,0 +1,48 @@
++package svc
++
++import (
++	"context"
++	"log/slog"
++
++	"github.com/modelcontextprotocol/go-sdk/mcp"
++)
++
++var (
++	ReadFromTool = &mcp.Tool{
++		Name:        "serial.readFrom",
++		Title:       "Read from serial console",
++		Description: "Read the captured output of a serial console",
++		Annotations: &mcp.ToolAnnotations{DestructiveHint: &[]bool{false}[0]},
++	}
++)
++
++type ReadFromInput struct {
++	Path string `json:"path" jsonschema:"path that uniquely identifies the serial console until it gets unplugged"`
++}
++
++type ReadFromOutput struct {
++	Output string `json:"output" jsonschema:"captured output"`
++}
++
++func (s *Service) ReadFrom(ctx context.Context, req *mcp.CallToolRequest, input ReadFromInput) (*mcp.CallToolResult, *ReadFromOutput, error) {
++	console, err := s.findConsole(input.Path)
++	if err != nil {
++		return nil, nil, err
++	}
++
++	console.lock.Lock()
++	defer console.lock.Unlock()
++
++	if err := s.openConsoleLocked(console); err != nil {
++		if len(console.buffer) == 0 {
++			// Without history we return the error since we can't fall back to returning the captured history
++			return nil, nil, err
++		}
++
++		slog.Warn("Could not open serial console, returning the captured history", "path", console.path, "err", err)
++	}
++
++	return nil, &ReadFromOutput{
++		Output: string(console.buffer),
++	}, nil
++}
+diff --git a/pkg/svc/serial_write_to.go b/pkg/svc/serial_write_to.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..5d88dd167e59786bd4b431add69f17a2c8b7da67
+--- /dev/null
++++ b/pkg/svc/serial_write_to.go
+@@ -0,0 +1,59 @@
++package svc
++
++import (
++	"context"
++	"time"
++
++	"github.com/modelcontextprotocol/go-sdk/mcp"
++)
++
++var (
++	WriteToTool = &mcp.Tool{
++		Name:        "serial.writeTo",
++		Title:       "Write to serial console",
++		Description: "Write to a serial console and read back the output that follows",
++		Annotations: &mcp.ToolAnnotations{DestructiveHint: &[]bool{true}[0]},
++	}
++)
++
++type WriteToInput struct {
++	Path   string `json:"path" jsonschema:"path that uniquely identifies the serial console until it gets unplugged"`
++	Data   string `json:"data" jsonschema:"data to write to the console. This tool sends it unchanged. Use \n for Enter and \u0003 for Ctrl-C."`
++	WaitMs int    `json:"waitMs,omitempty" jsonschema:"how long to wait before reading back the output in milliseconds, so that the target has time to react to the write"`
++}
++
++type WriteToOutput struct {
++	Output string `json:"output" jsonschema:"output that has arrived since the write"`
++}
++
++func (s *Service) WriteTo(ctx context.Context, req *mcp.CallToolRequest, input WriteToInput) (*mcp.CallToolResult, *WriteToOutput, error) {
++	console, err := s.findConsole(input.Path)
++	if err != nil {
++		return nil, nil, err
++	}
++
++	console.lock.Lock()
++	if err := s.openConsoleLocked(console); err != nil {
++		console.lock.Unlock()
++
++		return nil, nil, err
++	}
++
++	mark := len(console.buffer)
++
++	// Write to the console, then release the lock so that the reader can keep capturing
++	_, err = console.port.Write([]byte(input.Data))
++	console.lock.Unlock()
++	if err != nil {
++		return nil, nil, err
++	}
++
++	time.Sleep(time.Duration(input.WaitMs) * time.Millisecond)
++
++	console.lock.Lock()
++	defer console.lock.Unlock()
++
++	return nil, &WriteToOutput{
++		Output: string(console.buffer[min(mark, len(console.buffer)):]),
++	}, nil
++}
+
