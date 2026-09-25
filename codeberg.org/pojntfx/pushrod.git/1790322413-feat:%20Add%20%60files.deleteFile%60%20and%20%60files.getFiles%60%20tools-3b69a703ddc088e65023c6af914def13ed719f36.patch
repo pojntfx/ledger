@@ -1,0 +1,286 @@
+From 3b69a703ddc088e65023c6af914def13ed719f36 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Fri, 25 Sep 2026 00:46:53 -0700
+Subject: [PATCH] feat: Add `files.deleteFile` and `files.getFiles` tools
+---
+diff --git a/go.mod b/go.mod
+index d7b98b8ed79e958c0f2db51a231c44300c5b475c..eeb70af1de18ba63f0d4d0522447f8d525463bcf 100644
+--- a/go.mod
++++ b/go.mod
+@@ -3,21 +3,22 @@
+ go 1.26.4
+ 
+ require (
++	github.com/adrg/xdg v0.5.3
+ 	github.com/blackjack/webcam v0.6.1
+ 	github.com/google/jsonschema-go v0.4.3
+-	github.com/modelcontextprotocol/go-sdk v1.7.0
++	github.com/modelcontextprotocol/go-sdk v1.8.0
+ 	go.bug.st/serial v1.8.0
+-	golang.org/x/mobile v0.0.0-20260821190718-4776eadac327
+-	rafaelmartins.com/p/usbhid v0.0.0-20260811025057-543484740bef
++	golang.org/x/mobile v0.0.0-20260908204917-8b95e45f8d3e
++	rafaelmartins.com/p/usbhid v0.0.0-20260903160318-2edd824d3b06
+ )
+ 
+ require (
+-	github.com/ebitengine/purego v0.9.1 // indirect
+-	github.com/segmentio/asm v1.1.3 // indirect
++	github.com/ebitengine/purego v0.11.1 // indirect
++	github.com/segmentio/asm v1.2.1 // indirect
+ 	github.com/segmentio/encoding v0.5.4 // indirect
+ 	github.com/yosida95/uritemplate/v3 v3.0.2 // indirect
+-	golang.org/x/oauth2 v0.35.0 // indirect
+-	golang.org/x/sync v0.22.0 // indirect
+-	golang.org/x/sys v0.47.0 // indirect
+-	golang.org/x/time v0.15.0 // indirect
++	golang.org/x/oauth2 v0.37.0 // indirect
++	golang.org/x/sync v0.23.0 // indirect
++	golang.org/x/sys v0.48.0 // indirect
++	golang.org/x/time v0.16.0 // indirect
+ )
+diff --git a/go.sum b/go.sum
+index 7f73d32350c410742f6fae1e701d7fbfc656e21d..a0260450a8230910cfb2010786ffe84046c28832 100644
+--- a/go.sum
++++ b/go.sum
+@@ -1,34 +1,44 @@
++github.com/adrg/xdg v0.5.3 h1:xRnxJXne7+oWDatRhR1JLnvuccuIeCoBu2rtuLqQB78=
++github.com/adrg/xdg v0.5.3/go.mod h1:nlTsY+NNiCBGCK2tpm09vRqfVzrc2fLmXGpBLF0zlTQ=
+ github.com/blackjack/webcam v0.6.1 h1:K0T6Q0zto23U99gNAa5q/hFoye6uGcKr2aE6hFoxVoE=
+ github.com/blackjack/webcam v0.6.1/go.mod h1:zs+RkUZzqpFPHPiwBZ6U5B34ZXXe9i+SiHLKnnukJuI=
+-github.com/ebitengine/purego v0.9.1 h1:a/k2f2HQU3Pi399RPW1MOaZyhKJL9w/xFpKAg4q1s0A=
+-github.com/ebitengine/purego v0.9.1/go.mod h1:iIjxzd6CiRiOG0UyXP+V1+jWqUXVjPKLAI0mRfJZTmQ=
++github.com/davecgh/go-spew v1.1.1 h1:vj9j/u1bqnvCEfJOwUhtlOARqs3+rkHYY13jYWTU97c=
++github.com/davecgh/go-spew v1.1.1/go.mod h1:J7Y8YcW2NihsgmVo/mv3lAwl/skON4iLHjSsI+c5H38=
++github.com/ebitengine/purego v0.11.1 h1:2zpWRSQNVKN4eKsKO9eM1ILDgWfYMY9GwqRmK6XeQ/0=
++github.com/ebitengine/purego v0.11.1/go.mod h1:DCHPP08djqhNSoTfImcnHYQRZmd0qhakvrozqaEYhGQ=
+ github.com/golang-jwt/jwt/v5 v5.3.1 h1:kYf81DTWFe7t+1VvL7eS+jKFVWaUnK9cB1qbwn63YCY=
+ github.com/golang-jwt/jwt/v5 v5.3.1/go.mod h1:fxCRLWMO43lRc8nhHWY6LGqRcf+1gQWArsqaEUEa5bE=
+ github.com/google/go-cmp v0.7.0 h1:wk8382ETsv4JYUZwIsn6YpYiWiBsYLSJiTsyBybVuN8=
+ github.com/google/go-cmp v0.7.0/go.mod h1:pXiqmnSA92OHEEa9HXL2W4E7lf9JzCmGVUdgjX3N/iU=
+ github.com/google/jsonschema-go v0.4.3 h1:/DBOLZTfDow7pe2GmaJNhltueGTtDKICi8V8p+DQPd0=
+ github.com/google/jsonschema-go v0.4.3/go.mod h1:r5quNTdLOYEz95Ru18zA0ydNbBuYoo9tgaYcxEYhJVE=
+-github.com/modelcontextprotocol/go-sdk v1.7.0 h1:yqjY2dsbKAC0LSuWZVBMrHgiG8ukXv6NRo0JiALay44=
+-github.com/modelcontextprotocol/go-sdk v1.7.0/go.mod h1:dL7u98E/zjJTGzEq+j30jQ8K2k1mb6LeAH4inEcSGts=
+-github.com/segmentio/asm v1.1.3 h1:WM03sfUOENvvKexOLp+pCqgb/WDjsi7EK8gIsICtzhc=
+-github.com/segmentio/asm v1.1.3/go.mod h1:Ld3L4ZXGNcSLRg4JBsZ3//1+f/TjYl0Mzen/DQy1EJg=
++github.com/modelcontextprotocol/go-sdk v1.8.0 h1:KIvahhYqwtbeniWVPs3TcXEA7b8jEtwfBpOTAI+Urx4=
++github.com/modelcontextprotocol/go-sdk v1.8.0/go.mod h1:dL7u98E/zjJTGzEq+j30jQ8K2k1mb6LeAH4inEcSGts=
++github.com/pmezard/go-difflib v1.0.0 h1:4DBwDE0NGyQoBHbLQYPwSUPoCMWR5BEzIk/f1lZbAQM=
++github.com/pmezard/go-difflib v1.0.0/go.mod h1:iKH77koFhYxTK1pcRnkKkqfTogsbg7gZNVY4sRDYZ/4=
++github.com/segmentio/asm v1.2.1 h1:DTNbBqs57ioxAD4PrArqftgypG4/qNpXoJx8TVXxPR0=
++github.com/segmentio/asm v1.2.1/go.mod h1:BqMnlJP91P8d+4ibuonYZw9mfnzI9HfxselHZr5aAcs=
+ github.com/segmentio/encoding v0.5.4 h1:OW1VRern8Nw6ITAtwSZ7Idrl3MXCFwXHPgqESYfvNt0=
+ github.com/segmentio/encoding v0.5.4/go.mod h1:HS1ZKa3kSN32ZHVZ7ZLPLXWvOVIiZtyJnO1gPH1sKt0=
++github.com/stretchr/testify v1.9.0 h1:HtqpIVDClZ4nwg75+f6Lvsy/wHu+3BoSGCbBAcpTsTg=
++github.com/stretchr/testify v1.9.0/go.mod h1:r2ic/lqez/lEtzL7wO/rwa5dbSLXVDPFyf8C91i36aY=
+ github.com/yosida95/uritemplate/v3 v3.0.2 h1:Ed3Oyj9yrmi9087+NczuL5BwkIc4wvTb5zIM+UJPGz4=
+ github.com/yosida95/uritemplate/v3 v3.0.2/go.mod h1:ILOh0sOhIJR3+L/8afwt/kE++YT040gmv5BQTMR2HP4=
+ go.bug.st/serial v1.8.0 h1:ZtnmN8aYXtPlTghwSvDWPHKBHL9TM6oFDa+KpSn4SQE=
+ go.bug.st/serial v1.8.0/go.mod h1:d0MmS16Qt9b1m06yoYRNUXhRRTJV5Qg2S5EKqQtnayQ=
+-golang.org/x/mobile v0.0.0-20260821190718-4776eadac327 h1:D/wiQ6AoTYjDtSD0HMPhU8O40NUP8EF0UmDhIYCnG4I=
+-golang.org/x/mobile v0.0.0-20260821190718-4776eadac327/go.mod h1:D9q8rgXu13Q3uuM+Vuy6F/DG1WF/giTPLtqQ9on5B1M=
+-golang.org/x/oauth2 v0.35.0 h1:Mv2mzuHuZuY2+bkyWXIHMfhNdJAdwW3FuWeCPYN5GVQ=
+-golang.org/x/oauth2 v0.35.0/go.mod h1:lzm5WQJQwKZ3nwavOZ3IS5Aulzxi68dUSgRHujetwEA=
+-golang.org/x/sync v0.22.0 h1:SZjpbeLmrCk4xhRSZFNZW5gFUeCeFgjekvI/+gfScek=
+-golang.org/x/sync v0.22.0/go.mod h1:9xrNwdLfx4jkKbNva9FpL6vEN7evnE43NNNJQ2LF3+0=
+-golang.org/x/sys v0.47.0 h1:o7XGOvZQCADBQQ4Y7VNq2dRWQR7JmOUW8Kxx4ZsNgWs=
+-golang.org/x/sys v0.47.0/go.mod h1:4GL1E5IUh+htKOUEOaiffhrAeqysfVGipDYzABqnCmw=
+-golang.org/x/time v0.15.0 h1:bbrp8t3bGUeFOx08pvsMYRTCVSMk89u4tKbNOZbp88U=
+-golang.org/x/time v0.15.0/go.mod h1:Y4YMaQmXwGQZoFaVFk4YpCt4FLQMYKZe9oeV/f4MSno=
+-golang.org/x/tools v0.49.0 h1:3NI7VXzL9+1WZD52Dx2ttoPwD5DWrFGpl9mFZDlmisI=
+-golang.org/x/tools v0.49.0/go.mod h1:SJNXV9DBKT0UbdttsQjbfJlAE/q+y36++zo3uL3N0Oo=
+-rafaelmartins.com/p/usbhid v0.0.0-20260811025057-543484740bef h1:R1IycbWCVegqAyyMyO7/bRKQjYi0aTvFX1kayxwWYko=
+-rafaelmartins.com/p/usbhid v0.0.0-20260811025057-543484740bef/go.mod h1:Rta/iJgy+IuDjpHCBFwHKTNDfHI2i2z7HfO/re/sOV8=
++golang.org/x/mobile v0.0.0-20260908204917-8b95e45f8d3e h1:zYnHsDmxfxKH/x9DjYNAdoIdMsP8enB1Ncb10b3pdHk=
++golang.org/x/mobile v0.0.0-20260908204917-8b95e45f8d3e/go.mod h1:+g6JKqLjAprgkdZKuuBhkhIN9zvSktraeSABDN2M7p8=
++golang.org/x/oauth2 v0.37.0 h1:JUlcxA8oAtauLfiH8FX2/FkAWHAdi0QtGCGc+hofE98=
++golang.org/x/oauth2 v0.37.0/go.mod h1:IxwZNxUULJmpBFf9K/9NTMSIfZZuvuTy1gGxhigP/58=
++golang.org/x/sync v0.23.0 h1:KameEIfc1IkluZyXWLn39Wd4tURc6GbCiISGiZm2bQk=
++golang.org/x/sync v0.23.0/go.mod h1:sUUOizhqBxiL6pEWpqNLUiaJn1ShEbZ6BBqskPbjZm0=
++golang.org/x/sys v0.48.0 h1:bbX/i/6MgT9BVLM9RT1thmxL04yeTAhbEz4SyadbXoo=
++golang.org/x/sys v0.48.0/go.mod h1:hNLxWAXmnKAxqDtdwIYC4bM9oQPEecfsnNMuSxOs3og=
++golang.org/x/time v0.16.0 h1:vMb6ptszcQMkcwiRTAuNNU50gom6++Q/6gY2hDM6VDE=
++golang.org/x/time v0.16.0/go.mod h1:rVKOqvZeKvrDKTQiAHJ7wmwP0RzleSphoEA9RcdLA0s=
++golang.org/x/tools v0.50.0 h1:c2ifzfcuY7L90lZ2aKd8S4K2NpASF08SZx9ZuJkHmSU=
++golang.org/x/tools v0.50.0/go.mod h1:7ulVMw3831Mwi5EZD6RomGyffr4VFjuNYXf2BbCEAV0=
++gopkg.in/yaml.v3 v3.0.1 h1:fxVm/GzAzEWqLHuvctI91KS9hhNmmWOoWu0XTYJS7CA=
++gopkg.in/yaml.v3 v3.0.1/go.mod h1:K4uyk7z7BCEPqu6E+C64Yfv1cQ7kz7rIZviUmN+EgEM=
++rafaelmartins.com/p/usbhid v0.0.0-20260903160318-2edd824d3b06 h1:3ZExkkFFPDk5U0oh678sOgB5mAepL9r1uJzUivdsam8=
++rafaelmartins.com/p/usbhid v0.0.0-20260903160318-2edd824d3b06/go.mod h1:Rta/iJgy+IuDjpHCBFwHKTNDfHI2i2z7HfO/re/sOV8=
+diff --git a/main.go b/main.go
+index 00fdd80ee5fee1c9d3edb26325d917663947ef36..5e3981d60b994d9c6df7803676a3aa8f5dc57757 100644
+--- a/main.go
++++ b/main.go
+@@ -10,10 +10,12 @@ 	"net"
+ 	"net/http"
+ 	"os"
+ 	"os/signal"
++	"path/filepath"
+ 	"syscall"
+ 	"time"
+ 
+ 	"codeberg.org/pojntfx/pushrod/pkg/svc"
++	"github.com/adrg/xdg"
+ 	"github.com/modelcontextprotocol/go-sdk/mcp"
+ )
+ 
+@@ -25,10 +27,16 @@ 	flag.Parse()
+ 
+ 	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
+ 
++	filesDir := filepath.Join(xdg.StateHome, "pushrod", "files")
++
++	if err := os.MkdirAll(filesDir, os.ModePerm); err != nil {
++		panic(err)
++	}
++
+ 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+ 	defer cancel()
+ 
+-	service := svc.NewService(ctx, logger, time.Second*10, time.Minute, time.Second*5)
++	service := svc.NewService(ctx, logger, time.Second*10, time.Minute, time.Second*5, filesDir)
+ 
+ 	handler := mcp.NewServer(
+ 		&mcp.Implementation{
+@@ -61,6 +69,8 @@ 	mcp.AddTool(handler, svc.StopBufferingTool, service.StopBuffering)
+ 	mcp.AddTool(handler, svc.ClearBufferTool, service.ClearBuffer)
+ 	mcp.AddTool(handler, svc.ReadFromTool, service.ReadFrom)
+ 	mcp.AddTool(handler, svc.WriteToTool, service.WriteTo)
++	mcp.AddTool(handler, svc.GetFilesTool, service.GetFiles)
++	mcp.AddTool(handler, svc.DeleteFileTool, service.DeleteFile)
+ 
+ 	log.Println("Listening on", *laddr)
+ 
+diff --git a/pkg/svc/files_delete_file.go b/pkg/svc/files_delete_file.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..2dc152251bfca44f45f474bf2bcccf37a701d72c
+--- /dev/null
++++ b/pkg/svc/files_delete_file.go
+@@ -0,0 +1,42 @@
++package svc
++
++import (
++	"context"
++	"os"
++
++	"github.com/modelcontextprotocol/go-sdk/mcp"
++)
++
++var (
++	DeleteFileTool = &mcp.Tool{
++		Name:        "files.deleteFile",
++		Title:       "Delete file",
++		Description: "Delete a file from the server",
++		Annotations: &mcp.ToolAnnotations{DestructiveHint: new(true)},
++	}
++)
++
++type DeleteFileInput struct {
++	Name string `json:"name" jsonschema:"name of the file to delete"`
++}
++
++func (s *Service) DeleteFile(ctx context.Context, req *mcp.CallToolRequest, input DeleteFileInput) (*mcp.CallToolResult, *GetFilesOutput, error) {
++	root, err := os.OpenRoot(s.filesDir)
++	if err != nil {
++		return nil, nil, err
++	}
++	defer root.Close()
++
++	if err := root.Remove(input.Name); err != nil {
++		return nil, nil, err
++	}
++
++	files, err := s.listFiles()
++	if err != nil {
++		return nil, nil, err
++	}
++
++	return nil, &GetFilesOutput{
++		Files: files,
++	}, nil
++}
+diff --git a/pkg/svc/files_get_files.go b/pkg/svc/files_get_files.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..da5b3f536ee912ff2939584411561eb5333be293
+--- /dev/null
++++ b/pkg/svc/files_get_files.go
+@@ -0,0 +1,46 @@
++package svc
++
++import (
++	"context"
++	"os"
++
++	"github.com/modelcontextprotocol/go-sdk/mcp"
++)
++
++var (
++	GetFilesTool = &mcp.Tool{
++		Name:        "files.getFiles",
++		Title:       "Get files",
++		Description: "Get all files on the server that other tools can reference by name",
++		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true},
++	}
++)
++
++type GetFilesOutput struct {
++	Files []string `json:"files" jsonschema:"names of the files on the server"`
++}
++
++func (s *Service) listFiles() ([]string, error) {
++	entries, err := os.ReadDir(s.filesDir)
++	if err != nil {
++		return nil, err
++	}
++
++	files := []string{}
++	for _, entry := range entries {
++		files = append(files, entry.Name())
++	}
++
++	return files, nil
++}
++
++func (s *Service) GetFiles(ctx context.Context, req *mcp.CallToolRequest, input struct{}) (*mcp.CallToolResult, *GetFilesOutput, error) {
++	files, err := s.listFiles()
++	if err != nil {
++		return nil, nil, err
++	}
++
++	return nil, &GetFilesOutput{
++		Files: files,
++	}, nil
++}
+diff --git a/pkg/svc/root.go b/pkg/svc/root.go
+index bf58adabb1a392bc9f994b5d550c9a82edab3dbc..72fd93c486fba29ed00e3c7d5adf730f7bd10c3d 100644
+--- a/pkg/svc/root.go
++++ b/pkg/svc/root.go
+@@ -35,6 +35,8 @@ 	shutdownCtx context.Context
+ 
+ 	log *slog.Logger
+ 
++	filesDir string
++
+ 	wg *sync.WaitGroup
+ 
+ 	totalRelayCycleDuration,
+@@ -46,7 +48,7 @@ 	consolesLock *sync.Mutex
+ 	consoles     map[string]*serialConsole
+ }
+ 
+-func NewService(baseCtx context.Context, log *slog.Logger, shutdownTimeout, totalRelayCycleDuration, onRelayCycleDuration time.Duration) *Service {
++func NewService(baseCtx context.Context, log *slog.Logger, shutdownTimeout, totalRelayCycleDuration, onRelayCycleDuration time.Duration, filesDir string) *Service {
+ 	shutdownCtx, shutdownCancel := context.WithCancel(context.Background())
+ 
+ 	go func() {
+@@ -67,6 +69,8 @@ 		baseCtx:     baseCtx,
+ 		shutdownCtx: shutdownCtx,
+ 
+ 		log: log,
++
++		filesDir: filesDir,
+ 
+ 		wg: &sync.WaitGroup{},
+ 
+
