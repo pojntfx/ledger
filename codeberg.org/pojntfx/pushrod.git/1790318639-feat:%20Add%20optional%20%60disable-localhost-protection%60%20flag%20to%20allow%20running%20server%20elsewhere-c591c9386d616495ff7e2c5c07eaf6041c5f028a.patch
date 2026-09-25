@@ -1,0 +1,36 @@
+From c591c9386d616495ff7e2c5c07eaf6041c5f028a Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Thu, 24 Sep 2026 23:43:59 -0700
+Subject: [PATCH] feat: Add optional `disable-localhost-protection` flag to allow running server elsewhere
+---
+diff --git a/main.go b/main.go
+index 338cbfb40a03ed868b05fb31a215f20fd6f46b4f..00fdd80ee5fee1c9d3edb26325d917663947ef36 100644
+--- a/main.go
++++ b/main.go
+@@ -19,6 +19,7 @@ )
+ 
+ func main() {
+ 	laddr := flag.String("laddr", ":1337", "Listen address")
++	disableLocalhostProtection := flag.Bool("disable-localhost-protection", false, "Disable the automatic DNS rebinding protection. If you do not understand the security risk, keep the protection enabled. See https://modelcontextprotocol.io/specification/2025-11-25/basic/security_best_practices#local-mcp-server-compromise")
+ 
+ 	flag.Parse()
+ 
+@@ -65,9 +66,14 @@ 	log.Println("Listening on", *laddr)
+ 
+ 	server := &http.Server{
+ 		Addr: *laddr,
+-		Handler: mcp.NewStreamableHTTPHandler(func(r *http.Request) *mcp.Server {
+-			return handler
+-		}, nil),
++		Handler: mcp.NewStreamableHTTPHandler(
++			func(r *http.Request) *mcp.Server {
++				return handler
++			},
++			&mcp.StreamableHTTPOptions{
++				DisableLocalhostProtection: *disableLocalhostProtection,
++			},
++		),
+ 		BaseContext: func(l net.Listener) context.Context {
+ 			return ctx
+ 		},
+
