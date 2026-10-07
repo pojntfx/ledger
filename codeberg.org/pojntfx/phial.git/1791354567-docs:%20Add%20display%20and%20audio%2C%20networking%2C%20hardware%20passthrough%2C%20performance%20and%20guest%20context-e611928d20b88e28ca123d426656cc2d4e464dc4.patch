@@ -1,0 +1,90 @@
+From e611928d20b88e28ca123d426656cc2d4e464dc4 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Tue, 06 Oct 2026 23:29:27 -0700
+Subject: [PATCH] docs: Add display and audio, networking, hardware passthrough, performance and guest context
+---
+diff --git a/ROADMAP.md b/ROADMAP.md
+index 6c41049cfd6cfbbc161a00d06f071580f6667e54..f24eff909bff37bb1ff1198a2985193a8827883f 100644
+--- a/ROADMAP.md
++++ b/ROADMAP.md
+@@ -203,3 +203,79 @@ - Add one default handler that answers 404, so an unmatched path returns 404 on purpose.
+ - Point the guest at the host path that names the row, and use a placeholder token in the guest.
+ - Acceptance: revoking the grant returns 403 on the next request.
+ 
++## Display and audio
++
++- Add the virtio GPU with virglrenderer, and turn on blob, venus, and the native context.
++- Run one egl-headless display, so the guest draws without a window.
++- Run waypipe over vsock for single apps, and set the guest display to 0.
++- Run gnome-remote-desktop for the full session, and send the desktop over RDP.
++- Send audio over RDP, so no extra QEMU audio device is needed.
++- Send the clipboard over RDP as well.
++- Use PipeWire in the guest, and leave the QEMU audio device out.
++- Add an audio device only for a run that cannot use RDP audio.
++- Add a GTK display to the launcher variables, and swap it on when RDP is not enough.
++- Use the GTK display for early boot, for the firmware, and for MokManager.
++- Swap the display on temporarily from the desktop file based configurator, so one switch changes the run.
++- Add a serial console to every run, so you can debug the kernel when you need to.
++- Acceptance: `gnome-shell` runs on the virtio GPU, and one GL app appears through waypipe.
++## Networking
++
++- Create one bridge on the host, and add the Ethernet port to it.
++- Add one tap to the bridge, and let one user own it.
++- Allow the forward path on the bridge in the host firewall.
++- Pass one USB Wi-Fi adapter to the guest, so the guest owns the wireless path.
++- Make mDNS work on the Wi-Fi adapter as well as on the bridge.
++- Run one passt instance as the fallback path, and give that route the highest guest route metric.
++- Start passt from QEMU with `-nic passt,model=virtio-net-pci`, so QEMU auto-starts it and no socket is needed.
++- Make sure that the QEMU build lists `passt` in `-netdev help`, and keep a `-netdev stream` socket as the fallback.
++- Let passt send the guest traffic out of whatever host device the host route picks.
++- Use the same passt instance for the host WLAN and the host WWAN.
++- Prefer IPv6 on every interface, and use dual-stack only as a fallback.
++- Acceptance: a scan from the guest sees the LAN, and mDNS resolves both ways.
++## Hardware passthrough
++
++- Pass named USB devices with `usb-host`, and name each one by vendor and product ID.
++- Pass one whole USB hub to the guest with `vfio-pci` on a second xHCI controller.
++- Attach any USB device to that hub, for example a fastboot device or a UART adapter.
++- Never bind the only xHCI controller to the guest.
++- Keep the guest serial console for guest kernel work.
++- List the devices to forward in the launcher variables, so you can change them without editing the code.
++- Use `kernel-irqchip=split` on the host, because the VFIO devices need interrupt remapping.
++- Acceptance: three unplug and replug cycles return every device to the guest.
++## Performance
++
++- Use q35, because it is the newest x86 machine type and there is no newer one.
++- Give the guest the host CPU model, so the guest sees every host feature.
++- Size the vCPU count to physical cores, and leave one core for the host.
++- Back the guest RAM with the shared memfd, and turn on huge pages.
++- Create the raw image preallocated, and use `cache=none,aio=native` on it.
++- Keep the RTC on the host clock.
++- No GPU passes through. Use venus on the virtio GPU, so the guest shares the host GPU over virtio.
++- Size the CPU and the RAM first, because heavy work still uses them.
++- Measure before you tune. Use `perf` in the guest and `perf kvm` on the host.
++
++## Guest lifecycle
++
++- Install the guest once from the kickstart.
++- Update the guest with Ansible, and treat it as a mutable pet.
++- Publish no image, and build no base image.
++## Guest tooling
++
++- Install the base system with the kickstart, and add nothing else.
++- Leave every tool to the user.
++- Enable nested virtualization, so driver tests can run in a nested VM.
++- Run one nested GNOME session for shell and extension work.
++- Test the portals in the nested session, because the guest owns that session.
++- Use waypipe by default for desktop apps, and switch to RDP when you need shell and session integration.
++
++## Agent skills
++
++- Write one global skill set in the guest, and distribute it with Ansible.
++- Tell each guest agent how the whole system works, so it can drive the VM and consume the secrets that the host granted.
++- Name every feature the agent can use: the launcher, the runner, the proxy, and the display paths.
++- Keep the sync command and the grant commands off the guest agent. Only the host user adds a provider or grants access.
++- Say which secrets must stay secret, and say that the agent must never print a value.
++- Point the agent at the guest serial console for kernel work.
++- Point the agent at the waypipe path for single apps and at the RDP path for the full session.
++- Acceptance: a guest agent can consume a granted secret for an hour, and it cannot add a provider or extend a grant.
++
+
