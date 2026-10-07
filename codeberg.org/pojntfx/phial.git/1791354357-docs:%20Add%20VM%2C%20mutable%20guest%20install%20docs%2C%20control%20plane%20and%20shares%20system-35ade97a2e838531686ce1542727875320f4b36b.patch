@@ -1,0 +1,93 @@
+From 35ade97a2e838531686ce1542727875320f4b36b Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Tue, 06 Oct 2026 23:25:57 -0700
+Subject: [PATCH] docs: Add VM, mutable guest install docs, control plane and shares system
+---
+diff --git a/ROADMAP.md b/ROADMAP.md
+index 4bab58322dd0ac8913d5ca7f6812547758e7d399..3ac9b35433557936a05a1841acb9b9218492d924 100644
+--- a/ROADMAP.md
++++ b/ROADMAP.md
+@@ -51,3 +51,82 @@ - Run `qemu-system-x86_64 -machine q35,help`, and make sure that it lists `smm` and `kernel-irqchip`.
+ - Run `virtiofsd --version`, and make sure that it reports the Rust backend.
+ - Run `virt-fw-vars --help`, and make sure that it lists a DER enrollment flag.
+ 
++## VM launch
++
++- Write one shell script that builds the QEMU argument list in code.
++- Put the script in `$XDG_CONFIG_HOME`, because it is user configuration.
++- Open the script with `xdg-open`, so it loads in the default editor.
++- Set the CPU count, the memory size, the disk path, the display mode, and the USB list as variables at the top of the script.
++- Turn Secure Boot on by default, and add one switch to turn it off as an escape hatch.
++- Run the VM from one systemd user unit, and let the unit call the script.
++- Put the unit in `$XDG_CONFIG_HOME/systemd/user`.
++- Read the runtime paths from `$XDG_RUNTIME_DIR`, and keep sockets and state there.
++- Add one desktop entry that opens the unit in the default editor.
++- Add one desktop entry that opens the script in the default editor.
++- Follow the XDG base directory rules for every path.
++- Use q35 with KVM, and give the guest the host CPU model.
++- Size the vCPU count to physical cores, and leave one core for the host.
++- Set the topology with `-smp <n>,sockets=1,cores=<n>,threads=1`.
++- Back the guest RAM with a shared memfd, and turn on huge pages.
++- Reserve huge pages with `vm.nr_hugepages` in `/etc/sysctl.d`.
++- Raise `LimitMEMLOCK` to infinity in the unit, because `mem-lock=on` needs it.
++- Split the IRQ chip with `kernel-irqchip=split`, because the VFIO devices need interrupt remapping.
++- Boot the guest with UEFI and Secure Boot.
++- Use the OVMF secboot code and vars files from the host.
++- Start swtpm before QEMU, and expose it on a control socket.
++- Add the TPM 2.0 device with `tpm-crb`.
++- Copy the OVMF vars template to a runtime path before the first boot.
++- Make sure that the firmware descriptor declares `requires-smm`, and keep `smm=on`.
++- Create the raw image with `qemu-img create -f raw -o preallocation=falloc`.
++- Add the raw disk with `cache=none,aio=native` and `discard=unmap`.
++- Give the disk an iothread and `num-queues=4`, and pin the iothread.
++- Add the vsock device with `guest-cid=3`.
++- Add the guest agent on a virtio serial port.
++- Add the two virtiofs devices, one per share.
++- Add the serial console in every run.
++- Keep the RTC on the host clock.
++- Run custom modules in the guest only after you enroll a Machine Owner Key (MOK).
++- Enroll a MOK with `mokutil` at boot, or with `virt-fw-vars` while the VM is shut down.
++- Use a run with a visible screen when MokManager needs it for enrollment.
++- Fall back to the Secure Boot off switch only when a MOK cannot be enrolled.
++- Acceptance: the guest reaches the firmware, then the installer.
++
++## Guest install
++
++- Install Fedora Workstation 45 from the netinst ISO.
++- Pass the kickstart file to the installer, so the first boot is unattended.
++- Select the workstation environment in the kickstart, so GNOME and the portals are present.
++- Create the user in the kickstart, and set the guest hostname to `phial`.
++- Install the SSH authorized keys from `https://github.com/pojntfx.keys` in the kickstart.
++- Install and enable `qemu-guest-agent`, so the agent channel answers from the first boot.
++- Run every later guest change as Ansible over that SSH entry.
++- Keep the guest as one pet machine, and let Ansible run again at any time.
++- Follow the Ansible layout of [vanlug-infrastructure](https://codeberg.org/pojntfx/vanlug-infrastructure), but use kickstart instead of cloud-init.
++- Enable nested virtualization in the guest, so driver tests can run in a nested VM.
++- Keep the kickstart for the parts that must exist at first boot.
++- Keep Ansible for everything else.
++- Acceptance: the guest boots under Secure Boot, and `ssh phial` reaches it.
++
++## Control plane
++
++- Add one guest unit that exposes SSH over vsock with socat.
++- Listen on vsock and forward to SSH on the guest loopback.
++- Add the host SSH entry, so `ssh phial` reaches the guest with no network device.
++- Expose one guest port to the host with one unit per port, so the host reaches a guest service.
++- Expose only the proxy port and the two agent sockets to the guest, so the guest reaches the host proxy and the granted agents, and nothing else.
++- Keep the agent forwards down until a grant opens, so the guest sees no agent socket outside a window.
++- Never forward the host loopback in general.
++- Bind the guest listeners to the IPv6 loopback, and add that address as the host alias `host.internal`.
++- Make the loopback alias IPv6 first, and use dual-stack only as a fallback.
++- Keep the IPv4 rule local to the loopback alias. The guest still dials IPv4 on the LAN and in an IPv4-only café.
++- Acceptance: SSH works with no NIC other than loopback.
++
++## Shares
++
++- Run one virtiofsd unit per share, and keep the sockets in the runtime directory.
++- Add one virtiofs device per share in the launcher.
++- Give the two shares the tags `hostshare` and `phial-secrets`.
++- Mount the secrets share with `ro,nosuid,nodev,noexec`.
++- Map the guest user to the host user on the secrets share, so the guest user reads the files and no other guest user does.
++- Set one explicit uid and gid map in virtiofsd, and do not rely on two matching defaults.
++- Acceptance: a host file appears in the guest with no restart.
+
