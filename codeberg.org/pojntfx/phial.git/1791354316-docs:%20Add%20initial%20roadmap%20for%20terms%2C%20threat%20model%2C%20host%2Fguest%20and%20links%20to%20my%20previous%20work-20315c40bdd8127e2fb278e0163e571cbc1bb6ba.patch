@@ -1,0 +1,65 @@
+From 20315c40bdd8127e2fb278e0163e571cbc1bb6ba Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Tue, 06 Oct 2026 23:25:16 -0700
+Subject: [PATCH] docs: Add initial roadmap for terms, threat model, host/guest and links to my previous work
+---
+diff --git a/ROADMAP.md b/ROADMAP.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..4bab58322dd0ac8913d5ca7f6812547758e7d399
+--- /dev/null
++++ b/ROADMAP.md
+@@ -0,0 +1,53 @@
++# Roadmap
++
++## Terms
++
++- The program is `phial`.
++- The host runs the program.
++- The guest is the virtual machine that the host runs.
++- Env mode describes a secret that the guest reads from a file.
++- Proxy mode describes a secret that the host injects into an outbound request.
++- A grant is a time box on one secret.
++
++## Threat model
++
++- The host is trusted, and the guest is not.
++- Only the host user adds a provider, removes a provider, or grants access.
++- The guest agent cannot add a provider. It may only use what the host already granted.
++- Leave room for a future request path, where the guest agent asks the host for a grant and the host answers.
++- One grant covers one SSH key, one GnuPG key, one API key, or one other secret.
++- Revocation at the provider is out of scope. Removing the local file is not revocation at the provider.
++
++## Host matrix
++
++- The host runs Fedora Workstation 45 during development.
++- The host takes QEMU and waypipe from DNF for now.
++- At the target, the host runs GNOME OS and takes the user space tools from Homebrew.
++- The guest runs Fedora Workstation 45.
++- The guest installs from a kickstart and boots with UEFI and Secure Boot.
++
++## Host toolchain
++
++- Install the user space tools with Homebrew, so one manifest works on both hosts.
++- Homebrew covers virtiofsd, passt, Caddy, socat, GnuPG, swtpm, FreeRDP, wl-clipboard, and zenity.
++- Take QEMU and waypipe from DNF on the development host.
++- Make sure that Fedora builds QEMU with virglrenderer.
++- Fedora also ships a GNOME pinentry and KeePassXC.
++- Record a note for each tool that Homebrew does not provide on Linux.
++- Keep the KeePassXC window open and unlocked, so its Secret Service answers one `keepassxc://` lookup with no prompt.
++
++## Historical notes
++
++- [QEMU and VM arguments](https://gist.github.com/pojntfx/b860e123e649504bcd298aa6e92c4043) holds the raw QEMU flags from earlier work.
++- [Headless virgl and waypipe](https://gist.github.com/pojntfx/32e13d3eda90f34a56913e9fb53e7ac3) holds the vsock and waypipe flow from earlier work.
++- Read both before you change the launcher or the display path.
++
++## Host acceptance
++
++- Run `qemu-system-x86_64 -display help`, and make sure that it lists `egl-headless`.
++- Run `qemu-system-x86_64 -device virtio-vga-gl,help`, and make sure that it lists `venus` and `drm_native_context`.
++- Run `qemu-system-x86_64 -device help`, and make sure that it lists `qemu-xhci`, `vhost-vsock-pci`, `vhost-user-fs-pci`, and `virtio-blk-pci`.
++- Run `qemu-system-x86_64 -machine q35,help`, and make sure that it lists `smm` and `kernel-irqchip`.
++- Run `virtiofsd --version`, and make sure that it reports the Rust backend.
++- Run `virt-fw-vars --help`, and make sure that it lists a DER enrollment flag.
++
+
