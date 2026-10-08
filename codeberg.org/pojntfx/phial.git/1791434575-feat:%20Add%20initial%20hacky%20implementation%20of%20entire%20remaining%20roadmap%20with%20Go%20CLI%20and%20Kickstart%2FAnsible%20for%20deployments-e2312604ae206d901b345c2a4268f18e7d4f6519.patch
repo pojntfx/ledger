@@ -1,0 +1,3688 @@
+From e2312604ae206d901b345c2a4268f18e7d4f6519 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Wed, 07 Oct 2026 21:42:55 -0700
+Subject: [PATCH] feat: Add initial hacky implementation of entire remaining roadmap with Go CLI and Kickstart/Ansible for deployments
+---
+diff --git a/.gitignore b/.gitignore
+new file mode 100644
+index 0000000000000000000000000000000000000000..5391a55a7c57b38e9d1a49925224414d9c8db8b1
+--- /dev/null
++++ b/.gitignore
+@@ -0,0 +1 @@
++/bin/phial
+diff --git a/Brewfile b/Brewfile
+new file mode 100644
+index 0000000000000000000000000000000000000000..a6284d9de9f17ca977d21716e55108ad09b78d88
+--- /dev/null
++++ b/Brewfile
+@@ -0,0 +1,12 @@
++brew "virtiofsd"
++brew "passt"
++brew "caddy"
++brew "socat"
++brew "gnupg"
++brew "swtpm"
++brew "freerdp"
++brew "wl-clipboard"
++brew "zenity"
++brew "libsecret"
++brew "ansible"
++brew "uv"
+diff --git a/Makefile b/Makefile
+new file mode 100644
+index 0000000000000000000000000000000000000000..e0aa4e19113d0ae50378764f000b1dbe6b8c4ec9
+--- /dev/null
++++ b/Makefile
+@@ -0,0 +1,22 @@
++.PHONY: build install acceptance test guest
++
++build:
++	cd cli && CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o ../bin/phial .
++
++install: build
++	./install.sh
++
++acceptance:
++	phial-acceptance
++
++test:
++	./tests/test-cli.sh
++
++guest:
++	cd guest && ansible-playbook playbooks/base.yaml
++	cd guest && ansible-playbook playbooks/vsock.yaml
++	cd guest && ansible-playbook playbooks/network.yaml
++	cd guest && ansible-playbook playbooks/shares.yaml
++	cd guest && ansible-playbook playbooks/secrets.yaml
++	cd guest && ansible-playbook playbooks/desktop.yaml
++	cd guest && ansible-playbook playbooks/agents.yaml
+diff --git a/README.md b/README.md
+index 311d738b2bc21d0f9c6f2d7025b03273c7a87bfb..24f561d330b682b4958747b1ba4c27fd3216342e 100644
+--- a/README.md
++++ b/README.md
+@@ -1,10 +1,172 @@
+ # Phial
+ 
+-Run a VM that keeps your network, devices, and secrets.
++Phial runs a Fedora Workstation 45 guest under QEMU on a Fedora Workstation 45 host. The host keeps every secret. The guest receives time-boxed access to the secrets that the host user grants.
++
++The host is trusted. The guest is not trusted. Read [ROADMAP.md](ROADMAP.md) for the full design and the threat model.
++
++## Terms
++
++- Env mode means that the guest reads a secret from a file.
++- Proxy mode means that the host injects a secret into an outbound request.
++- A grant is a time box on one secret.
++- The launcher is the script that builds the QEMU argument list.
++- The mapping file lists the providers in four columns: name, mode, source, upstream.
++- A share is a host directory that the guest mounts over virtiofs.
+ 
+-## Overview
++## Requirements
+ 
+-🚧 This project is a work-in-progress! Instructions will be added as soon as it is usable. 🚧
++- Fedora Workstation 45 on the host.
++- Homebrew for the user space tools. The Brewfile is the manifest.
++- DNF for the tools that Homebrew does not provide on Linux. Read [docs/TOOLCHAIN.md](docs/TOOLCHAIN.md).
++- Root once through run0 for the host setup bundle.
++
++## Install
++
++Install the user space tools:
++
++```sh
++brew bundle install
++```
++
++Build the static CLI and install phial into your user directories:
++
++```sh
++make install
++```
++
++Apply the root setup bundle:
++
++```sh
++run0 ./host/phial-host-root-setup.sh
++```
++
++If SELinux blocks the execution, pipe the script in instead: run0 bash -s < ./host/phial-host-root-setup.sh
++
++Open KeePassXC and unlock the database. Keep the KeePassXC window open and unlocked, so its Secret Service answers one keepassxc:// lookup with no prompt.
++
++Edit the launcher variables at the top of the script:
++
++```sh
++xdg-open ~/.config/phial/phial-vm.sh
++```
++
++Edit the mapping file:
++
++```sh
++xdg-open ~/.config/phial/mapping
++```
++
++## The virtual machine
++
++Start the guest:
++
++```sh
++systemctl --user start phial-vm.service
++```
++
++The unit phial-vm.service calls the launcher. The launcher reads its variables from the top of the script. Set PHIAL_SECURE_BOOT=off in the script only when a Machine Owner Key cannot be enrolled. A Machine Owner Key is a key that shim trusts for custom modules. Set PHIAL_GPU to venus, virgl, or none. venus turns on blob, venus, and the native context as the roadmap asks. Read docs/TOOLCHAIN.md when the host 3D stack misbehaves.
++
++The desktop entries open the unit and the script in the default editor. The display switch entry swaps between egl-headless and GTK for the next run. Use the GTK display for early boot, for the firmware, and for MokManager.
++
++## Install the guest
++
++Run the installer helper:
++
++```sh
++./guest/install-guest.sh
++```
++
++The helper downloads the Fedora 45 netinst assets, packs [guest/phial.ks](guest/phial.ks) into a FAT image, and boots the installer with the kickstart through shim for the full Secure Boot chain. The serial console streams to a log, so you can watch the installer work. The kickstart installs the workstation environment, creates the user phial, sets the hostname phial, installs the SSH keys from https://github.com/pojntfx.keys, and enables sshd and qemu-guest-agent.
++
++Provision the guest after the first boot:
++
++```sh
++make guest
++```
++
++The Ansible playbooks follow the layout of vanlug-infrastructure, with kickstart instead of cloud-init. The guest is a pet machine. Run the playbooks again at any time.
++
++## Secrets and grants
++
++Add a row to the mapping file, then materialize every row:
++
++```sh
++phial sync
++```
++
++Grant one secret for one hour:
++
++```sh
++phial allow --for 1h openai
++```
++
++Show the remaining time:
++
++```sh
++phial status
++```
++
++Revoke a grant early:
++
++```sh
++phial revoke openai
++```
++
++List the secret names, never the values:
++
++```sh
++phial ls
++```
++
++Env rows land as files in the secrets share. The guest mounts the share read-only at /mnt/phial-secrets. The runner loads every file as an environment variable:
++
++```sh
++phial run env
++```
++
++Proxy rows stay on the host. The guest calls http://host.internal:4000/<name> with the placeholder token phial-proxy-placeholder. Caddy matches the grant file for the row, injects the Authorization header, and forwards the request to the upstream. A missing grant file returns 403. An unmatched path returns 404.
++
++Grant subject types are api-key, ssh-key, and gpg-key. An SSH key grant loads the key from ~/.config/phial/keys into the dedicated agent with a one hour lifetime and a confirmation prompt. The prompt appears on the host through the GTK askpass. The GnuPG prompt appears on the host through pinentry-gnome3. The guest holds no private key.
++
++## Display and audio
++
++- Use phial-waypipe <command> for one app over waypipe on vsock. The guest display is 0.
++- Use phial-rdp for a full desktop session over RDP through the gnome-remote-desktop system daemon. Audio and clipboard go over RDP.
++- Attach to the serial console with socat - UNIX-CONNECT:$XDG_RUNTIME_DIR/phial/vm/console.sock for kernel work.
++
++## Networking and devices
++
++The root bundle creates the bridge phialbr0, adds the Ethernet port to it, and owns the tap phialtap0 for the guest. The passt fallback route has the highest guest route metric. Prefer IPv6 on every interface. The dual-stack path is a fallback only.
++
++The launcher passes the named USB devices with usb-host by vendor and product ID. To pass the second xHCI controller with its whole hub, set PHIAL_USB_XHCI in the launcher and bind the controller:
++
++```sh
++run0 ./host/phial-vfio.sh bind 0000:00:14.0
++```
++
++Restore the host drivers when the VM stops:
++
++```sh
++run0 ./host/phial-vfio.sh restore 0000:00:14.0
++```
++
++Never bind the only xHCI controller to the guest. The launcher refuses when the host has one controller.
++
++## Acceptance
++
++Run the host acceptance suite:
++
++```sh
++make acceptance
++```
++
++Run the CLI and proxy test suite:
++
++```sh
++make test
++```
++
++Read [docs/VALIDATION.md](docs/VALIDATION.md) for the validation results of this tree.
+ 
+ ## License
+ 
+diff --git a/cli/go.mod b/cli/go.mod
+new file mode 100644
+index 0000000000000000000000000000000000000000..4824216c9f1a98b2a7df60d4a2854525c582ea0d
+--- /dev/null
++++ b/cli/go.mod
+@@ -0,0 +1,19 @@
++module codeberg.org/pojntfx/phial
++
++go 1.27
++
++require (
++	github.com/adrg/xdg v0.5.3
++	github.com/coreos/go-systemd/v22 v22.7.0
++	github.com/godbus/dbus/v5 v5.2.2
++	github.com/google/renameio/v2 v2.0.2
++	github.com/mdlayher/vsock v1.3.0
++	golang.org/x/crypto v0.57.0
++)
++
++require (
++	github.com/mdlayher/socket v0.6.0 // indirect
++	golang.org/x/net v0.58.0 // indirect
++	golang.org/x/sync v0.20.0 // indirect
++	golang.org/x/sys v0.48.0 // indirect
++)
+diff --git a/cli/go.sum b/cli/go.sum
+new file mode 100644
+index 0000000000000000000000000000000000000000..eaf4be238ce7d77a93c74a5582c35ca0c85ea1d4
+--- /dev/null
++++ b/cli/go.sum
+@@ -0,0 +1,32 @@
++github.com/adrg/xdg v0.5.3 h1:xRnxJXne7+oWDatRhR1JLnvuccuIeCoBu2rtuLqQB78=
++github.com/adrg/xdg v0.5.3/go.mod h1:nlTsY+NNiCBGCK2tpm09vRqfVzrc2fLmXGpBLF0zlTQ=
++github.com/coreos/go-systemd/v22 v22.7.0 h1:LAEzFkke61DFROc7zNLX/WA2i5J8gYqe0rSj9KI28KA=
++github.com/coreos/go-systemd/v22 v22.7.0/go.mod h1:xNUYtjHu2EDXbsxz1i41wouACIwT7Ybq9o0BQhMwD0w=
++github.com/davecgh/go-spew v1.1.1 h1:vj9j/u1bqnvCEfJOwUhtlOARqs3+rkHYY13jYWTU97c=
++github.com/davecgh/go-spew v1.1.1/go.mod h1:J7Y8YcW2NihsgmVo/mv3lAwl/skON4iLHjSsI+c5H38=
++github.com/godbus/dbus/v5 v5.2.2 h1:TUR3TgtSVDmjiXOgAAyaZbYmIeP3DPkld3jgKGV8mXQ=
++github.com/godbus/dbus/v5 v5.2.2/go.mod h1:3AAv2+hPq5rdnr5txxxRwiGjPXamgoIHgz9FPBfOp3c=
++github.com/google/go-cmp v0.7.0 h1:wk8382ETsv4JYUZwIsn6YpYiWiBsYLSJiTsyBybVuN8=
++github.com/google/go-cmp v0.7.0/go.mod h1:pXiqmnSA92OHEEa9HXL2W4E7lf9JzCmGVUdgjX3N/iU=
++github.com/google/renameio/v2 v2.0.2 h1:qKZs+tfn+arruZZhQ7TKC/ergJunuJicWS6gLDt/dGw=
++github.com/google/renameio/v2 v2.0.2/go.mod h1:OX+G6WHHpHq3NVj7cAOleLOwJfcQ1s3uUJQCrr78SWo=
++github.com/mdlayher/socket v0.6.0 h1:ScZPaAGyO1icQnbFrhPM8mnXyMu9qukC1K4ZoM2IQKU=
++github.com/mdlayher/socket v0.6.0/go.mod h1:q7vozUAnxSqnjHc12Fik5yUKIzfZ8ITCfMkhOtE9z18=
++github.com/mdlayher/vsock v1.3.0 h1:bqQfZ1OznI03y6YiXp2sze05RVdzLn/zsfjnjd4+ivI=
++github.com/mdlayher/vsock v1.3.0/go.mod h1:WsuksavOvwCnV5UqGHUkvAvCy+Dqy81y4goKQTzxxNY=
++github.com/pmezard/go-difflib v1.0.0 h1:4DBwDE0NGyQoBHbLQYPwSUPoCMWR5BEzIk/f1lZbAQM=
++github.com/pmezard/go-difflib v1.0.0/go.mod h1:iKH77koFhYxTK1pcRnkKkqfTogsbg7gZNVY4sRDYZ/4=
++github.com/stretchr/testify v1.9.0 h1:HtqpIVDClZ4nwg75+f6Lvsy/wHu+3BoSGCbBAcpTsTg=
++github.com/stretchr/testify v1.9.0/go.mod h1:r2ic/lqez/lEtzL7wO/rwa5dbSLXVDPFyf8C91i36aY=
++golang.org/x/crypto v0.57.0 h1:3ZVCjf8Ggz7zneR/EHRVx68Ctf+2pmIMP2UFhh9cC6M=
++golang.org/x/crypto v0.57.0/go.mod h1:Fdz0i5U6CoizGwLda9DttjSk6qlZo25zYNtR+ycvuZA=
++golang.org/x/net v0.58.0 h1:ynWG7rqYi4ccpTEuPZ2QGWHktVEM9DMCj9yzDE0Q7To=
++golang.org/x/net v0.58.0/go.mod h1:YwCddHnFlT7eLQqVprV19OnhLGtc5xOKgE0RyqgfWAU=
++golang.org/x/sync v0.20.0 h1:e0PTpb7pjO8GAtTs2dQ6jYa5BWYlMuX047Dco/pItO4=
++golang.org/x/sync v0.20.0/go.mod h1:9xrNwdLfx4jkKbNva9FpL6vEN7evnE43NNNJQ2LF3+0=
++golang.org/x/sys v0.48.0 h1:bbX/i/6MgT9BVLM9RT1thmxL04yeTAhbEz4SyadbXoo=
++golang.org/x/sys v0.48.0/go.mod h1:hNLxWAXmnKAxqDtdwIYC4bM9oQPEecfsnNMuSxOs3og=
++golang.org/x/term v0.46.0 h1:3+OXuTbaKDgwk8jTi3aSLHRlmWqHEUDUtxnbFigO4YE=
++golang.org/x/term v0.46.0/go.mod h1:+K02xbkittuwc0Am4abfA3Fc+XRGXkvBXNO88NCXPoc=
++gopkg.in/yaml.v3 v3.0.1 h1:fxVm/GzAzEWqLHuvctI91KS9hhNmmWOoWu0XTYJS7CA=
++gopkg.in/yaml.v3 v3.0.1/go.mod h1:K4uyk7z7BCEPqu6E+C64Yfv1cQ7kz7rIZviUmN+EgEM=
+diff --git a/cli/main.go b/cli/main.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..3b94d6633692c69c38d459163fc414b621a44e4c
+--- /dev/null
++++ b/cli/main.go
+@@ -0,0 +1,44 @@
++package main
++
++import (
++	"fmt"
++	"log/slog"
++	"os"
++
++	"codeberg.org/pojntfx/phial/pkg/phial"
++)
++
++func main() {
++	log := slog.New(slog.NewTextHandler(os.Stderr, nil))
++
++	client := phial.NewClient(log)
++
++	if len(os.Args) < 2 {
++		fmt.Fprintln(os.Stderr, "usage: phial <sync|allow|revoke|status|ls|run> [arguments]")
++		os.Exit(2)
++	}
++
++	var err error
++	switch os.Args[1] {
++	case "sync":
++		err = client.Sync()
++	case "allow":
++		err = client.Allow(os.Args[2:])
++	case "revoke":
++		err = client.Revoke(os.Args[2:])
++	case "status":
++		err = client.Status()
++	case "ls":
++		err = client.Ls()
++	case "run":
++		err = client.Run(os.Args[2:])
++	default:
++		fmt.Fprintln(os.Stderr, "usage: phial <sync|allow|revoke|status|ls|run> [arguments]")
++		os.Exit(2)
++	}
++
++	if err != nil {
++		log.Error("command failed", "err", err)
++		os.Exit(1)
++	}
++}
+diff --git a/cli/pkg/phial/agent.go b/cli/pkg/phial/agent.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..22e8a7136acd2cf64e65dd0632150e6cd6a5cea8
+--- /dev/null
++++ b/cli/pkg/phial/agent.go
+@@ -0,0 +1,71 @@
++package phial
++
++import (
++	"fmt"
++	"net"
++	"os"
++	"path/filepath"
++
++	"golang.org/x/crypto/ssh"
++	"golang.org/x/crypto/ssh/agent"
++)
++
++func (c *Client) agentClient() (agent.Agent, net.Conn, error) {
++	conn, err := net.Dial("unix", c.agentSock)
++	if err != nil {
++		return nil, nil, fmt.Errorf("cannot reach the dedicated agent at %s, start phial-agent.service: %w", c.agentSock, err)
++	}
++
++	return agent.NewClient(conn), conn, nil
++}
++
++func (c *Client) grantSSHKey(name string) error {
++	keyPath := filepath.Join(c.keysDir, name)
++
++	data, err := os.ReadFile(keyPath)
++	if err != nil {
++		return fmt.Errorf("no key file %s, put the private key for this grant there", keyPath)
++	}
++
++	key, err := ssh.ParseRawPrivateKey(data)
++	if err != nil {
++		return fmt.Errorf("cannot parse %s, use an unencrypted key: %w", keyPath, err)
++	}
++
++	client, conn, err := c.agentClient()
++	if err != nil {
++		return err
++	}
++	defer conn.Close()
++
++	if err := client.Add(agent.AddedKey{
++		PrivateKey:       key,
++		Comment:          name,
++		LifetimeSecs:     3600,
++		ConfirmBeforeUse: true,
++	}); err != nil {
++		return fmt.Errorf("cannot load %s into the dedicated agent: %w", name, err)
++	}
++
++	c.setForward("ssh-agent", "start")
++
++	return nil
++}
++
++func (c *Client) removeSSHKey(name string) {
++	keyPath := filepath.Join(c.keysDir, name)
++
++	data, err := os.ReadFile(keyPath)
++	if err == nil {
++		if key, err := ssh.ParseRawPrivateKey(data); err == nil {
++			if signer, err := ssh.NewSignerFromKey(key); err == nil {
++				if client, conn, err := c.agentClient(); err == nil {
++					_ = client.Remove(signer.PublicKey())
++					conn.Close()
++				}
++			}
++		}
++	}
++
++	c.setForward("ssh-agent", "stop")
++}
+diff --git a/cli/pkg/phial/allow.go b/cli/pkg/phial/allow.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..d302c2fe2c10363df194c5e2c48f212e44f37d66
+--- /dev/null
++++ b/cli/pkg/phial/allow.go
+@@ -0,0 +1,72 @@
++package phial
++
++import (
++	"errors"
++	"flag"
++	"fmt"
++	"time"
++)
++
++func (c *Client) Allow(args []string) error {
++	flags := flag.NewFlagSet("allow", flag.ContinueOnError)
++
++	duration := flags.String("for", "", "grant duration, a systemd timespan such as 30min or 1h")
++	kind := flags.String("kind", "api-key", "grant subject type: api-key, ssh-key, or gpg-key")
++
++	if err := flags.Parse(args); err != nil {
++		return err
++	}
++
++	if flags.NArg() != 1 || *duration == "" {
++		return errors.New("usage: phial allow --for <duration> [--kind api-key|ssh-key|gpg-key] <name>")
++	}
++
++	name := flags.Arg(0)
++
++	seconds, err := parseDuration(*duration)
++	if err != nil {
++		return err
++	}
++
++	if err := c.ensureDirs(); err != nil {
++		return err
++	}
++
++	switch *kind {
++	case "api-key":
++		r, err := c.findRow(name)
++		if err != nil {
++			return err
++		}
++
++		if err := c.materializeRow(r); err != nil {
++			return err
++		}
++
++		if err := writeSecret(c.caddyfile, c.caddyfileText()); err != nil {
++			return err
++		}
++
++		c.applyCaddy()
++	case "ssh-key":
++		if err := c.grantSSHKey(name); err != nil {
++			return err
++		}
++	case "gpg-key":
++		c.setForward("gpg-extra", "start")
++	default:
++		return fmt.Errorf("unknown kind %q", *kind)
++	}
++
++	expires := c.writeGrant(name, *kind, seconds)
++
++	if err := c.scheduleExpiry(name, seconds); err != nil {
++		return err
++	}
++
++	notify("phial grant", fmt.Sprintf("%s (%s) granted until %s", name, *kind, expires.Format("15:04")))
++
++	fmt.Printf("granted %s (%s) until %s\n", name, *kind, expires.Format(time.RFC3339))
++
++	return nil
++}
+diff --git a/cli/pkg/phial/guest.go b/cli/pkg/phial/guest.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..2be3b4aaae904f283696ceb2ba613325446552f3
+--- /dev/null
++++ b/cli/pkg/phial/guest.go
+@@ -0,0 +1,128 @@
++package phial
++
++import (
++	"errors"
++	"fmt"
++	"net"
++	"os"
++	"path/filepath"
++	"time"
++
++	"github.com/adrg/xdg"
++	"github.com/mdlayher/vsock"
++	"golang.org/x/crypto/ssh"
++	"golang.org/x/crypto/ssh/agent"
++	"golang.org/x/crypto/ssh/knownhosts"
++)
++
++func guestAuth() ([]ssh.AuthMethod, error) {
++	var methods []ssh.AuthMethod
++
++	if sock := os.Getenv("SSH_AUTH_SOCK"); sock != "" {
++		if conn, err := net.Dial("unix", sock); err == nil {
++			methods = append(methods, ssh.PublicKeysCallback(agent.NewClient(conn).Signers))
++		}
++	}
++
++	if signer, err := guestSigner(); err == nil {
++		methods = append(methods, ssh.PublicKeys(signer))
++	}
++
++	if len(methods) == 0 {
++		return nil, errors.New("no usable key: load one into ssh-agent or put one in ~/.ssh")
++	}
++
++	return methods, nil
++}
++
++func guestSigner() (ssh.Signer, error) {
++	for _, name := range []string{"id_ed25519", "id_rsa"} {
++		data, err := os.ReadFile(filepath.Join(xdg.Home, ".ssh", name))
++		if err != nil {
++			continue
++		}
++
++		signer, err := ssh.ParsePrivateKey(data)
++		if err == nil {
++			return signer, nil
++		}
++	}
++
++	return nil, errors.New("no usable key in ~/.ssh")
++}
++
++func guestHostKeyCallback() ssh.HostKeyCallback {
++	knownHostsFile := filepath.Join(xdg.Home, ".ssh", "known_hosts")
++
++	callback, err := knownhosts.New(knownHostsFile)
++	if err != nil {
++		callback = nil
++	}
++
++	return func(hostname string, remote net.Addr, key ssh.PublicKey) error {
++		if callback != nil {
++			err := callback(hostname, remote, key)
++			if err == nil {
++				return nil
++			}
++
++			var keyError *knownhosts.KeyError
++			if !errors.As(err, &keyError) || len(keyError.Want) > 0 {
++				return err
++			}
++		}
++
++		file, err := os.OpenFile(knownHostsFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
++		if err != nil {
++			return err
++		}
++		defer file.Close()
++
++		_, err = fmt.Fprintln(file, knownhosts.Line([]string{"phial"}, key))
++
++		return err
++	}
++}
++
++func (c *Client) guestCommand(command string) error {
++	auth, err := guestAuth()
++	if err != nil {
++		return err
++	}
++
++	conn, err := vsock.Dial(3, 2222, nil)
++	if err != nil {
++		return err
++	}
++
++	config := &ssh.ClientConfig{
++		User:            "phial",
++		Auth:            auth,
++		HostKeyCallback: guestHostKeyCallback(),
++		Timeout:         5 * time.Second,
++	}
++
++	sshConn, chans, reqs, err := ssh.NewClientConn(conn, "phial:22", config)
++	if err != nil {
++		conn.Close()
++
++		return err
++	}
++
++	client := ssh.NewClient(sshConn, chans, reqs)
++	defer client.Close()
++
++	session, err := client.NewSession()
++	if err != nil {
++		return err
++	}
++	defer session.Close()
++
++	return session.Run(command)
++}
++
++func (c *Client) sshGuest(command string) {
++	if err := c.guestCommand(command); err != nil {
++		c.log.Info("guest command failed", "command", command, "err", err)
++	}
++}
+diff --git a/cli/pkg/phial/ls.go b/cli/pkg/phial/ls.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..6f74981c712b6f6ecf17b51f0803a047276731d9
+--- /dev/null
++++ b/cli/pkg/phial/ls.go
+@@ -0,0 +1,16 @@
++package phial
++
++import "fmt"
++
++func (c *Client) Ls() error {
++	rows, err := c.readMapping()
++	if err != nil {
++		return err
++	}
++
++	for _, r := range rows {
++		fmt.Printf("%s\t%s\t%s\t%s\n", r.name, r.mode, r.source, r.upstream)
++	}
++
++	return nil
++}
+diff --git a/cli/pkg/phial/notify.go b/cli/pkg/phial/notify.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..23a7441ba91f2e30706d6e2659297b636f28e2ca
+--- /dev/null
++++ b/cli/pkg/phial/notify.go
+@@ -0,0 +1,18 @@
++package phial
++
++import (
++	"github.com/godbus/dbus/v5"
++)
++
++func notify(summary, body string) {
++	bus, err := dbus.ConnectSessionBus()
++	if err != nil {
++		return
++	}
++	defer bus.Close()
++
++	_ = bus.Object("org.freedesktop.Notifications", dbus.ObjectPath("/org/freedesktop/Notifications")).
++		Call("org.freedesktop.Notifications.Notify", 0,
++			"phial", uint32(0), "", summary, body,
++			[]string{}, map[string]dbus.Variant{}, int32(-1)).Err
++}
+diff --git a/cli/pkg/phial/phial.go b/cli/pkg/phial/phial.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..5bc5392c06b2349a897763b8343d8cc3c9f322f0
+--- /dev/null
++++ b/cli/pkg/phial/phial.go
+@@ -0,0 +1,258 @@
++package phial
++
++import (
++	"fmt"
++	"log/slog"
++	"os"
++	"path/filepath"
++	"regexp"
++	"strconv"
++	"strings"
++	"time"
++
++	"github.com/adrg/xdg"
++	"github.com/google/renameio/v2"
++)
++
++const Placeholder = "phial-proxy-placeholder"
++
++var namePattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
++
++type Client struct {
++	log *slog.Logger
++
++	mappingFile string
++	keysDir     string
++	caddyfile   string
++	secretsDir  string
++	grantsDir   string
++	dropinsDir  string
++	agentSock   string
++}
++
++func NewClient(log *slog.Logger) *Client {
++	configDir := filepath.Join(xdg.ConfigHome, "phial")
++	if override := os.Getenv("PHIAL_CONFIG_DIR"); override != "" {
++		configDir = override
++	}
++
++	runtimeBase := xdg.RuntimeDir
++	if runtimeBase == "" {
++		runtimeBase = fmt.Sprintf("/run/user/%d", os.Getuid())
++	}
++	runtimeDir := filepath.Join(runtimeBase, "phial")
++	if override := os.Getenv("PHIAL_RUNTIME_DIR"); override != "" {
++		runtimeDir = override
++	}
++
++	return &Client{
++		log:         log,
++		mappingFile: filepath.Join(configDir, "mapping"),
++		keysDir:     filepath.Join(configDir, "keys"),
++		caddyfile:   filepath.Join(configDir, "Caddyfile"),
++		secretsDir:  filepath.Join(runtimeDir, "secrets"),
++		grantsDir:   filepath.Join(runtimeDir, "grants"),
++		dropinsDir:  filepath.Join(runtimeDir, "caddy"),
++		agentSock:   filepath.Join(runtimeDir, "agent", "ssh.sock"),
++	}
++}
++
++func (c *Client) ensureDirs() error {
++	for _, dir := range []string{c.keysDir, c.secretsDir, c.grantsDir, c.dropinsDir, filepath.Dir(c.agentSock)} {
++		if err := os.MkdirAll(dir, 0o700); err != nil {
++			return err
++		}
++
++		if err := os.Chmod(dir, 0o700); err != nil {
++			return err
++		}
++	}
++
++	return nil
++}
++
++type row struct {
++	name     string
++	mode     string
++	source   string
++	upstream string
++}
++
++func (c *Client) readMapping() ([]row, error) {
++	data, err := os.ReadFile(c.mappingFile)
++	if os.IsNotExist(err) {
++		return nil, nil
++	}
++	if err != nil {
++		return nil, err
++	}
++
++	var rows []row
++	for index, line := range strings.Split(string(data), "\n") {
++		line = strings.TrimSpace(line)
++
++		if line == "" || strings.HasPrefix(line, "#") {
++			continue
++		}
++
++		parts := strings.Fields(line)
++		if len(parts) != 4 {
++			return nil, fmt.Errorf("%s:%d: expected 4 columns: name mode source upstream", c.mappingFile, index+1)
++		}
++
++		if parts[1] != "env" && parts[1] != "proxy" {
++			return nil, fmt.Errorf("%s:%d: unknown mode %q, use env or proxy", c.mappingFile, index+1, parts[1])
++		}
++
++		if !namePattern.MatchString(parts[0]) {
++			return nil, fmt.Errorf("%s:%d: name %q must be a valid variable name", c.mappingFile, index+1, parts[0])
++		}
++
++		rows = append(rows, row{parts[0], parts[1], parts[2], parts[3]})
++	}
++
++	return rows, nil
++}
++
++func (c *Client) findRow(name string) (row, error) {
++	rows, err := c.readMapping()
++	if err != nil {
++		return row{}, err
++	}
++
++	for _, r := range rows {
++		if r.name == name {
++			return r, nil
++		}
++	}
++
++	return row{}, fmt.Errorf("no mapping row named %q", name)
++}
++
++func writeSecret(path, data string) error {
++	return renameio.WriteFile(path, []byte(data), 0o600, renameio.WithStaticPermissions(0o600))
++}
++
++func (c *Client) grantPath(name string) string {
++	return filepath.Join(c.grantsDir, name+".grant")
++}
++
++func (c *Client) readGrant(name string) map[string]string {
++	data, err := os.ReadFile(c.grantPath(name))
++	if err != nil {
++		return nil
++	}
++
++	fields := map[string]string{}
++	for _, line := range strings.Split(string(data), "\n") {
++		if key, value, ok := strings.Cut(line, "="); ok {
++			fields[key] = value
++		}
++	}
++
++	return fields
++}
++
++func (c *Client) writeGrant(name, kind string, seconds int) time.Time {
++	expires := time.Now().Add(time.Duration(seconds) * time.Second)
++
++	_ = writeSecret(c.grantPath(name), fmt.Sprintf("name=%s\nkind=%s\nexpires=%s\nexpires_unix=%d\n",
++		name, kind, expires.Format(time.RFC3339), expires.Unix()))
++
++	return expires
++}
++
++var durationPattern = regexp.MustCompile(`(\d+)\s*([A-Za-z]+)`)
++
++var durationUnits = map[string]int{
++	"s": 1, "sec": 1, "second": 1, "seconds": 1,
++	"m": 60, "min": 60, "minute": 60, "minutes": 60,
++	"h": 3600, "hr": 3600, "hour": 3600, "hours": 3600,
++	"d": 86400, "day": 86400, "days": 86400,
++}
++
++func parseDuration(text string) (int, error) {
++	if seconds, err := strconv.Atoi(text); err == nil && seconds > 0 {
++		return seconds, nil
++	}
++
++	total := 0
++	for _, match := range durationPattern.FindAllStringSubmatch(text, -1) {
++		unit, ok := durationUnits[match[2]]
++		if !ok {
++			return 0, fmt.Errorf("unknown duration unit %q in %q", match[2], text)
++		}
++
++		number, _ := strconv.Atoi(match[1])
++		total += number * unit
++	}
++
++	if total <= 0 {
++		return 0, fmt.Errorf("invalid duration %q, use a systemd timespan such as 30min or 1h", text)
++	}
++
++	return total, nil
++}
++
++func upstreamHost(upstream string) string {
++	if _, rest, ok := strings.Cut(upstream, "://"); ok {
++		upstream = rest
++	}
++
++	host, _, _ := strings.Cut(upstream, "/")
++
++	return host
++}
++
++func (c *Client) dropinText(r row, value string) string {
++	return fmt.Sprintf(`@phial_%[1]s_path path /%[1]s /%[1]s/*
++@phial_%[1]s_granted {
++	path /%[1]s /%[1]s/*
++	file {
++		root %[2]s
++		try_files %[1]s.grant
++	}
++}
++handle @phial_%[1]s_granted {
++	uri strip_prefix /%[1]s
++	reverse_proxy %[3]s {
++		header_up Host %[4]s
++		header_up Authorization "Bearer %[5]s"
++	}
++}
++handle @phial_%[1]s_path {
++	respond 403
++}
++`, r.name, c.grantsDir, r.upstream, upstreamHost(r.upstream), value)
++}
++
++func (c *Client) caddyfileText() string {
++	var out strings.Builder
++
++	out.WriteString("{\n\tadmin off\n}\n\n:4000 {\n\tbind ::1\n")
++
++	if dropins, _ := filepath.Glob(filepath.Join(c.dropinsDir, "*.caddy")); len(dropins) > 0 {
++		out.WriteString("\timport " + filepath.Join(c.dropinsDir, "*.caddy") + "\n")
++	}
++
++	out.WriteString("\thandle {\n\t\trespond 404\n\t}\n}\n")
++
++	return out.String()
++}
++
++func (c *Client) materializeRow(r row) error {
++	value, err := resolve(r.source)
++	if err != nil {
++		return err
++	}
++
++	if r.mode == "env" {
++		return writeSecret(filepath.Join(c.secretsDir, r.name), value+"\n")
++	}
++
++	if err := writeSecret(filepath.Join(c.dropinsDir, r.name+".caddy"), c.dropinText(r, value)); err != nil {
++		return err
++	}
++
++	return writeSecret(filepath.Join(c.secretsDir, r.name), Placeholder+"\n")
++}
+diff --git a/cli/pkg/phial/revoke.go b/cli/pkg/phial/revoke.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..4c9fdd8d89c54f769c5770e8ac96dd0a7f57611b
+--- /dev/null
++++ b/cli/pkg/phial/revoke.go
+@@ -0,0 +1,43 @@
++package phial
++
++import (
++	"errors"
++	"fmt"
++	"os"
++	"path/filepath"
++)
++
++func (c *Client) Revoke(args []string) error {
++	if len(args) != 1 {
++		return errors.New("usage: phial revoke <name>")
++	}
++
++	name := args[0]
++
++	if err := c.ensureDirs(); err != nil {
++		return err
++	}
++
++	kind := "api-key"
++	if grant := c.readGrant(name); grant != nil && grant["kind"] != "" {
++		kind = grant["kind"]
++	}
++
++	_ = os.Remove(filepath.Join(c.secretsDir, name))
++	_ = os.Remove(c.grantPath(name))
++
++	switch kind {
++	case "ssh-key":
++		c.removeSSHKey(name)
++	case "gpg-key":
++		c.setForward("gpg-extra", "stop")
++	}
++
++	notify("phial revoke", fmt.Sprintf("%s (%s) revoked", name, kind))
++
++	fmt.Printf("revoked %s\n", name)
++
++	c.cancelExpiry(name)
++
++	return nil
++}
+diff --git a/cli/pkg/phial/run.go b/cli/pkg/phial/run.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..21b7df1e26e7f5ca14431400114fb676a8151f87
+--- /dev/null
++++ b/cli/pkg/phial/run.go
+@@ -0,0 +1,54 @@
++package phial
++
++import (
++	"errors"
++	"fmt"
++	"os"
++	"os/exec"
++	"path/filepath"
++	"strings"
++	"syscall"
++)
++
++func (c *Client) Run(args []string) error {
++	if len(args) == 0 {
++		return errors.New("usage: phial run <command> [argument...]")
++	}
++
++	dir := os.Getenv("PHIAL_SECRETS_DIR")
++	if dir == "" {
++		dir = "/mnt/phial-secrets"
++	}
++
++	environment := os.Environ()
++
++	entries, err := os.ReadDir(dir)
++	if err == nil {
++		for _, entry := range entries {
++			info, err := entry.Info()
++			if err != nil || !info.Mode().IsRegular() {
++				continue
++			}
++
++			if !namePattern.MatchString(entry.Name()) {
++				fmt.Fprintf(os.Stderr, "phial run: skipping %s, not a valid variable name\n", entry.Name())
++
++				continue
++			}
++
++			data, err := os.ReadFile(filepath.Join(dir, entry.Name()))
++			if err != nil {
++				continue
++			}
++
++			environment = append(environment, entry.Name()+"="+strings.TrimRight(string(data), "\n"))
++		}
++	}
++
++	binary, err := exec.LookPath(args[0])
++	if err != nil {
++		return err
++	}
++
++	return syscall.Exec(binary, args, environment)
++}
+diff --git a/cli/pkg/phial/secrets.go b/cli/pkg/phial/secrets.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..3e009b0c8da1b594999e31bcab770ef65cc99529
+--- /dev/null
++++ b/cli/pkg/phial/secrets.go
+@@ -0,0 +1,68 @@
++package phial
++
++import (
++	"fmt"
++	"strings"
++
++	"github.com/godbus/dbus/v5"
++)
++
++type secretItem struct {
++	Session     dbus.ObjectPath
++	Parameters  []byte
++	Value       []byte
++	ContentType string
++}
++
++func resolve(source string) (string, error) {
++	key, ok := strings.CutPrefix(source, "keepassxc://")
++	if !ok {
++		return "", fmt.Errorf("unsupported source %q, the only scheme is keepassxc://", source)
++	}
++
++	bus, err := dbus.ConnectSessionBus()
++	if err != nil {
++		return "", fmt.Errorf("no session bus: %w", err)
++	}
++	defer bus.Close()
++
++	service := bus.Object("org.freedesktop.secrets", dbus.ObjectPath("/org/freedesktop/secrets"))
++
++	var output dbus.Variant
++	var session dbus.ObjectPath
++	if err := service.Call("org.freedesktop.Secret.Service.OpenSession", 0, "plain",
++		dbus.MakeVariant("")).Store(&output, &session); err != nil {
++		return "", fmt.Errorf("cannot open a Secret Service session: %w", err)
++	}
++
++	var unlocked, locked []dbus.ObjectPath
++	if err := service.Call("org.freedesktop.Secret.Service.SearchItems", 0,
++		map[string]string{"phial": key}).Store(&unlocked, &locked); err != nil {
++		return "", fmt.Errorf("lookup of %s failed: %w", source, err)
++	}
++
++	if len(unlocked) == 0 {
++		if len(locked) > 0 {
++			return "", fmt.Errorf("the entry for %s is locked, open and unlock the KeePassXC window", source)
++		}
++
++		return "", fmt.Errorf("no entry for %s, store it with the attribute phial set to %q", source, key)
++	}
++
++	secrets := map[dbus.ObjectPath]secretItem{}
++	if err := service.Call("org.freedesktop.Secret.Service.GetSecrets", 0,
++		unlocked, session).Store(&secrets); err != nil {
++		return "", fmt.Errorf("cannot read %s: %w", source, err)
++	}
++
++	for _, item := range secrets {
++		value := strings.TrimRight(string(item.Value), "\n")
++		if value == "" {
++			return "", fmt.Errorf("empty value for %s", source)
++		}
++
++		return value, nil
++	}
++
++	return "", fmt.Errorf("no value for %s", source)
++}
+diff --git a/cli/pkg/phial/status.go b/cli/pkg/phial/status.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..da1d35d1faae60bf95a1d37eeedb3a844b1b66ea
+--- /dev/null
++++ b/cli/pkg/phial/status.go
+@@ -0,0 +1,68 @@
++package phial
++
++import (
++	"fmt"
++	"path/filepath"
++	"slices"
++	"strconv"
++	"strings"
++	"time"
++)
++
++func (c *Client) Status() error {
++	if err := c.ensureDirs(); err != nil {
++		return err
++	}
++
++	rows := map[string]row{}
++	rowsList, err := c.readMapping()
++	if err != nil {
++		return err
++	}
++	for _, r := range rowsList {
++		rows[r.name] = r
++	}
++
++	names := map[string]bool{}
++	for name := range rows {
++		names[name] = true
++	}
++
++	grants, _ := filepath.Glob(filepath.Join(c.grantsDir, "*.grant"))
++	for _, grant := range grants {
++		names[strings.TrimSuffix(filepath.Base(grant), ".grant")] = true
++	}
++
++	if len(names) == 0 {
++		fmt.Println("no secrets and no grants")
++
++		return nil
++	}
++
++	sorted := []string{}
++	for name := range names {
++		sorted = append(sorted, name)
++	}
++	slices.Sort(sorted)
++
++	for _, name := range sorted {
++		mode := "-"
++		if r, ok := rows[name]; ok {
++			mode = r.mode
++		}
++
++		grant := c.readGrant(name)
++		if grant != nil {
++			unix, _ := strconv.ParseInt(grant["expires_unix"], 10, 64)
++			if remaining := unix - time.Now().Unix(); remaining > 0 {
++				fmt.Printf("%s\t%s\t%s\tgranted\t%ds left\n", name, grant["kind"], mode, remaining)
++
++				continue
++			}
++		}
++
++		fmt.Printf("%s\t-\t%s\tnot granted\n", name, mode)
++	}
++
++	return nil
++}
+diff --git a/cli/pkg/phial/sync.go b/cli/pkg/phial/sync.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..890254909cdc8e7f702ba77a694c6a392cd1f663
+--- /dev/null
++++ b/cli/pkg/phial/sync.go
+@@ -0,0 +1,45 @@
++package phial
++
++import (
++	"fmt"
++	"os"
++	"path/filepath"
++	"strings"
++)
++
++func (c *Client) Sync() error {
++	if err := c.ensureDirs(); err != nil {
++		return err
++	}
++
++	rows, err := c.readMapping()
++	if err != nil {
++		return err
++	}
++
++	seen := map[string]bool{}
++	for _, r := range rows {
++		if err := c.materializeRow(r); err != nil {
++			return err
++		}
++
++		seen[r.name] = true
++	}
++
++	dropins, _ := filepath.Glob(filepath.Join(c.dropinsDir, "*.caddy"))
++	for _, dropin := range dropins {
++		if !seen[strings.TrimSuffix(filepath.Base(dropin), ".caddy")] {
++			_ = os.Remove(dropin)
++		}
++	}
++
++	if err := writeSecret(c.caddyfile, c.caddyfileText()); err != nil {
++		return err
++	}
++
++	c.applyCaddy()
++
++	fmt.Printf("synced %d row(s)\n", len(rows))
++
++	return nil
++}
+diff --git a/cli/pkg/phial/systemd.go b/cli/pkg/phial/systemd.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..d8f360b07ecd2c2fcd1046e3021558ae6bc7299c
+--- /dev/null
++++ b/cli/pkg/phial/systemd.go
+@@ -0,0 +1,133 @@
++package phial
++
++import (
++	"context"
++	"fmt"
++	"os"
++	"os/exec"
++	"path/filepath"
++	"strconv"
++	"strings"
++
++	systemdDbus "github.com/coreos/go-systemd/v22/dbus"
++	"github.com/godbus/dbus/v5"
++)
++
++func (c *Client) userManager() (*systemdDbus.Conn, error) {
++	return systemdDbus.NewUserConnectionContext(context.Background())
++}
++
++type timerEntry struct {
++	Name  string
++	Value uint64
++}
++
++func (c *Client) scheduleExpiry(name string, seconds int) error {
++	conn, err := c.userManager()
++	if err != nil {
++		return err
++	}
++	defer conn.Close()
++
++	binary, err := exec.LookPath("phial")
++	if err != nil {
++		binary, _ = filepath.Abs(os.Args[0])
++	}
++
++	timer := []systemdDbus.Property{
++		systemdDbus.PropDescription("phial grant expiry for " + name),
++		{Name: "TimersMonotonic", Value: dbus.MakeVariant([]timerEntry{{Name: "OnActiveSec", Value: uint64(seconds) * 1000000}})},
++		{Name: "AccuracyUSec", Value: dbus.MakeVariant(uint64(1000000))},
++		{Name: "CollectMode", Value: dbus.MakeVariant("inactive-or-failed")},
++	}
++
++	service := []systemdDbus.Property{
++		systemdDbus.PropDescription("phial grant expiry for " + name),
++		systemdDbus.PropType("oneshot"),
++		systemdDbus.PropExecStart([]string{binary, "revoke", name}, false),
++		{Name: "Environment", Value: dbus.MakeVariant([]string{
++			"PHIAL_CONFIG_DIR=" + filepath.Dir(c.mappingFile),
++			"PHIAL_RUNTIME_DIR=" + filepath.Dir(c.secretsDir),
++			"PATH=" + os.Getenv("PATH"),
++		})},
++		{Name: "CollectMode", Value: dbus.MakeVariant("inactive-or-failed")},
++	}
++
++	aux := []systemdDbus.PropertyCollection{
++		{Name: "phial-expire-" + name + ".service", Properties: service},
++	}
++
++	_, err = conn.StartTransientUnitAux(context.Background(), "phial-expire-"+name+".timer", "replace", timer, aux, nil)
++
++	return err
++}
++
++func (c *Client) cancelExpiry(name string) {
++	conn, err := c.userManager()
++	if err != nil {
++		return
++	}
++	defer conn.Close()
++
++	_, _ = conn.StopUnitContext(context.Background(), "phial-expire-"+name+".timer", "replace", nil)
++	_, _ = conn.StopUnitContext(context.Background(), "phial-expire-"+name+".service", "replace", nil)
++}
++
++func caddyVersion() (int, int, bool) {
++	out, err := exec.Command("caddy", "version").Output()
++	if err != nil {
++		return 0, 0, false
++	}
++
++	parts := strings.Split(strings.TrimPrefix(strings.TrimSpace(string(out)), "v"), ".")
++	if len(parts) < 2 {
++		return 0, 0, false
++	}
++
++	major, err1 := strconv.Atoi(parts[0])
++	minor, err2 := strconv.Atoi(parts[1])
++
++	return major, minor, err1 == nil && err2 == nil
++}
++
++func (c *Client) applyCaddy() {
++	conn, err := c.userManager()
++	if err != nil {
++		return
++	}
++	defer conn.Close()
++
++	property, err := conn.GetUnitPropertyContext(context.Background(), "phial-caddy.service", "ActiveState")
++	if err != nil {
++		return
++	}
++
++	state, ok := property.Value.Value().(string)
++	if !ok || state != "active" {
++		return
++	}
++
++	major, minor, ok := caddyVersion()
++	if ok && (major < 2 || (major == 2 && minor < 11)) {
++		_, _ = conn.RestartUnitContext(context.Background(), "phial-caddy.service", "replace", nil)
++	} else {
++		_, _ = conn.ReloadUnitContext(context.Background(), "phial-caddy.service", "replace", nil)
++	}
++}
++
++func (c *Client) setForward(name, state string) {
++	conn, err := c.userManager()
++	if err == nil {
++		unit := "phial-forward@" + name + ".service"
++
++		if state == "start" {
++			_, _ = conn.StartUnitContext(context.Background(), unit, "replace", nil)
++		} else {
++			_, _ = conn.StopUnitContext(context.Background(), unit, "replace", nil)
++		}
++
++		conn.Close()
++	}
++
++	c.sshGuest(fmt.Sprintf("systemctl --user %s phial-forward@%s.service", state, name))
++}
+diff --git a/docs/TOOLCHAIN.md b/docs/TOOLCHAIN.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..4d62575bc9eabad867af76d6371ee19be11e5005
+--- /dev/null
++++ b/docs/TOOLCHAIN.md
+@@ -0,0 +1,36 @@
++# Toolchain notes
++
++One Homebrew manifest works on both hosts. The Brewfile lists the user space tools. This file records a note for each tool that Homebrew does not provide on Linux, and the source for each such tool.
++
++## Tools from Homebrew
++
++The Brewfile installs virtiofsd, passt, Caddy, socat, GnuPG, swtpm, FreeRDP, wl-clipboard, zenity, libsecret, Ansible, and uv. The phial CLI builds with the Go toolchain from Homebrew.
++
++## Tools that Homebrew does not provide on Linux
++
++- waypipe is not in Homebrew on Linux. Take it from DNF. The root bundle installs it.
++- virt-firmware is not in Homebrew on Linux. It provides virt-fw-vars. Take it from DNF, or run uv tool install virt-firmware.
++- KeePassXC is a Homebrew cask, and casks do not install on Linux. Take it from DNF. Fedora ships KeePassXC.
++- pinentry-gnome3 is not in Homebrew on Linux. Take it from DNF. Fedora ships it.
++- mokutil is not in Homebrew on Linux. Take it from DNF. Fedora ships it.
++- systemd is the host system manager. Homebrew does not provide it. The grants use the user manager over D-Bus.
++- gnome-remote-desktop is a GNOME component. Homebrew does not provide it on Linux. The guest takes it from Fedora packages. GNOME OS ships it.
++
++## Tools with a note
++
++- QEMU is in Homebrew, but the roadmap takes QEMU and waypipe from DNF on the development host. The Fedora build of QEMU carries virglrenderer. Make sure that the QEMU build lists egl-headless and venus with phial-acceptance.
++- notify-send is in libnotify, and Homebrew provides libnotify on Linux. The CLI sends notifications over D-Bus instead, so libnotify is optional.
++
++## Runtime stack notes
++
++- Fedora 45 ships Python 3.15.0rc2. Ansible 2.20 and 2.21 both break against it, because Python 3.15 removed a dataclasses internal. The playbooks pin the guest interpreter to /usr/bin/python3.14 from the python3.14 compat package. The libdnf5 bindings do not exist for that interpreter, so package tasks call the dnf5 command line tool. That tool is C++ and needs no Python.
++- Fedora 45 ships oo7-daemon as the Secret Service. Under passwordless autologin its login collection stays locked, and the unlock prompt has no headless answer. phial therefore uses the gnome-remote-desktop system daemon for RDP. That daemon stores its credentials in the TPM or in a file and needs no Secret Service. The RDP path gives a full remote login session over RDP.
++- The virtio GPU 3D path is broken on the Fedora 45 prerelease stack with QEMU 11.1 rc3, virglrenderer 1.3.0, and Mesa 26.2. The guest kernel times out on GPU capsets with "timed out waiting for cap set 0", and the console framebuffer can freeze. This happens for virgl, venus, and the rutabaga device, on every display backend, and with Fedora 44 and 45 guest kernels alike. The 2D path works. Set PHIAL_GPU to virgl or none until the host stack is fixed. The default PHIAL_GPU=venus turns on blob, venus, and the native context as soon as the stack works.
++- socat resolves the bind= option with the IPv4 resolver inside TCP-LISTEN. For an IPv6 loopback listener use TCP6-LISTEN. The units and the guest dispatcher pick the family themselves.
++- run0 from a login session runs unconfined, so it can execute scripts under the home directory. A run0 call that becomes a transient service runs as init_t, and SELinux then blocks execution of user_home_t files. Pipe the script in that case with run0 bash -s < script.
++- -overcommit mem-lock=on needs LimitMEMLOCK=infinity. The unit sets that limit, and the root bundle lifts the user manager hard limit with a user@.service drop-in.
++- Fedora 45 sshd listens on vsock port 22 natively, and the guest console advertises ssh vsock%3 from the host. Vsock ports below 1024 are privileged, so the socat SSH unit uses port 2222. The host entry and the CLI both dial that port.
++
++## KeePassXC entry convention
++
++The CLI resolves keepassxc://<key> through the Secret Service on the session bus. KeePassXC registers org.freedesktop.secrets when you enable Secret Service integration in the application settings. Give the KeePassXC entry a custom attribute phial with the value <key>. The CLI searches for that attribute and reads the entry secret. Keep the KeePassXC window open and unlocked during lookups.
+diff --git a/docs/VALIDATION.md b/docs/VALIDATION.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..a00327c98e458a0e627e2e2dcfd0251c9af16423
+--- /dev/null
++++ b/docs/VALIDATION.md
+@@ -0,0 +1,162 @@
++# Validation
++
++This file records what phial validated on 2026-10-07 and 2026-10-08. The development host is a Lenovo ThinkPad X13 with an Intel Core Ultra 7 165U. It has 12 physical cores, 14 threads, and 30 GiB RAM. It runs Fedora Workstation 45 prerelease with kernel 7.2.6-300 and QEMU 11.1.0 rc3. The connected hardware is one USB hub chain with dummy devices (FTDI 0403:6001, CH340 1a86:55d3, MACROSILICON 345f:2131, USBRelay 16c0:05df, ASIX 0b95:1790). A USB LAN adapter (Realtek 0bda:8156) sits on the first xHCI controller. The host WLAN carries the host network. No USB Wi-Fi adapter exists yet, so the Wi-Fi passthrough path stays untested.
++
++## Host acceptance
++
++phial-acceptance runs every host acceptance item. All 30 items pass. This covers the display backends, the device list, the machine properties, the Rust virtiofsd, and the passt netdev. It also covers the DER enrollment flags of virt-fw-vars, the OVMF secboot pair, and the firmware descriptor with requires-smm.
++
++One note: this QEMU build accepts kernel-irqchip=split but does not list it in the q35,help output. The acceptance item therefore falls back to a probe boot and passes.
++
++## VM launch acceptance
++
++The acceptance reads "the guest reaches the firmware, then the installer".
++
++- The firmware runs: the OVMF debug console log shows the UEFI phase, and the kernel then starts with Secure Boot enabled.
++- The installer runs: the serial console shows the Anaconda services, and the kickstart installs all 1856 packages to completion.
++
++The launcher builds the QEMU argument list in code. It uses q35, KVM, smm=on, kernel-irqchip=split, and the host CPU model. It gives the guest 11 vCPUs in one socket with threads=1. It backs the RAM with a shared memfd and huge pages, sets -overcommit mem-lock=on, and keeps the RTC on the host clock. It adds the OVMF secboot code and vars, TPM 2.0 with tpm-crb, and vsock with guest-cid=3. It adds the guest agent on a virtio serial port and two virtiofs devices with the tags hostshare and phial-secrets. It pins one iothread with num-queues=4 on the disk and adds a serial console on every run.
++
++Three fixes came out of this phase and are in the tree. The launcher waits for a live listener on the swtpm and virtiofsd sockets before it starts QEMU. virtiofsd restarts after a client disconnect. -overcommit mem-lock=on needs LimitMEMLOCK=infinity in the unit, and the root bundle raises the hard limit for the user manager.
++
++The Secure Boot chain has three parts. The firmware is OVMF secboot with smm=on. The installer kernel boots through shim with -shim, and the installed guest boots its signed Fedora kernel under Secure Boot. mokutil reports SecureBoot enabled in the guest.
++
++## Guest install acceptance
++
++The acceptance reads "the guest boots under Secure Boot, and ssh phial reaches it".
++
++- The guest boots under Secure Boot: mokutil --sb-state in the guest prints SecureBoot enabled.
++- ssh phial reaches it: the host entry ssh phial connects over vsock with no network device, and the guest hostname phial answers.
++
++The install flow downloads the Fedora 45 netinst assets, packs guest/phial.ks into a FAT image with mtools, and boots the installer with the kickstart. The kickstart installs the workstation environment and creates the user phial with uid and gid 1000. It sets the hostname phial and installs the SSH keys from https://github.com/pojntfx.keys. It enables sshd and qemu-guest-agent, and it sets the default target to graphical.
++
++The guest agent answers from the first boot. A guest-ping over the QGA socket passes before provisioning.
++
++## Control plane acceptance
++
++The acceptance reads "SSH works with no NIC other than loopback".
++
++- The guest runs one unit that exposes SSH over vsock with socat. It listens on vsock port 2222 and forwards to SSH on the guest IPv6 loopback. Port 22 is a privileged vsock port, and Fedora 45 sshd already binds it natively.
++- The host entry ssh phial reaches the guest with no network device.
++- Only the proxy port and the two agent sockets reach the guest. The guest units for the agent sockets stay down until a grant opens.
++- The guest listeners bind the IPv6 loopback first. The guest hosts file maps host.internal to ::1 first and to 127.0.0.1 as the fallback. The IPv4 rule stays local to the alias.
++
++Tests: ssh phial works during the install and after it. The proxy port answers from the guest at http://host.internal:4000.
++
++## Shares acceptance
++
++The acceptance reads "a host file appears in the guest with no restart".
++
++- A host file written to the hostshare appears in the guest at /mnt/hostshare with no restart.
++- A guest file written to /mnt/hostshare appears in the host directory.
++- The secrets share mounts ro,nosuid,nodev,noexec. A write to it fails with Read-only file system. An execute attempt fails with Permission denied.
++- The file mode is 0600 and the owner is phial:phial in the guest. sudo -u nobody cat of the file fails with Permission denied.
++
++virtiofsd runs one unit per share with sockets in the runtime directory. The explicit uid and gid map is :1000:1000:1 on both sides, pinned by the kickstart uid and gid.
++
++## Secrets store acceptance
++
++The acceptance reads "the list command prints names and never values".
++
++- phial ls prints the names, modes, sources, and upstreams. It never prints a value. The test suite asserts this on a mapping with known values.
++- One row resolves through keepassxc:// over the Secret Service. The entry attribute phial carries the key.
++- Env rows land as one file per secret in the secrets share, named after the secret.
++- Proxy rows keep the value on the host. The guest holds the placeholder phial-proxy-placeholder.
++- Every value is written with a temp file and a rename. The Go CLI uses renameio.
++
++## Grants acceptance
++
++The acceptance reads "the secret file disappears on time with no other step".
++
++- phial allow --for 6s writes the secret file and the grant file. The file disappears at expiry with no other step. The timer is a transient systemd timer created over the user manager D-Bus with 1 second accuracy.
++- phial revoke removes both files and cancels the timer.
++- phial status reads the expiry and prints the remaining time.
++- The desktop notification fires on grant and on revoke over the org.freedesktop.Notifications D-Bus API.
++
++Grant subject types are api-key, ssh-key, and gpg-key. An api-key grant covers one mapping row. An ssh-key grant loads one key file from the keys directory. A gpg-key grant opens the GnuPG window.
++
++## CLI and runner acceptance
++
++The acceptance reads "the guest runner prints the variable in the guest".
++
++- phial run loads every file in /mnt/phial-secrets as an environment variable and runs the command. In the guest it prints the granted value.
++- The path unit phial-secrets.path restarts the consumer units when the share changes. A phial sync on the host restarts the guest consumer within one second.
++- A consumer unit loads its secret with LoadCredential= and reads it from the credential directory.
++
++The CLI is one statically linked Go binary with the subcommands sync, allow, revoke, status, ls, and run. run is the guest runner. The binary builds with CGO_ENABLED=0 and installs to the user path on both sides.
++
++The test suite tests/test-cli.sh runs 22 tests against the binary. All 22 pass. It covers ls, sync, both modes, and the runner. It also covers allow and revoke, the timed expiry, and the proxy injection and stripping. It also covers the 403 and 404 responses and the ssh-key load and drop.
++
++## Agent forwarding acceptance
++
++The acceptance reads "a guest push prompts on the host, and the guest holds no private key".
++
++- The dedicated ssh-agent runs on the host with its socket in the runtime directory. phial allow --kind ssh-key loads the key with ssh-add -c -t 1h semantics, which is confirm-before-use and a one hour lifetime.
++- The agent socket forwards to the guest over vsock. The guest sees the key with ssh-add -l and holds no private key file.
++- A signing attempt from the guest pops the GTK askpass on the host with the key fingerprint and Allow and Deny buttons. The dialog was confirmed on the host during validation.
++- The GnuPG extra socket forwards over vsock. The guest gpg-agent socket answers with the host GnuPG version 2.5.24 in restricted mode. The pinentry prompt runs on the host through pinentry-gnome3.
++
++The forwards open only while a grant is open. When the grant expires, the revoke stops the forwards on both sides.
++
++## Proxy acceptance
++
++The acceptance reads "revoking the grant returns 403 on the next request".
++
++- Caddy runs as a user unit with admin off and listens on the IPv6 loopback port 4000.
++- phial sync rewrites the main Caddyfile and writes one drop-in per proxy row. The change applies with systemctl --user reload phial-caddy. Caddy 2.11.7 reloads on SIGUSR1. The CLI falls back to a restart on older builds.
++- The drop-in matches the grant file for the row before it injects the secret into the Authorization header. A missing grant file returns 403. An unmatched path returns 404.
++- From the guest: no grant returns 403 and a grant returns 200. On a grant the real secret reaches the upstream and the row prefix is stripped. Revoking returns 403 on the next request.
++
++## Display and audio acceptance
++
++The acceptance reads "gnome-shell runs on the virtio GPU, and one GL app appears through waypipe".
++
++- gnome-shell runs on the virtio GPU. The journal shows the GBM renderer on /dev/dri/card1 with the virtio_gpu driver, and gnome-shell selects the boot VGA GPU as primary.
++- One GL app appears through waypipe. gnome-text-editor from the guest opened a window on the host desktop through waypipe over vsock. The window was seen during validation.
++
++The display paths: phial-waypipe runs one guest app over waypipe on vsock port 5553 with the guest display 0. phial-rdp connects to the full session over RDP on port 3389 through the vsock port forward. FreeRDP authentication against the gnome-remote-desktop system daemon succeeds with /auth-only through the forward. Audio and clipboard travel over RDP.
++
++The virtio GPU 3D path is broken on this host stack and is documented in docs/TOOLCHAIN.md. This validation used PHIAL_GPU=virgl. The default PHIAL_GPU=venus keeps blob, venus, and the native context on.
++
++## Networking acceptance
++
++The acceptance reads "a scan from the guest sees the LAN, and mDNS resolves both ways".
++
++- The bridge phialbr0 carries the Ethernet port and the tap phialtap0. The guest gets LAN reachability through the bridge and pings the LAN gateway over IPv6 with 1 ms round trip.
++- The passt fallback route has the highest guest route metric. The guest shows two default routes with metrics 100 for the LAN and 1000 for the passt NIC.
++- mDNS resolves both ways. The host resolves phial.local to the guest LAN address and the guest resolves the host name to its LAN address. Avahi runs on both sides and the bridge carries the multicast.
++- IPv6 runs first on every interface. The dual stack stays as the fallback.
++
++The USB Wi-Fi passthrough line is ready in the launcher variables but untested, because no USB Wi-Fi adapter exists yet.
++
++## Hardware passthrough acceptance
++
++The acceptance reads "three unplug and replug cycles return every device to the guest".
++
++- usb-host passes the named devices by vendor and product ID. The udev rules grant the host user access with uaccess.
++- Three unplug and replug cycles ran with the host device authorize file. Every cycle returned all five devices to the guest with their drivers bound: ftdi_sio, cdc_acm, uvcvideo and snd-usb-audio, usbhid, and cdc_ncm.
++- The second xHCI controller passes with vfio-pci on its whole IOMMU group. The guest sees the native 12 port xHCI with the real hub topology and every device on the hub chain. The internal camera, fingerprint reader, Bluetooth, and WWAN on that controller travel with it, as expected.
++- The launcher refuses to bind the only xHCI controller. The guard counts xHCI controllers and stops when one remains.
++- The restore returns both group members to their host drivers, xhci_hcd and intel_pmc_ssram_telemetry.
++
++One fix came out of this phase: /dev/vfio group nodes need a udev uaccess rule, which the root bundle now writes.
++
++## Performance
++
++The guest runs with 11 vCPUs in one socket with threads=1 and 15 GiB RAM on a shared memfd with huge pages. The disk is a raw image with preallocation=falloc, cache=none, aio=native, and discard=unmap behind an iothread with num-queues=4 pinned to the last CPU. The iothread pin runs after QEMU starts. No GPU passes through. Measurement with perf and perf kvm remains a follow-up.
++
++## Guest lifecycle
++
++The guest installs once from the kickstart and updates through Ansible as one pet machine. No image is published and no base image is built. The Ansible layout follows vanlug-infrastructure with playbooks, group_vars, and shared configuration. It uses kickstart instead of cloud-init.
++
++## Agent skills
++
++The skill set installs to ~/.agents/skills/phial/SKILL.md in the guest through Ansible. It names the launcher, the runner, the proxy, and both display paths. It tells the agent that the secrets must stay secret and that the agent must never print a value. It points at the serial console for kernel work. The sync and grant commands stay host only.
++
++The remaining gap: the skill cannot stop a determined agent from reading the secrets share. The share is read-only and the runner holds the values in the environment by design.
++
++## Items that need the user
++
++- KeePassXC must be open and unlocked on the host for keepassxc:// lookups. The validation used the host Secret Service provider, which answers the same standard API.
++- The MOK enrollment flow is in place with mokutil at boot or virt-fw-vars while the VM is down. No custom module needed enrollment in this session, so the live enrollment is untested. virt-fw-vars --help lists the DER enrollment flags.
++- The USB Wi-Fi adapter passthrough waits for hardware.
+diff --git a/guest/ansible.cfg b/guest/ansible.cfg
+new file mode 100644
+index 0000000000000000000000000000000000000000..696f9aa7c56706737cae8bb5d84e162fa10d7a98
+--- /dev/null
++++ b/guest/ansible.cfg
+@@ -0,0 +1,5 @@
++[defaults]
++inventory = inventory.yaml
++retry_files_enabled = false
++interpreter_python = auto_silent
++forks = 5
+diff --git a/guest/config/bin/phial-answer-prompts.sh b/guest/config/bin/phial-answer-prompts.sh
+new file mode 100644
+index 0000000000000000000000000000000000000000..962b8af4499be3bba922fd9f4b3e32f5ab4e9501
+--- /dev/null
++++ b/guest/config/bin/phial-answer-prompts.sh
+@@ -0,0 +1,11 @@
++#!/usr/bin/env bash
++set -u
++"$@" &
++command_pid=$!
++while kill -0 "$command_pid" 2>/dev/null; do
++    for prompt in $(busctl --user tree org.freedesktop.secrets 2>/dev/null | grep -oE "/org/freedesktop/secrets/prompt/[A-Za-z0-9_/-]+"); do
++        busctl --user call org.freedesktop.secrets "$prompt" org.freedesktop.Secret.Prompt Prompt s "" >/dev/null 2>&1 || true
++    done
++    sleep 0.4
++done
++wait "$command_pid"
+diff --git a/guest/config/bin/phial-forward-guest b/guest/config/bin/phial-forward-guest
+new file mode 100755
+index 0000000000000000000000000000000000000000..4f937e9d879090fe690e6586e563f1c9e8e57d09
+--- /dev/null
++++ b/guest/config/bin/phial-forward-guest
+@@ -0,0 +1,33 @@
++#!/usr/bin/env bash
++set -euo pipefail
++name="${1:?usage: phial-forward-guest <name>}"
++conf="${XDG_CONFIG_HOME:-$HOME/.config}/phial/forward-$name.conf"
++if [[ ! -f "$conf" ]]; then
++    printf 'phial-forward-guest: no configuration file %s\n' "$conf" >&2
++    exit 1
++fi
++source "$conf"
++listen_family="TCP6-LISTEN"
++loopback="[::1]"
++if [[ ! -f /proc/net/if_inet6 ]]; then
++    listen_family="TCP-LISTEN"
++    loopback="127.0.0.1"
++fi
++case "${PHIAL_KIND:-}" in
++    tcp)
++        exec socat "$listen_family:$PHIAL_PORT,bind=$loopback,fork,reuseaddr" "VSOCK-CONNECT:2:$PHIAL_PORT"
++        ;;
++    unix)
++        case "$PHIAL_SOCKET" in
++            "~/"*) target="$HOME/${PHIAL_SOCKET#\~/}" ;;
++            /*) target="$PHIAL_SOCKET" ;;
++            *) target="$XDG_RUNTIME_DIR/$PHIAL_SOCKET" ;;
++        esac
++        mkdir -p "$(dirname "$target")"
++        exec socat "UNIX-LISTEN:$target,fork,reuseaddr,unlink-early" "VSOCK-CONNECT:2:$PHIAL_PORT"
++        ;;
++    *)
++        printf 'phial-forward-guest: unknown PHIAL_KIND %s\n' "${PHIAL_KIND}" >&2
++        exit 1
++        ;;
++esac
+diff --git a/guest/config/forward-gpg-extra.conf b/guest/config/forward-gpg-extra.conf
+new file mode 100644
+index 0000000000000000000000000000000000000000..68a89a5e8afd674fd83e9ad9ea93e97d156430ea
+--- /dev/null
++++ b/guest/config/forward-gpg-extra.conf
+@@ -0,0 +1,3 @@
++PHIAL_KIND=unix
++PHIAL_PORT=5552
++PHIAL_SOCKET=~/.gnupg/S.gpg-agent
+diff --git a/guest/config/forward-proxy.conf b/guest/config/forward-proxy.conf
+new file mode 100644
+index 0000000000000000000000000000000000000000..149ca520d2b96e4c847d9f7531656ceddbb1e64a
+--- /dev/null
++++ b/guest/config/forward-proxy.conf
+@@ -0,0 +1,2 @@
++PHIAL_KIND=tcp
++PHIAL_PORT=4000
+diff --git a/guest/config/forward-ssh-agent.conf b/guest/config/forward-ssh-agent.conf
+new file mode 100644
+index 0000000000000000000000000000000000000000..766cc53a5093cb0aabd4de89f6f9ff4764507a36
+--- /dev/null
++++ b/guest/config/forward-ssh-agent.conf
+@@ -0,0 +1,3 @@
++PHIAL_KIND=unix
++PHIAL_PORT=5551
++PHIAL_SOCKET=phial/ssh-agent.sock
+diff --git a/guest/config/systemd-user/phial-consumer@.service b/guest/config/systemd-user/phial-consumer@.service
+new file mode 100644
+index 0000000000000000000000000000000000000000..e0f30e6771fbbe12202a4f69850dadba61edc7c2
+--- /dev/null
++++ b/guest/config/systemd-user/phial-consumer@.service
+@@ -0,0 +1,7 @@
++[Unit]
++Description=example consumer of the phial secret %i
++
++[Service]
++Type=oneshot
++LoadCredential=%i:/mnt/phial-secrets/%i
++ExecStart=/usr/bin/sh -c 'test -s "$CREDENTIALS_DIRECTORY/%i" && echo "phial-consumer: %i loaded"'
+diff --git a/guest/config/systemd-user/phial-forward@.service b/guest/config/systemd-user/phial-forward@.service
+new file mode 100644
+index 0000000000000000000000000000000000000000..d90e7ef47af175c665a985681f5531a5f0daebbf
+--- /dev/null
++++ b/guest/config/systemd-user/phial-forward@.service
+@@ -0,0 +1,11 @@
++[Unit]
++Description=phial host service %i in the guest
++
++[Service]
++Type=simple
++EnvironmentFile=-%h/.config/phial/forward-%i.conf
++ExecStart=%h/.local/bin/phial-forward-guest %i
++Restart=on-failure
++
++[Install]
++WantedBy=default.target
+diff --git a/guest/config/systemd-user/phial-guest-port@.service b/guest/config/systemd-user/phial-guest-port@.service
+new file mode 100644
+index 0000000000000000000000000000000000000000..5792f65594f578e019bad737e8e1cf275ceb1e78
+--- /dev/null
++++ b/guest/config/systemd-user/phial-guest-port@.service
+@@ -0,0 +1,10 @@
++[Unit]
++Description=phial guest port %i over vsock
++
++[Service]
++Type=simple
++ExecStart=/usr/bin/socat VSOCK-LISTEN:%i,fork,reuseaddr TCP:[::1]:%i
++Restart=on-failure
++
++[Install]
++WantedBy=default.target
+diff --git a/guest/config/systemd-user/phial-secrets-refresh.service b/guest/config/systemd-user/phial-secrets-refresh.service
+new file mode 100644
+index 0000000000000000000000000000000000000000..db690304a47e1cdea5940dded6427aac035d8234
+--- /dev/null
++++ b/guest/config/systemd-user/phial-secrets-refresh.service
+@@ -0,0 +1,6 @@
++[Unit]
++Description=restart the units that consume phial secrets
++
++[Service]
++Type=oneshot
++ExecStart=/usr/bin/systemctl --user try-restart phial-consumer@*.service
+diff --git a/guest/config/systemd-user/phial-secrets.path b/guest/config/systemd-user/phial-secrets.path
+new file mode 100644
+index 0000000000000000000000000000000000000000..46ece3f941c0f37b6750c5a1638899cd59c0216e
+--- /dev/null
++++ b/guest/config/systemd-user/phial-secrets.path
+@@ -0,0 +1,9 @@
++[Unit]
++Description=watch the phial secrets share
++
++[Path]
++PathChanged=/mnt/phial-secrets
++Unit=phial-secrets-refresh.service
++
++[Install]
++WantedBy=default.target
+diff --git a/guest/config/systemd-user/phial-ssh-vsock.service b/guest/config/systemd-user/phial-ssh-vsock.service
+new file mode 100644
+index 0000000000000000000000000000000000000000..cb468a2fc12452593f531fb7786ce24355de4492
+--- /dev/null
++++ b/guest/config/systemd-user/phial-ssh-vsock.service
+@@ -0,0 +1,10 @@
++[Unit]
++Description=phial SSH over vsock
++
++[Service]
++Type=simple
++ExecStart=/usr/bin/socat VSOCK-LISTEN:2222,fork,reuseaddr TCP:[::1]:22
++Restart=on-failure
++
++[Install]
++WantedBy=default.target
+diff --git a/guest/config/user.conf b/guest/config/user.conf
+new file mode 100644
+index 0000000000000000000000000000000000000000..0261ca601b15d035948c95306ac4455c45d2d7ae
+--- /dev/null
++++ b/guest/config/user.conf
+@@ -0,0 +1,2 @@
++[Manager]
++DefaultEnvironment=SSH_AUTH_SOCK=%t/phial/ssh-agent.sock
+diff --git a/guest/group_vars/all.yaml b/guest/group_vars/all.yaml
+new file mode 100644
+index 0000000000000000000000000000000000000000..a3f0a937799da30375080e0ef8887d60144b9422
+--- /dev/null
++++ b/guest/group_vars/all.yaml
+@@ -0,0 +1,12 @@
++ansible_user: phial
++ansible_python_interpreter: /usr/bin/python3.14
++phial_guest_user: phial
++phial_host_alias: host.internal
++phial_proxy_port: 4000
++phial_ssh_agent_port: 5551
++phial_gpg_extra_port: 5552
++phial_waypipe_port: 5553
++phial_rdp_port: 3389
++phial_secrets_mount: /mnt/phial-secrets
++phial_hostshare_mount: /mnt/hostshare
++phial_fallback_mac: "52:54:00:5e:a1:02"
+diff --git a/guest/install-guest.sh b/guest/install-guest.sh
+new file mode 100755
+index 0000000000000000000000000000000000000000..0665d1b10af79daa28a338d0ce4b376951886a8c
+--- /dev/null
++++ b/guest/install-guest.sh
+@@ -0,0 +1,87 @@
++#!/usr/bin/env bash
++set -euo pipefail
++export LC_ALL=C.UTF-8
++
++repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
++state="${XDG_DATA_HOME:-$HOME/.local/share}/phial"
++runtime="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/phial"
++assets="$state/install"
++launcher="${XDG_CONFIG_HOME:-$HOME/.config}/phial/phial-vm.sh"
++[[ -f "$launcher" ]] || launcher="$repo/host/phial-vm.sh"
++fedora_base="${PHIAL_FEDORA_URL:-https://download.fedoraproject.org/pub/fedora/linux/development/45/Everything/x86_64}"
++timeout_minutes="${PHIAL_INSTALL_TIMEOUT:-45}"
++
++mkdir -p "$assets" "$runtime/vm"
++
++fetch() {
++    local target="$1" url="$2"
++    if [[ ! -s "$target" ]]; then
++        printf 'fetching %s\n' "$url"
++        curl -fSL --retry 3 -o "$target" "$url"
++    fi
++}
++
++fetch "$assets/vmlinuz" "$fedora_base/os/images/pxeboot/vmlinuz"
++fetch "$assets/initrd.img" "$fedora_base/os/images/pxeboot/initrd.img"
++
++iso_name="$(curl -fsSL --max-time 30 "$fedora_base/iso/" | grep -oE 'Fedora-Everything-netinst-x86_64-45[^"]*\.iso' | sort -u | head -1)"
++[[ -n "$iso_name" ]] || { printf 'no netinst ISO found under %s\n' "$fedora_base/iso/" >&2; exit 1; }
++iso="$assets/$iso_name"
++fetch "$iso" "$fedora_base/iso/$iso_name"
++
++label="$(isoinfo -d -i "$iso" | awk -F': ' '/Volume id/{print $2}')"
++printf 'ISO label: %s\n' "$label"
++
++ks_img="$assets/phial-ks.img"
++rm -f "$ks_img"
++truncate -s 8M "$ks_img"
++mkfs.vfat -n PHIALKS "$ks_img" >/dev/null
++mcopy -i "$ks_img" -o "$repo/guest/phial.ks" ::phial.ks
++printf 'kickstart image: %s\n' "$ks_img"
++
++systemctl --user start phial-swtpm.service phial-virtiofsd@hostshare.service phial-virtiofsd@phial-secrets.service
++systemctl --user stop phial-vm.service 2>/dev/null || true
++systemctl --user stop phial-install.service 2>/dev/null || true
++
++rm -f "$runtime/vm/console.log"
++serial_mode="${PHIAL_INSTALL_SERIAL:-socket}"
++
++systemd-run --user --unit=phial-install --collect     -p "Environment=PHIAL_KERNEL=$assets/vmlinuz"     -p "Environment=PHIAL_INITRD=$assets/initrd.img"     -p "Environment=PHIAL_SHIM=$assets/shim.efi"     -p "Environment=PHIAL_GPU=none"     -p "Environment=\"PHIAL_APPEND=inst.ks=hd:LABEL=$label inst.ks=hd:vdb:/phial.ks inst.repo=$fedora_base/os/ console=tty0 console=ttyS0,115200n8\""     -p "Environment=PHIAL_ISO=$iso"     -p "Environment=PHIAL_KS_IMG=$ks_img"     -p "Environment=PHIAL_SERIAL=$serial_mode"     -p "LimitMEMLOCK=infinity"     -- "$launcher"
++
++if [[ "$serial_mode" == "socket" ]]; then
++    (
++        for _ in $(seq 1 100); do
++            [[ -S "$runtime/vm/console.sock" ]] && break
++            sleep 0.2
++        done
++        socat "UNIX-CONNECT:$runtime/vm/console.sock" - >> "$runtime/vm/console.log" 2>/dev/null
++    ) &
++fi
++
++printf 'installer running as phial-install.service, watching %s\n' "$runtime/vm/console.log"
++
++deadline=$(( $(date +%s) + timeout_minutes * 60 ))
++while [[ "$(date +%s)" -lt "$deadline" ]]; do
++    if [[ -f "$runtime/vm/console.log" ]]; then
++        if grep -q "Restarting system" "$runtime/vm/console.log"; then
++            printf 'install complete, stopping the installer run\n'
++            systemctl --user stop phial-install.service 2>/dev/null || true
++            printf 'start the guest with: systemctl --user start phial-vm.service\n'
++            exit 0
++        fi
++        if grep -qE "An unknown error has occurred|anaconda died|Pane is dead" "$runtime/vm/console.log"; then
++            printf 'installer failed, see %s\n' "$runtime/vm/console.log" >&2
++            systemctl --user stop phial-install.service 2>/dev/null || true
++            exit 1
++        fi
++    fi
++    if ! systemctl --user is-active --quiet phial-install.service; then
++        printf 'phial-install.service ended, see %s\n' "$runtime/vm/console.log" >&2
++        exit 1
++    fi
++    sleep 15
++done
++
++printf 'timeout after %s minutes\n' "$timeout_minutes" >&2
++systemctl --user stop phial-install.service 2>/dev/null || true
++exit 1
+diff --git a/guest/inventory.yaml b/guest/inventory.yaml
+new file mode 100644
+index 0000000000000000000000000000000000000000..77ea9eac80ac3920228c7807fea75e806769985c
+--- /dev/null
++++ b/guest/inventory.yaml
+@@ -0,0 +1,3 @@
++all:
++  hosts:
++    phial:
+diff --git a/guest/phial.ks b/guest/phial.ks
+new file mode 100644
+index 0000000000000000000000000000000000000000..3978d96d5f8585ebf9940bde6653e0c64bf93ad9
+--- /dev/null
++++ b/guest/phial.ks
+@@ -0,0 +1,50 @@
++#version=F45
++text
++lang en_US.UTF-8
++keyboard us
++timezone Etc/UTC --utc
++network --hostname=phial --bootproto=dhcp --device=link --activate
++rootpw --lock
++user --name=phial --groups=wheel --lock --uid=1000 --gid=1000
++bootloader --append="console=tty0 console=ttyS0,115200n8"
++zerombr
++clearpart --all --initlabel
++autopart
++firewall --enabled --ssh
++selinux --enforcing
++services --enabled=sshd,qemu-guest-agent
++firstboot --disabled
++reboot
++
++%packages
++@^workstation-product-environment
++qemu-guest-agent
++socat
++mokutil
++%end
++
++%post --log=/root/phial-post.log
++install -d -m 0700 -o phial -g phial /home/phial/.ssh
++curl -fsSL https://github.com/pojntfx.keys -o /home/phial/.ssh/authorized_keys
++chmod 0600 /home/phial/.ssh/authorized_keys
++chown phial:phial /home/phial/.ssh/authorized_keys
++restorecon -R /home/phial/.ssh
++systemctl set-default graphical.target
++printf '%%wheel ALL=(ALL) NOPASSWD: ALL\n' > /etc/sudoers.d/90-phial
++chmod 0440 /etc/sudoers.d/90-phial
++install -d -m 0700 -o phial -g phial /home/phial/.config/systemd/user/default.target.wants
++cat > /home/phial/.config/systemd/user/phial-ssh-vsock.service <<'UNIT'
++[Unit]
++Description=phial SSH over vsock
++
++[Service]
++Type=simple
++ExecStart=/usr/bin/socat VSOCK-LISTEN:2222,fork,reuseaddr TCP:[::1]:22
++Restart=on-failure
++
++[Install]
++WantedBy=default.target
++UNIT
++ln -sf ../phial-ssh-vsock.service /home/phial/.config/systemd/user/default.target.wants/phial-ssh-vsock.service
++chown -R phial:phial /home/phial/.config
++%end
+diff --git a/guest/playbooks/agents.yaml b/guest/playbooks/agents.yaml
+new file mode 100644
+index 0000000000000000000000000000000000000000..4067d225c16cc3a8d829a4c0218177e8947b9e7c
+--- /dev/null
++++ b/guest/playbooks/agents.yaml
+@@ -0,0 +1,18 @@
++- name: agent skills
++  hosts: phial
++  tasks:
++    - name: create the skill directory
++      ansible.builtin.file:
++        path: "/home/{{ phial_guest_user }}/.agents/skills/phial"
++        state: directory
++        owner: "{{ phial_guest_user }}"
++        group: "{{ phial_guest_user }}"
++        mode: "0755"
++
++    - name: install the global skill set
++      ansible.builtin.copy:
++        src: ../skills/phial/SKILL.md
++        dest: "/home/{{ phial_guest_user }}/.agents/skills/phial/SKILL.md"
++        owner: "{{ phial_guest_user }}"
++        group: "{{ phial_guest_user }}"
++        mode: "0644"
+diff --git a/guest/playbooks/base.yaml b/guest/playbooks/base.yaml
+new file mode 100644
+index 0000000000000000000000000000000000000000..13af3768ba39f49936ae25ec5c95bcf254a032cd
+--- /dev/null
++++ b/guest/playbooks/base.yaml
+@@ -0,0 +1,35 @@
++- name: base system setup
++  hosts: phial
++  tasks:
++    - name: install the base tools
++      ansible.builtin.command: dnf install -y python3.14 socat qemu-guest-agent mokutil
++      changed_when: false
++      become: true
++
++    - name: enable nested virtualization
++      ansible.builtin.copy:
++        dest: /etc/modprobe.d/99-phial-nested.conf
++        content: |
++          options kvm-intel nested=1
++          options kvm-amd nested=1
++        mode: "0644"
++      become: true
++
++    - name: enable lingering for the guest user
++      ansible.builtin.command: loginctl enable-linger {{ phial_guest_user }}
++      changed_when: false
++      become: true
++
++    - name: make sure that sshd runs
++      ansible.builtin.systemd_service:
++        name: sshd
++        enabled: true
++        state: started
++      become: true
++
++    - name: make sure that qemu-guest-agent runs
++      ansible.builtin.systemd_service:
++        name: qemu-guest-agent
++        enabled: true
++        state: started
++      become: true
+diff --git a/guest/playbooks/desktop.yaml b/guest/playbooks/desktop.yaml
+new file mode 100644
+index 0000000000000000000000000000000000000000..47fd0c50733b79f0e5a2f9bd9e88e86ed909d32d
+--- /dev/null
++++ b/guest/playbooks/desktop.yaml
+@@ -0,0 +1,109 @@
++- name: desktop, display, and audio
++  hosts: phial
++  tasks:
++    - name: install the desktop tools
++      ansible.builtin.command: dnf install -y gnome-remote-desktop waypipe mesa-demos openssl
++      changed_when: false
++      become: true
++
++    - name: turn on autologin for the guest user
++      ansible.builtin.ini_file:
++        path: /etc/gdm/custom.conf
++        section: daemon
++        option: "{{ item.option }}"
++        value: "{{ item.value }}"
++      loop:
++        - {option: AutomaticLoginEnable, value: "true"}
++        - {option: AutomaticLogin, value: "{{ phial_guest_user }}"}
++      become: true
++
++    - name: create the RDP configuration directory
++      ansible.builtin.file:
++        path: /etc/gnome-remote-desktop
++        state: directory
++        mode: "0700"
++      become: true
++
++    - name: generate the RDP TLS certificate
++      ansible.builtin.command:
++        cmd: openssl req -x509 -newkey rsa:2048 -keyout /etc/gnome-remote-desktop/rdp-tls.key -out /etc/gnome-remote-desktop/rdp-tls.crt -days 3650 -nodes -subj /CN=phial
++        creates: /etc/gnome-remote-desktop/rdp-tls.key
++      become: true
++
++    - name: let the remote desktop daemon read the TLS pair
++      ansible.builtin.file:
++        path: "/etc/gnome-remote-desktop/{{ item }}"
++        owner: gnome-remote-desktop
++        group: gnome-remote-desktop
++        mode: "0600"
++      loop:
++        - rdp-tls.key
++        - rdp-tls.crt
++      become: true
++
++    - name: locate the RDP password file on the host
++      ansible.builtin.set_fact:
++        phial_rdp_password_file: "{{ lookup('ansible.builtin.env', 'HOME') }}/.config/phial/rdp-password"
++      run_once: true
++      become: false
++
++    - name: generate the RDP password on the host
++      ansible.builtin.set_fact:
++        phial_rdp_password: "{{ lookup('ansible.builtin.password', phial_rdp_password_file + ' length=32 chars=ascii_letters,digits') }}"
++      run_once: true
++      become: false
++
++    - name: protect the RDP password on the host
++      ansible.builtin.file:
++        path: "{{ phial_rdp_password_file }}"
++        mode: "0600"
++      delegate_to: localhost
++      run_once: true
++      become: false
++
++    - name: point RDP at the TLS certificate
++      ansible.builtin.command: grdctl --system rdp set-tls-cert /etc/gnome-remote-desktop/rdp-tls.crt
++      changed_when: false
++      become: true
++
++    - name: point RDP at the TLS key
++      ansible.builtin.command: grdctl --system rdp set-tls-key /etc/gnome-remote-desktop/rdp-tls.key
++      changed_when: false
++      become: true
++
++    - name: set the RDP credentials
++      ansible.builtin.command: grdctl --system rdp set-credentials {{ phial_guest_user }} {{ phial_rdp_password }}
++      changed_when: false
++      become: true
++      no_log: true
++
++    - name: allow remote control over RDP
++      ansible.builtin.command: grdctl --system rdp disable-view-only
++      changed_when: false
++      become: true
++
++    - name: disable the user session RDP backend
++      ansible.builtin.command: grdctl rdp disable
++      changed_when: false
++      become: false
++      ignore_errors: true
++
++    - name: enable RDP on the system daemon
++      ansible.builtin.command: grdctl --system rdp enable
++      changed_when: false
++      become: true
++
++    - name: run the remote desktop system daemon
++      ansible.builtin.systemd_service:
++        name: gnome-remote-desktop
++        enabled: true
++        state: started
++      become: true
++
++    - name: expose the RDP port to the host over vsock
++      ansible.builtin.systemd_service:
++        name: phial-guest-port@{{ phial_rdp_port }}
++        enabled: true
++        state: started
++        scope: user
++      become: false
+diff --git a/guest/playbooks/network.yaml b/guest/playbooks/network.yaml
+new file mode 100644
+index 0000000000000000000000000000000000000000..de375d906b23a8a62f991da74b8606471efe0325
+--- /dev/null
++++ b/guest/playbooks/network.yaml
+@@ -0,0 +1,16 @@
++- name: guest networking
++  hosts: phial
++  become: true
++  tasks:
++    - name: give the passt fallback route the highest metric
++      ansible.builtin.shell: |
++        set -e
++        for dev in $(nmcli -t -f DEVICE,TYPE device | awk -F: '$2 == "ethernet" {print $1}'); do
++            hw=$(nmcli -g GENERAL.HWADDR device show "$dev" | sed 's/\\//g')
++            if [ "$(echo "$hw" | tr 'A-F' 'a-f')" = "{{ phial_fallback_mac }}" ]; then
++                con=$(nmcli -g GENERAL.CONNECTION device show "$dev" | sed 's/\\//g')
++                nmcli connection modify "$con" ipv4.route-metric 1000 ipv6.route-metric 1000
++                nmcli connection up "$con" || true
++            fi
++        done
++      changed_when: false
+diff --git a/guest/playbooks/secrets.yaml b/guest/playbooks/secrets.yaml
+new file mode 100644
+index 0000000000000000000000000000000000000000..08ad0bef0f497602e425cd462b0b791f2b513d88
+--- /dev/null
++++ b/guest/playbooks/secrets.yaml
+@@ -0,0 +1,50 @@
++- name: secrets store and runner
++  hosts: phial
++  tasks:
++    - name: create the user directories
++      ansible.builtin.file:
++        path: "/home/{{ phial_guest_user }}/{{ item }}"
++        state: directory
++        owner: "{{ phial_guest_user }}"
++        group: "{{ phial_guest_user }}"
++        mode: "0755"
++      loop:
++        - .local/bin
++        - .config/systemd/user
++
++    - name: install the phial programs
++      ansible.builtin.copy:
++        src: "{{ item }}"
++        dest: "/home/{{ phial_guest_user }}/.local/bin/{{ item | basename }}"
++        owner: "{{ phial_guest_user }}"
++        group: "{{ phial_guest_user }}"
++        mode: "0755"
++      loop:
++        - ../../bin/phial
++
++    - name: install the secrets units
++      ansible.builtin.copy:
++        src: "{{ item }}"
++        dest: "/home/{{ phial_guest_user }}/.config/systemd/user/{{ item | basename }}"
++        owner: "{{ phial_guest_user }}"
++        group: "{{ phial_guest_user }}"
++        mode: "0644"
++      loop:
++        - ../config/systemd-user/phial-secrets.path
++        - ../config/systemd-user/phial-secrets-refresh.service
++        - ../config/systemd-user/phial-consumer@.service
++
++    - name: reload the user manager
++      ansible.builtin.systemd_service:
++        daemon_reload: true
++        scope: user
++      changed_when: false
++      become: false
++
++    - name: watch the secrets share
++      ansible.builtin.systemd_service:
++        name: phial-secrets.path
++        enabled: true
++        state: started
++        scope: user
++      become: false
+diff --git a/guest/playbooks/shares.yaml b/guest/playbooks/shares.yaml
+new file mode 100644
+index 0000000000000000000000000000000000000000..08ce13ca33f97c555eadc829d0606bb84da695df
+--- /dev/null
++++ b/guest/playbooks/shares.yaml
+@@ -0,0 +1,27 @@
++- name: virtiofs shares
++  hosts: phial
++  become: true
++  tasks:
++    - name: create the mount points
++      ansible.builtin.file:
++        path: "{{ item }}"
++        state: directory
++      loop:
++        - "{{ phial_hostshare_mount }}"
++        - "{{ phial_secrets_mount }}"
++
++    - name: mount the host share
++      ansible.posix.mount:
++        name: "{{ phial_hostshare_mount }}"
++        src: hostshare
++        fstype: virtiofs
++        opts: defaults,nofail
++        state: mounted
++
++    - name: mount the secrets share read-only
++      ansible.posix.mount:
++        name: "{{ phial_secrets_mount }}"
++        src: phial-secrets
++        fstype: virtiofs
++        opts: ro,nosuid,nodev,noexec,nofail
++        state: mounted
+diff --git a/guest/playbooks/vsock.yaml b/guest/playbooks/vsock.yaml
+new file mode 100644
+index 0000000000000000000000000000000000000000..9549cde86da9d99ccd302ed8c24f7864031009fc
+--- /dev/null
++++ b/guest/playbooks/vsock.yaml
+@@ -0,0 +1,86 @@
++- name: vsock control plane
++  hosts: phial
++  tasks:
++    - name: create the user directories
++      ansible.builtin.file:
++        path: "/home/{{ phial_guest_user }}/{{ item }}"
++        state: directory
++        owner: "{{ phial_guest_user }}"
++        group: "{{ phial_guest_user }}"
++        mode: "0755"
++      loop:
++        - .local/bin
++        - .config/systemd/user
++        - .config/phial
++
++    - name: add the host alias to the guest hosts file, IPv6 first
++      ansible.builtin.blockinfile:
++        path: /etc/hosts
++        marker: "# {mark} phial"
++        block: |
++          ::1 {{ phial_host_alias }}
++          127.0.0.1 {{ phial_host_alias }}
++      become: true
++
++    - name: install the user units
++      ansible.builtin.copy:
++        src: "{{ item.src }}"
++        dest: "/home/{{ phial_guest_user }}/.config/systemd/user/{{ item.dest }}"
++        owner: "{{ phial_guest_user }}"
++        group: "{{ phial_guest_user }}"
++        mode: "0644"
++      loop:
++        - {src: ../config/systemd-user/phial-ssh-vsock.service, dest: phial-ssh-vsock.service}
++        - {src: ../config/systemd-user/phial-guest-port@.service, dest: phial-guest-port@.service}
++        - {src: ../config/systemd-user/phial-forward@.service, dest: phial-forward@.service}
++
++    - name: install the forward dispatcher
++      ansible.builtin.copy:
++        src: ../config/bin/phial-forward-guest
++        dest: "/home/{{ phial_guest_user }}/.local/bin/phial-forward-guest"
++        owner: "{{ phial_guest_user }}"
++        group: "{{ phial_guest_user }}"
++        mode: "0755"
++
++    - name: install the forward configurations
++      ansible.builtin.copy:
++        src: "{{ item }}"
++        dest: "/home/{{ phial_guest_user }}/.config/phial/"
++        owner: "{{ phial_guest_user }}"
++        group: "{{ phial_guest_user }}"
++        mode: "0644"
++      loop:
++        - ../config/forward-proxy.conf
++        - ../config/forward-ssh-agent.conf
++        - ../config/forward-gpg-extra.conf
++
++    - name: set the agent socket for the user manager
++      ansible.builtin.copy:
++        src: ../config/user.conf
++        dest: "/home/{{ phial_guest_user }}/.config/systemd/user.conf"
++        owner: "{{ phial_guest_user }}"
++        group: "{{ phial_guest_user }}"
++        mode: "0644"
++
++    - name: reload the user manager
++      ansible.builtin.systemd_service:
++        daemon_reload: true
++        scope: user
++      changed_when: false
++      become: false
++
++    - name: run SSH over vsock
++      ansible.builtin.systemd_service:
++        name: phial-ssh-vsock
++        enabled: true
++        state: started
++        scope: user
++      become: false
++
++    - name: expose the proxy port to the guest
++      ansible.builtin.systemd_service:
++        name: phial-forward@proxy
++        enabled: true
++        state: started
++        scope: user
++      become: false
+diff --git a/guest/skills/phial/SKILL.md b/guest/skills/phial/SKILL.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..fb2a080c38e9af1ea22e1a40badc7471429d0743
+--- /dev/null
++++ b/guest/skills/phial/SKILL.md
+@@ -0,0 +1,47 @@
++---
++name: phial
++description: Work in the phial guest and consume the secrets that the host granted. Use when you drive the phial virtual machine, call a proxied API, use a granted SSH or GnuPG key, run a desktop app, or debug the guest kernel.
++license: AGPL-3.0-or-later
++metadata:
++  project: https://codeberg.org/pojntfx/phial
++---
++
++# phial guest
++
++You run inside the phial guest. The host is a Fedora Workstation machine that runs this guest under QEMU. The host is trusted. The guest is not trusted. The host user decides which secrets enter the guest and for how long.
++
++## Terms
++
++- The host runs the program phial and the virtual machine.
++- The guest is the virtual machine that you run in.
++- Env mode puts a secret in a file in the secrets share.
++- Proxy mode keeps the secret on the host and injects it into an outbound request there.
++- A grant is a time box on one secret.
++
++## What you can use
++
++- The runner: phial run loads every file in /mnt/phial-secrets as an environment variable and runs a command. Example: phial run env.
++- The proxy: send API requests to http://host.internal:4000/<name>. The host replaces your placeholder token with the real secret. Use the literal token phial-proxy-placeholder.
++- The SSH agent: when a grant is open, SSH_AUTH_SOCK points at the forwarded host agent. The host asks before the key signs.
++- The GnuPG agent: when a grant is open, gpg in the guest reaches the host agent. The host shows the pinentry prompt.
++- The launcher: the host runs the virtual machine as the user unit phial-vm.service.
++- The display paths: for a single app, ask for a waypipe run, the guest display is 0. For the full session, the host runs phial-rdp.
++- The serial console: for kernel work, read the guest console from the host with socat - UNIX-CONNECT:$XDG_RUNTIME_DIR/phial/vm/console.sock.
++
++## Rules that you must follow
++
++- Never print a secret value. Print secret names only. The command phial ls lists names and never values.
++- Never read /mnt/phial-secrets directly when a runner or a unit can load the value for you.
++- Never run phial sync, phial allow, or phial revoke. Only the host user grants access.
++- Never try to add a provider or extend a grant. Ask the host user instead.
++- Never copy a private key into the guest. The guest holds no private keys.
++- A grant expires on time. If a proxy request returns 403, the grant is closed. Tell the host user.
++
++## How the system works
++
++- The host writes one file per secret into the secrets share. The guest mounts the share read-only at /mnt/phial-secrets.
++- The path unit phial-secrets.path restarts the units that consume secrets when the share changes.
++- Guest units load secrets with LoadCredential= so the unit does not see the environment.
++- The host proxy Caddy listens on the host loopback. A socat pair over vsock carries it to the guest.
++- The host injects the Authorization header after it matches the grant file for the row.
++- SSH reaches the guest over vsock. The host entry is ssh phial. No network device is needed.
+diff --git a/host/desktop/phial-display.desktop b/host/desktop/phial-display.desktop
+new file mode 100644
+index 0000000000000000000000000000000000000000..3804b6ab7922613bfd70ca11b1cd9a63226d645d
+--- /dev/null
++++ b/host/desktop/phial-display.desktop
+@@ -0,0 +1,10 @@
++[Desktop Entry]
++Type=Application
++Name=phial display switch
++Comment=Swap the phial VM display between egl-headless and GTK, then restart the VM
++Exec=phial-configurator display toggle
++Icon=video-display
++Terminal=false
++Categories=Utility;
++Keywords=display;vm;phial;
++StartupNotify=false
+diff --git a/host/desktop/phial-mapping.desktop b/host/desktop/phial-mapping.desktop
+new file mode 100644
+index 0000000000000000000000000000000000000000..2c351c799b32060ef3bd206c37fd5d5538b5bf29
+--- /dev/null
++++ b/host/desktop/phial-mapping.desktop
+@@ -0,0 +1,10 @@
++[Desktop Entry]
++Type=Application
++Name=phial secrets mapping
++Comment=Open the phial secrets mapping file in the default editor
++Exec=xdg-open @CFG_DIR@/mapping
++Icon=utilities-terminal
++Terminal=false
++Categories=Utility;
++Keywords=secrets;phial;
++StartupNotify=false
+diff --git a/host/desktop/phial-vm-script.desktop b/host/desktop/phial-vm-script.desktop
+new file mode 100644
+index 0000000000000000000000000000000000000000..7feb88a888a693eb41170db052a4e63548fb2bd4
+--- /dev/null
++++ b/host/desktop/phial-vm-script.desktop
+@@ -0,0 +1,10 @@
++[Desktop Entry]
++Type=Application
++Name=phial VM launcher
++Comment=Open the phial VM launcher script in the default editor
++Exec=xdg-open @CFG_DIR@/phial-vm.sh
++Icon=utilities-terminal
++Terminal=false
++Categories=Utility;
++Keywords=vm;phial;
++StartupNotify=false
+diff --git a/host/desktop/phial-vm-unit.desktop b/host/desktop/phial-vm-unit.desktop
+new file mode 100644
+index 0000000000000000000000000000000000000000..ab4126c485ba8af445fefce0b6c8bbe72c1c7f8d
+--- /dev/null
++++ b/host/desktop/phial-vm-unit.desktop
+@@ -0,0 +1,10 @@
++[Desktop Entry]
++Type=Application
++Name=phial VM unit
++Comment=Open the phial VM systemd unit in the default editor
++Exec=xdg-open @UNIT_DIR@/phial-vm.service
++Icon=utilities-terminal
++Terminal=false
++Categories=Utility;
++Keywords=vm;phial;
++StartupNotify=false
+diff --git a/host/forward-gpg-extra.conf b/host/forward-gpg-extra.conf
+new file mode 100644
+index 0000000000000000000000000000000000000000..b72662a5b6b0b5f087ac3d506fb218ed5a62cc33
+--- /dev/null
++++ b/host/forward-gpg-extra.conf
+@@ -0,0 +1,2 @@
++PHIAL_LISTEN=VSOCK-LISTEN:5552,fork,reuseaddr
++PHIAL_TARGET=UNIX-CONNECT:@RUNTIME_DIR@/gnupg/S.gpg-agent.extra
+diff --git a/host/forward-proxy.conf b/host/forward-proxy.conf
+new file mode 100644
+index 0000000000000000000000000000000000000000..4c0a39e50977d35e98d07b681e2bd7af4b7ea088
+--- /dev/null
++++ b/host/forward-proxy.conf
+@@ -0,0 +1,2 @@
++PHIAL_LISTEN=VSOCK-LISTEN:4000,fork,reuseaddr
++PHIAL_TARGET=TCP:[::1]:4000
+diff --git a/host/forward-ssh-agent.conf b/host/forward-ssh-agent.conf
+new file mode 100644
+index 0000000000000000000000000000000000000000..02f6931ed45588dae7d77ebfa3a81d203c63b7e6
+--- /dev/null
++++ b/host/forward-ssh-agent.conf
+@@ -0,0 +1,2 @@
++PHIAL_LISTEN=VSOCK-LISTEN:5551,fork,reuseaddr
++PHIAL_TARGET=UNIX-CONNECT:@RUNTIME_DIR@/phial/agent/ssh.sock
+diff --git a/host/mapping b/host/mapping
+new file mode 100644
+index 0000000000000000000000000000000000000000..1cb9212974a2cd3f89d9e7249d119e92db3f0be9
+--- /dev/null
++++ b/host/mapping
+@@ -0,0 +1,7 @@
++# One row per secret, four columns: name, mode, source, upstream.
++# name: file name in the secrets share, and variable name for the guest runner.
++# mode: env puts the value in a file that the guest reads, proxy injects the value on the host.
++# source: a keepassxc:// URI. The entry needs the attribute phial set to the part after the scheme.
++# upstream: the base URL that Caddy forwards to for proxy rows, or - for env rows.
++# openai proxy keepassxc://openai https://api.openai.com
++# github_token env keepassxc://github_token -
+diff --git a/host/modprobe.d/99-phial-nested.conf b/host/modprobe.d/99-phial-nested.conf
+new file mode 100644
+index 0000000000000000000000000000000000000000..cd863fc4bd016a3cd9b6a5c4929cdfda95411918
+--- /dev/null
++++ b/host/modprobe.d/99-phial-nested.conf
+@@ -0,0 +1,2 @@
++options kvm-intel nested=1
++options kvm-amd nested=1
+diff --git a/host/phial-askpass.sh b/host/phial-askpass.sh
+new file mode 100755
+index 0000000000000000000000000000000000000000..aea5f514b177e425003d5d708d871243096b9600
+--- /dev/null
++++ b/host/phial-askpass.sh
+@@ -0,0 +1,8 @@
++#!/usr/bin/env bash
++set -euo pipefail
++prompt="${1:-phial agent request}"
++shopt -s nocasematch
++if [[ "$prompt" == *confirm* || "$prompt" == *sign* || "$prompt" == *allow* ]]; then
++    exec zenity --question --title=phial --text="$prompt" --ok-label=Allow --cancel-label=Deny
++fi
++exec zenity --entry --title=phial --text="$prompt" --hide-text
+diff --git a/host/phial-caddy.caddy b/host/phial-caddy.caddy
+new file mode 100644
+index 0000000000000000000000000000000000000000..f84db5c09eee9f74f46aea7a8684a6be9ae534d8
+--- /dev/null
++++ b/host/phial-caddy.caddy
+@@ -0,0 +1,10 @@
++{
++	admin off
++}
++
++:4000 {
++	bind 127.0.0.1
++	handle {
++		respond 404
++	}
++}
+diff --git a/host/phial-host-root-setup.sh b/host/phial-host-root-setup.sh
+new file mode 100755
+index 0000000000000000000000000000000000000000..01954b55144ae784ea6006afeadcdef053c154ff
+--- /dev/null
++++ b/host/phial-host-root-setup.sh
+@@ -0,0 +1,107 @@
++#!/usr/bin/env bash
++set -euo pipefail
++export LC_ALL=C.UTF-8
++
++if [[ "$(id -u)" -ne 0 ]]; then
++    printf 'run this with: run0 bash -s < %s\n' "$0" >&2
++    exit 1
++fi
++
++caller="${SUDO_USER:-${PKEXEC_UID:+}}"
++if [[ -z "${SUDO_USER:-}" && -n "${PKEXEC_UID:-}" ]]; then
++    caller="$(getent passwd "$PKEXEC_UID" | cut -d: -f1)"
++fi
++[[ -z "$caller" ]] && caller="${PHIAL_USER:-}"
++[[ -z "$caller" ]] && { printf 'PHIAL_USER is not set\n' >&2; exit 1; }
++caller_uid="$(id -u "$caller")"
++caller_gid="$(id -g "$caller")"
++caller_home="$(getent passwd "$caller" | cut -d: -f6)"
++runtime_dir="/run/user/$caller_uid"
++config_home="$caller_home/.config"
++repo="${PHIAL_REPO:-$caller_home/Projets/phial}"
++
++PHIAL_MEMORY="${PHIAL_MEMORY:-16G}"
++PHIAL_USB_DEVICES="${PHIAL_USB_DEVICES:-}"
++
++printf 'caller: %s (uid %s)\n' "$caller" "$caller_uid"
++
++install -d -m 0755 /etc/systemd/system/user@.service.d
++printf '[Service]\nLimitMEMLOCK=infinity\n' > /etc/systemd/system/user@.service.d/99-phial-memlock.conf
++systemctl daemon-reload
++manager_pid="$(systemctl show -p MainPID --value "user@$caller_uid.service")"
++if [[ -n "$manager_pid" && "$manager_pid" != "0" ]]; then
++    prlimit --pid "$manager_pid" --memlock=unlimited
++fi
++printf 'memlock limit for the user manager: %s\n' "$(grep Memlock "/proc/$manager_pid/limits" 2>/dev/null || echo unknown)"
++
++memory_mib=$(( $(numfmt --from=iec "${PHIAL_MEMORY:-16G}") / 1024 / 1024 ))
++pages=$(( memory_mib / 2 + 256 ))
++printf 'vm.nr_hugepages=%d\n' "$pages" > /etc/sysctl.d/99-phial-hugepages.conf
++sysctl -w "vm.nr_hugepages=$pages"
++printf 'huge pages: %s\n' "$(cat /proc/sys/vm/nr_hugepages)"
++
++printf 'options kvm-intel nested=1\noptions kvm-amd nested=1\n' > /etc/modprobe.d/99-phial-nested.conf
++nested="$(cat /sys/module/kvm_intel/parameters/nested 2>/dev/null || cat /sys/module/kvm_amd/parameters/nested 2>/dev/null || echo N)"
++if [[ "$nested" != "Y" && "$nested" != "1" ]]; then
++    modprobe -r kvm_intel 2>/dev/null || modprobe -r kvm_amd 2>/dev/null || true
++    modprobe kvm_intel nested=1 2>/dev/null || modprobe kvm-amd nested=1 2>/dev/null || true
++fi
++printf 'nested virtualization: %s\n' "$(cat /sys/module/kvm_intel/parameters/nested 2>/dev/null || cat /sys/module/kvm_amd/parameters/nested 2>/dev/null)"
++
++{
++    for device in $PHIAL_USB_DEVICES; do
++        vendor=${device%%:*}
++        product=${device##*:}
++        printf 'SUBSYSTEM=="usb", ATTR{idVendor}=="%s", ATTR{idProduct}=="%s", TAG+="uaccess"\n' "$vendor" "$product"
++    done
++} > /etc/udev/rules.d/70-phial-usb.rules
++rm -f /etc/udev/rules.d/99-phial-usb.rules
++printf 'SUBSYSTEM=="vfio", KERNEL=="*", TAG+="uaccess"\n' > /etc/udev/rules.d/70-phial-vfio.rules
++udevadm control --reload
++udevadm trigger --subsystem-match=usb
++udevadm trigger --subsystem-match=vfio
++printf 'udev rules: /etc/udev/rules.d/70-phial-usb.rules and 70-phial-vfio.rules\n'
++
++dnf install -y waypipe virt-firmware keepassxc pinentry-gnome3
++
++ethernet="${1:-}"
++if [[ -z "$ethernet" ]]; then
++    ethernet="$(nmcli -t -f DEVICE,TYPE,STATE device | awk -F: '$2 == "ethernet" && $3 == "connected" {print $1; exit}')"
++fi
++if [[ -z "$ethernet" ]]; then
++    ethernet="$(nmcli -t -f DEVICE,TYPE device | awk -F: '$2 == "ethernet" {print $1; exit}')"
++fi
++if [[ -n "$ethernet" ]]; then
++    printf 'ethernet port for the bridge: %s\n' "$ethernet"
++    if ! nmcli -t -f NAME connection show | grep -qx phialbr0; then
++        nmcli connection add type bridge con-name phialbr0 ifname phialbr0 stp no ipv4.method auto ipv6.method auto
++    fi
++    old="$(nmcli -t -f NAME,DEVICE connection show --active | awk -F: -v dev="$ethernet" '$2 == dev {print $1; exit}')"
++    if [[ -n "$old" && "$old" != phialbr0-* ]]; then
++        nmcli connection delete "$old"
++    fi
++    if ! nmcli -t -f NAME connection show | grep -qx "phialbr0-$ethernet"; then
++        nmcli connection add type bridge-slave con-name "phialbr0-$ethernet" ifname "$ethernet" master phialbr0
++    fi
++    if ! nmcli -t -f NAME connection show | grep -qx phialtap0; then
++        nmcli connection add type tun con-name phialtap0 ifname phialtap0 mode tap owner "$caller_uid" group "$caller_gid" pi no vnet-hdr yes master phialbr0 slave-type bridge autoconnect yes
++    fi
++    nmcli connection up phialbr0 || true
++    nmcli connection up "phialbr0-$ethernet" || true
++    nmcli connection up phialtap0 || true
++    firewall-cmd --permanent --zone=FedoraWorkstation --add-interface=phialbr0
++    firewall-cmd --permanent --zone=FedoraWorkstation --add-interface=phialtap0
++    firewall-cmd --permanent --zone=FedoraWorkstation --add-forward
++    firewall-cmd --reload
++    wifi="$(nmcli -t -f DEVICE,TYPE device | awk -F: '$2 == "wifi" {print $1; exit}')"
++    resolvectl mdns phialbr0 yes || true
++    [[ -n "$wifi" ]] && resolvectl mdns "$wifi" yes || true
++    printf 'bridge: phialbr0 with %s and phialtap0\n' "$ethernet"
++else
++    printf 'no connected ethernet port found, skipping the bridge\n' >&2
++fi
++
++printf '\nroot setup complete. manual steps that remain:\n'
++printf '  1. open KeePassXC and unlock the database, so the Secret Service answers keepassxc:// lookups\n'
++printf '  2. plug the USB Wi-Fi adapter, then add its vendor:product to PHIAL_USB_DEVICES\n'
++printf '  3. to pass the second xHCI controller with its hub to the guest: run0 %s bind <pci-address>\n' "$repo/host/phial-vfio.sh"
+diff --git a/host/phial-vfio.sh b/host/phial-vfio.sh
+new file mode 100755
+index 0000000000000000000000000000000000000000..ba50d068e9b5a1552453e91a3eaf1674a15d6f7d
+--- /dev/null
++++ b/host/phial-vfio.sh
+@@ -0,0 +1,68 @@
++#!/usr/bin/env bash
++set -euo pipefail
++
++usage() {
++    printf 'usage: run0 %s <bind|restore> <pci-address>\n' "$0" >&2
++    printf 'example: run0 %s bind 0000:00:14.0\n' "$0" >&2
++    exit 2
++}
++
++action="${1:-}"
++address="${2:-}"
++[[ -n "$action" && -n "$address" ]] || usage
++
++if [[ "$(id -u)" -ne 0 ]]; then
++    printf 'run this with: run0 %s %s %s\n' "$0" "$action" "$address" >&2
++    exit 1
++fi
++
++device_dir="/sys/bus/pci/devices/$address"
++[[ -d "$device_dir" ]] || { printf 'no PCI device %s\n' "$address" >&2; exit 1; }
++
++group="$(basename "$(readlink -f "$device_dir/iommu_group")")"
++state_dir="/run/phial-vfio/$address"
++members=(/sys/kernel/iommu_groups/"$group"/devices/*)
++
++current_driver() {
++    basename "$(readlink "$1/driver" 2>/dev/null)" 2>/dev/null || true
++}
++
++case "$action" in
++    bind)
++        modprobe vfio-pci
++        modprobe vfio_iommu_type1 2>/dev/null || true
++        mkdir -p "$state_dir"
++        for member in "${members[@]}"; do
++            name="${member##*/}"
++            driver="$(current_driver "$member")"
++            printf '%s\n' "$driver" > "$state_dir/$name.driver"
++            if [[ -n "$driver" ]]; then
++                echo "$name" > "$member/driver/unbind"
++            fi
++            echo vfio-pci > "$member/driver_override"
++            echo "$name" > /sys/bus/pci/drivers/vfio-pci/bind
++            printf 'bound %s to vfio-pci (was: %s)\n' "$name" "${driver:-none}"
++        done
++        ;;
++    restore)
++        for member in "${members[@]}"; do
++            name="${member##*/}"
++            driver="$(cat "$state_dir/$name.driver" 2>/dev/null || true)"
++            current="$(current_driver "$member")"
++            if [[ "$current" == "vfio-pci" ]]; then
++                echo "$name" > "$member/driver/unbind"
++            fi
++            echo "" > "$member/driver_override" 2>/dev/null || true
++            if [[ -n "$driver" && -d "/sys/bus/pci/drivers/$driver" ]]; then
++                echo "$name" > "/sys/bus/pci/drivers/$driver/bind"
++                printf 'restored %s to %s\n' "$name" "$driver"
++            else
++                printf 'left %s unbound (no previous driver)\n' "$name"
++            fi
++        done
++        rm -rf "$state_dir"
++        ;;
++    *)
++        usage
++        ;;
++esac
+diff --git a/host/phial-vm.sh b/host/phial-vm.sh
+new file mode 100755
+index 0000000000000000000000000000000000000000..8c7334d40cb1691f5eb9e7f1acff3b206b76ff58
+--- /dev/null
++++ b/host/phial-vm.sh
+@@ -0,0 +1,276 @@
++#!/usr/bin/env bash
++PHIAL_VCPUS=${PHIAL_VCPUS:-auto}
++PHIAL_MEMORY=${PHIAL_MEMORY:-16G}
++PHIAL_DISK=${PHIAL_DISK:-auto}
++PHIAL_DISK_SIZE=${PHIAL_DISK_SIZE:-128G}
++PHIAL_DISPLAY=${PHIAL_DISPLAY:-egl-headless}
++PHIAL_GPU=${PHIAL_GPU:-venus}
++PHIAL_SECURE_BOOT=${PHIAL_SECURE_BOOT:-on}
++PHIAL_HUGEPAGES=${PHIAL_HUGEPAGES:-on}
++PHIAL_AUDIO=${PHIAL_AUDIO:-none}
++PHIAL_USB_DEVICES=(${PHIAL_USB_DEVICES:-0403:6001 1a86:55d3 345f:2131 16c0:05df 0b95:1790})
++PHIAL_USB_XHCI=${PHIAL_USB_XHCI:-}
++PHIAL_NET_LAN=${PHIAL_NET_LAN:-auto}
++PHIAL_NET_LAN_IFNAME=${PHIAL_NET_LAN_IFNAME:-phialtap0}
++PHIAL_NET_LAN_MAC=${PHIAL_NET_LAN_MAC:-52:54:00:5e:a1:01}
++PHIAL_NET_FALLBACK=${PHIAL_NET_FALLBACK:-passt}
++PHIAL_NET_FALLBACK_MAC=${PHIAL_NET_FALLBACK_MAC:-52:54:00:5e:a1:02}
++PHIAL_IOTHREAD_CPU=${PHIAL_IOTHREAD_CPU:-auto}
++PHIAL_KERNEL=${PHIAL_KERNEL:-}
++PHIAL_SHIM=${PHIAL_SHIM:-}
++PHIAL_INITRD=${PHIAL_INITRD:-}
++PHIAL_APPEND=${PHIAL_APPEND:-}
++PHIAL_ISO=${PHIAL_ISO:-}
++PHIAL_KS_IMG=${PHIAL_KS_IMG:-}
++PHIAL_SERIAL=${PHIAL_SERIAL:-socket}
++# end of configuration
++
++set -euo pipefail
++
++OVMF_DIR=/usr/share/edk2/ovmf
++RUNTIME_DIR=${XDG_RUNTIME_DIR:-/run/user/$(id -u)}
++DATA_HOME=${XDG_DATA_HOME:-$HOME/.local/share}
++RUN=$RUNTIME_DIR/phial/vm
++STATE=$DATA_HOME/phial
++[[ "$PHIAL_DISK" == "auto" ]] && PHIAL_DISK=$STATE/phial.raw
++
++if [[ "$PHIAL_VCPUS" == "auto" ]]; then
++    physical=$(lscpu -p=SOCKET,CORE | grep -v '^#' | sort -u | wc -l)
++    PHIAL_VCPUS=$((physical > 1 ? physical - 1 : 1))
++fi
++if [[ "$PHIAL_IOTHREAD_CPU" == "auto" ]]; then
++    PHIAL_IOTHREAD_CPU=$(( $(nproc) - 1 ))
++fi
++
++firmware_code=$OVMF_DIR/OVMF_CODE.secboot.fd
++firmware_vars_template=$OVMF_DIR/OVMF_VARS.secboot.fd
++firmware_vars=$RUN/OVMF_VARS.secboot.fd
++if [[ "$PHIAL_SECURE_BOOT" != "on" ]]; then
++    firmware_code=$OVMF_DIR/OVMF_CODE.fd
++    firmware_vars_template=$OVMF_DIR/OVMF_VARS.fd
++    firmware_vars=$RUN/OVMF_VARS.fd
++fi
++
++prepare() {
++    mkdir -p "$RUN" "$STATE"
++    chmod 0700 "$RUNTIME_DIR/phial" "$RUN" 2>/dev/null || true
++    if [[ ! -f "$firmware_vars" ]]; then
++        cp "$firmware_vars_template" "$firmware_vars"
++        chmod 0600 "$firmware_vars"
++    fi
++    if [[ ! -f "$PHIAL_DISK" ]]; then
++        qemu-img create -f raw -o preallocation=falloc "$PHIAL_DISK" "$PHIAL_DISK_SIZE" >/dev/null
++    fi
++    if [[ "$PHIAL_HUGEPAGES" == "on" ]]; then
++        local memory_mib pages_needed pages_have
++        memory_mib=$(( $(numfmt --from=iec "$PHIAL_MEMORY") / 1024 / 1024 ))
++        pages_needed=$(( memory_mib / 2 ))
++        pages_have=$(cat /proc/sys/vm/nr_hugepages)
++        if [[ "$pages_have" -lt "$pages_needed" ]]; then
++            printf 'phial-vm: need %d huge pages, have %d; run: run0 %s\n' \
++                "$pages_needed" "$pages_have" \
++                "$(dirname "$0")/phial-host-root-setup.sh" >&2
++            exit 1
++        fi
++    fi
++}
++
++build_args() {
++    args=(
++        -name phial
++        -machine "q35,accel=kvm,smm=on,kernel-irqchip=split,memory-backend=mem0"
++        -cpu host
++        -smp "$PHIAL_VCPUS,sockets=1,cores=$PHIAL_VCPUS,threads=1"
++        -m "$PHIAL_MEMORY"
++        -object "memory-backend-memfd,id=mem0,size=$PHIAL_MEMORY,share=on,hugetlb=$( [[ "$PHIAL_HUGEPAGES" == "on" ]] && echo on || echo off )"
++        -overcommit mem-lock=on
++        -rtc base=utc,clock=host
++        -drive "if=pflash,format=raw,readonly=on,unit=0,file=$firmware_code"
++        -drive "if=pflash,format=raw,unit=1,file=$firmware_vars"
++        -chardev "socket,id=tpm0,path=$RUN/swtpm.sock"
++        -tpmdev emulator,id=tpmdev0,chardev=tpm0
++        -device tpm-crb,tpmdev=tpmdev0
++        -object iothread,id=io0
++        -drive "if=none,id=drive0,file=$PHIAL_DISK,format=raw,cache=none,aio=native,discard=unmap"
++        -device virtio-blk-pci,drive=drive0,iothread=io0,num-queues=4
++        -device vhost-vsock-pci,guest-cid=3
++        -device virtio-serial-pci,id=virtser0
++        -chardev "socket,id=qga0,path=$RUN/qga.sock,server=on,wait=off"
++        -device virtserialport,chardev=qga0,name=org.qemu.guest_agent.0
++        -chardev "socket,id=fs0,path=$RUN/virtiofsd-hostshare.sock"
++        -device vhost-user-fs-pci,chardev=fs0,tag=hostshare
++        -chardev "socket,id=fs1,path=$RUN/virtiofsd-phial-secrets.sock"
++        -device vhost-user-fs-pci,chardev=fs1,tag=phial-secrets
++        -debugcon "file:$RUN/ovmf-debug.log"
++        -global isa-debugcon.iobase=0x402
++        -qmp "unix:$RUN/qmp.sock,server=on,wait=off"
++        -pidfile "$RUN/qemu.pid"
++        -device qemu-xhci,id=xhci0
++    )
++    if [[ "$PHIAL_SECURE_BOOT" == "on" ]]; then
++        args+=(-global driver=cfi.pflash01,property=secure,value=on)
++    fi
++    case "$PHIAL_DISPLAY" in
++        egl-headless)
++            args+=(-display egl-headless)
++            ;;
++        gtk)
++            args+=(-display gtk,gl=on,grab-on-hover=on)
++            ;;
++        none)
++            args+=(-display none)
++            ;;
++        *)
++            printf 'phial-vm: unknown PHIAL_DISPLAY %s\n' "$PHIAL_DISPLAY" >&2
++            exit 1
++            ;;
++    esac
++    case "$PHIAL_GPU" in
++        venus)
++            args+=(-device virtio-vga-gl,venus=on,blob=on,hostmem=4G,drm_native_context=on)
++            ;;
++        virgl)
++            args+=(-device virtio-vga-gl,blob=off)
++            ;;
++        none)
++            args+=(-device virtio-vga)
++            ;;
++        *)
++            printf 'phial-vm: unknown PHIAL_GPU %s\n' "$PHIAL_GPU" >&2
++            exit 1
++            ;;
++    esac
++    case "$PHIAL_AUDIO" in
++        none) ;;
++        hda)
++            args+=(-audiodev pipewire,id=snd0 -device intel-hda -device hda-duplex,audiodev=snd0)
++            ;;
++        *)
++            printf 'phial-vm: unknown PHIAL_AUDIO %s\n' "$PHIAL_AUDIO" >&2
++            exit 1
++            ;;
++    esac
++    if [[ "$PHIAL_NET_LAN" == "on" ]] || { [[ "$PHIAL_NET_LAN" == "auto" ]] && ip link show "$PHIAL_NET_LAN_IFNAME" >/dev/null 2>&1; }; then
++        args+=(
++            -netdev "tap,id=lan0,ifname=$PHIAL_NET_LAN_IFNAME,script=no,downscript=no"
++            -device "virtio-net-pci,netdev=lan0,mac=$PHIAL_NET_LAN_MAC"
++        )
++    fi
++    case "$PHIAL_NET_FALLBACK" in
++        passt)
++            args+=(-nic "passt,model=virtio-net-pci,mac=$PHIAL_NET_FALLBACK_MAC")
++            ;;
++        stream)
++            args+=(
++                -netdev "stream,id=fb0,addr.type=unix,addr.path=$RUN/passt.sock,server=off"
++                -device "virtio-net-pci,netdev=fb0,mac=$PHIAL_NET_FALLBACK_MAC"
++            )
++            ;;
++        off) ;;
++        *)
++            printf 'phial-vm: unknown PHIAL_NET_FALLBACK %s\n' "$PHIAL_NET_FALLBACK" >&2
++            exit 1
++            ;;
++    esac
++    local device vendor product
++    for device in "${PHIAL_USB_DEVICES[@]}"; do
++        vendor=${device%%:*}
++        product=${device##*:}
++        if lsusb -d "$vendor:$product" >/dev/null 2>&1; then
++            args+=(-device "usb-host,vendorid=0x$vendor,productid=0x$product")
++        else
++            printf 'phial-vm: usb device %s not present, skipping\n' "$device" >&2
++        fi
++    done
++    if [[ -n "$PHIAL_USB_XHCI" ]]; then
++        local controllers
++        controllers=$(lspci -d ::0c03 | grep -ci xhci)
++        if [[ "$controllers" -le 1 ]]; then
++            printf 'phial-vm: refusing to pass the only xHCI controller to the guest\n' >&2
++            exit 1
++        fi
++        if [[ ! -e "/sys/bus/pci/devices/$PHIAL_USB_XHCI" ]]; then
++            printf 'phial-vm: no PCI device %s\n' "$PHIAL_USB_XHCI" >&2
++            exit 1
++        fi
++        if [[ "$(readlink "/sys/bus/pci/devices/$PHIAL_USB_XHCI/driver" 2>/dev/null | xargs -r basename)" != "vfio-pci" ]]; then
++            printf 'phial-vm: %s is not bound to vfio-pci; run: run0 %s\n' \
++                "$PHIAL_USB_XHCI" "$(dirname "$0")/phial-vfio.sh bind $PHIAL_USB_XHCI" >&2
++            exit 1
++        fi
++        args+=(-device "vfio-pci,host=$PHIAL_USB_XHCI")
++    fi
++    if [[ -n "$PHIAL_KERNEL" ]]; then
++        [[ -n "$PHIAL_SHIM" ]] && args+=(-shim "$PHIAL_SHIM")
++        args+=(-kernel "$PHIAL_KERNEL")
++        [[ -n "$PHIAL_INITRD" ]] && args+=(-initrd "$PHIAL_INITRD")
++        [[ -n "$PHIAL_APPEND" ]] && args+=(-append "$PHIAL_APPEND")
++    fi
++    if [[ -n "$PHIAL_ISO" ]]; then
++        args+=(-drive "file=$PHIAL_ISO,format=raw,media=cdrom,readonly=on")
++    fi
++    if [[ -n "$PHIAL_KS_IMG" ]]; then
++        args+=(-drive "file=$PHIAL_KS_IMG,format=raw,if=none,id=ksdisk,readonly=on,cache=none,aio=native")
++        args+=(-device virtio-blk-pci,drive=ksdisk)
++    fi
++    case "$PHIAL_SERIAL" in
++        socket)
++            args+=(-serial "unix:$RUN/console.sock,server=on,wait=off")
++            ;;
++        log)
++            args+=(-serial "file:$RUN/console.log")
++            ;;
++        *)
++            printf 'phial-vm: unknown PHIAL_SERIAL %s\n' "$PHIAL_SERIAL" >&2
++            exit 1
++            ;;
++    esac
++}
++
++pin_iothread() {
++    local pid="$1" attempts=0 tid
++    while [[ "$attempts" -lt 50 ]]; do
++        for task in "/proc/$pid/task"/*; do
++            [[ "$(cat "$task/comm" 2>/dev/null)" == "io0" ]] || continue
++            tid=${task##*/}
++            taskset -pc "$PHIAL_IOTHREAD_CPU" "$tid" >/dev/null 2>&1 && return 0
++        done
++        attempts=$((attempts + 1))
++        sleep 0.1
++    done
++    printf 'phial-vm: could not pin iothread io0\n' >&2
++    return 0
++}
++
++wait_for_sockets() {
++    local socket
++    for socket in "$@"; do
++        local attempts=0
++        while ! ss -xlp 2>/dev/null | grep -qF "$socket"; do
++            attempts=$((attempts + 1))
++            if [[ "$attempts" -gt 100 ]]; then
++                printf 'phial-vm: socket %s has no live listener\n' "$socket" >&2
++                exit 1
++            fi
++            sleep 0.1
++        done
++    done
++}
++
++main() {
++    if [[ "${1:-}" == "--print-args" ]]; then
++        build_args
++        printf '%q ' "${args[@]}"
++        printf '\n'
++        return 0
++    fi
++    prepare
++    build_args
++    wait_for_sockets "$RUN/swtpm.sock" "$RUN/virtiofsd-hostshare.sock" "$RUN/virtiofsd-phial-secrets.sock"
++    qemu-system-x86_64 "${args[@]}" &
++    qemu_pid=$!
++    pin_iothread "$qemu_pid"
++    wait "$qemu_pid"
++}
++
++main "$@"
+diff --git a/host/share-hostshare.conf b/host/share-hostshare.conf
+new file mode 100644
+index 0000000000000000000000000000000000000000..a4e87e8da2c459364af25f3312e27f834776e1d5
+--- /dev/null
++++ b/host/share-hostshare.conf
+@@ -0,0 +1 @@
++PHIAL_SHARE_DIR=@DATA_HOME@/phial/hostshare
+diff --git a/host/share-phial-secrets.conf b/host/share-phial-secrets.conf
+new file mode 100644
+index 0000000000000000000000000000000000000000..1db531d4157040f89614b979f7bcbda8d353c773
+--- /dev/null
++++ b/host/share-phial-secrets.conf
+@@ -0,0 +1 @@
++PHIAL_SHARE_DIR=@RUNTIME_DIR@/phial/secrets
+diff --git a/host/sysctl/99-phial-hugepages.conf b/host/sysctl/99-phial-hugepages.conf
+new file mode 100644
+index 0000000000000000000000000000000000000000..1da633f2dc4c90f337e0734314a8817cac27828b
+--- /dev/null
++++ b/host/sysctl/99-phial-hugepages.conf
+@@ -0,0 +1 @@
++vm.nr_hugepages=8704
+diff --git a/host/systemd/phial-agent.service b/host/systemd/phial-agent.service
+new file mode 100644
+index 0000000000000000000000000000000000000000..4b1811adac2e61643c5bd8c57d4b60420ac7d8a2
+--- /dev/null
++++ b/host/systemd/phial-agent.service
+@@ -0,0 +1,15 @@
++[Unit]
++Description=phial dedicated SSH agent
++Documentation=https://codeberg.org/pojntfx/phial
++
++[Service]
++Type=simple
++Environment=SSH_ASKPASS=%E/phial/phial-askpass.sh
++Environment=SSH_ASKPASS_REQUIRE=force
++ExecStartPre=mkdir -p %t/phial/agent
++ExecStartPre=rm -f %t/phial/agent/ssh.sock
++ExecStart=@SSH_AGENT@ -D -a %t/phial/agent/ssh.sock
++Restart=on-failure
++
++[Install]
++WantedBy=default.target
+diff --git a/host/systemd/phial-caddy.service b/host/systemd/phial-caddy.service
+new file mode 100644
+index 0000000000000000000000000000000000000000..88ed56482ad86468e9a5984dd0d37fb51466d345
+--- /dev/null
++++ b/host/systemd/phial-caddy.service
+@@ -0,0 +1,13 @@
++[Unit]
++Description=phial secret proxy
++Documentation=https://codeberg.org/pojntfx/phial
++
++[Service]
++Type=notify
++Environment=PATH=@BREW_PREFIX@/bin:/usr/local/bin:/usr/bin:/bin
++ExecStart=@CADDY@ run --config %E/phial/Caddyfile --adapter caddyfile
++ExecReload=/usr/bin/kill -USR1 $MAINPID
++Restart=on-failure
++
++[Install]
++WantedBy=default.target
+diff --git a/host/systemd/phial-forward@.service b/host/systemd/phial-forward@.service
+new file mode 100644
+index 0000000000000000000000000000000000000000..35596ea1f70f95bca32b5be9eb26a154e6ba9c9b
+--- /dev/null
++++ b/host/systemd/phial-forward@.service
+@@ -0,0 +1,12 @@
++[Unit]
++Description=phial host forward %i to the guest
++Documentation=https://codeberg.org/pojntfx/phial
++
++[Service]
++Type=simple
++EnvironmentFile=-%E/phial/forward-%i.conf
++ExecStart=@SOCAT@ "${PHIAL_LISTEN}" "${PHIAL_TARGET}"
++Restart=on-failure
++
++[Install]
++WantedBy=default.target
+diff --git a/host/systemd/phial-guest-port@.service b/host/systemd/phial-guest-port@.service
+new file mode 100644
+index 0000000000000000000000000000000000000000..3b33da469f3949f1c1357af33dc35c4f0302602d
+--- /dev/null
++++ b/host/systemd/phial-guest-port@.service
+@@ -0,0 +1,11 @@
++[Unit]
++Description=phial guest port %i on the host loopback
++Documentation=https://codeberg.org/pojntfx/phial
++
++[Service]
++Type=simple
++ExecStart=@SOCAT@ TCP6-LISTEN:%i,bind=[::1],fork,reuseaddr VSOCK-CONNECT:3:%i
++Restart=on-failure
++
++[Install]
++WantedBy=default.target
+diff --git a/host/systemd/phial-swtpm.service b/host/systemd/phial-swtpm.service
+new file mode 100644
+index 0000000000000000000000000000000000000000..50e21833590423aacc75c58a7cfe292bb40fc0d3
+--- /dev/null
++++ b/host/systemd/phial-swtpm.service
+@@ -0,0 +1,13 @@
++[Unit]
++Description=phial software TPM
++Documentation=https://codeberg.org/pojntfx/phial
++
++[Service]
++Type=simple
++Environment=PATH=@BREW_PREFIX@/bin:/usr/local/bin:/usr/bin:/bin
++ExecStartPre=mkdir -p %t/phial/vm/swtpm
++ExecStart=@SWTPM@ socket --tpmstate dir=%t/phial/vm/swtpm --ctrl type=unixio,path=%t/phial/vm/swtpm.sock --tpm2 --log level=20
++Restart=on-failure
++
++[Install]
++WantedBy=default.target
+diff --git a/host/systemd/phial-virtiofsd@.service b/host/systemd/phial-virtiofsd@.service
+new file mode 100644
+index 0000000000000000000000000000000000000000..a5c3ed0baab52d2df8b782fc83498769106de7b7
+--- /dev/null
++++ b/host/systemd/phial-virtiofsd@.service
+@@ -0,0 +1,14 @@
++[Unit]
++Description=phial virtiofs share %i
++Documentation=https://codeberg.org/pojntfx/phial
++
++[Service]
++Type=simple
++Environment=PATH=@BREW_PREFIX@/bin:/usr/local/bin:/usr/bin:/bin
++EnvironmentFile=-%E/phial/share-%i.conf
++ExecStartPre=mkdir -p ${PHIAL_SHARE_DIR}
++ExecStart=@VIRTIOFSD@ --socket-path=%t/phial/vm/virtiofsd-%i.sock --shared-dir=${PHIAL_SHARE_DIR} --xattr --announce-submounts --uid-map=:1000:1000:1: --gid-map=:1000:1000:1:
++Restart=always
++
++[Install]
++WantedBy=default.target
+diff --git a/host/systemd/phial-vm.service b/host/systemd/phial-vm.service
+new file mode 100644
+index 0000000000000000000000000000000000000000..38c1053d60d8deccaaa3e57b52ca357e0b8dda55
+--- /dev/null
++++ b/host/systemd/phial-vm.service
+@@ -0,0 +1,20 @@
++[Unit]
++Description=phial virtual machine
++Documentation=https://codeberg.org/pojntfx/phial
++Requires=phial-swtpm.service
++After=phial-swtpm.service
++Wants=phial-virtiofsd@hostshare.service phial-virtiofsd@phial-secrets.service
++After=phial-virtiofsd@hostshare.service phial-virtiofsd@phial-secrets.service
++
++[Service]
++Type=exec
++Environment=PATH=@BREW_PREFIX@/bin:/usr/local/bin:/usr/bin:/bin
++ExecStart=%E/phial/phial-vm.sh
++LimitMEMLOCK=infinity
++Restart=no
++TimeoutStopSec=30s
++KillMode=control-group
++SendSIGKILL=yes
++
++[Install]
++WantedBy=default.target
+diff --git a/host/udev/99-phial-usb.rules b/host/udev/99-phial-usb.rules
+new file mode 100644
+index 0000000000000000000000000000000000000000..4e6eddba9af1cbe111bf8690976ee85845d1203e
+--- /dev/null
++++ b/host/udev/99-phial-usb.rules
+@@ -0,0 +1,5 @@
++SUBSYSTEM=="usb", ATTR{idVendor}=="0403", ATTR{idProduct}=="6001", TAG+="uaccess"
++SUBSYSTEM=="usb", ATTR{idVendor}=="1a86", ATTR{idProduct}=="55d3", TAG+="uaccess"
++SUBSYSTEM=="usb", ATTR{idVendor}=="345f", ATTR{idProduct}=="2131", TAG+="uaccess"
++SUBSYSTEM=="usb", ATTR{idVendor}=="16c0", ATTR{idProduct}=="05df", TAG+="uaccess"
++SUBSYSTEM=="usb", ATTR{idVendor}=="0b95", ATTR{idProduct}=="1790", TAG+="uaccess"
+diff --git a/install.sh b/install.sh
+new file mode 100755
+index 0000000000000000000000000000000000000000..57388763a554153095ace44130324531afc388e0
+--- /dev/null
++++ b/install.sh
+@@ -0,0 +1,107 @@
++#!/usr/bin/env bash
++set -euo pipefail
++
++repo="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
++config_home="${XDG_CONFIG_HOME:-$HOME/.config}"
++runtime_dir="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
++data_home="${XDG_DATA_HOME:-$HOME/.local/share}"
++unit_dir="$config_home/systemd/user"
++brew_prefix="$(brew --prefix 2>/dev/null || echo /home/linuxbrew/.linuxbrew)"
++
++install -d -m 0755 "$HOME/.local/bin" "$HOME/.local/share/applications"
++install -d -m 0700 "$config_home/phial" "$config_home/phial/keys" "$unit_dir"
++install -d -m 0755 "$data_home/phial/hostshare"
++
++if command -v go >/dev/null 2>&1; then
++    (cd "$repo/cli" && CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o "$repo/bin/phial" .)
++fi
++if [[ ! -x "$repo/bin/phial" ]]; then
++    printf 'phial binary missing and no go toolchain found; run: make build\n' >&2
++    exit 1
++fi
++
++install -m 0755 "$repo/bin/phial" "$repo/bin/phial-acceptance" "$repo/bin/phial-configurator" "$repo/bin/phial-waypipe" "$repo/bin/phial-rdp" "$HOME/.local/bin/"
++install -m 0755 "$repo/host/phial-askpass.sh" "$config_home/phial/phial-askpass.sh"
++
++if [[ ! -f "$config_home/phial/phial-vm.sh" ]]; then
++    install -m 0755 "$repo/host/phial-vm.sh" "$config_home/phial/phial-vm.sh"
++else
++    printf 'keeping your existing %s\n' "$config_home/phial/phial-vm.sh"
++fi
++if [[ ! -f "$config_home/phial/mapping" ]]; then
++    install -m 0600 "$repo/host/mapping" "$config_home/phial/mapping"
++else
++    printf 'keeping your existing %s\n' "$config_home/phial/mapping"
++fi
++if [[ ! -f "$config_home/phial/Caddyfile" ]]; then
++    install -m 0600 "$repo/host/phial-caddy.caddy" "$config_home/phial/Caddyfile"
++fi
++
++tool_path() {
++    command -v "$1" 2>/dev/null || { printf 'phial install: %s not found in PATH\n' "$1" >&2; exit 1; }
++}
++
++caddy_bin="$(tool_path caddy)"
++virtiofsd_bin="$(tool_path virtiofsd)"
++swtpm_bin="$(tool_path swtpm)"
++socat_bin="$(tool_path socat)"
++ssh_agent_bin="$(tool_path ssh-agent)"
++
++for unit in "$repo"/host/systemd/*.service; do
++    sed -e "s|@BREW_PREFIX@|$brew_prefix|g" \
++        -e "s|@CADDY@|$caddy_bin|g" \
++        -e "s|@VIRTIOFSD@|$virtiofsd_bin|g" \
++        -e "s|@SWTPM@|$swtpm_bin|g" \
++        -e "s|@SOCAT@|$socat_bin|g" \
++        -e "s|@SSH_AGENT@|$ssh_agent_bin|g" \
++        "$unit" > "$unit_dir/$(basename "$unit")"
++done
++
++install -m 0644 "$repo/host/share-hostshare.conf" "$config_home/phial/share-hostshare.conf"
++sed -i "s|@DATA_HOME@|$data_home|g" "$config_home/phial/share-hostshare.conf"
++install -m 0644 "$repo/host/share-phial-secrets.conf" "$config_home/phial/share-phial-secrets.conf"
++sed -i "s|@RUNTIME_DIR@|$runtime_dir|g" "$config_home/phial/share-phial-secrets.conf"
++for conf in forward-proxy forward-ssh-agent forward-gpg-extra; do
++    install -m 0644 "$repo/host/$conf.conf" "$config_home/phial/$conf.conf"
++    sed -i "s|@RUNTIME_DIR@|$runtime_dir|g" "$config_home/phial/$conf.conf"
++done
++
++sed "s|@UNIT_DIR@|$unit_dir|g" "$repo/host/desktop/phial-vm-unit.desktop" > "$HOME/.local/share/applications/phial-vm-unit.desktop"
++sed "s|@CFG_DIR@|$config_home/phial|g" "$repo/host/desktop/phial-vm-script.desktop" > "$HOME/.local/share/applications/phial-vm-script.desktop"
++sed "s|@CFG_DIR@|$config_home/phial|g" "$repo/host/desktop/phial-mapping.desktop" > "$HOME/.local/share/applications/phial-mapping.desktop"
++install -m 0644 "$repo/host/desktop/phial-display.desktop" "$HOME/.local/share/applications/phial-display.desktop"
++update-desktop-database "$HOME/.local/share/applications" 2>/dev/null || true
++
++ssh_config="$HOME/.ssh/config"
++touch "$ssh_config"
++chmod 0600 "$ssh_config"
++if ! grep -q '# >>> phial >>>' "$ssh_config"; then
++    cat >> "$ssh_config" <<'EOF'
++
++# >>> phial >>>
++Host phial
++    User phial
++    ProxyCommand socat - VSOCK-CONNECT:3:2222
++    IdentityFile ~/.ssh/id_ed25519
++    IdentitiesOnly yes
++    StrictHostKeyChecking accept-new
++# <<< phial <<<
++EOF
++fi
++
++gnupg_conf="$HOME/.gnupg/gpg-agent.conf"
++install -d -m 0700 "$HOME/.gnupg"
++touch "$gnupg_conf"
++chmod 0600 "$gnupg_conf"
++if ! grep -q '# phial' "$gnupg_conf"; then
++    printf '\n# phial\npinentry-program /usr/bin/pinentry-gnome3\n' >> "$gnupg_conf"
++fi
++
++systemctl --user daemon-reload
++systemctl --user enable --now phial-forward@proxy.service
++
++printf 'phial installed. next steps:\n'
++printf '  1. run0 %s\n' "$repo/host/phial-host-root-setup.sh"
++printf '  2. open KeePassXC and unlock the database\n'
++printf '  3. xdg-open %s to adjust the launcher variables\n' "$config_home/phial/phial-vm.sh"
++printf '  4. systemctl --user start phial-vm.service\n'
+diff --git a/tests/echo-upstream.py b/tests/echo-upstream.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..33044d6f32fb28735d0d29f4ce66591298cb9e5a
+--- /dev/null
++++ b/tests/echo-upstream.py
+@@ -0,0 +1,21 @@
++import socket
++from http.server import BaseHTTPRequestHandler, HTTPServer
++
++
++class Server(HTTPServer):
++    address_family = socket.AF_INET6
++
++
++class Handler(BaseHTTPRequestHandler):
++    def do_GET(self):
++        body = ('auth=' + str(self.headers.get('Authorization')) + ' path=' + self.path).encode()
++        self.send_response(200)
++        self.send_header('Content-Length', str(len(body)))
++        self.end_headers()
++        self.wfile.write(body)
++
++    def log_message(self, *args):
++        pass
++
++
++Server(('::1', 18099), Handler).serve_forever()
+diff --git a/tests/qga.py b/tests/qga.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..63b7287d7559fefaaab71a51312ea92a7f35e044
+--- /dev/null
++++ b/tests/qga.py
+@@ -0,0 +1,80 @@
++import base64
++import json
++import socket
++import sys
++import time
++
++
++class GuestAgent:
++    def __init__(self, path):
++        self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
++        self.sock.connect(path)
++        self.file = self.sock.makefile("rw")
++        self.sync()
++
++    def command(self, execute, arguments=None):
++        message = {"execute": execute}
++        if arguments is not None:
++            message["arguments"] = arguments
++        self.file.write(json.dumps(message))
++        self.file.write("\n")
++        self.file.flush()
++        while True:
++            line = self.file.readline()
++            if not line:
++                raise RuntimeError("agent closed the channel")
++            reply = json.loads(line)
++            if "return" in reply or "error" in reply:
++                if "error" in reply:
++                    raise RuntimeError(f"{execute}: {reply['error']}")
++                return reply["return"]
++
++    def sync(self):
++        marker = int(time.time() * 1000)
++        self.file.write(json.dumps({"execute": "guest-sync", "arguments": {"id": marker}}))
++        self.file.write("\n")
++        self.file.flush()
++        while True:
++            line = self.file.readline()
++            if not line:
++                raise RuntimeError("agent closed the channel")
++            reply = json.loads(line)
++            if reply.get("return") == marker:
++                return
++
++    def write_file(self, path, data):
++        handle = self.command("guest-file-open", {"path": path, "mode": "w+"})
++        self.command("guest-file-write", {"handle": handle, "buf-b64": base64.b64encode(data).decode()})
++        self.command("guest-file-close", {"handle": handle})
++
++    def exec(self, argv):
++        result = self.command("guest-exec", {"path": argv[0], "arg": argv[1:], "capture-output": True})
++        pid = result["pid"]
++        while True:
++            status = self.command("guest-exec-status", {"pid": pid})
++            if status.get("exited"):
++                if status.get("exitcode", 1) != 0:
++                    raise RuntimeError(f"{argv}: exit {status.get('exitcode')}: {status.get('err-data', '')}")
++                return status
++            time.sleep(0.5)
++
++    def ping(self):
++        self.command("guest-ping")
++
++
++if __name__ == "__main__":
++    socket_path, authorized_key = sys.argv[1], sys.argv[2]
++    agent = GuestAgent(socket_path)
++    agent.ping()
++    agent.exec(["/usr/bin/mkdir", "-p", "/home/phial/.ssh"])
++    agent.exec(["/usr/bin/sh", "-c", "touch /home/phial/.ssh/authorized_keys"])
++    handle = agent.command("guest-file-open", {"path": "/home/phial/.ssh/authorized_keys", "mode": "r"})
++    content = agent.command("guest-file-read", {"handle": handle})
++    agent.command("guest-file-close", {"handle": handle})
++    existing = base64.b64decode(content.get("buf-b64", "")).decode()
++    if authorized_key.strip() not in existing:
++        agent.exec(["/usr/bin/sh", "-c", f"printf '%s\n' {json.dumps(authorized_key.strip())} >> /home/phial/.ssh/authorized_keys"])
++    agent.exec(["/usr/bin/chmod", "700", "/home/phial/.ssh"])
++    agent.exec(["/usr/bin/chmod", "600", "/home/phial/.ssh/authorized_keys"])
++    agent.exec(["/usr/bin/chown", "-R", "phial:phial", "/home/phial/.ssh"])
++    print("validation key installed in the guest")
+diff --git a/tests/qmp.py b/tests/qmp.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..0192cb2aeef7d3d34423672553cdd81114650c82
+--- /dev/null
++++ b/tests/qmp.py
+@@ -0,0 +1,42 @@
++import json
++import socket
++import sys
++import time
++
++
++class Qmp:
++    def __init__(self, path):
++        self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
++        self.sock.connect(path)
++        self.file = self.sock.makefile("rw")
++        self.file.readline()
++        self.execute("qmp_capabilities")
++
++    def execute(self, command, arguments=None):
++        message = {"execute": command}
++        if arguments is not None:
++            message["arguments"] = arguments
++        self.file.write(json.dumps(message))
++        self.file.write("\n")
++        self.file.flush()
++        while True:
++            reply = json.loads(self.file.readline())
++            if "return" in reply or "error" in reply:
++                if "error" in reply:
++                    raise RuntimeError(reply["error"])
++                return reply["return"]
++
++    def screendump(self, path):
++        self.execute("screendump", {"filename": path, "format": "png"})
++
++
++if __name__ == "__main__":
++    qmp = Qmp(sys.argv[1])
++    action = sys.argv[2]
++    if action == "screendump":
++        qmp.screendump(sys.argv[3])
++        print("screendump written")
++    elif action == "status":
++        print(qmp.execute("query-status"))
++    elif action == "monitor":
++        print(qmp.execute("human-monitor-command", {"command-line": sys.argv[3]}))
+diff --git a/tests/serial-cmd.py b/tests/serial-cmd.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..d05c9c0c3d9a7fd31b2ca0ef4d5b3f13cffee5f6
+--- /dev/null
++++ b/tests/serial-cmd.py
+@@ -0,0 +1,49 @@
++import socket
++import sys
++import time
++
++
++def run(sock_path, commands, settle=1.0):
++    sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
++    sock.connect(sock_path)
++    sock.settimeout(0.2)
++    buffer = bytearray()
++
++    def pump(duration):
++        end = time.time() + duration
++        while time.time() < end:
++            try:
++                data = sock.recv(4096)
++                if data:
++                    buffer.extend(data)
++            except socket.timeout:
++                pass
++
++    pump(settle)
++    sock.sendall(b"\n")
++    pump(1.0)
++    del buffer[:]
++
++    for command in commands:
++        sock.sendall(command.encode() + b"; echo PHIAL-RC-$?\n")
++        deadline = time.time() + 60
++        import re as _re
++        while time.time() < deadline:
++            pump(0.4)
++            if _re.search(rb"PHIAL-RC-[0-9]+\n", bytes(buffer)):
++                break
++        text = bytes(buffer)
++        match = _re.search(rb"PHIAL-RC-[0-9]+", text)
++        end = match.start() if match else len(text)
++        rc = text[end:].split(b"\n")[0].decode(errors="ignore")
++        body = text[:end].decode(errors="ignore")
++        lines = [line for line in body.splitlines() if line.strip() and not line.strip().startswith(command[:30])]
++        print("$ " + command)
++        print("\n".join(lines))
++        print(rc)
++        print("---")
++        del buffer[:]
++
++
++if __name__ == "__main__":
++    run(sys.argv[1], sys.argv[2:])
+diff --git a/tests/serial-shell.py b/tests/serial-shell.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..7c34230fa6aec9e0b6d7b3ffc273d4aa4d17970b
+--- /dev/null
++++ b/tests/serial-shell.py
+@@ -0,0 +1,58 @@
++import socket
++import sys
++import threading
++import time
++
++
++class SerialShell:
++    def __init__(self, path, logfile):
++        self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
++        self.sock.connect(path)
++        self.sock.settimeout(0.2)
++        self.buffer = bytearray()
++        self.log = open(logfile, "ab", buffering=0)
++        self.lock = threading.Lock()
++        self.alive = True
++        self.reader = threading.Thread(target=self._read, daemon=True)
++        self.reader.start()
++
++    def _read(self):
++        while self.alive:
++            try:
++                data = self.sock.recv(4096)
++            except socket.timeout:
++                continue
++            except OSError:
++                return
++            if not data:
++                return
++            with self.lock:
++                self.buffer.extend(data)
++            self.log.write(data)
++
++    def send(self, text):
++        self.sock.sendall(text.encode())
++
++    def wait_for(self, patterns, timeout=60):
++        deadline = time.time() + timeout
++        with self.lock:
++            start_len = len(self.buffer)
++        while time.time() < deadline:
++            with self.lock:
++                haystack = bytes(self.buffer[start_len:])
++            for pattern in patterns:
++                if pattern.encode() in haystack:
++                    return pattern, haystack
++            time.sleep(0.3)
++        return None, bytes(self.buffer[start_len:])
++
++
++if __name__ == "__main__":
++    sock_path, logfile = sys.argv[1], sys.argv[2]
++    shell = SerialShell(sock_path, logfile)
++    shell.send("\n")
++    which, _ = shell.wait_for(["login:", "# ", "~]#"], timeout=90)
++    if which == "login:":
++        shell.send("root\n")
++        shell.wait_for(["#"], timeout=30)
++    print("shell ready", flush=True)
+diff --git a/tests/test-cli.sh b/tests/test-cli.sh
+new file mode 100755
+index 0000000000000000000000000000000000000000..547f247cd3bb55fa874f217ff9ab07a30a126227
+--- /dev/null
++++ b/tests/test-cli.sh
+@@ -0,0 +1,99 @@
++#!/usr/bin/env bash
++set -euo pipefail
++
++repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
++export PATH="$repo/bin:$PATH"
++scratch="$(mktemp -d)"
++cleanup() {
++    [[ -n "${caddy_pid:-}" ]] && kill "$caddy_pid" 2>/dev/null || true
++    [[ -n "${upstream_pid:-}" ]] && kill "$upstream_pid" 2>/dev/null || true
++    [[ -n "${agent_pid:-}" ]] && kill "$agent_pid" 2>/dev/null || true
++    rm -rf "$scratch"
++}
++trap cleanup EXIT
++pkill -f "caddy run --confi[g]" 2>/dev/null || true
++pkill -f "echo-upstrea[m]" 2>/dev/null || true
++sleep 0.3
++export PHIAL_CONFIG_DIR="$scratch/config/phial"
++export PHIAL_RUNTIME_DIR="$scratch/runtime/phial"
++mkdir -p "$PHIAL_CONFIG_DIR" "$PHIAL_RUNTIME_DIR"
++
++checks=0
++fails=0
++ok() {
++    checks=$((checks + 1))
++    if eval "$2"; then
++        printf 'PASS %s\n' "$1"
++    else
++        printf 'FAIL %s\n' "$1"
++        fails=$((fails + 1))
++    fi
++}
++
++cat > "$PHIAL_CONFIG_DIR/mapping" <<'EOF'
++testenv env keepassxc://phial-test-env -
++testproxy proxy keepassxc://phial-test-proxy http://[::1]:18099
++EOF
++
++printf 'env-secret-value' | secret-tool store --label="phial test env" phial phial-test-env
++printf 'proxy-secret-value' | secret-tool store --label="phial test proxy" phial phial-test-proxy
++
++listing="$(phial ls)"
++ok "ls lists the names" 'grep -q testenv <<<"$listing" && grep -q testproxy <<<"$listing"'
++ok "ls never prints the values" '! grep -q secret-value <<<"$listing"'
++
++phial sync >/dev/null
++ok "sync writes the env secret file" 'grep -qx env-secret-value "$PHIAL_RUNTIME_DIR/secrets/testenv"'
++ok "sync writes a placeholder for the proxy row" 'grep -qx phial-proxy-placeholder "$PHIAL_RUNTIME_DIR/secrets/testproxy"'
++ok "sync writes the proxy drop-in" '[[ -f "$PHIAL_RUNTIME_DIR/caddy/testproxy.caddy" ]]'
++ok "sync writes the Caddyfile" '[[ -f "$PHIAL_CONFIG_DIR/Caddyfile" ]]'
++ok "the Caddyfile is valid" 'caddy validate --config "$PHIAL_CONFIG_DIR/Caddyfile" --adapter caddyfile >/dev/null 2>&1'
++ok "secret files have mode 0600" '[[ "$(stat -c %a "$PHIAL_RUNTIME_DIR/secrets/testenv")" == 600 ]]'
++
++printed="$(PHIAL_SECRETS_DIR="$PHIAL_RUNTIME_DIR/secrets" phial run sh -c 'echo $testenv')"
++ok "the runner loads the secret as a variable" '[[ "$printed" == "env-secret-value" ]]'
++
++phial allow --for 30min testenv >/dev/null
++ok "allow writes the grant file" '[[ -f "$PHIAL_RUNTIME_DIR/grants/testenv.grant" ]]'
++ok "status shows the grant" 'phial status | grep -q "testenv.*granted"'
++phial revoke testenv >/dev/null
++ok "revoke removes the secret file" '[[ ! -f "$PHIAL_RUNTIME_DIR/secrets/testenv" ]]'
++ok "revoke removes the grant file" '[[ ! -f "$PHIAL_RUNTIME_DIR/grants/testenv.grant" ]]'
++ok "status shows the grant is closed" 'phial status | grep -q "testenv.*not granted"'
++
++phial allow --for 6s testenv >/dev/null
++[[ -f "$PHIAL_RUNTIME_DIR/secrets/testenv" ]] || { echo 'FAIL grant wrote the secret file'; fails=$((fails + 1)); }
++sleep 8
++ok "the secret file disappears on time" '[[ ! -f "$PHIAL_RUNTIME_DIR/secrets/testenv" ]]'
++ok "the grant file disappears on time" '[[ ! -f "$PHIAL_RUNTIME_DIR/grants/testenv.grant" ]]'
++
++python3 "$repo/tests/echo-upstream.py" python3 "$repo/tests/echo-upstream.py" &>/dev/null &>/dev/null python3 "$repo/tests/echo-upstream.py" &>/dev/null &
++upstream_pid=$!
++sleep 0.5
++caddy run --config "$PHIAL_CONFIG_DIR/Caddyfile" --adapter caddyfile >/dev/null 2>caddy run --config "$PHIAL_CONFIG_DIR/Caddyfile" --adapter caddyfile >/dev/null 2>&1 &1 caddy run --config "$PHIAL_CONFIG_DIR/Caddyfile" --adapter caddyfile >/dev/null 2>&1 &
++caddy_pid=$!
++sleep 2
++phial allow --for 60s testproxy >/dev/null
++sleep 0.2
++response="$(curl -s "http://[::1]:4000/testproxy/v1/models" -H 'Authorization: Bearer phial-proxy-placeholder')"
++ok "the proxy injects the secret" '[[ "$response" == *"auth=Bearer proxy-secret-value"* ]]'
++ok "the proxy strips the row prefix" '[[ "$response" == *"path=/v1/models"* ]]'
++phial revoke testproxy >/dev/null
++sleep 0.2
++code="$(curl -s -o /dev/null -w '%{http_code}' "http://[::1]:4000/testproxy/v1/models")"
++ok "revoking the grant returns 403 on the next request" '[[ "$code" == 403 ]]'
++code="$(curl -s -o /dev/null -w '%{http_code}' "http://[::1]:4000/nowhere")"
++ok "an unmatched path returns 404" '[[ "$code" == 404 ]]'
++
++ssh-keygen -t ed25519 -N "" -f "$PHIAL_CONFIG_DIR/keys/testkey" -q
++mkdir -p "$PHIAL_RUNTIME_DIR/agent"
++ssh-agent -a "$PHIAL_RUNTIME_DIR/agent/ssh.sock" -D &>/dev/null &
++agent_pid=$!
++sleep 0.5
++phial allow --kind ssh-key --for 30min testkey >/dev/null 2>&1
++ok "the ssh-key grant loads the key into the dedicated agent" 'SSH_AUTH_SOCK="$PHIAL_RUNTIME_DIR/agent/ssh.sock" ssh-add -l | grep -q testkey'
++phial revoke testkey >/dev/null 2>&1
++ok "the ssh-key revoke drops the key" '! SSH_AUTH_SOCK="$PHIAL_RUNTIME_DIR/agent/ssh.sock" ssh-add -l 2>/dev/null | grep -q testkey'
++
++printf '%d checks, %d failures\n' "$checks" "$fails"
++[[ "$fails" -eq 0 ]]
+
