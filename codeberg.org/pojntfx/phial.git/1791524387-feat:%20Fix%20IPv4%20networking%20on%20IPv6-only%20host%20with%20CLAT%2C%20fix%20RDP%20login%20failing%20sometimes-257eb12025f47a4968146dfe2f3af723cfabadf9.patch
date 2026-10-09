@@ -1,0 +1,204 @@
+From 257eb12025f47a4968146dfe2f3af723cfabadf9 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Thu, 08 Oct 2026 22:39:47 -0700
+Subject: [PATCH] feat: Fix IPv4 networking on IPv6-only host with CLAT, fix RDP login failing sometimes
+---
+diff --git a/host/systemd/phial-passt@.service b/host/systemd/phial-passt@.service
+new file mode 100644
+index 0000000000000000000000000000000000000000..4d51723cfe87ed3db6eacb55155298412be4be9c
+--- /dev/null
++++ b/host/systemd/phial-passt@.service
+@@ -0,0 +1,13 @@
++[Unit]
++Description=phial passt network backend %i
++After=network-online.target
++
++[Service]
++Type=simple
++ExecStartPre=mkdir -p %t/phial/vms/%i
++ExecStartPre=rm -f %t/phial/vms/%i/passt.sock
++ExecStart=@PASST@ --foreground --socket %t/phial/vms/%i/passt.sock --address 192.168.100.2 --netmask 24 --gateway 192.168.100.1 --dns 192.168.100.1 --dns-forward 192.168.100.1 --mtu 1472 --quiet
++Restart=on-failure
++
++[Install]
++WantedBy=default.target
+diff --git a/internal/guest/files/systemd-system/phial-network.service b/internal/guest/files/systemd-system/phial-network.service
+new file mode 100644
+index 0000000000000000000000000000000000000000..1510a695b7fd6e55f55af77e78fa907fa8b7e746
+--- /dev/null
++++ b/internal/guest/files/systemd-system/phial-network.service
+@@ -0,0 +1,13 @@
++[Unit]
++Description=phial guest network preferences
++After=NetworkManager.service
++Wants=NetworkManager.service
++ConditionPathExists=/usr/local/libexec/phial-network.sh
++
++[Service]
++Type=oneshot
++RemainAfterExit=yes
++ExecStart=/usr/local/libexec/phial-network.sh
++
++[Install]
++WantedBy=multi-user.target
+diff --git a/internal/guest/provision.go b/internal/guest/provision.go
+index 1f15a7b29a5d2e203f362d1a014320509d22e6d5..959829361ffe4a9ee1d916bbe497f4af2e45009c 100644
+--- a/internal/guest/provision.go
++++ b/internal/guest/provision.go
+@@ -55,6 +55,13 @@
+ 		steps = append(steps, writeText(item.dest, item.mode, string(data)))
+ 	}
+ 
++	unit, err := files.ReadFile("files/systemd-system/phial-network.service")
++	if err != nil {
++		return err
++	}
++
++	steps = append(steps, writeSystemFile("/etc/systemd/system/phial-network.service", string(unit), "0644"))
++
+ 	if binary != "" {
+ 		data, err := os.ReadFile(binary)
+ 		if err != nil {
+@@ -84,12 +91,29 @@ 		"systemctl --user restart phial-waypipe.service 2>/dev/null || true",
+ 		"systemctl --user enable --now gnome-remote-desktop-handover.service 2>/dev/null || true",
+ 		"systemctl --user enable --now phial-guest-port@3389.service 2>/dev/null || true",
+ 		rdpScript(def.Name, rdpPassword),
+-		fallbackMetricScript(fallbackMAC),
++		installNetworkScript(fallbackMAC),
++		"gsettings set org.gnome.desktop.screensaver lock-enabled false 2>/dev/null || true",
++		"gsettings set org.gnome.desktop.screensaver idle-activation-enabled false 2>/dev/null || true",
++		"gsettings set org.gnome.desktop.session idle-delay 0 2>/dev/null || true",
++		"gsettings set org.gnome.shell enabled-extensions \"[]\" 2>/dev/null || true",
++		"sudo systemctl disable NetworkManager-wait-online.service 2>/dev/null || true",
++		"sudo systemctl daemon-reload",
++		"sudo systemctl enable --now phial-network.service 2>/dev/null || true",
+ 	)
+ 
+ 	return run(def.Name, strings.Join(steps, "\n"))
+ }
+ 
++func installNetworkScript(mac string) string {
++	return writeSystemFile("/usr/local/libexec/phial-network.sh", fallbackMetricScript(mac), "0755")
++}
++
++func writeSystemFile(dest string, content string, mode string) string {
++	encoded := base64.StdEncoding.EncodeToString([]byte(content))
++
++	return fmt.Sprintf("sudo mkdir -p \"$(dirname %s)\" && printf '%%s' '%s' | base64 -d | sudo tee %s > /dev/null && sudo chmod %s %s", dest, encoded, dest, mode, dest)
++}
++
+ func rdpScript(name string, password string) string {
+ 	key := "/etc/gnome-remote-desktop/rdp-tls.key"
+ 	cert := "/etc/gnome-remote-desktop/rdp-tls.crt"
+@@ -109,8 +133,8 @@ 		"sudo systemctl enable gnome-remote-desktop > /dev/null 2>&1 || true",
+ 		"sudo systemctl restart gnome-remote-desktop > /dev/null 2>&1 || true",
+ 		"echo \"phial:" + password + "\" | sudo chpasswd || { echo \"phial: could not set the guest password, pwquality rejects it\" >&2; exit 1; }",
+ 		"sudo passwd -u " + name + " > /dev/null 2>&1 || true",
+-		"sudo crudini --set /etc/gdm/custom.conf daemon AutomaticLoginEnable true",
+-		"sudo crudini --set /etc/gdm/custom.conf daemon AutomaticLogin " + name,
++		"sudo crudini --del /etc/gdm/custom.conf daemon AutomaticLogin > /dev/null 2>&1 || true",
++		"sudo crudini --set /etc/gdm/custom.conf daemon AutomaticLoginEnable false",
+ 		"sudo loginctl enable-linger " + name + " || true",
+ 		"mkdir -p ~/.config/environment.d",
+ 		"printf 'XDG_SESSION_TYPE=wayland\\n' > ~/.config/environment.d/wayland.conf",
+@@ -128,7 +152,54 @@ 	return fmt.Sprintf("mkdir -p \"$HOME/%s\" && printf '%%s' '%s' | base64 -d > \"$HOME/%s\" && chmod 0755 \"$HOME/%s\"", path.Dir(dest), content, dest, dest)
+ }
+ 
+ func fallbackMetricScript(mac string) string {
+-	return fmt.Sprintf("for dev in $(nmcli -t -f DEVICE,TYPE device | awk -F: '$2 == \"ethernet\" {print $1}'); do\n  hw=$(nmcli -g GENERAL.HWADDR device show \"$dev\" | sed 's/\\\\//g')\n  if [ \"$(echo \"$hw\" | tr 'A-F' 'a-f')\" = \"%s\" ]; then\n    con=$(nmcli -g GENERAL.CONNECTION device show \"$dev\" | sed 's/\\\\//g')\n    sudo nmcli connection modify \"$con\" ipv4.route-metric 1000 ipv6.route-metric 1000 || true\n  fi\ndone", mac)
++	return fmt.Sprintf(`#!/bin/bash
++
++set -u
++
++for dev in $(nmcli -t -f DEVICE,TYPE device | awk -F: '$2 == "ethernet" {print $1}'); do
++  hw=$(nmcli -g GENERAL.HWADDR device show "$dev" | sed 's/\\//g')
++
++  if [ "$(echo "$hw" | tr 'A-F' 'a-f')" != "%s" ]; then
++    continue
++  fi
++
++  con=$(nmcli -g GENERAL.CONNECTION device show "$dev" | sed 's/\\//g')
++
++  if [ -z "$con" ] || [ "$con" = "--" ]; then
++    sudo nmcli connection add type ethernet ifname "$dev" con-name phial-fallback connection.autoconnect yes ipv4.method auto ipv6.method auto > /dev/null || true
++
++    con=phial-fallback
++  fi
++
++  sudo nmcli connection modify "$con" connection.autoconnect yes ipv6.route-metric 1000 ipv4.route-metric 2000 || true
++  sudo nmcli connection up "$con" || true
++
++  addr=$(ip -6 addr show dev "$dev" scope global 2>/dev/null | awk '/inet6/ {print $2; exit}' | cut -d/ -f1)
++  gw=""
++
++  if [ -n "$addr" ]; then
++    gw="$(echo "$addr" | sed 's/::.*/::/')1"
++  fi
++
++  if [ -n "$gw" ]; then
++    sudo nmcli connection modify "$con" ipv6.dns "$gw" ipv6.ignore-auto-dns yes ipv4.ignore-auto-dns yes || true
++    sudo nmcli connection up "$con" || true
++  fi
++done
++
++for dev in $(nmcli -t -f DEVICE,TYPE device | awk -F: '$2 == "ethernet" {print $1}'); do
++  hw=$(nmcli -g GENERAL.HWADDR device show "$dev" | sed 's/\\//g')
++
++  if [ "$(echo "$hw" | tr 'A-F' 'a-f')" = "%s" ]; then
++    continue
++  fi
++
++  con=$(nmcli -g GENERAL.CONNECTION device show "$dev" | sed 's/\\//g')
++
++  if [ -n "$con" ] && [ "$con" != "--" ]; then
++    sudo nmcli connection modify "$con" ipv6.route-metric 100 ipv4.route-metric 200 || true
++  fi
++done`, mac, mac)
+ }
+ 
+ func run(host string, script string) error {
+diff --git a/internal/setup/install.go b/internal/setup/install.go
+index ce4c469f01d1f585258fba0d29e6ad6ad552bb61..a059a203b5377d385ad1d7882a757c58d8238c94 100644
+--- a/internal/setup/install.go
++++ b/internal/setup/install.go
+@@ -81,7 +81,7 @@ 	}
+ 
+ 	tools := map[string]string{}
+ 
+-	for _, name := range []string{"caddy", "virtiofsd", "swtpm", "socat", "ssh-agent"} {
++	for _, name := range []string{"caddy", "virtiofsd", "swtpm", "socat", "ssh-agent", "passt"} {
+ 		path, err := toolPath(name)
+ 		if err != nil {
+ 			return err
+@@ -146,6 +146,7 @@ 		text = strings.ReplaceAll(text, "@VIRTIOFSD@", tools["virtiofsd"])
+ 		text = strings.ReplaceAll(text, "@SWTPM@", tools["swtpm"])
+ 		text = strings.ReplaceAll(text, "@SOCAT@", tools["socat"])
+ 		text = strings.ReplaceAll(text, "@SSH_AGENT@", tools["ssh-agent"])
++		text = strings.ReplaceAll(text, "@PASST@", tools["passt"])
+ 
+ 		if err := installFile([]byte(text), filepath.Join(unitDir, unit.Name()), 0o644, true); err != nil {
+ 			return err
+diff --git a/internal/virt/launcher.go b/internal/virt/launcher.go
+index 52dfe74778b975f7c0a43b458f3c93909291774d..04890f89dd208a54bcbe70ca3a98abc636db175b 100644
+--- a/internal/virt/launcher.go
++++ b/internal/virt/launcher.go
+@@ -351,9 +351,7 @@ 		)
+ 	}
+ 
+ 	switch d.NetFallback {
+-	case "passt":
+-		args = append(args, "-nic", "passt,model=virtio-net-pci,mac=52:54:00:5e:a1:02")
+-	case "stream":
++	case "passt", "stream":
+ 		args = append(args,
+ 			"-netdev", "stream,id=fb0,addr.type=unix,addr.path="+filepath.Join(run, "passt.sock")+",server=off",
+ 			"-device", "virtio-net-pci,netdev=fb0,mac=52:54:00:5e:a1:02",
+@@ -554,6 +552,7 @@ 	units := []string{
+ 		"phial-swtpm@" + d.Name + ".service",
+ 		"phial-virtiofsd@hostshare.service",
+ 		"phial-virtiofsd@phial-secrets.service",
++		"phial-passt@" + d.Name + ".service",
+ 	}
+ 
+ 	for _, share := range d.Shares {
+
