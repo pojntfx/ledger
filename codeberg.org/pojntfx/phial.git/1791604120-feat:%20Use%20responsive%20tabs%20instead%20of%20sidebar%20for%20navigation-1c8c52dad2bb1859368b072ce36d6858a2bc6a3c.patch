@@ -1,0 +1,327 @@
+From 1c8c52dad2bb1859368b072ce36d6858a2bc6a3c Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Fri, 09 Oct 2026 20:48:40 -0700
+Subject: [PATCH] feat: Use responsive tabs instead of sidebar for navigation
+---
+diff --git a/internal/components/app.go b/internal/components/app.go
+index e027d863d72630edbc48b2d05fb17041297face8..af54a02f84efd2b317c8b15599b58c0a9de68441 100644
+--- a/internal/components/app.go
++++ b/internal/components/app.go
+@@ -42,9 +42,6 @@ 	window            *adw.ApplicationWindow
+ 	toolbar           *gtk.Widget
+ 	toasts            *adw.ToastOverlay
+ 	stack             *adw.ViewStack
+-	split             *adw.NavigationSplitView
+-	sidebarList       *gtk.ListBox
+-	syncing           bool
+ 	sidebar           *adw.Sidebar
+ 	banner            *adw.Banner
+ 	title             *adw.WindowTitle
+diff --git a/internal/components/requests.go b/internal/components/requests.go
+index 731537267d59a1f398687d3d656c7f7f87d8b805..5713d19f6c1ccf903b3edf842453a8cc75540a49 100644
+--- a/internal/components/requests.go
++++ b/internal/components/requests.go
+@@ -22,7 +22,7 @@ 		a.refreshRequests(scrolled)
+ 		return true
+ 	})
+ 
+-	return pageWithHeader(i18n.L("Requests"), &scrolled.Widget)
++	return &scrolled.Widget
+ }
+ 
+ func (a *App) refreshRequests(scrolled *gtk.ScrolledWindow) {
+diff --git a/internal/components/secrets.go b/internal/components/secrets.go
+index d263358e85b7167bc8f698f03955ec5ac9237748..75be570c23ae79fb9b99af85e6b0aee6b95e2f45 100644
+--- a/internal/components/secrets.go
++++ b/internal/components/secrets.go
+@@ -22,7 +22,7 @@ 		a.refreshSecrets(scrolled)
+ 		return true
+ 	})
+ 
+-	return pageWithHeader(i18n.L("Secrets"), &scrolled.Widget)
++	return &scrolled.Widget
+ }
+ 
+ func (a *App) refreshSecrets(scrolled *gtk.ScrolledWindow) {
+diff --git a/internal/components/vms.go b/internal/components/vms.go
+index 724dbd634b7649ac8ba5cf37a70438c368bfbd09..9ffb2f9ec1868d7b447f4ad5437aa775087881d6 100644
+--- a/internal/components/vms.go
++++ b/internal/components/vms.go
+@@ -28,7 +28,7 @@ 		a.refreshVMs(scrolled)
+ 		return true
+ 	})
+ 
+-	return pageWithHeader(i18n.L("Machines"), &scrolled.Widget)
++	return &scrolled.Widget
+ }
+ 
+ func (a *App) refreshVMs(scrolled *gtk.ScrolledWindow) {
+diff --git a/internal/components/widgets.go b/internal/components/widgets.go
+index 6aab8b865b2d7ef1fde74f998cf3ed1c146ca9b4..c1e48f761a1714465ca77284f9a401590a44cb2d 100644
+--- a/internal/components/widgets.go
++++ b/internal/components/widgets.go
+@@ -256,19 +256,6 @@ 	dialog.SetChild(&toolbar.Widget)
+ 	dialog.Present(&a.window.Widget)
+ }
+ 
+-func pageWithHeader(title string, content *gtk.Widget) *gtk.Widget {
+-	toolbar := adw.NewToolbarView()
+-
+-	header := adw.NewHeaderBar()
+-	titleWidget := adw.NewWindowTitle(title, "")
+-	header.SetTitleWidget(&titleWidget.Widget)
+-
+-	toolbar.AddTopBar(&header.Widget)
+-	toolbar.SetContent(content)
+-
+-	return &toolbar.Widget
+-}
+-
+ func humanBytes(value int64) string {
+ 	const unit = 1024.0
+ 	if value < int64(unit) {
+diff --git a/internal/components/window.go b/internal/components/window.go
+index 750a7c17561bedcc6459dadaac15660dc37686b8..496f42c84782325881ae19d75409e8fbaa3abf1f 100644
+--- a/internal/components/window.go
++++ b/internal/components/window.go
+@@ -41,33 +41,14 @@
+ 	toasts := adw.NewToastOverlay()
+ 	a.toasts = toasts
+ 
++	nav := adw.NewNavigationView()
++	a.contentNav = nav
++
+ 	homePage := a.buildHomePage()
++	nav.Add(homePage)
+ 
+-	toasts.SetChild(&homePage.Widget)
++	toasts.SetChild(&nav.Widget)
+ 	a.window.SetContent(&toasts.Widget)
+-
+-	cond := adw.NewBreakpointConditionLength(adw.BreakpointConditionMaxWidthValue, 500, adw.LengthUnitSpValue)
+-	bp := adw.NewBreakpoint(cond)
+-
+-	var onApply func(adw.Breakpoint)
+-	onApply = func(adw.Breakpoint) {
+-		if a.split != nil {
+-			a.split.SetCollapsed(true)
+-		}
+-	}
+-	bp.ConnectApply(&onApply)
+-	a.hold(&onApply)
+-
+-	var onUnapply func(adw.Breakpoint)
+-	onUnapply = func(adw.Breakpoint) {
+-		if a.split != nil {
+-			a.split.SetCollapsed(false)
+-		}
+-	}
+-	bp.ConnectUnapply(&onUnapply)
+-	a.hold(&onUnapply)
+-
+-	a.window.AddBreakpoint(bp)
+ 
+ 	a.registerActions()
+ 
+@@ -201,26 +182,41 @@ 			return
+ 		}
+ 		variant := (*glib.Variant)(unsafe.Pointer(parameter))
+ 		path := variant.GetString(nil)
+-		_ = a.captureWindow(path)
++		println(a.captureWindow(path))
+ 	}
+ 	captureAction.ConnectActivate(&onCapture)
+ 	a.hold(&onCapture)
+ }
+ 
+ func (a *App) buildHomePage() *adw.NavigationPage {
+-	split := adw.NewNavigationSplitView()
+-	split.SetMinSidebarWidth(200)
+-	a.split = split
++	stack := adw.NewViewStack()
++	a.stack = stack
+ 
+-	sidebarBox := gtk.NewBox(gtk.OrientationVerticalValue, 0)
++	for _, p := range pageDefs {
++		stack.AddTitledWithIcon(p.build(), p.name, p.title, p.icon)
++	}
+ 
+-	sidebarToolbar := adw.NewToolbarView()
++	a.banner = adw.NewBanner("")
++	a.banner.SetRevealed(false)
+ 
+-	sidebarHeader := adw.NewHeaderBar()
+-	sidebarHeader.SetShowTitle(true)
++	var onBanner func(adw.Banner)
++	onBanner = func(adw.Banner) {
++		a.showPage("requests")
++	}
++	a.banner.ConnectButtonClicked(&onBanner)
++	a.hold(&onBanner)
+ 
+-	sidebarTitle := adw.NewWindowTitle("Phial", "")
+-	sidebarHeader.SetTitleWidget(&sidebarTitle.Widget)
++	contentBox := gtk.NewBox(gtk.OrientationVerticalValue, 0)
++	contentBox.Append(&a.banner.Widget)
++	stack.SetVexpand(true)
++	contentBox.Append(&stack.Widget)
++
++	header := adw.NewHeaderBar()
++
++	switcher := adw.NewViewSwitcher()
++	switcher.SetStack(stack)
++	switcher.SetPolicy(adw.ViewSwitcherPolicyWideValue)
++	header.SetTitleWidget(&switcher.Widget)
+ 
+ 	menuBtn := gtk.NewMenuButton()
+ 	menuBtn.SetIconName("open-menu-symbolic")
+@@ -234,100 +230,42 @@ 	menuModel.Append(i18n.L("_Preferences"), "app.settings")
+ 	menuModel.Append(i18n.L("_About Phial"), "app.about")
+ 	menuModel.Append(i18n.L("_Quit"), "app.quit")
+ 	menuBtn.SetMenuModel(&menuModel.MenuModel)
+-	sidebarHeader.PackEnd(&menuBtn.Widget)
+-
+-	sidebarToolbar.AddTopBar(&sidebarHeader.Widget)
+-
+-	sidebarList := gtk.NewListBox()
+-	sidebarList.SetSelectionMode(gtk.SelectionSingleValue)
+-	sidebarList.SetActivateOnSingleClick(true)
+-	sidebarList.AddCssClass("navigation-sidebar")
+-	a.sidebarList = sidebarList
+-
+-	for _, p := range pageDefs {
+-		row := gtk.NewListBoxRow()
+-		row.SetName(p.name)
+-
+-		box := gtk.NewBox(gtk.OrientationHorizontalValue, 12)
+-		box.SetMarginTop(8)
+-		box.SetMarginBottom(8)
+-		box.SetMarginStart(12)
+-		box.SetMarginEnd(12)
+-
+-		icon := gtk.NewImage()
+-		icon.SetFromIconName(p.icon)
+-		icon.SetPixelSize(16)
+-		box.Append(&icon.Widget)
+-
+-		label := gtk.NewLabel(p.title)
+-		label.SetHalign(gtk.AlignStartValue)
+-		label.SetHexpand(true)
+-		box.Append(&label.Widget)
++	header.PackEnd(&menuBtn.Widget)
+ 
+-		row.SetChild(&box.Widget)
+-		sidebarList.Append(&row.Widget)
+-	}
++	switcherBar := adw.NewViewSwitcherBar()
++	switcherBar.SetStack(stack)
++	switcherBar.SetReveal(false)
+ 
+-	var onActivated func(gtk.ListBox, uintptr)
+-	onActivated = func(_ gtk.ListBox, rowPtr uintptr) {
+-		if a.syncing {
+-			return
+-		}
++	toolbar := adw.NewToolbarView()
++	toolbar.AddTopBar(&header.Widget)
++	toolbar.SetContent(&contentBox.Widget)
++	toolbar.AddBottomBar(&switcherBar.Widget)
+ 
+-		row := gtk.ListBoxRowNewFromInternalPtr(rowPtr)
+-		name := row.GetName()
+-		if name != "" {
+-			a.showPage(name)
++	cond := adw.NewBreakpointConditionLength(adw.BreakpointConditionMaxWidthValue, 550, adw.LengthUnitSpValue)
++	bp := adw.NewBreakpoint(cond)
+ 
+-			if a.split != nil && a.split.GetCollapsed() {
+-				a.split.SetCollapsed(false)
+-			}
+-		}
++	var onApply func(adw.Breakpoint)
++	onApply = func(adw.Breakpoint) {
++		switcherBar.SetReveal(true)
++		header.SetTitleWidget(nil)
+ 	}
+-	sidebarList.ConnectRowActivated(&onActivated)
+-	a.hold(&onActivated)
++	bp.ConnectApply(&onApply)
++	a.hold(&onApply)
+ 
+-	sidebarScroll := gtk.NewScrolledWindow()
+-	sidebarScroll.SetChild(&sidebarList.Widget)
+-	sidebarScroll.SetVexpand(true)
+-
+-	sidebarToolbar.SetContent(&sidebarScroll.Widget)
+-	sidebarBox.Append(&sidebarToolbar.Widget)
+-
+-	sidebarPage := adw.NewNavigationPage(&sidebarBox.Widget, i18n.L("Phial"))
+-	split.SetSidebar(sidebarPage)
+-
+-	stack := adw.NewViewStack()
+-	a.stack = stack
+-
+-	for _, p := range pageDefs {
+-		stack.AddTitled(p.build(), p.name, p.title)
++	var onUnapply func(adw.Breakpoint)
++	onUnapply = func(adw.Breakpoint) {
++		switcherBar.SetReveal(false)
++		header.SetTitleWidget(&switcher.Widget)
+ 	}
+-
+-	a.banner = adw.NewBanner("")
+-	a.banner.SetRevealed(false)
+-
+-	var onBanner func(adw.Banner)
+-	onBanner = func(adw.Banner) {
+-		a.showPage("requests")
+-	}
+-	a.banner.ConnectButtonClicked(&onBanner)
+-	a.hold(&onBanner)
+-
+-	contentBox := gtk.NewBox(gtk.OrientationVerticalValue, 0)
+-	contentBox.Append(&a.banner.Widget)
+-	stack.SetVexpand(true)
+-	contentBox.Append(&stack.Widget)
++	bp.ConnectUnapply(&onUnapply)
++	a.hold(&onUnapply)
+ 
+-	contentNav := adw.NewNavigationView()
+-	a.contentNav = contentNav
+-	homePage := adw.NewNavigationPage(&contentBox.Widget, i18n.L("Machines"))
+-	homePage.SetTag("home")
+-	contentNav.Add(homePage)
++	a.window.AddBreakpoint(bp)
+ 
+-	split.SetContent(adw.NewNavigationPage(&contentNav.Widget, i18n.L("Machines")))
++	home := adw.NewNavigationPage(&toolbar.Widget, i18n.L("Phial"))
++	home.SetTag("home")
+ 
+-	return adw.NewNavigationPage(&split.Widget, i18n.L("Phial"))
++	return home
+ }
+ 
+ func (a *App) showPage(name string) {
+@@ -335,20 +273,10 @@ 	if a.contentNav != nil {
+ 		a.contentNav.PopToTag("home")
+ 		a.detail = nil
+ 	}
+-	for i, p := range pageDefs {
++	for _, p := range pageDefs {
+ 		if p.name == name {
+ 			a.visible = name
+ 			a.stack.SetVisibleChildName(name)
+-			if a.sidebarList != nil {
+-				a.syncing = true
+-				if row := a.sidebarList.GetRowAtIndex(int32(i)); row != nil {
+-					a.sidebarList.SelectRow(row)
+-				}
+-				a.syncing = false
+-			}
+-			if a.split != nil && a.split.GetCollapsed() {
+-				a.split.SetShowContent(true)
+-			}
+ 			return
+ 		}
+ 	}
+
