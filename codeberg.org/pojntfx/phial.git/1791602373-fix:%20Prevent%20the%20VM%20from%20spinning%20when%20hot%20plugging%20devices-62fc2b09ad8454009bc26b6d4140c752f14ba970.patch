@@ -1,0 +1,259 @@
+From 62fc2b09ad8454009bc26b6d4140c752f14ba970 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Fri, 09 Oct 2026 20:19:33 -0700
+Subject: [PATCH] fix: Prevent the VM from spinning when hot plugging devices
+---
+diff --git a/internal/mcp/tools_system.go b/internal/mcp/tools_system.go
+index 07635b00540463ccaaab373fec36b0b652b3a165..7364669cff1fb00b40fce3e6b4d11f8cf7d34b91 100644
+--- a/internal/mcp/tools_system.go
++++ b/internal/mcp/tools_system.go
+@@ -116,7 +116,7 @@ 	if ethernet == "" {
+ 		ethernet = setup.FirstEthernet()
+ 	}
+ 
+-	output, err := run0("root-setup", ethernet, input.Memory)
++	output, err := run0("root-setup", ethernet, input.Memory, strings.Join(input.Devices, ","))
+ 	if err != nil {
+ 		return nil, nil, fmt.Errorf("root setup: %s: %w", output, err)
+ 	}
+diff --git a/internal/mcp/tools_usb.go b/internal/mcp/tools_usb.go
+index de6291d9d3f4f15a85423e2afe3c6f46fbb7df6c..1b6b21d25e4c1663067d2e46f5a74304bbbc07a5 100644
+--- a/internal/mcp/tools_usb.go
++++ b/internal/mcp/tools_usb.go
+@@ -133,7 +133,15 @@ 	if err := def.Save(); err != nil {
+ 		return nil, nil, err
+ 	}
+ 
+-	return nil, map[string]string{"state": "added"}, nil
++	if active, _ := def.Active(); active && def.Ready() {
++		if err := virt.HotplugUSB(def, input.Device); err != nil {
++			return nil, map[string]string{"state": "added", "attaches": "next start", "reason": err.Error()}, nil
++		}
++
++		return nil, map[string]string{"state": "attached"}, nil
++	}
++
++	return nil, map[string]string{"state": "added", "attaches": "when the guest is ready"}, nil
+ }
+ 
+ func (s *Service) UsbRemoveDevice(ctx context.Context, req *mcpgo.CallToolRequest, input UsbDeviceInput) (*mcpgo.CallToolResult, any, error) {
+@@ -151,6 +159,12 @@ 		}
+ 	}
+ 
+ 	def.USBDevices = kept
++
++	if active, _ := def.Active(); active {
++		if err := virt.UnplugUSB(def, input.Device); err != nil {
++			fmt.Fprintf(os.Stderr, "phial: could not detach usb device %s: %v\n", input.Device, err)
++		}
++	}
+ 
+ 	if err := def.Save(); err != nil {
+ 		return nil, nil, err
+diff --git a/internal/virt/launcher.go b/internal/virt/launcher.go
+index 50e2787649c23c0f230150899f8a9cab4fd87ba0..8030af252f38b843bc328589575afe4afc7028c9 100644
+--- a/internal/virt/launcher.go
++++ b/internal/virt/launcher.go
+@@ -367,9 +367,8 @@
+ 	var missing []string
+ 	for _, device := range d.USBDevices {
+ 		vendor, product, _ := strings.Cut(device, ":")
+-		if usbDevicePresent(vendor, product) {
+-			args = append(args, "-device", "usb-host,vendorid=0x"+vendor+",productid=0x"+product)
+-		} else {
++
++		if _, _, found := usbBusAddress(vendor, product); !found {
+ 			missing = append(missing, device)
+ 		}
+ 	}
+@@ -518,6 +517,8 @@ 	}
+ 
+ 	go pinIOThread(command.Process.Pid)
+ 
++	go attachUSBWhenReady(d)
++
+ 	return command.Wait()
+ }
+ 
+@@ -614,3 +615,35 @@ 	state, ok := property.Value.Value().(string)
+ 
+ 	return ok && state == "active", nil
+ }
++
++func usbBusAddress(vendor string, product string) (string, string, bool) {
++	matches, _ := filepath.Glob("/sys/bus/usb/devices/*/idVendor")
++
++	for _, vendorFile := range matches {
++		directory := filepath.Dir(vendorFile)
++
++		data, err := os.ReadFile(vendorFile)
++		if err != nil || strings.TrimSpace(string(data)) != vendor {
++			continue
++		}
++
++		productData, err := os.ReadFile(filepath.Join(directory, "idProduct"))
++		if err != nil || strings.TrimSpace(string(productData)) != product {
++			continue
++		}
++
++		busData, err := os.ReadFile(filepath.Join(directory, "busnum"))
++		if err != nil {
++			continue
++		}
++
++		addressData, err := os.ReadFile(filepath.Join(directory, "devnum"))
++		if err != nil {
++			continue
++		}
++
++		return strings.TrimSpace(string(busData)), strings.TrimSpace(string(addressData)), true
++	}
++
++	return "", "", false
++}
+diff --git a/internal/virt/usb.go b/internal/virt/usb.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..61148616d2849c8982cf7abd5f721947a1436c4f
+--- /dev/null
++++ b/internal/virt/usb.go
+@@ -0,0 +1,100 @@
++package virt
++
++import (
++	"fmt"
++	"os"
++	"strconv"
++	"strings"
++	"time"
++)
++
++func USBDeviceID(device string) string {
++	vendor, product, _ := strings.Cut(device, ":")
++
++	return "usb-" + vendor + "-" + product
++}
++
++func HotplugUSB(def Definition, device string) error {
++	vendor, product, _ := strings.Cut(device, ":")
++
++	bus, address, found := usbBusAddress(vendor, product)
++	if !found {
++		return fmt.Errorf("usb device %s is not present on the host", device)
++	}
++
++	busNumber, err := strconv.Atoi(bus)
++	if err != nil {
++		return err
++	}
++
++	addressNumber, err := strconv.Atoi(address)
++	if err != nil {
++		return err
++	}
++
++	conn, reader, err := qmpConnect(def)
++	if err != nil {
++		return err
++	}
++	defer conn.Close()
++
++	return qmpCall(conn, reader, qmpCommand{
++		Execute: "device_add",
++		Arguments: map[string]interface{}{
++			"driver":   "usb-host",
++			"hostbus":  busNumber,
++			"hostaddr": addressNumber,
++			"id":       USBDeviceID(device),
++		},
++	})
++}
++
++func UnplugUSB(def Definition, device string) error {
++	conn, reader, err := qmpConnect(def)
++	if err != nil {
++		return err
++	}
++	defer conn.Close()
++
++	return qmpCall(conn, reader, qmpCommand{Execute: "device_del", Arguments: map[string]string{"id": USBDeviceID(device)}})
++}
++
++func attachUSBWhenReady(def Definition) {
++	if len(def.USBDevices) == 0 {
++		return
++	}
++
++	ready := false
++
++	for attempt := 0; attempt < 360; attempt++ {
++		if def.Ready() {
++			ready = true
++
++			break
++		}
++
++		time.Sleep(5 * time.Second)
++	}
++
++	if !ready {
++		fmt.Fprintf(os.Stderr, "phial: the guest did not become ready, not attaching usb devices\n")
++
++		return
++	}
++
++	time.Sleep(5 * time.Second)
++
++	for _, device := range def.USBDevices {
++		vendor, product, _ := strings.Cut(device, ":")
++
++		if _, _, found := usbBusAddress(vendor, product); !found {
++			continue
++		}
++
++		if err := HotplugUSB(def, device); err != nil {
++			fmt.Fprintf(os.Stderr, "phial: could not attach usb device %s: %v\n", device, err)
++		}
++
++		time.Sleep(time.Second)
++	}
++}
+diff --git a/main.go b/main.go
+index 296f773a3335474042a34c98fa28bae5a4a805f6..f6b3babc0f2cea122be82938f187e1b9aa3fa397 100644
+--- a/main.go
++++ b/main.go
+@@ -167,9 +167,33 @@ 	if len(args) > 1 {
+ 		memory = args[1]
+ 	}
+ 
++	devices := []string{}
++	seen := map[string]bool{}
++
++	if defs, err := virt.List(); err == nil {
++		for _, def := range defs {
++			for _, device := range def.USBDevices {
++				if seen[device] {
++					continue
++				}
++
++				seen[device] = true
++				devices = append(devices, device)
++			}
++		}
++	}
++
++	if len(args) > 2 && args[2] != "" {
++		devices = strings.Split(args[2], ",")
++	}
++
++	if len(devices) == 0 {
++		devices = virt.Defaults("phial").USBDevices
++	}
++
+ 	return setup.RootSetup(setup.RootSetupOptions{
+ 		Memory:     memory,
+-		USBDevices: virt.Defaults("phial").USBDevices,
++		USBDevices: devices,
+ 		Ethernet:   ethernet,
+ 	})
+ }
+
