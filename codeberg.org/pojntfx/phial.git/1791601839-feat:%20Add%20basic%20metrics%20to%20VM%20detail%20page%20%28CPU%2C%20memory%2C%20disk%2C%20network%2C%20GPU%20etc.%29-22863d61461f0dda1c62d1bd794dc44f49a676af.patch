@@ -1,0 +1,446 @@
+From 22863d61461f0dda1c62d1bd794dc44f49a676af Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Fri, 09 Oct 2026 20:10:39 -0700
+Subject: [PATCH] feat: Add basic metrics to VM detail page (CPU, memory, disk, network, GPU etc.)
+---
+diff --git a/internal/components/vms.go b/internal/components/vms.go
+index 865623fe0fa1a0f3609b139056f582c48c3b2d4a..f3f5dce182949eaaa13671fb1ceaab3ce5cf54a0 100644
+--- a/internal/components/vms.go
++++ b/internal/components/vms.go
+@@ -8,6 +8,7 @@
+ 	"codeberg.org/puregotk/puregotk/v4/adw"
+ 	"codeberg.org/puregotk/puregotk/v4/gobject"
+ 	"codeberg.org/puregotk/puregotk/v4/gtk"
++	"codeberg.org/puregotk/puregotk/v4/pango"
+ 	"github.com/pojntfx/go-gettext/pkg/i18n"
+ 
+ 	"codeberg.org/pojntfx/phial/internal/mcp"
+@@ -232,6 +233,67 @@ 		infoGroup.Add(&statusRow.Widget)
+ 	}
+ 
+ 	vbox.Append(&infoGroup.Widget)
++
++	usageGroup := adw.NewPreferencesGroup()
++	usageGroup.SetTitle(i18n.L("Usage"))
++
++	usageBox := gtk.NewBox(gtk.OrientationHorizontalValue, 6)
++	usageBox.SetHomogeneous(true)
++	usageBox.SetMarginTop(12)
++	usageBox.SetMarginBottom(12)
++	usageBox.SetMarginStart(12)
++	usageBox.SetMarginEnd(12)
++
++	usageValues := map[string]*gtk.Label{}
++
++	addUsage := func(key string, caption string, initial string) {
++		column := gtk.NewBox(gtk.OrientationVerticalValue, 2)
++
++		value := gtk.NewLabel(initial)
++		value.AddCssClass("title-3")
++		value.SetEllipsize(pango.EllipsizeEndValue)
++
++		label := gtk.NewLabel(caption)
++		label.AddCssClass("dim-label")
++		label.AddCssClass("caption")
++		label.SetEllipsize(pango.EllipsizeEndValue)
++
++		column.Append(&value.Widget)
++		column.Append(&label.Widget)
++
++		usageValues[key] = value
++		usageBox.Append(&column.Widget)
++	}
++
++	addUsage("cpu", i18n.L("CPU"), "-")
++	addUsage("memory", i18n.L("Memory"), "-")
++	addUsage("disk", i18n.L("Disk"), "-")
++	addUsage("network", i18n.L("Network"), "-")
++	addUsage("gpu", i18n.L("GPU"), def.GPU)
++
++	usageGroup.Add(&usageBox.Widget)
++	vbox.Append(&usageGroup.Widget)
++
++	if active {
++		a.every(3, func() bool {
++			go func() {
++				metrics, err := virt.CollectMetrics(def)
++				if err != nil {
++					return
++				}
++
++				a.idle(func() {
++					usageValues["cpu"].SetText(fmt.Sprintf("%.0f%%", metrics.CPUPercent))
++					usageValues["memory"].SetText(formatBytes(metrics.MemoryUsed))
++					usageValues["disk"].SetText(formatBytes(metrics.DiskAllocated))
++					usageValues["network"].SetText(formatBytes(int64(metrics.NetworkRxRate)) + "/s")
++					usageValues["gpu"].SetText(def.GPU)
++				})
++			}()
++
++			return true
++		})
++	}
+ 
+ 	actions := adw.NewPreferencesGroup()
+ 	actions.SetTitle(i18n.L("Access"))
+@@ -751,3 +813,22 @@ 	}
+ 
+ 	a.toast(i18n.L("No terminal emulator found"))
+ }
++
++func formatBytes(value int64) string {
++	const unit = 1024
++
++	if value < unit {
++		return fmt.Sprintf("%d B", value)
++	}
++
++	units := []string{"KiB", "MiB", "GiB", "TiB"}
++
++	divisor, exponent := int64(unit), 0
++
++	for value/divisor >= unit && exponent < len(units)-1 {
++		divisor *= unit
++		exponent++
++	}
++
++	return fmt.Sprintf("%.1f %s", float64(value)/float64(divisor), units[exponent])
++}
+diff --git a/internal/guest/provision.go b/internal/guest/provision.go
+index 65fbd3e0f49cd66a3a585d09a6a8ccb29d20b706..7502f550e6f3bc0eef06a758402ad7dfa2aedde1 100644
+--- a/internal/guest/provision.go
++++ b/internal/guest/provision.go
+@@ -142,7 +142,8 @@ 	key := "/etc/gnome-remote-desktop/rdp-tls.key"
+ 	cert := "/etc/gnome-remote-desktop/rdp-tls.crt"
+ 
+ 	steps := []string{
+-		"sudo dnf install -y gnome-remote-desktop waypipe mesa-demos openssl crudini > /dev/null 2>&1 || true",
++		"sudo dnf install -y gnome-remote-desktop waypipe mesa-demos openssl crudini qemu-guest-agent > /dev/null 2>&1 || true",
++		"sudo systemctl enable --now qemu-guest-agent 2>/dev/null || true",
+ 		"sudo install -d -m 0700 /etc/gnome-remote-desktop",
+ 		"sudo test -s " + key + " || sudo test -s " + cert + " || sudo openssl req -x509 -newkey rsa:2048 -keyout " + key + " -out " + cert + " -days 3650 -nodes -subj /CN=" + name + " < /dev/null",
+ 		"sudo chown gnome-remote-desktop:gnome-remote-desktop " + key + " " + cert + " 2>/dev/null || true",
+diff --git a/internal/mcp/register.go b/internal/mcp/register.go
+index 34e12c825a104f73367b7b2f1237cb866b771341..06bf1cdc5ed2561894d284586bf0c6fc4daecee9 100644
+--- a/internal/mcp/register.go
++++ b/internal/mcp/register.go
+@@ -14,6 +14,7 @@ 	mcpgo.AddTool(server, GrantRevokeTool, s.GrantRevoke)
+ 	mcpgo.AddTool(server, VmLsTool, s.VmLs)
+ 	mcpgo.AddTool(server, VmStartTool, s.VmStart)
+ 	mcpgo.AddTool(server, VmUpdateTool, s.VmUpdate)
++	mcpgo.AddTool(server, VmMetricsTool, s.VmMetrics)
+ 	mcpgo.AddTool(server, VmStopTool, s.VmStop)
+ 	mcpgo.AddTool(server, VmRestartTool, s.VmRestart)
+ 	mcpgo.AddTool(server, ForwardLsTool, s.ForwardLs)
+diff --git a/internal/mcp/tools_vm.go b/internal/mcp/tools_vm.go
+index 74639510345bf0687f789d549d162c2cfd3f8a98..f25970033b9def6dd16ca25369be27d23b53e2af 100644
+--- a/internal/mcp/tools_vm.go
++++ b/internal/mcp/tools_vm.go
+@@ -279,6 +279,30 @@ 	Title:       "Update virtual machine settings",
+ 	Description: "Update display, GPU, Secure Boot, or hub controller for a VM.",
+ }
+ 
++type VmMetricsInput struct {
++	Name string `json:"name" jsonschema:"the VM name"`
++}
++
++func (s *Service) VmMetrics(ctx context.Context, req *mcpgo.CallToolRequest, input VmMetricsInput) (*mcpgo.CallToolResult, *virt.Metrics, error) {
++	def, err := virt.Load(input.Name)
++	if err != nil {
++		return nil, nil, err
++	}
++
++	metrics, err := virt.CollectMetrics(def)
++	if err != nil {
++		return nil, nil, err
++	}
++
++	return nil, &metrics, nil
++}
++
++var VmMetricsTool = &mcpgo.Tool{
++	Name:        "vm.metrics",
++	Title:       "Read virtual machine usage",
++	Description: "Read CPU, memory, disk, network, and GPU usage for a VM.",
++}
++
+ func (s *Service) VmUpdate(ctx context.Context, req *mcpgo.CallToolRequest, input VmUpdateInput) (*mcpgo.CallToolResult, any, error) {
+ 	def, err := virt.Load(input.Name)
+ 	if err != nil {
+diff --git a/internal/virt/metrics.go b/internal/virt/metrics.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..58cf955b1444536ae12002f3cb1d754ce733f2b7
+--- /dev/null
++++ b/internal/virt/metrics.go
+@@ -0,0 +1,176 @@
++package virt
++
++import (
++	"os"
++	"path/filepath"
++	"strconv"
++	"strings"
++	"time"
++)
++
++type Metrics struct {
++	CPUPercent     float64 `json:"cpu_percent"`
++	MemoryUsed     int64   `json:"memory_used"`
++	MemoryTotal    int64   `json:"memory_total"`
++	DiskAllocated  int64   `json:"disk_allocated"`
++	DiskTotal      int64   `json:"disk_total"`
++	NetworkRxBytes int64   `json:"network_rx_bytes"`
++	NetworkTxBytes int64   `json:"network_tx_bytes"`
++	NetworkRxRate  float64 `json:"network_rx_rate"`
++	NetworkTxRate  float64 `json:"network_tx_rate"`
++	GPU            string  `json:"gpu"`
++	VCPUs          int     `json:"vcpus"`
++}
++
++func qemuPID(def Definition) int {
++	data, err := os.ReadFile(filepath.Join(def.runtimePath(), "qemu.pid"))
++	if err != nil {
++		return 0
++	}
++
++	pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
++	if err != nil {
++		return 0
++	}
++
++	return pid
++}
++
++func processCPUTicks(pid int) (int64, error) {
++	data, err := os.ReadFile("/proc/" + strconv.Itoa(pid) + "/stat")
++	if err != nil {
++		return 0, err
++	}
++
++	fields := strings.Fields(string(data))
++	if len(fields) < 15 {
++		return 0, os.ErrInvalid
++	}
++
++	user, err := strconv.ParseInt(fields[13], 10, 64)
++	if err != nil {
++		return 0, err
++	}
++
++	system, err := strconv.ParseInt(fields[14], 10, 64)
++	if err != nil {
++		return 0, err
++	}
++
++	return user + system, nil
++}
++
++func processRSS(pid int) int64 {
++	data, err := os.ReadFile("/proc/" + strconv.Itoa(pid) + "/status")
++	if err != nil {
++		return 0
++	}
++
++	for _, line := range strings.Split(string(data), "\n") {
++		if !strings.HasPrefix(line, "VmRSS:") {
++			continue
++		}
++
++		fields := strings.Fields(line)
++		if len(fields) < 2 {
++			return 0
++		}
++
++		kb, err := strconv.ParseInt(fields[1], 10, 64)
++		if err != nil {
++			return 0
++		}
++
++		return kb * 1024
++	}
++
++	return 0
++}
++
++func CollectMetrics(def Definition) (Metrics, error) {
++	metrics := Metrics{GPU: def.GPU, VCPUs: def.VCPUs}
++
++	active, _ := def.Active()
++
++	image := def.DiskPathValue()
++	if info, err := os.Stat(image); err == nil {
++		metrics.DiskAllocated = info.Size()
++		metrics.DiskTotal = info.Size()
++	}
++
++	if size, err := parseSize(def.DiskSize); err == nil {
++		metrics.DiskTotal = size
++	}
++
++	metrics.MemoryTotal, _ = parseSize(def.Memory)
++
++	if !active {
++		return metrics, nil
++	}
++
++	pid := qemuPID(def)
++	if pid == 0 {
++		return metrics, nil
++	}
++
++	first, err := processCPUTicks(pid)
++	if err != nil {
++		return metrics, nil
++	}
++
++	rx, tx, _ := QgaNetworkBytes(def)
++
++	time.Sleep(time.Second)
++
++	second, err := processCPUTicks(pid)
++	if err != nil {
++		return metrics, nil
++	}
++
++	metrics.CPUPercent = float64(second-first) * 100 / 100
++
++	metrics.MemoryUsed = processRSS(pid)
++
++	if rx != 0 || tx != 0 {
++		metrics.NetworkRxBytes = rx
++		metrics.NetworkTxBytes = tx
++
++		nextRx, nextTx, err := QgaNetworkBytes(def)
++		if err == nil && nextRx >= rx && nextTx >= tx {
++			metrics.NetworkRxRate = float64(nextRx - rx)
++			metrics.NetworkTxRate = float64(nextTx - tx)
++		}
++	}
++
++	return metrics, nil
++}
++
++func parseSize(value string) (int64, error) {
++	if value == "" {
++		return 0, os.ErrInvalid
++	}
++
++	multiplier := int64(1)
++
++	switch value[len(value)-1] {
++	case 'K', 'k':
++		multiplier = 1024
++		value = value[:len(value)-1]
++	case 'M', 'm':
++		multiplier = 1024 * 1024
++		value = value[:len(value)-1]
++	case 'G', 'g':
++		multiplier = 1024 * 1024 * 1024
++		value = value[:len(value)-1]
++	case 'T', 't':
++		multiplier = 1024 * 1024 * 1024 * 1024
++		value = value[:len(value)-1]
++	}
++
++	number, err := strconv.ParseInt(strings.TrimSpace(value), 10, 64)
++	if err != nil {
++		return 0, err
++	}
++
++	return number * multiplier, nil
++}
+diff --git a/internal/virt/qga.go b/internal/virt/qga.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..69988dbe9ee548fd68d729ab104e9f1ac71429af
+--- /dev/null
++++ b/internal/virt/qga.go
+@@ -0,0 +1,88 @@
++package virt
++
++import (
++	"encoding/json"
++	"fmt"
++	"net"
++	"path/filepath"
++	"time"
++)
++
++type qgaRequest struct {
++	Execute   string      `json:"execute"`
++	Arguments interface{} `json:"arguments,omitempty"`
++}
++
++type qgaEnvelope struct {
++	Return json.RawMessage `json:"return"`
++	Error  *struct {
++		Class string `json:"class"`
++		Desc  string `json:"desc"`
++	} `json:"error"`
++}
++
++type qgaInterface struct {
++	Name       string `json:"name"`
++	Statistics struct {
++		RxBytes int64 `json:"rx-bytes"`
++		TxBytes int64 `json:"tx-bytes"`
++	} `json:"statistics"`
++	IPAddresses []interface{} `json:"ip-addresses"`
++}
++
++func QgaCall(def Definition, execute string, arguments interface{}) (json.RawMessage, error) {
++	conn, err := net.DialTimeout("unix", filepath.Join(def.runtimePath(), "qga.sock"), 5*time.Second)
++	if err != nil {
++		return nil, err
++	}
++	defer conn.Close()
++
++	_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
++
++	payload, err := json.Marshal(qgaRequest{Execute: execute, Arguments: arguments})
++	if err != nil {
++		return nil, err
++	}
++
++	if _, err := conn.Write(append(payload, '\n')); err != nil {
++		return nil, err
++	}
++
++	decoder := json.NewDecoder(conn)
++
++	var envelope qgaEnvelope
++	if err := decoder.Decode(&envelope); err != nil {
++		return nil, err
++	}
++
++	if envelope.Error != nil {
++		return nil, fmt.Errorf("%s", envelope.Error.Desc)
++	}
++
++	return envelope.Return, nil
++}
++
++func QgaNetworkBytes(def Definition) (int64, int64, error) {
++	raw, err := QgaCall(def, "guest-network-get-interfaces", nil)
++	if err != nil {
++		return 0, 0, err
++	}
++
++	var interfaces []qgaInterface
++	if err := json.Unmarshal(raw, &interfaces); err != nil {
++		return 0, 0, err
++	}
++
++	var rx, tx int64
++
++	for _, iface := range interfaces {
++		if iface.Name == "lo" {
++			continue
++		}
++
++		rx += iface.Statistics.RxBytes
++		tx += iface.Statistics.TxBytes
++	}
++
++	return rx, tx, nil
++}
+
