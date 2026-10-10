@@ -1,0 +1,700 @@
+From 91c5e0e53892175efa6331540adbf59841cfd993 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Fri, 09 Oct 2026 20:07:15 -0700
+Subject: [PATCH] feat: Add ability to share folders read-only into the guest and hotplug without restarting the guest
+---
+diff --git a/host/systemd/phial-virtiofsd@.service b/host/systemd/phial-virtiofsd@.service
+index 1a589372e6eb65865069612511c995a07e7b8784..1138c3ffec38db5ac0047821a68c37097593059d 100644
+--- a/host/systemd/phial-virtiofsd@.service
++++ b/host/systemd/phial-virtiofsd@.service
+@@ -7,6 +7,7 @@ Type=simple
+ Environment=PATH=@BREW_PREFIX@/bin:/usr/local/bin:/usr/bin:/bin
+ EnvironmentFile=-%E/phial/share-%i.conf
+ ExecStartPre=mkdir -p %t/phial/vm ${PHIAL_SHARE_DIR}
++ExecStartPre=rm -f %t/phial/vm/virtiofsd-%i.sock
+ ExecStart=@VIRTIOFSD@ --socket-path=%t/phial/vm/virtiofsd-%i.sock --shared-dir=${PHIAL_SHARE_DIR} --xattr --announce-submounts --uid-map=:1000:1000:1: --gid-map=:1000:1000:1:
+ Restart=always
+ 
+diff --git a/internal/components/dialogs.go b/internal/components/dialogs.go
+index f43a7d189241abdb7cadf29d1cec9cfd6acf3530..e84c8be3ebb4106c3c153248b7785c6ea8b9255b 100644
+--- a/internal/components/dialogs.go
++++ b/internal/components/dialogs.go
+@@ -4,9 +4,11 @@ import (
+ 	"fmt"
+ 	"os"
+ 	"os/exec"
++	"path/filepath"
+ 	"strings"
+ 
+ 	"codeberg.org/puregotk/puregotk/v4/adw"
++	"codeberg.org/puregotk/puregotk/v4/gobject"
+ 	"codeberg.org/puregotk/puregotk/v4/gtk"
+ 	"github.com/pojntfx/go-gettext/pkg/i18n"
+ 	"github.com/rymdport/portal/filechooser"
+@@ -370,6 +372,74 @@ 		},
+ 	)
+ }
+ 
++func (a *App) showShareTargetDialog(def virt.Definition, share string) {
++	dialog := adw.NewDialog()
++	dialog.SetTitle(i18n.L("Share Folder"))
++	dialog.SetContentWidth(420)
++
++	toolbar := adw.NewToolbarView()
++
++	header := adw.NewHeaderBar()
++	header.SetShowStartTitleButtons(false)
++
++	title := adw.NewWindowTitle(i18n.L("Share Folder"), filepath.Base(share))
++	header.SetTitleWidget(&title.Widget)
++	toolbar.AddTopBar(&header.Widget)
++
++	group := adw.NewPreferencesGroup()
++	group.SetTitle(i18n.L("Mount Point"))
++
++	targetRow := adw.NewEntryRow()
++	targetRow.SetTitle(i18n.L("In the _guest"))
++	targetRow.SetUseUnderline(true)
++	targetRow.SetText(def.ShareTarget(share))
++	targetRow.SetShowApplyButton(false)
++	group.Add(&targetRow.Widget)
++
++	readOnly := false
++
++	readOnlyRow := adw.NewSwitchRow()
++	readOnlyRow.SetTitle(i18n.L("Read-only"))
++	readOnlyRow.SetSubtitle(i18n.L("The guest cannot change the files"))
++
++	var onReadOnlyNotify func(gobject.Object, uintptr)
++	onReadOnlyNotify = func(gobject.Object, uintptr) {
++		readOnly = readOnlyRow.GetActive()
++	}
++	readOnlyRow.ConnectNotify(&onReadOnlyNotify)
++	a.hold(&onReadOnlyNotify)
++
++	group.Add(&readOnlyRow.Widget)
++
++	group.Add(&a.buttonRow(i18n.L("_Share the folder"), "folder-symbolic", func() {
++		target := strings.TrimSpace(targetRow.GetText())
++		if target == "" {
++			a.toast(i18n.L("Enter a mount point first"))
++			return
++		}
++
++		a.goAsync(func() (string, error) {
++			_, _, err := a.Service.ShareAdd(a.Ctx, nil, mcp.ShareInput{Name: def.Name, Path: share, Target: target, ReadOnly: readOnly})
++			if err != nil {
++				return "", err
++			}
++
++			a.idle(func() { a.refreshVMDetail(def.Name) })
++
++			return i18n.L("Folder shared") + " at " + target, nil
++		})
++
++		dialog.Close()
++	}).Widget)
++
++	page := adw.NewPreferencesPage()
++	page.Add(group)
++
++	toolbar.SetContent(&page.Widget)
++	dialog.SetChild(&toolbar.Widget)
++	dialog.Present(&a.window.Widget)
++}
++
+ func (a *App) showShareDialog(def virt.Definition) {
+ 	paths, err := filechooser.OpenFile("", i18n.L("Share Folder"), &filechooser.OpenFileOptions{
+ 		Directory:   true,
+@@ -387,14 +457,7 @@ 			a.showError(err)
+ 			continue
+ 		}
+ 
+-		a.goAsync(func() (string, error) {
+-			_, _, err := a.Service.ShareAdd(a.Ctx, nil, mcp.ShareInput{Name: def.Name, Path: share})
+-			if err != nil {
+-				return "", err
+-			}
+-			a.idle(func() { a.refreshVMDetail(def.Name) })
+-			return i18n.L("Folder shared"), nil
+-		})
++		a.showShareTargetDialog(def, share)
+ 	}
+ }
+ 
+diff --git a/internal/components/vms.go b/internal/components/vms.go
+index d2a20141c518076180a0dff4322ac9730a695c9a..865623fe0fa1a0f3609b139056f582c48c3b2d4a 100644
+--- a/internal/components/vms.go
++++ b/internal/components/vms.go
+@@ -4,7 +4,6 @@ import (
+ 	"fmt"
+ 	"os"
+ 	"os/exec"
+-	"path/filepath"
+ 
+ 	"codeberg.org/puregotk/puregotk/v4/adw"
+ 	"codeberg.org/puregotk/puregotk/v4/gobject"
+@@ -347,8 +346,8 @@ 	for _, share := range def.Shares {
+ 		share := share
+ 
+ 		row := adw.NewActionRow()
+-		row.SetTitle(filepath.Base(share))
+-		row.SetSubtitle(share)
++		row.SetTitle(share)
++		row.SetSubtitle(def.ShareTarget(share))
+ 
+ 		remove := a.iconButton("user-trash-symbolic", i18n.L("Stop sharing"), func() {
+ 			a.goAsync(func() (string, error) {
+@@ -608,11 +607,14 @@ 	snapshot.Shares = append([]string{}, def.Shares...)
+ 	snapshot.USBDevices = append([]string{}, def.USBDevices...)
+ 
+ 	a.goAsync(func() (string, error) {
+-		if err := snapshot.Save(); err != nil {
+-			return "", err
++		if current, err := virt.Load(snapshot.Name); err == nil {
++			snapshot.Shares = current.Shares
++			snapshot.ShareTargets = current.ShareTargets
++			snapshot.ReadOnlyShares = current.ReadOnlyShares
++			snapshot.USBDevices = current.USBDevices
+ 		}
+ 
+-		return "", nil
++		return "", snapshot.Save()
+ 	})
+ }
+ 
+diff --git a/internal/guest/provision.go b/internal/guest/provision.go
+index 959829361ffe4a9ee1d916bbe497f4af2e45009c..65fbd3e0f49cd66a3a585d09a6a8ccb29d20b706 100644
+--- a/internal/guest/provision.go
++++ b/internal/guest/provision.go
+@@ -73,10 +73,11 @@ 	}
+ 
+ 	steps = append(steps,
+ 		"sudo install -d -m 0755 "+hostshareMount+" "+secretsMount,
+-		"grep -q phial-hostshare /etc/fstab || echo 'hostshare "+hostshareMount+" virtiofs defaults,nofail 0 0' | sudo tee -a /etc/fstab > /dev/null",
+-		"grep -q phial-secrets /etc/fstab || echo 'phial-secrets "+secretsMount+" virtiofs ro,nosuid,nodev,noexec,nofail 0 0' | sudo tee -a /etc/fstab > /dev/null",
++		"grep -q ' "+hostshareMount+" ' /etc/fstab || echo 'hostshare "+hostshareMount+" virtiofs defaults,nofail 0 0' | sudo tee -a /etc/fstab > /dev/null",
++		"grep -q ' "+secretsMount+" ' /etc/fstab || echo 'phial-secrets "+secretsMount+" virtiofs ro,nosuid,nodev,noexec,nofail 0 0' | sudo tee -a /etc/fstab > /dev/null",
+ 		"sudo mountpoint -q "+hostshareMount+" || sudo mount "+hostshareMount+" || true",
+ 		"sudo mountpoint -q "+secretsMount+" || sudo mount "+secretsMount+" || true",
++		shareMountScript(def),
+ 		"sudo sed -i '/# BEGIN phial/,/# END phial/d' /etc/hosts",
+ 		"printf '# BEGIN phial\n::1 "+hostAlias+"\n127.0.0.1 "+hostAlias+"\n# END phial\n' | sudo tee -a /etc/hosts > /dev/null",
+ 		"printf 'options kvm-intel nested=1\noptions kvm-amd nested=1\n' | sudo tee /etc/modprobe.d/99-phial-nested.conf > /dev/null",
+@@ -102,6 +103,28 @@ 		"sudo systemctl enable --now phial-network.service 2>/dev/null || true",
+ 	)
+ 
+ 	return run(def.Name, strings.Join(steps, "\n"))
++}
++
++func shareMountScript(def virt.Definition) string {
++	var builder strings.Builder
++
++	for _, share := range def.Shares {
++		tag := virt.ShareTag(share)
++		target := def.ShareTarget(share)
++
++		options := "defaults,nofail"
++
++		if def.ShareReadOnly(share) {
++			options = "ro,nosuid,nodev,nofail"
++		}
++
++		fmt.Fprintf(&builder, "sudo install -d -m 0755 %s\n", target)
++		fmt.Fprintf(&builder, "sudo sed -i '\\| %s |d' /etc/fstab\n", target)
++		fmt.Fprintf(&builder, "echo '%s %s virtiofs %s 0 0' | sudo tee -a /etc/fstab > /dev/null\n", tag, target, options)
++		fmt.Fprintf(&builder, "sudo mountpoint -q %s || sudo mount %s || true\n", target, target)
++	}
++
++	return builder.String()
+ }
+ 
+ func installNetworkScript(mac string) string {
+diff --git a/internal/mcp/tools_share.go b/internal/mcp/tools_share.go
+index 5c524addb51f220c4342ebd52ad0c8b90a8d6efa..8efce8ea5741c28f905651cf4fc9dcf33821f95c 100644
+--- a/internal/mcp/tools_share.go
++++ b/internal/mcp/tools_share.go
+@@ -5,6 +5,8 @@ 	"context"
+ 	"fmt"
+ 	"os"
+ 	"path/filepath"
++	"slices"
++	"strconv"
+ 
+ 	mcpgo "github.com/modelcontextprotocol/go-sdk/mcp"
+ 
+@@ -33,8 +35,10 @@ 	}
+ )
+ 
+ type ShareInput struct {
+-	Name string `json:"name" jsonschema:"the VM name"`
+-	Path string `json:"path" jsonschema:"the host directory to share"`
++	Name     string `json:"name" jsonschema:"the VM name"`
++	Path     string `json:"path" jsonschema:"the host directory to share"`
++	Target   string `json:"target,omitempty" jsonschema:"the mount point in the guest, optional"`
++	ReadOnly bool   `json:"read_only,omitempty" jsonschema:"mount the share read-only, optional"`
+ }
+ 
+ type ShareLsOutput struct {
+@@ -96,11 +100,51 @@ 	}
+ 
+ 	def.Shares = append(def.Shares, input.Path)
+ 
++	if input.Target != "" {
++		if def.ShareTargets == nil {
++			def.ShareTargets = map[string]string{}
++		}
++
++		def.ShareTargets[input.Path] = input.Target
++	}
++
++	if input.ReadOnly {
++		def.ReadOnlyShares = append(def.ReadOnlyShares, input.Path)
++	}
++
+ 	if err := def.Save(); err != nil {
+ 		return nil, nil, err
+ 	}
+ 
+-	return nil, map[string]string{"state": "shared", "tag": virt.ShareTag(input.Path)}, nil
++	tag := virt.ShareTag(input.Path)
++
++	active, _ := def.Active()
++	if !active {
++		return nil, map[string]string{"state": "shared", "tag": tag}, nil
++	}
++
++	if err := virt.HotplugShare(def, input.Path); err != nil {
++		return nil, map[string]string{"state": "shared", "tag": tag, "attaches": "next start", "reason": err.Error()}, nil
++	}
++
++	target := def.ShareTarget(input.Path)
++
++	options := ""
++
++	if input.ReadOnly {
++		options = " -o ro"
++	}
++
++	mount := "for _ in $(seq 1 60); do sudo dmesg 2>/dev/null | grep -q \"discovered new tag: " + tag + "\" && break; sleep 0.25; done" +
++		" && sudo install -d -m 0755 " + target +
++		" && sudo mount -t virtiofs" + options + " " + tag + " " + target +
++		" && sudo mountpoint -q " + target
++
++	if err := virt.SSHExec(def.Name, mount); err != nil {
++		return nil, map[string]string{"state": "shared", "tag": tag, "mount": err.Error()}, nil
++	}
++
++	return nil, map[string]string{"state": "shared", "tag": tag, "target": target, "read_only": strconv.FormatBool(input.ReadOnly)}, nil
+ }
+ 
+ func (s *Service) ShareRemove(ctx context.Context, req *mcpgo.CallToolRequest, input ShareInput) (*mcpgo.CallToolResult, any, error) {
+@@ -108,6 +152,8 @@ 	def, err := virt.Load(input.Name)
+ 	if err != nil {
+ 		return nil, nil, err
+ 	}
++
++	target := def.ShareTarget(input.Path)
+ 
+ 	kept := []string{}
+ 
+@@ -117,11 +163,39 @@ 			kept = append(kept, existing)
+ 		}
+ 	}
+ 
++	active, _ := def.Active()
++
++	var detachError string
++
++	if active {
++		unmount := "if sudo mountpoint -q " + target + "; then sudo umount " + target + "; fi"
++
++		if err := virt.SSHExec(def.Name, unmount); err != nil {
++			detachError = err.Error()
++		} else if err := virt.UnplugShare(def, input.Path); err != nil {
++			detachError = err.Error()
++		}
++	}
++
+ 	def.Shares = kept
+ 
++	for path := range def.ShareTargets {
++		if !slices.Contains(kept, path) {
++			delete(def.ShareTargets, path)
++		}
++	}
++
++	def.ReadOnlyShares = slices.DeleteFunc(def.ReadOnlyShares, func(existing string) bool {
++		return !slices.Contains(kept, existing)
++	})
++
+ 	if err := def.Save(); err != nil {
+ 		return nil, nil, err
+ 	}
+ 
+-	return nil, map[string]string{"state": "removed"}, nil
++	if detachError != "" {
++		return nil, map[string]string{"state": "removed", "detach": detachError}, nil
++	}
++
++	return nil, map[string]string{"state": "removed", "target": target}, nil
+ }
+diff --git a/internal/virt/accessors.go b/internal/virt/accessors.go
+index fb50f5969255bfbd79ea3eaa94769867a7a0fc2f..a6fb4e144b6d93ddbd4d6f82a4926103cd474395 100644
+--- a/internal/virt/accessors.go
++++ b/internal/virt/accessors.go
+@@ -2,6 +2,7 @@ package virt
+ 
+ import (
+ 	"path/filepath"
++	"slices"
+ 	"strings"
+ 
+ 	"github.com/mdlayher/vsock"
+@@ -54,3 +55,15 @@ 	_ = conn.Close()
+ 
+ 	return true
+ }
++
++func (d Definition) ShareTarget(share string) string {
++	if target := d.ShareTargets[share]; target != "" {
++		return target
++	}
++
++	return "/mnt/" + ShareTag(share)
++}
++
++func (d Definition) ShareReadOnly(share string) bool {
++	return slices.Contains(d.ReadOnlyShares, share)
++}
+diff --git a/internal/virt/hotplug.go b/internal/virt/hotplug.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..c4fc786e4b65c49b1009cd2bd04522aa2141316b
+--- /dev/null
++++ b/internal/virt/hotplug.go
+@@ -0,0 +1,264 @@
++package virt
++
++import (
++	"bufio"
++	"context"
++	"encoding/json"
++	"fmt"
++	"net"
++	"os"
++	"path/filepath"
++	"strings"
++	"time"
++)
++
++type qmpCommand struct {
++	Execute   string      `json:"execute"`
++	Arguments interface{} `json:"arguments,omitempty"`
++}
++
++type qmpResponse struct {
++	Return interface{} `json:"return"`
++	Error  *struct {
++		Class string `json:"class"`
++		Desc  string `json:"desc"`
++	} `json:"error"`
++}
++
++func qmpCall(conn net.Conn, reader *bufio.Reader, command qmpCommand) error {
++	payload, err := json.Marshal(command)
++	if err != nil {
++		return err
++	}
++
++	if _, err := conn.Write(append(payload, '\n')); err != nil {
++		return err
++	}
++
++	for {
++		line, err := reader.ReadBytes('\n')
++		if err != nil {
++			return err
++		}
++
++		var response qmpResponse
++		if err := json.Unmarshal(line, &response); err != nil {
++			continue
++		}
++
++		if response.Error != nil {
++			return fmt.Errorf("%s", response.Error.Desc)
++		}
++
++		if response.Return != nil || command.Execute == "qmp_capabilities" {
++			return nil
++		}
++	}
++}
++
++func qmpQuery(conn net.Conn, reader *bufio.Reader, execute string) ([]map[string]interface{}, error) {
++	payload, err := json.Marshal(qmpCommand{Execute: execute})
++	if err != nil {
++		return nil, err
++	}
++
++	if _, err := conn.Write(append(payload, '\n')); err != nil {
++		return nil, err
++	}
++
++	for {
++		line, err := reader.ReadBytes('\n')
++		if err != nil {
++			return nil, err
++		}
++
++		var response struct {
++			Return []map[string]interface{} `json:"return"`
++			Error  *struct {
++				Desc string `json:"desc"`
++			} `json:"error"`
++		}
++
++		if err := json.Unmarshal(line, &response); err != nil {
++			continue
++		}
++
++		if response.Error != nil {
++			return nil, fmt.Errorf("%s", response.Error.Desc)
++		}
++
++		return response.Return, nil
++	}
++}
++
++func qmpConnect(def Definition) (net.Conn, *bufio.Reader, error) {
++	conn, err := net.DialTimeout("unix", filepath.Join(def.runtimePath(), "qmp.sock"), 10*time.Second)
++	if err != nil {
++		return nil, nil, err
++	}
++
++	reader := bufio.NewReader(conn)
++
++	if _, err := reader.ReadBytes('\n'); err != nil {
++		conn.Close()
++
++		return nil, nil, err
++	}
++
++	if err := qmpCall(conn, reader, qmpCommand{Execute: "qmp_capabilities"}); err != nil {
++		conn.Close()
++
++		return nil, nil, err
++	}
++
++	return conn, reader, nil
++}
++
++func shareSocket(tag string) string {
++	return filepath.Join(os.Getenv("XDG_RUNTIME_DIR"), "phial", "vm", "virtiofsd-"+tag+".sock")
++}
++
++func releaseShare(conn net.Conn, reader *bufio.Reader, tag string) {
++	socketPath := shareSocket(tag)
++
++	_ = qmpCall(conn, reader, qmpCommand{Execute: "device_del", Arguments: map[string]string{"id": "fs-" + tag}})
++
++	time.Sleep(time.Second)
++
++	entries, err := qmpQuery(conn, reader, "query-chardev")
++	if err != nil {
++		return
++	}
++
++	for _, entry := range entries {
++		label, _ := entry["label"].(string)
++		filename, _ := entry["filename"].(string)
++
++		if label == "" {
++			continue
++		}
++
++		if label == "fs-hotplug-"+tag || strings.Contains(filename, socketPath) {
++			_ = qmpCall(conn, reader, qmpCommand{Execute: "chardev-remove", Arguments: map[string]string{"id": label}})
++		}
++	}
++}
++
++func HotplugShare(def Definition, share string) error {
++	tag := ShareTag(share)
++	chardev := "fs-hotplug-" + tag
++	socketPath := shareSocket(tag)
++
++	conn, reader, err := qmpConnect(def)
++	if err != nil {
++		return err
++	}
++	defer conn.Close()
++
++	releaseShare(conn, reader, tag)
++
++	manager, err := userManager()
++	if err != nil {
++		return err
++	}
++
++	if _, err := manager.StartUnitContext(context.Background(), "phial-virtiofsd@"+tag+".service", "replace", nil); err != nil {
++		manager.Close()
++
++		return err
++	}
++
++	manager.Close()
++
++	for attempt := 0; attempt < 400; attempt++ {
++		if socketLive(socketPath) {
++			break
++		}
++
++		time.Sleep(100 * time.Millisecond)
++	}
++
++	if !socketLive(socketPath) {
++		return fmt.Errorf("virtiofsd did not listen on %s", socketPath)
++	}
++
++	if err := qmpCall(conn, reader, qmpCommand{
++		Execute: "chardev-add",
++		Arguments: map[string]interface{}{
++			"id": chardev,
++			"backend": map[string]interface{}{
++				"type": "socket",
++				"data": map[string]interface{}{
++					"addr": map[string]interface{}{
++						"type": "unix",
++						"data": map[string]string{"path": socketPath},
++					},
++					"server": false,
++				},
++			},
++		},
++	}); err != nil {
++		return err
++	}
++
++	var lastError error
++
++	for slot := 1; slot <= 8; slot++ {
++		lastError = qmpCall(conn, reader, qmpCommand{
++			Execute: "device_add",
++			Arguments: map[string]string{
++				"driver":  "vhost-user-fs-pci",
++				"bus":     fmt.Sprintf("hotplug%d", slot),
++				"chardev": chardev,
++				"tag":     tag,
++				"id":      "fs-" + tag,
++			},
++		})
++
++		if lastError == nil {
++			return nil
++		}
++	}
++
++	return lastError
++}
++
++func UnplugShare(def Definition, share string) error {
++	tag := ShareTag(share)
++
++	conn, err := net.DialTimeout("unix", filepath.Join(def.runtimePath(), "qmp.sock"), 10*time.Second)
++	if err != nil {
++		return err
++	}
++	defer conn.Close()
++
++	reader := bufio.NewReader(conn)
++
++	if _, err := reader.ReadBytes('\n'); err != nil {
++		return err
++	}
++
++	if err := qmpCall(conn, reader, qmpCommand{Execute: "qmp_capabilities"}); err != nil {
++		return err
++	}
++
++	if err := qmpCall(conn, reader, qmpCommand{Execute: "device_del", Arguments: map[string]string{"id": "fs-" + tag}}); err != nil {
++		if !strings.Contains(err.Error(), "not found") {
++			return err
++		}
++	} else {
++		time.Sleep(2 * time.Second)
++	}
++
++	_ = qmpCall(conn, reader, qmpCommand{Execute: "chardev-remove", Arguments: map[string]string{"id": "fs-hotplug-" + tag}})
++
++	manager, err := userManager()
++	if err != nil {
++		return err
++	}
++	defer manager.Close()
++
++	_, err = manager.StopUnitContext(context.Background(), "phial-virtiofsd@"+tag+".service", "replace", nil)
++
++	return err
++}
+diff --git a/internal/virt/launcher.go b/internal/virt/launcher.go
+index 04890f89dd208a54bcbe70ca3a98abc636db175b..50e2787649c23c0f230150899f8a9cab4fd87ba0 100644
+--- a/internal/virt/launcher.go
++++ b/internal/virt/launcher.go
+@@ -306,6 +306,12 @@ 		"-pidfile", filepath.Join(run, "qemu.pid"),
+ 		"-device", "qemu-xhci,id=xhci0",
+ 	}
+ 
++	for slot := 1; slot <= 8; slot++ {
++		args = append(args,
++			"-device", fmt.Sprintf("pcie-root-port,id=hotplug%d,chassis=%d,slot=%d", slot, slot, slot),
++		)
++	}
++
+ 	for index, share := range d.Shares {
+ 		tag := ShareTag(share)
+ 		id := fmt.Sprintf("fsx%d", index)
+diff --git a/internal/virt/vm.go b/internal/virt/vm.go
+index 79bb85aba8dc7449ddaadf29750f1b69dd1989cc..6c07ad0208ef7c324866419646ee606722a15477 100644
+--- a/internal/virt/vm.go
++++ b/internal/virt/vm.go
+@@ -26,21 +26,23 @@ 	return "/usr/share/edk2/ovmf"
+ }
+ 
+ type Definition struct {
+-	Name        string   `json:"name"`
+-	VCPUs       int      `json:"vcpus"`
+-	Memory      string   `json:"memory"`
+-	Disk        string   `json:"disk"`
+-	DiskSize    string   `json:"disk_size"`
+-	Display     string   `json:"display"`
+-	GPU         string   `json:"gpu"`
+-	SecureBoot  bool     `json:"secure_boot"`
+-	HugePages   bool     `json:"hugepages"`
+-	USBDevices  []string `json:"usb_devices"`
+-	USBXHCI     string   `json:"usb_xhci"`
+-	NetLAN      string   `json:"net_lan"`
+-	NetFallback string   `json:"net_fallback"`
+-	Audio       string   `json:"audio"`
+-	Shares      []string `json:"shares"`
++	Name           string            `json:"name"`
++	VCPUs          int               `json:"vcpus"`
++	Memory         string            `json:"memory"`
++	Disk           string            `json:"disk"`
++	DiskSize       string            `json:"disk_size"`
++	Display        string            `json:"display"`
++	GPU            string            `json:"gpu"`
++	SecureBoot     bool              `json:"secure_boot"`
++	HugePages      bool              `json:"hugepages"`
++	USBDevices     []string          `json:"usb_devices"`
++	USBXHCI        string            `json:"usb_xhci"`
++	NetLAN         string            `json:"net_lan"`
++	NetFallback    string            `json:"net_fallback"`
++	Audio          string            `json:"audio"`
++	Shares         []string          `json:"shares"`
++	ShareTargets   map[string]string `json:"share_targets,omitempty"`
++	ReadOnlyShares []string          `json:"read_only_shares,omitempty"`
+ }
+ 
+ func Defaults(name string) Definition {
+
