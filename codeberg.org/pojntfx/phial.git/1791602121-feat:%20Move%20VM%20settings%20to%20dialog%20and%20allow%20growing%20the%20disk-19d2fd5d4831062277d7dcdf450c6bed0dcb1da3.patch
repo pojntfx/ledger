@@ -1,0 +1,366 @@
+From 19d2fd5d4831062277d7dcdf450c6bed0dcb1da3 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Fri, 09 Oct 2026 20:15:21 -0700
+Subject: [PATCH] feat: Move VM settings to dialog and allow growing the disk
+---
+diff --git a/internal/components/dialogs.go b/internal/components/dialogs.go
+index e84c8be3ebb4106c3c153248b7785c6ea8b9255b..318ea9e1081cfa3d60862e1274fcbe031c0b8349 100644
+--- a/internal/components/dialogs.go
++++ b/internal/components/dialogs.go
+@@ -5,6 +5,7 @@ 	"fmt"
+ 	"os"
+ 	"os/exec"
+ 	"path/filepath"
++	"strconv"
+ 	"strings"
+ 
+ 	"codeberg.org/puregotk/puregotk/v4/adw"
+@@ -694,3 +695,175 @@ 	}
+ 
+ 	return fmt.Sprintf(i18n.L("%s opens on this host through waypipe"), what)
+ }
++
++func (a *App) showEditDialog(def virt.Definition) {
++	dialog := adw.NewDialog()
++	dialog.SetTitle(i18n.L("Edit Machine"))
++	dialog.SetContentWidth(440)
++	dialog.SetContentHeight(640)
++
++	toolbar := adw.NewToolbarView()
++	header := adw.NewHeaderBar()
++	header.SetShowStartTitleButtons(false)
++
++	title := adw.NewWindowTitle(i18n.L("Edit Machine"), def.Name)
++	header.SetTitleWidget(&title.Widget)
++	toolbar.AddTopBar(&header.Widget)
++
++	page := adw.NewPreferencesPage()
++
++	identityGroup := adw.NewPreferencesGroup()
++	identityGroup.SetTitle(i18n.L("Identity"))
++
++	nameRow := adw.NewEntryRow()
++	nameRow.SetTitle(i18n.L("Name"))
++	nameRow.SetText(def.Name)
++	nameRow.SetShowApplyButton(false)
++	identityGroup.Add(&nameRow.Widget)
++
++	page.Add(identityGroup)
++
++	hardwareGroup := adw.NewPreferencesGroup()
++	hardwareGroup.SetTitle(i18n.L("Hardware"))
++
++	vcpus := def.VCPUs
++	if vcpus < 1 {
++		vcpus = 1
++	}
++
++	cpuAdjustment := gtk.NewAdjustment(float64(vcpus), 1, 64, 1, 4, 0)
++	cpuRow := adw.NewSpinRow(cpuAdjustment, 1, 0)
++	cpuRow.SetTitle(i18n.L("CPU Count"))
++	hardwareGroup.Add(&cpuRow.Widget)
++
++	memoryGiB, err := strconv.Atoi(sizeDigits(def.Memory))
++	if err != nil || memoryGiB < 1 {
++		memoryGiB = 8
++	}
++
++	memoryRow := adw.NewSpinRow(gtk.NewAdjustment(float64(memoryGiB), 1, 256, 1, 8, 0), 1, 0)
++	memoryRow.SetTitle(i18n.L("Memory"))
++	memoryRow.SetNumeric(true)
++
++	memoryUnit := gtk.NewLabel(i18n.L("GiB"))
++	memoryUnit.AddCssClass("dim-label")
++	memoryUnit.SetMarginEnd(8)
++	memoryRow.AddSuffix(&memoryUnit.Widget)
++	hardwareGroup.Add(&memoryRow.Widget)
++
++	diskGiB, err := strconv.Atoi(sizeDigits(def.DiskSize))
++	if err != nil || diskGiB < 8 {
++		diskGiB = 40
++	}
++
++	diskRow := adw.NewSpinRow(gtk.NewAdjustment(float64(diskGiB), 8, 2048, 1, 16, 0), 1, 0)
++	diskRow.SetTitle(i18n.L("Disk Size"))
++	diskRow.SetNumeric(true)
++
++	diskUnit := gtk.NewLabel(i18n.L("GiB"))
++	diskUnit.AddCssClass("dim-label")
++	diskUnit.SetMarginEnd(8)
++	diskRow.AddSuffix(&diskUnit.Widget)
++	hardwareGroup.Add(&diskRow.Widget)
++
++	page.Add(hardwareGroup)
++
++	displayGroup := adw.NewPreferencesGroup()
++	displayGroup.SetTitle(i18n.L("Display"))
++
++	display := def.Display
++	gpu := def.GPU
++	secureBoot := def.SecureBoot
++
++	displayGroup.Add(&a.comboRow(i18n.L("Display"),
++		[]string{i18n.L("Headless"), i18n.L("Window"), i18n.L("Off")},
++		[]string{"egl-headless", "gtk", "none"},
++		def.Display, func(value string) {
++			display = value
++		}).Widget)
++
++	displayGroup.Add(&a.comboRow(i18n.L("GPU"),
++		[]string{"Venus", "VirGL", i18n.L("Off")},
++		[]string{"venus", "virgl", "none"},
++		def.GPU, func(value string) {
++			gpu = value
++		}).Widget)
++
++	displayGroup.Add(&a.switchRow(i18n.L("Secure Boot"), def.SecureBoot, func(value bool) {
++		secureBoot = value
++	}).Widget)
++
++	page.Add(displayGroup)
++
++	actionGroup := adw.NewPreferencesGroup()
++
++	actionGroup.Add(&a.buttonRow(i18n.L("Save the changes"), "document-save-symbolic", func() {
++		vcpuCount := int(cpuRow.GetValue())
++
++		memory := strconv.Itoa(int(memoryRow.GetValue())) + "G"
++		diskSize := strconv.Itoa(int(diskRow.GetValue())) + "G"
++		newName := strings.TrimSpace(nameRow.GetText())
++
++		input := mcp.VmUpdateInput{
++			Name:       def.Name,
++			Display:    display,
++			GPU:        gpu,
++			VCPUs:      &vcpuCount,
++			SecureBoot: &secureBoot,
++		}
++
++		input.Memory = memory
++		input.DiskSize = diskSize
++
++		if newName != "" && newName != def.Name {
++			input.NewName = newName
++		}
++
++		a.goAsync(func() (string, error) {
++			if _, _, err := a.Service.VmUpdate(a.Ctx, nil, input); err != nil {
++				return "", err
++			}
++
++			target := def.Name
++
++			if input.NewName != "" {
++				target = input.NewName
++			}
++
++			a.idle(func() { a.refreshVMDetail(target) })
++
++			return i18n.L("Machine updated"), nil
++		})
++
++		dialog.Close()
++	}).Widget)
++
++	page.Add(actionGroup)
++
++	toolbar.SetContent(&page.Widget)
++	dialog.SetChild(&toolbar.Widget)
++	dialog.Present(&a.window.Widget)
++}
++
++func sizeDigits(size string) string {
++	value := strings.TrimSpace(size)
++
++	for _, unit := range []string{"K", "k", "M", "m", "G", "g", "T", "t"} {
++		value = strings.TrimSuffix(value, unit)
++	}
++
++	return strings.TrimSpace(value)
++}
++
++func sizeValue(digits string) string {
++	value := strings.TrimSpace(digits)
++	if value == "" {
++		return ""
++	}
++
++	if _, err := strconv.Atoi(value); err != nil {
++		return ""
++	}
++
++	return value + "G"
++}
+diff --git a/internal/components/vms.go b/internal/components/vms.go
+index f3f5dce182949eaaa13671fb1ceaab3ce5cf54a0..724dbd634b7649ac8ba5cf37a70438c368bfbd09 100644
+--- a/internal/components/vms.go
++++ b/internal/components/vms.go
+@@ -130,6 +130,11 @@
+ 	title := adw.NewWindowTitle(def.Name, i18n.L("Machine"))
+ 	header.SetTitleWidget(&title.Widget)
+ 
++	editBtn := a.iconButton("document-edit-symbolic", i18n.L("Edit Machine"), func() {
++		a.showEditDialog(def)
++	})
++	header.PackEnd(&editBtn.Widget)
++
+ 	var tasksBtn *gtk.ToggleButton
+ 
+ 	if installing {
+@@ -540,37 +545,6 @@ 		a.showAddDeviceDialog(def)
+ 	}).Widget)
+ 
+ 	vbox.Append(&devicesGroup.Widget)
+-
+-	displayGroup := adw.NewPreferencesGroup()
+-	displayGroup.SetTitle(i18n.L("Display and GPU"))
+-
+-	displayGroup.Add(&a.comboRow(i18n.L("_Display"),
+-		[]string{i18n.L("Headless"), i18n.L("Window"), i18n.L("Off")},
+-		[]string{"egl-headless", "gtk", "none"},
+-		def.Display, func(v string) {
+-			def.Display = v
+-			a.saveDef(def, i18n.L("Display mode saved; it applies on the next start"))
+-		}).Widget)
+-
+-	displayGroup.Add(&a.comboRow(i18n.L("_GPU"),
+-		[]string{"Venus", "VirGL", i18n.L("Off")},
+-		[]string{"venus", "virgl", "none"},
+-		def.GPU, func(v string) {
+-			def.GPU = v
+-			a.saveDef(def, i18n.L("GPU mode saved; it applies on the next start"))
+-		}).Widget)
+-
+-	vbox.Append(&displayGroup.Widget)
+-
+-	securityGroup := adw.NewPreferencesGroup()
+-	securityGroup.SetTitle(i18n.L("Security"))
+-
+-	securityGroup.Add(&a.switchRow(i18n.L("_Secure Boot"), def.SecureBoot, func(v bool) {
+-		def.SecureBoot = v
+-		a.saveDef(def, i18n.L("Secure Boot saved; it applies on the next start"))
+-	}).Widget)
+-
+-	vbox.Append(&securityGroup.Widget)
+ 
+ 	scrolled.SetChild(&vbox.Widget)
+ 	toolbar.SetContent(&scrolled.Widget)
+diff --git a/internal/mcp/tools_vm.go b/internal/mcp/tools_vm.go
+index f25970033b9def6dd16ca25369be27d23b53e2af..d63f045894ba144f96c8480fe3586d3196369d88 100644
+--- a/internal/mcp/tools_vm.go
++++ b/internal/mcp/tools_vm.go
+@@ -267,8 +267,12 @@ }
+ 
+ type VmUpdateInput struct {
+ 	Name       string `json:"name" jsonschema:"the VM name"`
++	NewName    string `json:"new_name,omitempty" jsonschema:"a new name, optional"`
+ 	Display    string `json:"display,omitempty" jsonschema:"egl-headless, gtk, or none, optional"`
+ 	GPU        string `json:"gpu,omitempty" jsonschema:"venus, virgl, or none, optional"`
++	VCPUs      *int   `json:"vcpus,omitempty" jsonschema:"the CPU count, optional"`
++	Memory     string `json:"memory,omitempty" jsonschema:"the memory size such as 8G, optional"`
++	DiskSize   string `json:"disk_size,omitempty" jsonschema:"the disk size such as 40G, optional"`
+ 	SecureBoot *bool  `json:"secure_boot,omitempty" jsonschema:"whether Secure Boot runs, optional"`
+ 	USBXHCI    string `json:"usb_xhci,omitempty" jsonschema:"the hub controller PCI address, optional"`
+ }
+@@ -276,7 +280,7 @@
+ var VmUpdateTool = &mcpgo.Tool{
+ 	Name:        "vm.update",
+ 	Title:       "Update virtual machine settings",
+-	Description: "Update display, GPU, Secure Boot, or hub controller for a VM.",
++	Description: "Update name, CPU, memory, disk size, display, GPU, Secure Boot, or hub controller for a VM.",
+ }
+ 
+ type VmMetricsInput struct {
+@@ -321,12 +325,33 @@ 	}
+ 	if input.USBXHCI != "" {
+ 		def.USBXHCI = input.USBXHCI
+ 	}
++	if input.VCPUs != nil {
++		def.VCPUs = *input.VCPUs
++	}
++	if input.Memory != "" {
++		def.Memory = input.Memory
++	}
++	if input.DiskSize != "" && input.DiskSize != def.DiskSize {
++		if err := def.GrowDisk(input.DiskSize); err != nil {
++			return nil, nil, err
++		}
++
++		def.DiskSize = input.DiskSize
++	}
++
++	if input.NewName != "" && input.NewName != def.Name {
++		if err := def.Rename(input.NewName); err != nil {
++			return nil, nil, err
++		}
++
++		def.Name = input.NewName
++	}
+ 
+ 	if err := def.Save(); err != nil {
+ 		return nil, nil, err
+ 	}
+ 
+-	return nil, map[string]string{"state": "updated"}, nil
++	return nil, map[string]string{"state": "updated", "name": def.Name}, nil
+ }
+ 
+ var VmInstallStatusTool = &mcpgo.Tool{
+diff --git a/internal/virt/vm.go b/internal/virt/vm.go
+index 6c07ad0208ef7c324866419646ee606722a15477..1cfa799fee339a2df1a0b163e72e3be19e0beb73 100644
+--- a/internal/virt/vm.go
++++ b/internal/virt/vm.go
+@@ -233,3 +233,52 @@
+ func (d Definition) Delete() error {
+ 	return os.Remove(filepath.Join(configDir(), "vms", d.Name+".json"))
+ }
++
++func (d Definition) GrowDisk(size string) error {
++	target, err := parseSize(size)
++	if err != nil {
++		return err
++	}
++
++	image := d.DiskPathValue()
++
++	info, err := os.Stat(image)
++	if err != nil {
++		return err
++	}
++
++	if target <= info.Size() {
++		return nil
++	}
++
++	return os.Truncate(image, target)
++}
++
++func (d Definition) Rename(newName string) error {
++	configDirValue, err := os.UserConfigDir()
++	if err != nil {
++		return err
++	}
++
++	renamed := d
++	renamed.Name = newName
++
++	oldDisk := d.DiskPathValue()
++	newDisk := renamed.DiskPathValue()
++
++	if oldDisk != newDisk {
++		if _, err := os.Stat(oldDisk); err == nil {
++			if err := os.Rename(oldDisk, newDisk); err != nil {
++				return err
++			}
++		}
++	}
++
++	oldConfig := filepath.Join(configDirValue, "phial", "vms", d.Name+".json")
++
++	if err := os.Remove(oldConfig); err != nil && !os.IsNotExist(err) {
++		return err
++	}
++
++	return renamed.Save()
++}
+
