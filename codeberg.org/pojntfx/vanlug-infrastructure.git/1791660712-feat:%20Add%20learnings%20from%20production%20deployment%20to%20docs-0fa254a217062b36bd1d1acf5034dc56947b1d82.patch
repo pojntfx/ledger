@@ -1,0 +1,83 @@
+From 0fa254a217062b36bd1d1acf5034dc56947b1d82 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Sat, 10 Oct 2026 12:31:52 -0700
+Subject: [PATCH] feat: Add learnings from production deployment to docs
+---
+diff --git a/README.md b/README.md
+index e5a4b5840ca21a97dbe4f978e3afd27b93a46693..81ab4319bcad14d88c5dcd11d569be1aa17d9323 100644
+--- a/README.md
++++ b/README.md
+@@ -22,7 +22,7 @@ Contributions to this repository are restricted to the VanLUG technical comittee at this time.
+ 
+ To contribute, please use the [Codeberg flow](https://docs.codeberg.org/collaborating/) and follow our [Code of Conduct](https://vanlug.ca/conduct/).
+ 
+-In order to get started, first clone the repository and set up all secrets by running the following:
++In order to get started, first clone the repository and set up all secrets (including the S3-compatible store credentials for the OpenTofu state) by running the following:
+ 
+ ```shell
+ $ git clone https://codeberg.org/pojntfx/vanlug-infrastructure
+@@ -40,7 +40,7 @@
+ If you'd like to switch back to the default (production) workspace, run:
+ 
+ ```shell
+-$ tofu workspace select
++$ tofu workspace select default
+ ```
+ 
+ Configure the primary domain, the public suffix apex, the public suffix suffix and other OpenTofu variables in [`variables.tofu`](variables.tofu). The public suffix apex is the apex of the DNS zone, and the public suffix domain is that apex with the suffix in front. For development, use `vanlug.p8.lu` for the primary domain, `vanlugusercontent.p8.lu` for the apex, `users` for the suffix and `p8.lu` for `public_suffix_manual_zone`. In production, we will use `vanlug.ca` for the primary domain, and `vanlug.org` with `users` for the public suffix. Set `public_suffix_zone_managed` to `true` to create the zone in Hetzner, or leave it at `false` to add the records by hand. Then deploy the physical infrastructure:
+@@ -76,7 +76,7 @@ $ ssh setup@2a01:4f8:c015:706c::1
+ [setup@vanlug-forgejo-runner ~]$ sudo journalctl _SYSTEMD_USER_UNIT=forgejo-runner.service -f
+ ```
+ 
+-That's it! All infrastructure should now be deployed. Don't forget to log into both the admin and genesis users to change their passwords and set up two-factor authentication.
++That's it! All infrastructure should now be deployed. Don't forget to **log into both the admin and genesis users to change their passwords, set up two-factor authentication, and store your recovery codes in a safe location**.
+ 
+ During development, to update the SELinux policies for the containers (`.cil` files), run:
+ 
+diff --git a/group_vars/all.yaml b/group_vars/all.yaml
+index 1e628ca20010d3aa9e856e0dd34cd9b1cb696dda..e6764e6e0f89121bf8adbfd3b5aeb5478599e1a1 100644
+--- a/group_vars/all.yaml
++++ b/group_vars/all.yaml
+@@ -1,14 +1,14 @@
+ # Primary domain all services are served under, from OpenTofu
+-vanlug_domain: '{{ lookup("cloud.terraform.tf_output", "vanlug_domain", binary_path="/home/linuxbrew/.linuxbrew/bin/tofu") }}'
++vanlug_domain: '{{ lookup("cloud.terraform.tf_output", "vanlug_domain", binary_path="/usr/bin/tofu") }}'
+ # Apex of the secondary domain (public suffix) all user pages are served under by git-pages, from OpenTofu
+-public_suffix_apex: '{{ lookup("cloud.terraform.tf_output", "public_suffix_apex", binary_path="/home/linuxbrew/.linuxbrew/bin/tofu") }}'
++public_suffix_apex: '{{ lookup("cloud.terraform.tf_output", "public_suffix_apex", binary_path="/usr/bin/tofu") }}'
+ # Secondary domain (public suffix) all user pages are served under by git-pages, from OpenTofu
+-public_suffix_domain: '{{ lookup("cloud.terraform.tf_output", "public_suffix_domain", binary_path="/home/linuxbrew/.linuxbrew/bin/tofu") }}'
++public_suffix_domain: '{{ lookup("cloud.terraform.tf_output", "public_suffix_domain", binary_path="/usr/bin/tofu") }}'
+ # Forgejo admin user used for initial/admin API access
+ forgejo_admin_username: vanlug-admin
+ # Email for Forgejo admin user
+ forgejo_admin_email: felicitas@pojtinger.com
+ # Forgejo genesis user (owner of the internal repos and used for non-admin API access), from OpenTofu
+-forgejo_genesis_username: '{{ lookup("cloud.terraform.tf_output", "forgejo_genesis_username", binary_path="/home/linuxbrew/.linuxbrew/bin/tofu") }}'
++forgejo_genesis_username: '{{ lookup("cloud.terraform.tf_output", "forgejo_genesis_username", binary_path="/usr/bin/tofu") }}'
+ # Email for Forgejo genesis user
+ forgejo_genesis_email: felicitas.pojtinger@gmail.com
+diff --git a/inventory.yaml b/inventory.yaml
+index bf0e0551da6ae44928f447e21f9239999dc1c293..57e49adc98c39ef6fe2cf911455fc3fae927e271 100644
+--- a/inventory.yaml
++++ b/inventory.yaml
+@@ -1,2 +1,2 @@
+ plugin: cloud.terraform.terraform_provider
+-binary_path: /home/linuxbrew/.linuxbrew/bin/tofu
++binary_path: /usr/bin/tofu
+diff --git a/providers.tofu b/providers.tofu
+index 41fb5455fb300fb8351d978aea0ceb8da84aadbc..510b3af7f832bf6bd8183153710b508e1c98a487 100644
+--- a/providers.tofu
++++ b/providers.tofu
+@@ -1,8 +1,8 @@
+ terraform {
+   backend "s3" {
+-    bucket   = "vanlug-opentofu-state"
++    bucket   = "vanlug-infra-opentofu-state"
+     endpoint = "https://fsn1.your-objectstorage.com"
+-    key      = "vanlug-infra.tfstate"
++    key      = "vanlug-infra-opentofu-state.tfstate"
+ 
+     # See https://oliverjakobi.com/posts/opentofu-s3-backend-hetzner-storage/
+     region                      = "main" # We're using Hetzner
+
