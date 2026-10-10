@@ -1,0 +1,69 @@
+From 126dcaf84884ae8784561508b16433ff037b0906 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Fri, 09 Oct 2026 20:22:28 -0700
+Subject: [PATCH] fix: Work around issues with IPv4 traffic to IPv6-only network on host via CLAT
+---
+diff --git a/internal/components/app.go b/internal/components/app.go
+index 4b2597da6e6d15f7233bd461754b10af1df02b30..e027d863d72630edbc48b2d05fb17041297face8 100644
+--- a/internal/components/app.go
++++ b/internal/components/app.go
+@@ -83,6 +83,12 @@ 			}
+ 		}()
+ 
+ 		go func() {
++			defer func() {
++				if recovered := recover(); recovered != nil {
++					log.Info("background request panicked", "err", recovered)
++				}
++			}()
++
+ 			if _, err := background.RequestBackground("", &background.RequestOptions{
+ 				Reason: i18n.L("Phial keeps the agent channel open for requests from virtual machines."),
+ 			}); err != nil {
+diff --git a/internal/guest/files/systemd-user/phial-waypipe.service b/internal/guest/files/systemd-user/phial-waypipe.service
+index ca65778101e8f2e76317c3e685940f81ae4a4e6d..65d205ddd1f7a95f0f4a34156d6e50951e0aedc0 100644
+--- a/internal/guest/files/systemd-user/phial-waypipe.service
++++ b/internal/guest/files/systemd-user/phial-waypipe.service
+@@ -2,6 +2,7 @@ [Unit]
+ Description=phial waypipe server
+ 
+ [Service]
++ExecStartPre=/usr/bin/rm -f %t/waypipe
+ Type=simple
+ ExecStart=/usr/bin/waypipe --display=waypipe --vsock -s 5000 server -- sleep infinity
+ Restart=on-failure
+diff --git a/internal/guest/provision.go b/internal/guest/provision.go
+index 7502f550e6f3bc0eef06a758402ad7dfa2aedde1..97eaf7c5c2a94576f3267d7428e3e4f777384d89 100644
+--- a/internal/guest/provision.go
++++ b/internal/guest/provision.go
+@@ -98,6 +98,7 @@ 		"gsettings set org.gnome.desktop.screensaver idle-activation-enabled false 2>/dev/null || true",
+ 		"gsettings set org.gnome.desktop.session idle-delay 0 2>/dev/null || true",
+ 		"gsettings set org.gnome.shell enabled-extensions \"[]\" 2>/dev/null || true",
+ 		"sudo systemctl disable NetworkManager-wait-online.service 2>/dev/null || true",
++		"sudo systemctl disable --now geoclue.service 2>/dev/null || true",
+ 		"sudo systemctl daemon-reload",
+ 		"sudo systemctl enable --now phial-network.service 2>/dev/null || true",
+ 	)
+@@ -198,11 +199,18 @@
+   sudo nmcli connection modify "$con" connection.autoconnect yes ipv6.route-metric 1000 ipv4.route-metric 2000 || true
+   sudo nmcli connection up "$con" || true
+ 
+-  addr=$(ip -6 addr show dev "$dev" scope global 2>/dev/null | awk '/inet6/ {print $2; exit}' | cut -d/ -f1)
++  net=""
++
++  for _ in $(seq 1 30); do
++    net=$(ip -6 route show dev "$dev" proto ra 2>/dev/null | awk '/\/64/ {print $1; exit}')
++    [ -n "$net" ] && break
++    sleep 2
++  done
++
+   gw=""
+ 
+-  if [ -n "$addr" ]; then
+-    gw="$(echo "$addr" | sed 's/::.*/::/')1"
++  if [ -n "$net" ]; then
++    gw="${net%%::/64}::1"
+   fi
+ 
+   if [ -n "$gw" ]; then
+
