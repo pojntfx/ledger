@@ -1,0 +1,1006 @@
+From feac0c67765c28c1c7a193d9ba641fe8e805f656 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Wed, 14 Oct 2026 17:20:19 -0700
+Subject: [PATCH] feat: Add initial rootful agent to do guest (re-) provisioning with, embed agent binary in guest, and rework Applications and Desktop options
+---
+diff --git a/Makefile b/Makefile
+index 5d48fc59476340b06e3937271f14d1a54eb9489b..7a7375f9f0f2309a6ad089243be25aabad320174 100644
+--- a/Makefile
++++ b/Makefile
+@@ -2,8 +2,15 @@ export PATH := /home/linuxbrew/.linuxbrew/bin:$(PATH)
+ 
+ .PHONY: build generate install test acceptance ui-test pot flatpak flatpak-lint clean
+ 
++GUEST_AGENT := internal/guest/agent/phial
++
+ build:
++	: > $(GUEST_AGENT)
++	CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o $(GUEST_AGENT) .
+ 	CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o bin/phial .
++
++guest-agent:
++	CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o $(GUEST_AGENT) .
+ 
+ generate:
+ 	cd assets/resources && blueprint-compiler batch-compile . . *.blp
+@@ -33,4 +40,4 @@ 	flatpak-builder --force-clean --repo=flatpak/repo flatpak/build flatpak/com.pojtinger.felicitas.Phial.json
+ 	flatpak build-bundle flatpak/repo flatpak/phial.flatpak com.pojtinger.felicitas.Phial
+ 
+ clean:
+-	rm -rf bin/phial flatpak/build flatpak/repo flatpak/phial.flatpak
++	rm -rf bin/phial $(GUEST_AGENT) flatpak/build flatpak/repo flatpak/phial.flatpak
+diff --git a/docs/DESIGN.md b/docs/DESIGN.md
+index eda972c316b28c965c02d714282ce55dd9db6d7d..e5ce4086e49e8055cdcc0f0cb47b29b7bb68dd9e 100644
+--- a/docs/DESIGN.md
++++ b/docs/DESIGN.md
+@@ -86,7 +86,10 @@ - Logs opens the log of the machine in the text editor: the console of the installer when it keeps one, else the service log of the machine.
+ - The Serial Console and Remote Desktop dialogs state the user and the password with a copy control for each, because the guest asks for both at its login.
+ - The Terminal and Remote Desktop dialogs carry Unlock the SSH Agent, which loads the key of the user into the dedicated agent of Phial and asks for the passphrase through pinentry.
+ - Every command in the guest states a timeout, so a guest that stops answering states an error instead of holding the app.
+-- The install provisions the machine: it boots the guest once, waits for the guest to answer, copies the units of the guest into it, and stops it again.
++- The install provisions the machine: it boots the guest once, waits for the guest agent to answer, copies the units of the guest into it, and stops it again.
++- The guest agent is the binary of Phial itself, so the reprovision step, which runs the provisioning again, replaces the agent of a machine as well.
++- The provisioning of a machine is idempotent, so the reprovision item in the menu of a machine runs it at any time.
++- The provisioning travels over the channel of the QEMU guest agent, which is a virtio serial port. The vsock carries the shell of the guest instead.
+ - The guest turns plymouth off and masks the network wait, because a machine that waits for a splash or for the network never reaches a login.
+ - The installer writes the home directory of the guest as root, so the provisioning repairs the labels of that directory before the session of the user writes its units.
+ - A machine installs in minutes rather than seconds, so the first start of a fresh machine needs a few minutes before the guest answers.
+diff --git a/internal/guest/provision.go b/internal/guest/provision.go
+index ab7026eac0e6d3ff2c181d76d2bdcf44ac296ed6..05d971ae39cf5d70046f8b314b92c34bad21791a 100644
+--- a/internal/guest/provision.go
++++ b/internal/guest/provision.go
+@@ -21,6 +21,13 @@
+ //go:embed files
+ var files embed.FS
+ 
++// agent is the binary of Phial itself, which the guest runs for its forwards,
++// its shares and its secrets. The update step of a machine writes it into the
++// guest again, so the guest agent always matches the version of the app.
++//
++//go:embed agent/phial
++var agent []byte
++
+ type target struct {
+ 	source string
+ 	dest   string
+@@ -42,7 +49,7 @@ 	{"files/forward-mcp.conf", ".config/phial/forward-mcp.conf", "0644"},
+ 	{"files/skills/SKILL.md", ".agents/skills/phial/SKILL.md", "0644"},
+ }
+ 
+-func Provision(def virt.Definition, hostAlias string, hostshareMount string, secretsMount string, fallbackMAC string, binary string, rdpPassword string) error {
++func Provision(def virt.Definition, hostAlias string, hostshareMount string, secretsMount string, fallbackMAC string, rdpPassword string) error {
+ 	active, _ := def.Active()
+ 	if !active {
+ 		return fmt.Errorf("%s does not run", def.Name)
+@@ -70,15 +77,6 @@ 	}
+ 
+ 	steps = append(steps, writeSystemFile("/etc/systemd/system/phial-network.service", string(unit), "0644"))
+ 
+-	if binary != "" {
+-		data, err := os.ReadFile(binary)
+-		if err != nil {
+-			return err
+-		}
+-
+-		steps = append(steps, writeBinary(".local/bin/phial", base64.StdEncoding.EncodeToString(data)))
+-	}
+-
+ 	steps = append(steps,
+ 		// The installer creates parts of the home directory as root, so the
+ 		// labels are repaired before the session of the user writes units.
+@@ -109,12 +107,30 @@ 		"gsettings set org.gnome.desktop.screensaver idle-activation-enabled false 2>/dev/null || true",
+ 		"gsettings set org.gnome.desktop.session idle-delay 0 2>/dev/null || true",
+ 		"gsettings set org.gnome.shell enabled-extensions \"[]\" 2>/dev/null || true",
+ 		"sudo systemctl disable NetworkManager-wait-online.service 2>/dev/null || true",
++		"ln -sf /dev/null /etc/systemd/system/NetworkManager-wait-online.service 2>/dev/null || true",
++		"ln -sf /dev/null /etc/systemd/system/plymouth-quit-wait.service 2>/dev/null || true",
+ 		"sudo systemctl disable --now geoclue.service 2>/dev/null || true",
+ 		"sudo systemctl daemon-reload",
+ 		"sudo systemctl enable --now phial-network.service 2>/dev/null || true",
+ 	)
+ 
+-	return run(def, prepareGuestScript(strings.Join(steps, "\n")))
++	if err := run(def, prepareGuestScript(strings.Join(steps, "\n"))); err != nil {
++		return err
++	}
++
++	if len(agent) == 0 {
++		return nil
++	}
++
++	path := guestHome + "/.local/bin/phial"
++
++	if err := virt.QgaWriteFile(def, path, 0755, agent); err != nil {
++		return err
++	}
++
++	_, err = virt.QgaExec(def, "chown phial:phial "+path+" && restorecon "+path+" > /dev/null 2>&1 || true")
++
++	return err
+ }
+ 
+ func shareMountScript(def virt.Definition) string {
+diff --git a/internal/mcp/tools_vm.go b/internal/mcp/tools_vm.go
+index ce5a4d520b35e56aea7b881e26b25381c65f500d..25ee0d25f3fc80aaba2efaaee47f0c187305e487 100644
+--- a/internal/mcp/tools_vm.go
++++ b/internal/mcp/tools_vm.go
+@@ -433,8 +433,8 @@ }
+ 
+ var VmProvisionTool = &mcpgo.Tool{
+ 	Name:        "vm.provision",
+-	Title:       "Provision the guest",
+-	Description: "Install or upgrade the guest tools over SSH. Run this after the install and after every update.",
++	Title:       "Reprovision the guest agent",
++	Description: "Write the unit files, the shares, the secrets and the guest agent of the machine again through the guest agent over the virtio serial channel. This step is idempotent, so run it after the install and after every update.",
+ }
+ 
+ func (s *Service) rdpPassword() (string, error) {
+@@ -480,12 +480,7 @@ 	if err != nil {
+ 		return nil, nil, err
+ 	}
+ 
+-	binary, err := os.Executable()
+-	if err != nil {
+-		return nil, nil, err
+-	}
+-
+-	if err := guest.Provision(def, "host.internal", "/mnt/hostshare", "/mnt/phial-secrets", "52:54:00:5e:a1:02", binary, password); err != nil {
++	if err := guest.Provision(def, "host.internal", "/mnt/hostshare", "/mnt/phial-secrets", "52:54:00:5e:a1:02", password); err != nil {
+ 		return nil, nil, err
+ 	}
+ 
+@@ -511,24 +506,19 @@ 	if err != nil {
+ 		return err
+ 	}
+ 
+-	binary, err := os.Executable()
+-	if err != nil {
+-		return err
+-	}
+-
+ 	deadline := time.Now().Add(10 * time.Minute)
+ 	for time.Now().Before(deadline) {
+ 		if err := ctx.Err(); err != nil {
+ 			return err
+ 		}
+ 
+-		if err := virt.WaitForGuest(ctx, def.Name); err != nil {
++		if err := virt.WaitForAgent(def); err != nil {
+ 			time.Sleep(5 * time.Second)
+ 
+ 			continue
+ 		}
+ 
+-		return guest.Provision(def, "host.internal", "/mnt/hostshare", "/mnt/phial-secrets", "52:54:00:5e:a1:02", binary, password)
++		return guest.Provision(def, "host.internal", "/mnt/hostshare", "/mnt/phial-secrets", "52:54:00:5e:a1:02", password)
+ 	}
+ 
+ 	return fmt.Errorf("the guest of %s did not answer in time", def.Name)
+diff --git a/internal/ui/access.go b/internal/ui/access.go
+index 372fb91134921e62d84f96c1395497cdf72f0c98..b3cf238e3e22965bb70630688c93b2d143eda0f8 100644
+--- a/internal/ui/access.go
++++ b/internal/ui/access.go
+@@ -140,11 +140,16 @@ 		"Connection",
+ 		"The host alias reaches the machine over vsock, so no network device is needed.",
+ 	)
+ 
+-	command := adw.NewActionRow()
+-	command.SetTitle("ssh " + def.Name)
+-	command.SetSubtitle(i18n.L("A host alias that Phial keeps in your SSH configuration"))
+-	command.SetSubtitleSelectable(true)
+-	command.AddCssClass("property")
++	command := adw.NewEntryRow()
++	command.SetTitle(i18n.L("A host alias that Phial keeps in your SSH configuration"))
++	command.SetText(def.Name)
++	command.SetEditable(false)
++	command.SetShowApplyButton(false)
++
++	copyAlias := a.iconButton("edit-copy-symbolic", i18n.L("Copy the Alias"), func() {
++		a.copyText(def.Name, i18n.L("Alias copied"))
++	})
++	command.AddSuffix(&copyAlias.Widget)
+ 	group.Add(&command.Widget)
+ 
+ 	group.Add(&a.buttonRow("_Open a Terminal", "utilities-terminal-symbolic", func() {
+@@ -164,7 +169,7 @@
+ 	group.Add(a.unlockAgentRow())
+ 
+ 	content := a.formPage(group)
+-	dialog := a.dialog(scope, "Terminal", def.Name, "_Close", content, nil)
++	dialog := a.dialog(scope, "SSH", def.Name, "_Close", content, nil)
+ 
+ 	a.present(dialog, scope)
+ }
+@@ -177,11 +182,16 @@
+ 	signIn := a.credentialGroup("phial", password)
+ 
+ 	address := formGroup("Address", "The port is forwarded from the machine to this host.")
+-	addressRow := adw.NewActionRow()
+-	addressRow.SetTitle("[::1]:3389")
+-	addressRow.SetSubtitle(i18n.L("Local to this host"))
+-	addressRow.SetSubtitleSelectable(true)
+-	addressRow.AddCssClass("property")
++	addressRow := adw.NewEntryRow()
++	addressRow.SetTitle(i18n.L("Local to this host"))
++	addressRow.SetText("[::1]:3389")
++	addressRow.SetEditable(false)
++	addressRow.SetShowApplyButton(false)
++
++	copyAddress := a.iconButton("edit-copy-symbolic", i18n.L("Copy the Address"), func() {
++		a.copyText("[::1]:3389", i18n.L("Address copied"))
++	})
++	addressRow.AddSuffix(&copyAddress.Widget)
+ 	address.Add(&addressRow.Widget)
+ 
+ 	address.Add(a.unlockAgentRow())
+diff --git a/internal/ui/app.go b/internal/ui/app.go
+index 4b0c8b16bcff7250ba51dd6b8871b499fa1fa528..ef7403f9fa2f0a0dfd8bd168175567169659f8fc 100644
+--- a/internal/ui/app.go
++++ b/internal/ui/app.go
+@@ -555,7 +555,11 @@ 			if _, _, err := a.Service.VmProvision(a.Ctx, nil, mcp.NameInput{Name: def.Name}); err != nil {
+ 				return "", err
+ 			}
+ 
+-			return i18n.L("The machine was provisioned"), nil
++			if page := a.machinePages[def.Name]; page != nil {
++				a.idle(func() { page.refresh() })
++			}
++
++			return i18n.L("The guest agent is up to date"), nil
+ 		})
+ 	})
+ }
+diff --git a/internal/ui/machines.go b/internal/ui/machines.go
+index 022ae669001a0ee10ed86987e442459d7294e166..09b32612d1defd478b268643c82a74fccba45268 100644
+--- a/internal/ui/machines.go
++++ b/internal/ui/machines.go
+@@ -41,6 +41,8 @@ 	actionButton *gtk.Button
+ 	editButton   *gtk.Button
+ 	spinner      *gtk.Spinner
+ 
++	banner *adw.Banner
++
+ 	overviewGroup *adw.PreferencesGroup
+ 	stateRow      *adw.ActionRow
+ 
+@@ -82,7 +84,6 @@
+ 	accessGroup *adw.PreferencesGroup
+ 	appRow      *adw.ActionRow
+ 	rdpRow      *adw.ActionRow
+-	terminalRow *adw.ActionRow
+ 	serialRow   *adw.ActionRow
+ 
+ 	metricsRunning bool
+@@ -140,18 +141,15 @@ 		a.activate("show-apps")
+ 	})
+ 	page.rdpRow = a.actionRow("Remote Desktop", "Show the whole desktop of the machine", func() {
+ 		a.activate("show-rdp")
+-	})
+-	page.terminalRow = a.actionRow("Terminal", "Open a shell in the machine over vsock", func() {
+-		a.activate("show-terminal")
+ 	})
+ 	page.serialRow = a.actionRow("Serial Console", "Attach to the console of the machine", func() {
+ 		a.activate("show-serial")
+ 	})
+-	page.sshRow = a.actionRow("SSH Command", "Copy this command or open it in a terminal", func() {
++	page.sshRow = a.actionRow("SSH", "Open a shell in the machine over vsock", func() {
+ 		a.activate("show-terminal")
+ 	})
+ 
+-	for _, row := range []*adw.ActionRow{page.appRow, page.rdpRow, page.terminalRow, page.serialRow, page.sshRow} {
++	for _, row := range []*adw.ActionRow{page.appRow, page.rdpRow, page.serialRow, page.sshRow} {
+ 		row.AddSuffix(&gtk.NewImageFromIconName("go-next-symbolic").Widget)
+ 		page.appsGroup.Add(&row.Widget)
+ 	}
+@@ -235,7 +233,7 @@ 	// One flat list keeps the destructive entry last and avoids the empty
+ 	// section label, which renders as a blank row.
+ 	menu := gio.NewMenu()
+ 	menu.Append(i18n.L("_Logs"), "app.show-logs")
+-	menu.Append(i18n.L("Pro_vision the Machine"), "app.provision-machine")
++	menu.Append(i18n.L("_Reprovision the Guest Agent"), "app.provision-machine")
+ 	menu.Append(i18n.L("_Restart"), "app.restart-machine")
+ 	menu.Append(i18n.L("_Delete Machine…"), "app.delete-machine")
+ 
+@@ -246,6 +244,18 @@ 	menuButton.SetMenuModel(&menu.MenuModel)
+ 	menuButton.SetValign(gtk.AlignCenterValue)
+ 	header.PackEnd(&menuButton.Widget)
+ 
++	// The banner states that the guest carries an older agent than the host, so
++	// that the user runs the update step.
++	page.banner = adw.NewBanner(i18n.L("The guest agent of this machine is out of date"))
++	page.banner.SetButtonLabel(i18n.L("_Reprovision"))
++	page.banner.SetRevealed(false)
++
++	var onBannerButton func(adw.Banner)
++	onBannerButton = func(adw.Banner) { a.activate("provision-machine") }
++	page.banner.ConnectButtonClicked(&onBannerButton)
++	a.hold(&onBannerButton)
++
++	toolbar.AddTopBar(&page.banner.Widget)
+ 	toolbar.AddTopBar(&header.Widget)
+ 	toolbar.SetContent(a.pageContent(
+ 		page.installGroup,
+@@ -551,13 +561,42 @@ 		ready = p.def.Ready()
+ 	}
+ 
+ 	p.setState(active, ready, p.app.Service.Installing(p.def.Name), vmInstalled(p.def))
++	p.refreshAgent()
++}
++
++// refreshAgent states whether the guest carries an agent that is as new as the
++// binary of the host.
++func (p *machinePage) refreshAgent() {
++	if !p.active || !p.ready {
++		p.banner.SetRevealed(false)
++
++		return
++	}
++
++	name := p.def.Name
++	def := p.def
++
++	go func() {
++		outdated, err := virt.GuestOutdated(def)
++		if err != nil {
++			return
++		}
++
++		p.app.idle(func() {
++			if p.def.Name != name {
++				return
++			}
++
++			p.banner.SetRevealed(outdated)
++		})
++	}()
+ }
+ 
+ // refreshAccess turns the controls on that need a reachable guest.
+ func (p *machinePage) refreshAccess() {
+ 	ready := p.active && p.ready
+ 
+-	for _, row := range []*adw.ActionRow{p.appRow, p.rdpRow, p.terminalRow, p.sshRow} {
++	for _, row := range []*adw.ActionRow{p.appRow, p.rdpRow, p.sshRow} {
+ 		row.SetSensitive(ready)
+ 	}
+ 
+diff --git a/internal/virt/agent_version.go b/internal/virt/agent_version.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..6fa0cae5a20f1936fa1a62b032096c5728e8c3be
+--- /dev/null
++++ b/internal/virt/agent_version.go
+@@ -0,0 +1,55 @@
++package virt
++
++import (
++	"context"
++	"os"
++	"strconv"
++	"strings"
++)
++
++// GuestAgentPath states where the provisioning copies the agent into a guest.
++const GuestAgentPath = "/home/phial/.local/bin/phial"
++
++// HostBuildTime states the build time of the binary of the host, which is the
++// time that the file of that binary changed.
++func HostBuildTime() (int64, error) {
++	executable, err := os.Executable()
++	if err != nil {
++		return 0, err
++	}
++
++	info, err := os.Stat(executable)
++	if err != nil {
++		return 0, err
++	}
++
++	return info.ModTime().Unix(), nil
++}
++
++// GuestBuildTime states the build time of the agent inside one guest, or zero
++// when the guest carries no agent yet. It reads the file as the user of the
++// guest, like every other call of the guest that is not the provisioning.
++func GuestBuildTime(def Definition) (int64, error) {
++	output, err := SSHRun(context.Background(), def.Name, "stat -c %Y "+GuestAgentPath+" 2>/dev/null || echo 0")
++	if err != nil {
++		return 0, err
++	}
++
++	return strconv.ParseInt(strings.TrimSpace(string(output)), 10, 64)
++}
++
++// GuestOutdated states whether the agent of a guest is older than the binary of
++// the host, so that the guest needs the update step.
++func GuestOutdated(def Definition) (bool, error) {
++	host, err := HostBuildTime()
++	if err != nil {
++		return false, err
++	}
++
++	guest, err := GuestBuildTime(def)
++	if err != nil {
++		return false, err
++	}
++
++	return guest < host, nil
++}
+diff --git a/internal/virt/qga.go b/internal/virt/qga.go
+index 66aed2ea30d65962db4b8e41e5d8fa65fc3175f6..7b6daed0446d0720ba5598b268c7cfc226efaa46 100644
+--- a/internal/virt/qga.go
++++ b/internal/virt/qga.go
+@@ -8,8 +8,13 @@ 	"fmt"
+ 	"net"
+ 	"path/filepath"
+ 	"strings"
++	"sync"
+ 	"time"
+ )
++
++// qgaLock keeps one client at a time on the agent, because a second client
++// drops the connection of the first one.
++var qgaLock sync.Mutex
+ 
+ type qgaRequest struct {
+ 	Execute   string      `json:"execute"`
+@@ -33,6 +38,52 @@ 	} `json:"statistics"`
+ 	IPAddresses []interface{} `json:"ip-addresses"`
+ }
+ 
++// QgaWriteFile writes one file in the guest through the agent, in chunks that
++// stay small because the channel carries a request as one message.
++func QgaWriteFile(def Definition, path string, mode int, data []byte) error {
++	raw, err := QgaCall(def, "guest-file-open", map[string]interface{}{"path": path, "mode": "wb"})
++	if err != nil {
++		return err
++	}
++
++	var handle int
++	if err := json.Unmarshal(raw, &handle); err != nil {
++		return err
++	}
++
++	defer func() {
++		_, _ = QgaCall(def, "guest-file-close", map[string]interface{}{"handle": handle})
++	}()
++
++	for len(data) > 0 {
++		chunk := data
++		if len(chunk) > 512*1024 {
++			chunk = chunk[:512*1024]
++		}
++		data = data[len(chunk):]
++
++		if _, err := QgaCall(def, "guest-file-write", map[string]interface{}{
++			"handle":  handle,
++			"buf-b64": base64.StdEncoding.EncodeToString(chunk),
++		}); err != nil {
++			return err
++		}
++	}
++
++	_, err = QgaExec(def, fmt.Sprintf("chmod %04o %s", mode, path))
++
++	return err
++}
++
++// WaitForAgent states whether the agent of one machine answers. The agent
++// answers as soon as the guest reaches its early boot, so the caller repeats
++// this call instead of waiting for a login.
++func WaitForAgent(def Definition) error {
++	_, err := QgaCall(def, "guest-ping", nil)
++
++	return err
++}
++
+ // QgaExec runs one script in the guest through the agent of the machine, which
+ // runs as root, and states its output.
+ func QgaExec(def Definition, script string) (string, error) {
+@@ -102,36 +153,90 @@
+ 	return "", errors.New("the script in the guest did not finish in time")
+ }
+ 
++// qgaSend states whether the agent of the machine received one request.
++func qgaSend(conn net.Conn, payload qgaRequest) error {
++	data, err := json.Marshal(payload)
++	if err != nil {
++		return err
++	}
++
++	_, err = conn.Write(append(data, '\n'))
++
++	return err
++}
++
++// qgaRead states the reply of the agent of the machine for one request.
++func qgaRead(decoder *json.Decoder) (json.RawMessage, error) {
++	var envelope qgaEnvelope
++	if err := decoder.Decode(&envelope); err != nil {
++		return nil, err
++	}
++
++	if envelope.Error != nil {
++		return nil, fmt.Errorf("%s", envelope.Error.Desc)
++	}
++
++	return envelope.Return, nil
++}
++
++// QgaCall states the reply of the agent of the machine for one request. The
++// agent states one client at a time, so every call holds the lock of the agent.
+ func QgaCall(def Definition, execute string, arguments interface{}) (json.RawMessage, error) {
++	qgaLock.Lock()
++	defer qgaLock.Unlock()
++
+ 	conn, err := net.DialTimeout("unix", filepath.Join(def.runtimePath(), "qga.sock"), 5*time.Second)
+ 	if err != nil {
+ 		return nil, err
+ 	}
+ 	defer conn.Close()
+ 
+-	_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
++	_ = conn.SetDeadline(time.Now().Add(30 * time.Second))
+ 
+-	payload, err := json.Marshal(qgaRequest{Execute: execute, Arguments: arguments})
+-	if err != nil {
++	decoder := json.NewDecoder(conn)
++
++	// The agent can carry the reply of a connection that ended early, so the call
++	// states a unique value first and reads until the agent states that value.
++	sync := time.Now().UnixNano()
++
++	if err := qgaSend(conn, qgaRequest{Execute: "guest-sync", Arguments: map[string]interface{}{"id": sync}}); err != nil {
+ 		return nil, err
+ 	}
+ 
+-	if _, err := conn.Write(append(payload, '\n')); err != nil {
+-		return nil, err
+-	}
++	for {
++		raw, err := qgaRead(decoder)
++		if err != nil {
++			return nil, err
++		}
++
++		var value int64
++		if err := json.Unmarshal(raw, &value); err != nil {
++			continue
++		}
+ 
+-	decoder := json.NewDecoder(conn)
++		if value == sync {
++			break
++		}
++	}
+ 
+-	var envelope qgaEnvelope
+-	if err := decoder.Decode(&envelope); err != nil {
++	if err := qgaSend(conn, qgaRequest{Execute: execute, Arguments: arguments}); err != nil {
+ 		return nil, err
+ 	}
+ 
+-	if envelope.Error != nil {
+-		return nil, fmt.Errorf("%s", envelope.Error.Desc)
+-	}
++	for {
++		raw, err := qgaRead(decoder)
++		if err != nil {
++			return nil, err
++		}
+ 
+-	return envelope.Return, nil
++		// A value states a leftover synchronization, so the call keeps reading.
++		var value int64
++		if err := json.Unmarshal(raw, &value); err == nil {
++			continue
++		}
++
++		return raw, nil
++	}
+ }
+ 
+ func QgaNetworkBytes(def Definition) (int64, int64, error) {
+diff --git a/po/phial.pot b/po/phial.pot
+index 2705c262e2ccd674a4a3b8412b0f312eb8096bd6..db60f4868551a73232c697b4e7155120e7ce4882 100644
+--- a/po/phial.pot
++++ b/po/phial.pot
+@@ -8,7 +8,7 @@ msgid ""
+ msgstr ""
+ "Project-Id-Version: PACKAGE VERSION\n"
+ "Report-Msgid-Bugs-To: \n"
+-"POT-Creation-Date: 2026-10-13 19:28-0700\n"
++"POT-Creation-Date: 2026-10-14 17:05-0700\n"
+ "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+ "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+ "Language-Team: LANGUAGE <LL@li.org>\n"
+@@ -186,8 +186,8 @@ "stays."
+ msgstr ""
+ 
+ #: ../internal/ui/providers.go:417 ../internal/ui/connections.go:167
+-#: ../internal/ui/app.go:483 ../internal/ui/dialogs.go:72
+-#: ../internal/ui/dialogs.go:111 ../internal/ui/machines.go:332
++#: ../internal/ui/dialogs.go:72 ../internal/ui/dialogs.go:111
++#: ../internal/ui/machines.go:346 ../internal/ui/app.go:483
+ msgid "_Cancel"
+ msgstr ""
+ 
+@@ -303,7 +303,7 @@ msgid "These values are the starting point of a new grant."
+ msgstr ""
+ 
+ #: ../internal/ui/devices.go:21 ../internal/ui/connections.go:93
+-#: ../internal/ui/machines.go:183
++#: ../internal/ui/machines.go:185
+ msgid "None"
+ msgstr ""
+ 
+@@ -461,15 +461,15 @@ msgstr ""
+ 
+ #: ../internal/ui/machine_dialogs.go:123 ../internal/ui/machine_dialogs.go:132
+ #: ../internal/ui/machine_dialogs.go:141 ../internal/ui/machine_dialogs.go:160
+-#: ../internal/ui/machine_dialogs.go:169 ../internal/ui/machines.go:577
++#: ../internal/ui/machine_dialogs.go:169 ../internal/ui/machines.go:620
+ msgid "Off"
+ msgstr ""
+ 
+-#: ../internal/ui/machine_dialogs.go:132 ../internal/ui/machines.go:579
++#: ../internal/ui/machine_dialogs.go:132 ../internal/ui/machines.go:622
+ msgid "Venus"
+ msgstr ""
+ 
+-#: ../internal/ui/machine_dialogs.go:132 ../internal/ui/machines.go:575
++#: ../internal/ui/machine_dialogs.go:132 ../internal/ui/machines.go:618
+ msgid "VirGL"
+ msgstr ""
+ 
+@@ -681,73 +681,11 @@ #: ../internal/ui/logs.go:45
+ msgid "This machine has no log yet"
+ msgstr ""
+ 
+-#: ../internal/ui/app.go:172
+-msgid "Phial keeps the agent channel open so that machines can ask for access."
+-msgstr ""
+-
+-#: ../internal/ui/app.go:313 ../internal/ui/access.go:126
+-#: ../internal/ui/access.go:161 ../internal/ui/access.go:201
+-msgid "Command copied"
+-msgstr ""
+-
+-#: ../internal/ui/app.go:412
+-msgid "translator-credits"
+-msgstr ""
+-
+-#: ../internal/ui/app.go:440
+-msgid "New machine, provider, or forward"
+-msgstr ""
+-
+-#: ../internal/ui/app.go:441
+-msgid "Sync secrets"
+-msgstr ""
+-
+-#: ../internal/ui/app.go:443
+-msgid "Keyboard shortcuts"
+-msgstr ""
+-
+-#: ../internal/ui/app.go:444
+-msgid "Close window"
+-msgstr ""
+-
+-#: ../internal/ui/app.go:445
+-msgid "Quit"
+-msgstr ""
+-
+-#: ../internal/ui/app.go:448 ../internal/ui/window.go:163
++#: ../internal/ui/window.go:163 ../internal/ui/app.go:448
+ #: ../assets/resources/window.blp:52 ../assets/resources/window.blp:58
+ msgid "Machines"
+ msgstr ""
+ 
+-#: ../internal/ui/app.go:449
+-msgid "Select a Machine 1 to 9"
+-msgstr ""
+-
+-#: ../internal/ui/app.go:450
+-msgid "Install, start, or stop the machine"
+-msgstr ""
+-
+-#: ../internal/ui/app.go:477
+-msgid "Stop the machines and quit?"
+-msgstr ""
+-
+-#: ../internal/ui/app.go:479
+-#, c-format
+-msgid "This stops %s. Close the window instead to keep the agent channel open."
+-msgstr ""
+-
+-#: ../internal/ui/app.go:484
+-msgid "_Stop and Quit"
+-msgstr ""
+-
+-#: ../internal/ui/app.go:549
+-msgid "Start the machine first"
+-msgstr ""
+-
+-#: ../internal/ui/app.go:558
+-msgid "The machine was provisioned"
+-msgstr ""
+-
+ #: ../internal/ui/window.go:174
+ msgid "Requests"
+ msgstr ""
+@@ -811,6 +749,11 @@ #: ../internal/ui/access.go:114
+ msgid "Socket on this host"
+ msgstr ""
+ 
++#: ../internal/ui/access.go:126 ../internal/ui/access.go:161
++#: ../internal/ui/access.go:201 ../internal/ui/app.go:313
++msgid "Command copied"
++msgstr ""
++
+ #: ../internal/ui/access.go:145
+ msgid "A host alias that Phial keeps in your SSH configuration"
+ msgstr ""
+@@ -867,161 +810,226 @@ #: ../internal/ui/access.go:338
+ msgid "The guest lists no applications"
+ msgstr ""
+ 
+-#: ../internal/ui/machines.go:108
++#: ../internal/ui/machines.go:110
+ msgid "Installation"
+ msgstr ""
+ 
+-#: ../internal/ui/machines.go:109
++#: ../internal/ui/machines.go:111
+ msgid ""
+ "Phial writes Fedora to the disk. A machine stays usable while the installer "
+ "runs."
+ msgstr ""
+ 
+-#: ../internal/ui/machines.go:115
++#: ../internal/ui/machines.go:117
+ msgid "Overview"
+ msgstr ""
+ 
+-#: ../internal/ui/machines.go:136
++#: ../internal/ui/machines.go:138
+ msgid "Applications and Desktop"
+ msgstr ""
+ 
+-#: ../internal/ui/machines.go:160
++#: ../internal/ui/machines.go:162
+ msgid "Shared Folders"
+ msgstr ""
+ 
+-#: ../internal/ui/machines.go:161
++#: ../internal/ui/machines.go:163
+ msgid "Mounted in the machine with virtiofs."
+ msgstr ""
+ 
+-#: ../internal/ui/machines.go:171
++#: ../internal/ui/machines.go:173
+ msgid "USB Devices"
+ msgstr ""
+ 
+-#: ../internal/ui/machines.go:181
++#: ../internal/ui/machines.go:183
+ msgid "Whole USB Hub"
+ msgstr ""
+ 
+-#: ../internal/ui/machines.go:182
++#: ../internal/ui/machines.go:184
+ msgid "A second xHCI controller gives the machine its own hub."
+ msgstr ""
+ 
+-#: ../internal/ui/machines.go:195
++#: ../internal/ui/machines.go:197
+ msgid "Storage"
+ msgstr ""
+ 
+-#: ../internal/ui/machines.go:202
++#: ../internal/ui/machines.go:204
+ msgid "Open Containing Folder"
+ msgstr ""
+ 
+-#: ../internal/ui/machines.go:216
++#: ../internal/ui/machines.go:218
+ msgid "The machine changes state"
+ msgstr ""
+ 
+-#: ../internal/ui/machines.go:229
++#: ../internal/ui/machines.go:231
+ msgid "Machine Settings"
+ msgstr ""
+ 
+-#: ../internal/ui/machines.go:237
++#: ../internal/ui/machines.go:239
+ msgid "_Logs"
+ msgstr ""
+ 
+-#: ../internal/ui/machines.go:238
+-msgid "Pro_vision the Machine"
++#: ../internal/ui/machines.go:240
++msgid "_Reprovision the Guest Agent"
+ msgstr ""
+ 
+-#: ../internal/ui/machines.go:239
++#: ../internal/ui/machines.go:241
+ msgid "_Restart"
+ msgstr ""
+ 
+-#: ../internal/ui/machines.go:240
++#: ../internal/ui/machines.go:242
+ msgid "_Delete Machine\342\200\246"
+ msgstr ""
+ 
+-#: ../internal/ui/machines.go:244
++#: ../internal/ui/machines.go:246
+ msgid "Machine Menu"
+ msgstr ""
+ 
+-#: ../internal/ui/machines.go:325
++#: ../internal/ui/machines.go:253
++msgid "The guest agent of this machine is out of date"
++msgstr ""
++
++#: ../internal/ui/machines.go:254
++msgid "_Reprovision"
++msgstr ""
++
++#: ../internal/ui/machines.go:339
+ msgid "Install the machine?"
+ msgstr ""
+ 
+-#: ../internal/ui/machines.go:327
++#: ../internal/ui/machines.go:341
+ #, c-format
+ msgid ""
+ "Phial downloads the Fedora netinst image and installs %s onto %s. This takes "
+ "about fifteen minutes."
+ msgstr ""
+ 
+-#: ../internal/ui/machines.go:333
++#: ../internal/ui/machines.go:347
+ msgid "_Install"
+ msgstr ""
+ 
+-#: ../internal/ui/machines.go:354
++#: ../internal/ui/machines.go:368
+ msgid "The installer runs in the background"
+ msgstr ""
+ 
+-#: ../internal/ui/machines.go:384
++#: ../internal/ui/machines.go:398
+ #, c-format
+ msgid ""
+ "This removes the definition of %s. The disk image stays on disk unless you "
+ "ask for its removal."
+ msgstr ""
+ 
+-#: ../internal/ui/machines.go:411
++#: ../internal/ui/machines.go:425
+ msgid "The machine and its disk were deleted"
+ msgstr ""
+ 
+-#: ../internal/ui/machines.go:414
++#: ../internal/ui/machines.go:428
+ msgid "The machine was deleted"
+ msgstr ""
+ 
+-#: ../internal/ui/machines.go:484
++#: ../internal/ui/machines.go:498
+ msgid "The usage is unavailable"
+ msgstr ""
+ 
+-#: ../internal/ui/machines.go:485
++#: ../internal/ui/machines.go:499
+ msgid "Phial could not read the usage of the machine"
+ msgstr ""
+ 
+-#: ../internal/ui/machines.go:487
++#: ../internal/ui/machines.go:501
+ msgid "No live usage"
+ msgstr ""
+ 
+-#: ../internal/ui/machines.go:488
++#: ../internal/ui/machines.go:502
+ msgid "Start the machine to read the usage of the guest"
+ msgstr ""
+ 
+-#: ../internal/ui/machines.go:614
++#: ../internal/ui/machines.go:657
+ #, c-format
+ msgid "%.1f of %d cores"
+ msgstr ""
+ 
+-#: ../internal/ui/machines.go:616
++#: ../internal/ui/machines.go:659
+ #, c-format
+ msgid "%.0f%% of one core"
+ msgstr ""
+ 
+-#: ../internal/ui/machines.go:619
++#: ../internal/ui/machines.go:662
+ #, c-format
+ msgid "%s of %s"
+ msgstr ""
+ 
+-#: ../internal/ui/machines.go:622
++#: ../internal/ui/machines.go:665
+ #, c-format
+ msgid "%s of %s on this host"
+ msgstr ""
+ 
+-#: ../internal/ui/machines.go:629
++#: ../internal/ui/machines.go:672
+ msgid "The guest agent does not answer"
+ msgstr ""
+ 
+-#: ../internal/ui/machines.go:631
++#: ../internal/ui/machines.go:674
+ msgid "No traffic"
+ msgstr ""
+ 
+-#: ../internal/ui/machines.go:634
++#: ../internal/ui/machines.go:677
+ #, c-format
+ msgid "%s/s received, %s/s sent"
++msgstr ""
++
++#: ../internal/ui/app.go:172
++msgid "Phial keeps the agent channel open so that machines can ask for access."
++msgstr ""
++
++#: ../internal/ui/app.go:412
++msgid "translator-credits"
++msgstr ""
++
++#: ../internal/ui/app.go:440
++msgid "New machine, provider, or forward"
++msgstr ""
++
++#: ../internal/ui/app.go:441
++msgid "Sync secrets"
++msgstr ""
++
++#: ../internal/ui/app.go:443
++msgid "Keyboard shortcuts"
++msgstr ""
++
++#: ../internal/ui/app.go:444
++msgid "Close window"
++msgstr ""
++
++#: ../internal/ui/app.go:445
++msgid "Quit"
++msgstr ""
++
++#: ../internal/ui/app.go:449
++msgid "Select a Machine 1 to 9"
++msgstr ""
++
++#: ../internal/ui/app.go:450
++msgid "Install, start, or stop the machine"
++msgstr ""
++
++#: ../internal/ui/app.go:477
++msgid "Stop the machines and quit?"
++msgstr ""
++
++#: ../internal/ui/app.go:479
++#, c-format
++msgid "This stops %s. Close the window instead to keep the agent channel open."
++msgstr ""
++
++#: ../internal/ui/app.go:484
++msgid "_Stop and Quit"
++msgstr ""
++
++#: ../internal/ui/app.go:549
++msgid "Start the machine first"
++msgstr ""
++
++#: ../internal/ui/app.go:562
++msgid "The guest agent is up to date"
+ msgstr ""
+ 
+ #: ../assets/resources/window.blp:7 ../assets/resources/window.blp:22
+
