@@ -1,0 +1,123 @@
+From 19410b33f6220c7909000dce8b3185e98a402b64 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Thu, 15 Oct 2026 23:18:56 -0700
+Subject: [PATCH] feat: Improve banner and transitions for provisioning state
+---
+diff --git a/internal/ui/access.go b/internal/ui/access.go
+index 1cddeabfd0c2aa5185a8b801973ec189284365ca..2d46737ec27502c2b7202befecaeb6c4609f6788 100644
+--- a/internal/ui/access.go
++++ b/internal/ui/access.go
+@@ -207,7 +207,7 @@ 	}).Widget)
+ 
+ 	address.Add(&a.buttonRow("_Copy the Command for Another Client", "edit-copy-symbolic", func() {
+ 		a.copyText(
+-			fmt.Sprintf("xfreerdp /v:%s /u:%s /cert:ignore", listenAddress, def.Name),
++			fmt.Sprintf("xfreerdp /v:%s /u:phial /cert:ignore", listenAddress),
+ 			i18n.L("Command copied"),
+ 		)
+ 	}).Widget)
+diff --git a/internal/ui/app.go b/internal/ui/app.go
+index f8525fb37e46af3aa054a188823ffcdef653510f..a1243c4d6045ffe180c55e335f6ece80bbb20443 100644
+--- a/internal/ui/app.go
++++ b/internal/ui/app.go
+@@ -567,13 +567,25 @@ 			a.toast(i18n.L("Start the machine first"))
+ 			return
+ 		}
+ 
++		page := a.machinePages[def.Name]
++
++		if page != nil {
++			page.setPending("provision")
++		}
++
+ 		a.goAsync(func() (string, error) {
+-			if _, _, err := a.Service.VmProvision(a.Ctx, nil, mcp.NameInput{Name: def.Name}); err != nil {
+-				return "", err
+-			}
++			_, _, err := a.Service.VmProvision(a.Ctx, nil, mcp.NameInput{Name: def.Name})
+ 
+-			if page := a.machinePages[def.Name]; page != nil {
+-				a.idle(func() { page.refresh() })
++			a.idle(func() {
++				if page != nil {
++					page.pending = ""
++					page.render()
++					page.refresh()
++				}
++			})
++
++			if err != nil {
++				return "", err
+ 			}
+ 
+ 			return i18n.L("The guest agent is up to date"), nil
+diff --git a/internal/ui/machines.go b/internal/ui/machines.go
+index 5e3de37e76c62085a1ecbcdfeeb06e3a09b938bb..87e3c4fd2985331ff32f2dddd485331764ebde37 100644
+--- a/internal/ui/machines.go
++++ b/internal/ui/machines.go
+@@ -256,9 +256,9 @@ 	onBannerButton = func(adw.Banner) { a.activate("provision-machine") }
+ 	page.banner.ConnectButtonClicked(&onBannerButton)
+ 	a.hold(&onBannerButton)
+ 
+-	toolbar.AddTopBar(&page.banner.Widget)
+ 	toolbar.AddTopBar(&header.Widget)
+-	toolbar.SetContent(a.pageContent(
++	toolbar.SetContent(a.pageContentWithBanner(
++		page.banner,
+ 		page.installGroup,
+ 		page.installActions,
+ 		page.overviewGroup,
+@@ -482,6 +482,7 @@ 	p.installGroup.SetVisible(p.installing)
+ 	p.installActions.SetVisible(p.installing)
+ 	p.editButton.SetSensitive(!p.installing)
+ 	p.spinner.SetVisible(p.pending != "" && !p.installing)
++	p.banner.SetSensitive(p.pending == "")
+ 
+ 	for _, row := range []*adw.ActionRow{p.cpuRow, p.memoryRow, p.diskRow, p.networkRow} {
+ 		row.SetVisible(p.active)
+diff --git a/internal/ui/util.go b/internal/ui/util.go
+index b75182fea6e04dc1f9d914e78b6b0f576b1e0752..08601c6c3f40cd3576d00e50cba466dec4049e43 100644
+--- a/internal/ui/util.go
++++ b/internal/ui/util.go
+@@ -320,6 +320,31 @@
+ 	return &scrolled.Widget
+ }
+ 
++// pageContentWithBanner wraps boxed lists like pageContent and puts a banner
++// above them, full width, as the HIG shows it. A hidden banner collapses, so
++// no spacer stays behind.
++func (a *App) pageContentWithBanner(banner *adw.Banner, groups ...*adw.PreferencesGroup) *gtk.Widget {
++	box := gtk.NewBox(gtk.OrientationVerticalValue, 24)
++	box.SetMarginTop(24)
++	box.SetMarginBottom(24)
++	box.SetMarginStart(12)
++	box.SetMarginEnd(12)
++
++	for _, group := range groups {
++		box.Append(&group.Widget)
++	}
++
++	clamp := a.clamped(&box.Widget)
++
++	content := gtk.NewBox(gtk.OrientationVerticalValue, 0)
++	content.Append(&banner.Widget)
++	content.Append(&clamp.Widget)
++
++	scrolled := a.scrolled(&content.Widget)
++
++	return &scrolled.Widget
++}
++
+ func (a *App) scrolled(child *gtk.Widget) *gtk.ScrolledWindow {
+ 	scrolled := gtk.NewScrolledWindow()
+ 	scrolled.SetHexpand(true)
+@@ -413,6 +438,8 @@ 	case pending == "start" || (active && !ready):
+ 		return i18n.L("Starting")
+ 	case pending == "restart":
+ 		return i18n.L("Restarting")
++	case pending == "provision":
++		return i18n.L("Updating the guest agent")
+ 	case active:
+ 		return i18n.L("Running")
+ 	case pending == "stop":
+
