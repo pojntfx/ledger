@@ -1,0 +1,203 @@
+From 573db89cc78632e7d11adfd06af6e308d9229c33 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Thu, 15 Oct 2026 23:14:31 -0700
+Subject: [PATCH] feat: Align app start dialog with other search dialogs
+---
+diff --git a/internal/ui/access.go b/internal/ui/access.go
+index 229809a1c44fc317f2eafb7c26e8447d2e98c966..1cddeabfd0c2aa5185a8b801973ec189284365ca 100644
+--- a/internal/ui/access.go
++++ b/internal/ui/access.go
+@@ -236,29 +236,29 @@
+ 	destinationGroup := formGroup("Destination", "A waypipe window belongs to this desktop, an RDP window to the guest session.")
+ 	destinationGroup.Add(&destination.row.Widget)
+ 
+-	search := gtk.NewSearchEntry()
+-	search.SetPlaceholderText(i18n.L("Search applications"))
+-	search.SetMarginTop(12)
+-	search.SetMarginBottom(6)
+-
+-	group := adw.NewPreferencesGroup()
++	statusGroup := adw.NewPreferencesGroup()
+ 
+ 	statusRow := adw.NewActionRow()
+ 	statusRow.SetTitle(i18n.L("Looking for applications"))
+ 	spinner := adw.NewSpinner()
+-	spinner.SetVisible(true)
+ 	statusRow.AddPrefix(&spinner.Widget)
+-	group.Add(&statusRow.Widget)
++	statusGroup.Add(&statusRow.Widget)
++
++	group := adw.NewPreferencesGroup()
+ 
+ 	var appRows []*adw.ActionRow
++
++	var searchEntry *gtk.SearchEntry
+ 
+ 	var onSearch func(gtk.SearchEntry)
+ 	onSearch = func(gtk.SearchEntry) {
+-		query := strings.ToLower(strings.TrimSpace(search.GetText()))
++		query := strings.ToLower(strings.TrimSpace(searchEntry.GetText()))
+ 		shown := 0
+ 
+ 		for _, row := range appRows {
+-			match := query == "" || strings.Contains(strings.ToLower(row.GetTitle()), query)
++			match := query == "" ||
++				strings.Contains(strings.ToLower(row.GetTitle()), query) ||
++				strings.Contains(strings.ToLower(row.GetSubtitle()), query)
+ 			row.SetVisible(match)
+ 			if match {
+ 				shown++
+@@ -266,19 +266,21 @@ 			}
+ 		}
+ 
+ 		if len(appRows) == 0 {
++			group.SetVisible(false)
++
+ 			return
+ 		}
+ 
+ 		if shown == 0 {
++			group.SetVisible(false)
+ 			statusRow.SetTitle(i18n.L("No application matches"))
+-			statusRow.SetVisible(true)
++			statusGroup.SetVisible(true)
+ 			return
+ 		}
+ 
+-		statusRow.SetVisible(false)
++		group.SetVisible(true)
++		statusGroup.SetVisible(false)
+ 	}
+-	search.ConnectSearchChanged(&onSearch)
+-	scope.hold(&onSearch)
+ 
+ 	runApp := func(command string) {
+ 		a.goAsync(func() (string, error) {
+@@ -310,65 +312,80 @@ 		}
+ 		runApp(value)
+ 	}).Widget)
+ 
+-	page := adw.NewPreferencesPage()
+-	page.Add(destinationGroup)
+-	page.Add(group)
+-	page.Add(commandGroup)
++	group.SetVisible(false)
++
++	var refresh *gtk.Button
++
++	var load func()
++	load = func() {
++		for _, row := range appRows {
++			group.Remove(&row.Widget)
++		}
++		appRows = nil
+ 
+-	layout := gtk.NewBox(gtk.OrientationVerticalValue, 0)
+-	layout.SetMarginStart(12)
+-	layout.SetMarginEnd(12)
+-	layout.SetMarginTop(12)
+-	layout.SetMarginBottom(12)
+-	layout.Append(&search.Widget)
+-	layout.Append(&page.Widget)
++		statusRow.SetTitle(i18n.L("Looking for applications"))
++		statusRow.SetSubtitle("")
++		statusGroup.SetVisible(true)
++		spinner.SetVisible(true)
++		group.SetVisible(false)
++		refresh.SetSensitive(false)
+ 
+-	content := a.scrolled(&layout.Widget)
++		go func() {
++			_, output, err := a.Service.ListGuestApps(a.Ctx, nil, mcp.ListAppsInput{VM: def.Name})
++
++			a.idle(func() {
++				spinner.SetVisible(false)
++				refresh.SetSensitive(true)
++
++				if err != nil {
++					statusRow.SetTitle(i18n.L("The applications could not be listed"))
++					statusRow.SetSubtitle(err.Error())
++					return
++				}
+ 
+-	dialog := a.dialog(scope, "Guest Applications", def.Name, "_Close", &content.Widget, nil)
++				apps := []mcp.GuestApp{}
++				if output != nil {
++					apps = output.Apps
++				}
+ 
+-	go func() {
+-		_, output, err := a.Service.ListGuestApps(a.Ctx, nil, mcp.ListAppsInput{VM: def.Name})
++				if len(apps) == 0 {
++					statusRow.SetTitle(i18n.L("The guest lists no applications"))
++					return
++				}
+ 
+-		a.idle(func() {
+-			spinner.SetVisible(false)
++				statusGroup.SetVisible(false)
+ 
+-			if err != nil {
+-				statusRow.SetTitle(i18n.L("The applications could not be listed"))
+-				statusRow.SetSubtitle(err.Error())
+-				return
+-			}
++				for _, app := range apps {
++					app := app
+ 
+-			apps := []mcp.GuestApp{}
+-			if output != nil {
+-				apps = output.Apps
+-			}
++					row := adw.NewActionRow()
++					row.SetTitle(app.Name)
++					row.SetSubtitle(app.ID)
++					row.SetActivatable(true)
+ 
+-			if len(apps) == 0 {
+-				statusRow.SetTitle(i18n.L("The guest lists no applications"))
+-				return
+-			}
++					var cb func(adw.ActionRow)
++					cb = func(adw.ActionRow) { runApp(app.Exec) }
++					row.ConnectActivated(&cb)
++					scope.hold(&cb)
+ 
+-			group.Remove(&statusRow.Widget)
++					group.Add(&row.Widget)
++					appRows = append(appRows, row)
++				}
+ 
+-			for _, app := range apps {
+-				app := app
++				onSearch(gtk.SearchEntry{})
++			})
++		}()
++	}
+ 
+-				row := adw.NewActionRow()
+-				row.SetTitle(app.Name)
+-				row.SetSubtitle(app.ID)
+-				row.SetActivatable(true)
++	refresh = a.iconButton("view-refresh-symbolic", i18n.L("Refresh the Application List"), func() { load() })
+ 
+-				var cb func(adw.ActionRow)
+-				cb = func(adw.ActionRow) { runApp(app.Exec) }
+-				row.ConnectActivated(&cb)
+-				scope.hold(&cb)
++	content := a.formPage(destinationGroup, statusGroup, group, commandGroup)
++	dialog, searchEntryRef := a.dialogSearch(scope, "Guest Applications", def.Name, content, "Search applications", &refresh.Widget)
++	searchEntry = searchEntryRef
++	searchEntry.ConnectSearchChanged(&onSearch)
++	scope.hold(&onSearch)
+ 
+-				group.Add(&row.Widget)
+-				appRows = append(appRows, row)
+-			}
+-		})
+-	}()
++	load()
+ 
+ 	a.present(dialog, scope)
+ }
+
