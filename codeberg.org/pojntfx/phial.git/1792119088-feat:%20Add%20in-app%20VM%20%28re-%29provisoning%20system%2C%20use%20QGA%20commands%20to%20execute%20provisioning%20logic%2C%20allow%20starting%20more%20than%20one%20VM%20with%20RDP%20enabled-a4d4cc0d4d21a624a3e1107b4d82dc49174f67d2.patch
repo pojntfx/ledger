@@ -1,0 +1,951 @@
+From a4d4cc0d4d21a624a3e1107b4d82dc49174f67d2 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Thu, 15 Oct 2026 19:51:28 -0700
+Subject: [PATCH] feat: Add in-app VM (re-)provisoning system, use QGA commands to execute provisioning logic, allow starting more than one VM with RDP enabled
+---
+diff --git a/.gitignore b/.gitignore
+new file mode 100644
+index 0000000000000000000000000000000000000000..5eb45373ecc4b9a0a11f213f9eda905e29d32000
+--- /dev/null
++++ b/.gitignore
+@@ -0,0 +1,2 @@
++/bin/
++/internal/guest/agent/phial
+diff --git a/docs/DESIGN.md b/docs/DESIGN.md
+index e5ce4086e49e8055cdcc0f0cb47b29b7bb68dd9e..4a51eb2a081e1d3606a4d5a8504fa68f3b94e3ad 100644
+--- a/docs/DESIGN.md
++++ b/docs/DESIGN.md
+@@ -81,7 +81,7 @@ repeat it. The header bar carries one primary control, one pencil, and one menu:
+ 
+ - The primary control is Install, Start, or Stop, and it follows the state of the machine.
+ - The pencil opens Machine Settings.
+-- The menu carries Logs, Provision the Machine, Restart, and Delete Machine.
++- The menu carries Logs, Reprovision the Guest Agent, Restart, and Delete Machine.
+ - Logs opens the log of the machine in the text editor: the console of the installer when it keeps one, else the service log of the machine.
+ - The Serial Console and Remote Desktop dialogs state the user and the password with a copy control for each, because the guest asks for both at its login.
+ - The Terminal and Remote Desktop dialogs carry Unlock the SSH Agent, which loads the key of the user into the dedicated agent of Phial and asks for the passphrase through pinentry.
+@@ -90,10 +90,14 @@ - The install provisions the machine: it boots the guest once, waits for the guest agent to answer, copies the units of the guest into it, and stops it again.
+ - The guest agent is the binary of Phial itself, so the reprovision step, which runs the provisioning again, replaces the agent of a machine as well.
+ - The provisioning of a machine is idempotent, so the reprovision item in the menu of a machine runs it at any time.
+ - The provisioning travels over the channel of the QEMU guest agent, which is a virtio serial port. The vsock carries the shell of the guest instead.
++- The QEMU guest agent of the guest runs in a confined SELinux domain, so the provisioning sends the script and the binary to /run/phial through the file API of the agent, and a path unit of the guest starts the service that runs the script as root without confinement.
++- The provisioning writes its own service and path units, so a machine that an older installer set up converges on the same state as a new install.
++- The page compares the build time of the host with the build time that the provisioning wrote into the guest, and asks for a reprovision with a banner when the guest is behind. The check reads /etc over the guest agent, because the confined domain reads nothing of the home of the user.
+ - The guest turns plymouth off and masks the network wait, because a machine that waits for a splash or for the network never reaches a login.
+ - The installer writes the home directory of the guest as root, so the provisioning repairs the labels of that directory before the session of the user writes its units.
+ - A machine installs in minutes rather than seconds, so the first start of a fresh machine needs a few minutes before the guest answers.
+-- The engine states the DRM native context of the host renderer, because a renderer without support for it leaves the guest without a working display.
++- The renderer of the host fails the DRM native context of Venus only when the guest initializes the GPU, so no probe can state it. A machine with such a renderer restarts once without the option and keeps that choice in its definition.
++- The stop of a machine asks the guest to shut down through the guest agent and presses the power button when no agent answers, so a stop flushes the writes of the guest; a guest that ignores the shutdown is switched off after a timeout.
+ - The generated ssh configuration names no agent, so ssh uses the agent of the session, which asks for the passphrase of the key on the first use.
+ 
+ Rules that the page keeps:
+diff --git a/guest/phial.ks b/guest/phial.ks
+index 9f1cf02e32cd2222e32216c80a174f6cc15a2d14..bb214d43e0308622ebac992cc7c588300ddb6dff 100644
+--- a/guest/phial.ks
++++ b/guest/phial.ks
+@@ -53,5 +53,25 @@ [Install]
+ WantedBy=multi-user.target
+ UNIT
+ systemctl enable phial-ssh-vsock.service
++cat > /etc/systemd/system/phial-provision.path <<'UNIT'
++[Unit]
++Description=phial guest provisioning trigger
++
++[Path]
++PathExists=/run/phial/trigger
++Unit=phial-provision.service
++
++[Install]
++WantedBy=multi-user.target
++UNIT
++cat > /etc/systemd/system/phial-provision.service <<'UNIT'
++[Unit]
++Description=phial guest provisioning
++
++[Service]
++Type=oneshot
++ExecStart=/bin/bash /run/phial/provision.sh
++UNIT
++systemctl enable phial-provision.path
+ loginctl enable-linger phial
+ %end
+diff --git a/host/systemd/phial-guest-port@.service b/host/systemd/phial-guest-port@.service
+index 8064dbc1e3a5ad64361c9eef9f10e74a577a1308..968af8de1371e86ff9cefa12d2f91336d8eb46a9 100644
+--- a/host/systemd/phial-guest-port@.service
++++ b/host/systemd/phial-guest-port@.service
+@@ -1,10 +1,11 @@
+ [Unit]
+-Description=phial guest port %i on the host loopback
++Description=phial guest RDP port for CID %i on the host loopback
+ Documentation=https://codeberg.org/pojntfx/phial-neo
+ 
+ [Service]
+ Type=simple
+-ExecStart=@SOCAT@ TCP6-LISTEN:%i,bind=[::1],fork,reuseaddr VSOCK-CONNECT:3:%i
++EnvironmentFile=-%E/phial/guest-port-%i.conf
++ExecStart=@SOCAT@ TCP6-LISTEN:${PHIAL_PORT},bind=[::1],fork,reuseaddr VSOCK-CONNECT:%i:3389
+ Restart=on-failure
+ 
+ [Install]
+diff --git a/host/systemd/phial-swtpm@.service b/host/systemd/phial-swtpm@.service
+index 7d2186dad9034ad937b9a4ab34baf948354aef9c..a54e09667cf8b04e14788e71296fc4e06927070b 100644
+--- a/host/systemd/phial-swtpm@.service
++++ b/host/systemd/phial-swtpm@.service
+@@ -6,7 +6,11 @@ [Service]
+ Type=exec
+ RuntimeDirectory=phial/vms/%i
+ RuntimeDirectoryMode=0700
++# The directory also carries the firmware state and the sockets of the
++# machine, so it must survive the restart of this service.
++RuntimeDirectoryPreserve=yes
+ ExecStartPre=mkdir -p %t/phial/vms/%i/swtpm
++ExecStartPre=rm -f %t/phial/vms/%i/swtpm.sock
+ ExecStart=@SWTPM@ socket --tpmstate dir=%t/phial/vms/%i/swtpm --ctrl type=unixio,path=%t/phial/vms/%i/swtpm.sock --tpm2 --log file=%t/phial/vms/%i/swtpm.log,level=5 --flags not-need-init
+ Restart=on-failure
+ 
+diff --git a/host/systemd/phial-vm@.service b/host/systemd/phial-vm@.service
+index 492ee3b96c3a5961a0874488f0237d559edef5e3..eea44a6c59b6c1c6987b4b124a446f2050b3672f 100644
+--- a/host/systemd/phial-vm@.service
++++ b/host/systemd/phial-vm@.service
+@@ -10,6 +10,12 @@ ExecStart=%h/.local/bin/phial vm exec %i
+ Environment=PATH=/usr/local/bin:/usr/bin:/bin:%h/.local/bin:@BREW_PREFIX@/bin
+ LimitMEMLOCK=infinity
+ Restart=on-failure
++# The stop signal goes to the supervisor alone, which shuts the guest down in
++# order first; anything left after the timeout is killed with the group. The
++# timeout leaves room for the shutdown of the guest, which outlives the
++# default of the distribution.
++KillMode=mixed
++TimeoutStopSec=120
+ 
+ [Install]
+ WantedBy=default.target
+diff --git a/internal/guest/files/systemd-system/phial-provision.path b/internal/guest/files/systemd-system/phial-provision.path
+new file mode 100644
+index 0000000000000000000000000000000000000000..5e889081d9baa36a3ea0b9d58e9aac6308948a22
+--- /dev/null
++++ b/internal/guest/files/systemd-system/phial-provision.path
+@@ -0,0 +1,9 @@
++[Unit]
++Description=phial guest provisioning trigger
++
++[Path]
++PathExists=/run/phial/trigger
++Unit=phial-provision.service
++
++[Install]
++WantedBy=multi-user.target
+diff --git a/internal/guest/files/systemd-system/phial-provision.service b/internal/guest/files/systemd-system/phial-provision.service
+new file mode 100644
+index 0000000000000000000000000000000000000000..48d2a3bee2e72c11a8ecec98f69562e417b6fd50
+--- /dev/null
++++ b/internal/guest/files/systemd-system/phial-provision.service
+@@ -0,0 +1,6 @@
++[Unit]
++Description=phial guest provisioning
++
++[Service]
++Type=oneshot
++ExecStart=/bin/bash /run/phial/provision.sh
+diff --git a/internal/guest/files/systemd-system/phial-ssh-vsock.service b/internal/guest/files/systemd-system/phial-ssh-vsock.service
+new file mode 100644
+index 0000000000000000000000000000000000000000..4677b81722f737b483c8bdc21401338926b408ae
+--- /dev/null
++++ b/internal/guest/files/systemd-system/phial-ssh-vsock.service
+@@ -0,0 +1,12 @@
++[Unit]
++Description=phial SSH over vsock
++After=sshd.service
++Wants=sshd.service
++
++[Service]
++Type=simple
++ExecStart=/usr/bin/socat VSOCK-LISTEN:2222,fork,reuseaddr TCP:[::1]:22
++Restart=on-failure
++
++[Install]
++WantedBy=multi-user.target
+diff --git a/internal/guest/provision.go b/internal/guest/provision.go
+index 05d971ae39cf5d70046f8b314b92c34bad21791a..b6bd0e21ee72af33126c63e0aa604af754b8030d 100644
+--- a/internal/guest/provision.go
++++ b/internal/guest/provision.go
+@@ -3,10 +3,13 @@
+ import (
+ 	"embed"
+ 	"encoding/base64"
++	"errors"
+ 	"fmt"
+ 	"os"
+ 	"path"
++	"strconv"
+ 	"strings"
++	"time"
+ 
+ 	"codeberg.org/pojntfx/phial-neo/internal/virt"
+ )
+@@ -70,12 +73,18 @@
+ 		steps = append(steps, writeText(item.dest, item.mode, string(data)))
+ 	}
+ 
+-	unit, err := files.ReadFile("files/systemd-system/phial-network.service")
+-	if err != nil {
+-		return err
++	// The system units travel with the provisioning, so that a machine which
++	// an older installer set up converges on the same state as a new install.
++	// The provisioning unit rewrites itself here, so one bootstrap over SSH is
++	// enough for a machine that predates it.
++	for _, item := range []string{"phial-network.service", "phial-ssh-vsock.service", "phial-provision.path", "phial-provision.service"} {
++		unit, err := files.ReadFile("files/systemd-system/" + item)
++		if err != nil {
++			return err
++		}
++
++		steps = append(steps, writeSystemFile("/etc/systemd/system/"+item, string(unit), "0644"))
+ 	}
+-
+-	steps = append(steps, writeSystemFile("/etc/systemd/system/phial-network.service", string(unit), "0644"))
+ 
+ 	steps = append(steps,
+ 		// The installer creates parts of the home directory as root, so the
+@@ -111,24 +120,83 @@ 		"ln -sf /dev/null /etc/systemd/system/NetworkManager-wait-online.service 2>/dev/null || true",
+ 		"ln -sf /dev/null /etc/systemd/system/plymouth-quit-wait.service 2>/dev/null || true",
+ 		"sudo systemctl disable --now geoclue.service 2>/dev/null || true",
+ 		"sudo systemctl daemon-reload",
++		"sudo grubby --update-kernel=ALL --args='plymouth.enable=0' 2>/dev/null || true",
+ 		"sudo systemctl enable --now phial-network.service 2>/dev/null || true",
++		"sudo systemctl enable --now phial-ssh-vsock.service 2>/dev/null || true",
++		"sudo systemctl enable phial-provision.path 2>/dev/null || true",
++		"systemctl is-active --quiet phial-provision.path || sudo systemctl start --no-block phial-provision.path 2>/dev/null || true",
+ 	)
+ 
+-	if err := run(def, prepareGuestScript(strings.Join(steps, "\n"))); err != nil {
++	// The guest agent of QEMU runs in a confined SELinux domain that reads and
++	// writes nothing outside of /run and /tmp, so the script and the binary go
++	// to /run/phial through the file API of the agent, and the path unit of the
++	// guest starts the service that runs the script as root without
++	// confinement.
++	var payload strings.Builder
++
++	payload.WriteString("exec > /run/phial/output.log 2>&1\n")
++	payload.WriteString("trap 'echo failed > /run/phial/status' ERR\n")
++	payload.WriteString("set -e\n")
++	payload.WriteString("rm -f /run/phial/trigger\n")
++	payload.WriteString(prepareGuestScript(strings.Join(steps, "\n")))
++	payload.WriteString("\nif [ -f /run/phial/phial ]; then\n")
++	payload.WriteString("\tinstall -m 0755 -o " + guestUser + " -g " + guestUser + " /run/phial/phial " + guestHome + "/.local/bin/phial\n")
++	payload.WriteString("\trestorecon " + guestHome + "/.local/bin/phial > /dev/null 2>&1 || true\n")
++
++	// The version check of the agent reads the build time of the host from
++	// /etc, because the confined domain of the agent reads nothing of the home
++	// of the user.
++	if hostTime, err := virt.HostBuildTime(); err == nil {
++		payload.WriteString("\tprintf '%s\\n' '" + strconv.FormatInt(hostTime, 10) + "' > " + virt.GuestAgentBuildTimePath + "\n")
++	}
++
++	payload.WriteString("fi\n")
++	payload.WriteString("echo done > /run/phial/status\n")
++
++	if _, err := virt.QgaExec(def, "mkdir -p /run/phial && rm -f /run/phial/status /run/phial/output.log"); err != nil {
+ 		return err
+ 	}
+ 
+-	if len(agent) == 0 {
+-		return nil
++	if err := virt.QgaWriteFile(def, "/run/phial/provision.sh", 0755, []byte(payload.String())); err != nil {
++		return err
+ 	}
+ 
+-	path := guestHome + "/.local/bin/phial"
++	if len(agent) > 0 {
++		if err := virt.QgaWriteFile(def, "/run/phial/phial", 0755, agent); err != nil {
++			return err
++		}
++	}
+ 
+-	if err := virt.QgaWriteFile(def, path, 0755, agent); err != nil {
++	if _, err := virt.QgaExec(def, "touch /run/phial/trigger"); err != nil {
+ 		return err
+ 	}
+ 
+-	_, err = virt.QgaExec(def, "chown phial:phial "+path+" && restorecon "+path+" > /dev/null 2>&1 || true")
++	deadline := time.Now().Add(15 * time.Minute)
++
++	for time.Now().Before(deadline) {
++		status, _ := virt.QgaExec(def, "cat /run/phial/status 2>/dev/null || true")
++
++		switch strings.TrimSpace(status) {
++		case "done":
++			return printOutput(def)
++		case "failed":
++			output, _ := virt.QgaExec(def, "tail -c 8192 /run/phial/output.log 2>/dev/null || true")
++
++			return fmt.Errorf("the provisioning script in the guest failed: %s", output)
++		}
++
++		time.Sleep(2 * time.Second)
++	}
++
++	return errors.New("the provisioning script in the guest did not finish in time")
++}
++
++// printOutput states the log of the provisioning script of the guest.
++func printOutput(def virt.Definition) error {
++	output, err := virt.QgaExec(def, "cat /run/phial/output.log 2>/dev/null || true")
++	if output != "" {
++		fmt.Fprintln(os.Stderr, output)
++	}
+ 
+ 	return err
+ }
+@@ -184,10 +252,10 @@ 		"sudo grdctl --system rdp enable",
+ 		"sudo systemctl enable gnome-remote-desktop > /dev/null 2>&1 || true",
+ 		"sudo systemctl restart gnome-remote-desktop > /dev/null 2>&1 || true",
+ 		"echo \"phial:" + password + "\" | sudo chpasswd || { echo \"phial: could not set the guest password, pwquality rejects it\" >&2; exit 1; }",
+-		"sudo passwd -u " + name + " > /dev/null 2>&1 || true",
++		"sudo passwd -u " + guestUser + " > /dev/null 2>&1 || true",
+ 		"sudo crudini --del /etc/gdm/custom.conf daemon AutomaticLogin > /dev/null 2>&1 || true",
+ 		"sudo crudini --set /etc/gdm/custom.conf daemon AutomaticLoginEnable false",
+-		"sudo loginctl enable-linger " + name + " || true",
++		"sudo loginctl enable-linger " + guestUser + " || true",
+ 		"mkdir -p ~/.config/environment.d",
+ 		"printf 'XDG_SESSION_TYPE=wayland\\n' > ~/.config/environment.d/wayland.conf",
+ 	}
+@@ -199,10 +267,6 @@ func writeText(dest string, mode string, content string) string {
+ 	return fmt.Sprintf("mkdir -p \"$HOME/%s\" && cat > \"$HOME/%s\" <<'PHIALEOF'\n%s\nPHIALEOF\nchmod %s \"$HOME/%s\"", path.Dir(dest), dest, content, mode, dest)
+ }
+ 
+-func writeBinary(dest string, content string) string {
+-	return fmt.Sprintf("mkdir -p \"$HOME/%s\" && printf '%%s' '%s' | base64 -d > \"$HOME/%s\" && chmod 0755 \"$HOME/%s\"", path.Dir(dest), content, dest, dest)
+-}
+-
+ func fallbackMetricScript(mac string) string {
+ 	return fmt.Sprintf(`#!/bin/bash
+ 
+@@ -273,12 +337,3 @@ 	script = strings.ReplaceAll(script, "\nloginctl", "\n"+guestAsUser+" loginctl")
+ 
+ 	return script + "\nchown -R phial:phial " + guestHome + "/.config " + guestHome + "/.local " + guestHome + "/.agents 2>/dev/null || true"
+ }
+-
+-func run(def virt.Definition, script string) error {
+-	output, err := virt.QgaExec(def, script)
+-	if output != "" {
+-		fmt.Fprintln(os.Stderr, output)
+-	}
+-
+-	return err
+-}
+diff --git a/internal/mcp/tools_display.go b/internal/mcp/tools_display.go
+index 2038b9d198d1eb4b16a7b1042ba52fdfac3eb3d0..03530030d0aa3bc4baf665fdb397b5d49542cfa4 100644
+--- a/internal/mcp/tools_display.go
++++ b/internal/mcp/tools_display.go
+@@ -251,11 +251,17 @@ 	if err := s.syncRdpCredentials(def, password); err != nil {
+ 		return nil, nil, fmt.Errorf("could not set the RDP credentials in the guest: %w", err)
+ 	}
+ 
+-	if err := s.unitStart("phial-guest-port@3389.service"); err != nil {
++	content := fmt.Sprintf("PHIAL_PORT=%d\n", def.RdpPortValue())
++
++	if err := os.WriteFile(filepath.Join(s.state.ConfigDir(), fmt.Sprintf("guest-port-%d.conf", def.GuestCIDValue())), []byte(content), 0o600); err != nil {
++		return nil, nil, fmt.Errorf("could not write the guest port configuration: %w", err)
++	}
++
++	if err := s.unitStart(fmt.Sprintf("phial-guest-port@%d.service", def.GuestCIDValue())); err != nil {
+ 		return nil, nil, err
+ 	}
+ 
+-	command := exec.Command("xfreerdp", "/v:[::1]:3389", "/u:"+input.VM, "/p:"+password, "/cert:ignore", "+clipboard", "/sound", "/dynamic-resolution")
++	command := exec.Command("xfreerdp", fmt.Sprintf("/v:[::1]:%d", def.RdpPortValue()), "/u:"+input.VM, "/p:"+password, "/cert:ignore", "+clipboard", "/sound", "/dynamic-resolution")
+ 
+ 	var output strings.Builder
+ 	command.Stdout = &output
+diff --git a/internal/mcp/tools_vm.go b/internal/mcp/tools_vm.go
+index 25ee0d25f3fc80aaba2efaaee47f0c187305e487..d0a04b405caf9aac0d6990a5c3958c2e8f65f1c9 100644
+--- a/internal/mcp/tools_vm.go
++++ b/internal/mcp/tools_vm.go
+@@ -7,6 +7,7 @@ 	"encoding/hex"
+ 	"fmt"
+ 	"os"
+ 	"os/exec"
++	"path/filepath"
+ 	"strings"
+ 	"time"
+ 
+@@ -190,6 +191,14 @@ 	}
+ 
+ 	if err := def.Stop(); err != nil {
+ 		s.log.Info("stop before delete failed", "err", err)
++	}
++
++	if err := s.unitStop(fmt.Sprintf("phial-guest-port@%d.service", def.GuestCIDValue())); err != nil {
++		s.log.Info("guest port stop before delete failed", "err", err)
++	}
++
++	if err := os.Remove(filepath.Join(s.state.ConfigDir(), fmt.Sprintf("guest-port-%d.conf", def.GuestCIDValue()))); err != nil && !os.IsNotExist(err) {
++		s.log.Info("guest port configuration removal before delete failed", "err", err)
+ 	}
+ 
+ 	image := def.DiskPathValue()
+diff --git a/internal/setup/install.go b/internal/setup/install.go
+index 3fdec2f660fdb8a1cbe4b795e26a109d66c3739a..dc6d64ce0d521f29967a09896870ecb7c03e9c51 100644
+--- a/internal/setup/install.go
++++ b/internal/setup/install.go
+@@ -231,6 +231,22 @@ 			return err
+ 		}
+ 	}
+ 
++	// The window reads its settings from the schema of the application, so the
++	// schema must live in the schema directory of the user.
++	schemaDir := filepath.Join(xdg.DataHome, "glib-2.0", "schemas")
++	schema, err := os.ReadFile(filepath.Join(options.RepoDir, "assets", "resources", "index.gschema.xml"))
++	if err != nil {
++		return err
++	}
++
++	if err := installFile(schema, filepath.Join(schemaDir, "com.pojtinger.felicitas.Phial.gschema.xml"), 0o644, true); err != nil {
++		return err
++	}
++
++	if out, err := exec.Command("glib-compile-schemas", schemaDir).CombinedOutput(); err != nil {
++		return fmt.Errorf("could not compile the settings schema: %w: %s", err, strings.TrimSpace(string(out)))
++	}
++
+ 	_ = exec.Command("systemctl", "--user", "daemon-reload").Run()
+ 	_ = exec.Command("systemctl", "--user", "enable", "--now", "phial-forward@proxy.service").Run()
+ 	_ = exec.Command("systemctl", "--user", "enable", "--now", "phial-forward@mcp.service").Run()
+diff --git a/internal/ui/access.go b/internal/ui/access.go
+index b3cf238e3e22965bb70630688c93b2d143eda0f8..229809a1c44fc317f2eafb7c26e8447d2e98c966 100644
+--- a/internal/ui/access.go
++++ b/internal/ui/access.go
+@@ -181,20 +181,20 @@ 	password := a.Service.RdpPassword()
+ 
+ 	signIn := a.credentialGroup("phial", password)
+ 
++	listenAddress := fmt.Sprintf("[::1]:%d", def.RdpPortValue())
++
+ 	address := formGroup("Address", "The port is forwarded from the machine to this host.")
+ 	addressRow := adw.NewEntryRow()
+ 	addressRow.SetTitle(i18n.L("Local to this host"))
+-	addressRow.SetText("[::1]:3389")
++	addressRow.SetText(listenAddress)
+ 	addressRow.SetEditable(false)
+ 	addressRow.SetShowApplyButton(false)
+ 
+ 	copyAddress := a.iconButton("edit-copy-symbolic", i18n.L("Copy the Address"), func() {
+-		a.copyText("[::1]:3389", i18n.L("Address copied"))
++		a.copyText(listenAddress, i18n.L("Address copied"))
+ 	})
+ 	addressRow.AddSuffix(&copyAddress.Widget)
+ 	address.Add(&addressRow.Widget)
+-
+-	address.Add(a.unlockAgentRow())
+ 
+ 	address.Add(&a.buttonRow("_Open the Remote Desktop", "video-display-symbolic", func() {
+ 		a.goAsync(func() (string, error) {
+@@ -207,7 +207,7 @@ 	}).Widget)
+ 
+ 	address.Add(&a.buttonRow("_Copy the Command for Another Client", "edit-copy-symbolic", func() {
+ 		a.copyText(
+-			fmt.Sprintf("xfreerdp /v:[::1]:3389 /u:%s /cert:ignore", def.Name),
++			fmt.Sprintf("xfreerdp /v:%s /u:%s /cert:ignore", listenAddress, def.Name),
+ 			i18n.L("Command copied"),
+ 		)
+ 	}).Widget)
+diff --git a/internal/virt/accessors.go b/internal/virt/accessors.go
+index a6fb4e144b6d93ddbd4d6f82a4926103cd474395..6ffdf7fdc09a060b80afee30bbbf8e40f0a8f4e0 100644
+--- a/internal/virt/accessors.go
++++ b/internal/virt/accessors.go
+@@ -12,6 +12,10 @@ func (d Definition) GuestCIDValue() uint32 {
+ 	return d.guestCID()
+ }
+ 
++func (d Definition) RdpPortValue() int {
++	return 3389 + int(d.guestCID())
++}
++
+ func (d Definition) RuntimePathValue() string {
+ 	return d.runtimePath()
+ }
+diff --git a/internal/virt/agent_version.go b/internal/virt/agent_version.go
+index 6fa0cae5a20f1936fa1a62b032096c5728e8c3be..50d2fb78cb7bc14943a0d764ba3a1927ec1cfb2a 100644
+--- a/internal/virt/agent_version.go
++++ b/internal/virt/agent_version.go
+@@ -1,7 +1,6 @@
+ package virt
+ 
+ import (
+-	"context"
+ 	"os"
+ 	"strconv"
+ 	"strings"
+@@ -26,16 +25,21 @@
+ 	return info.ModTime().Unix(), nil
+ }
+ 
++// GuestAgentBuildTimePath states where the provisioning writes the build time
++// of the host. It lives in /etc, because the confined domain of the agent
++// reads nothing of the home of the user.
++const GuestAgentBuildTimePath = "/etc/phial-agent-build-time"
++
+ // GuestBuildTime states the build time of the agent inside one guest, or zero
+-// when the guest carries no agent yet. It reads the file as the user of the
+-// guest, like every other call of the guest that is not the provisioning.
++// when the guest carries no agent yet. It reads over the guest agent protocol,
++// so the check works without SSH and without a login.
+ func GuestBuildTime(def Definition) (int64, error) {
+-	output, err := SSHRun(context.Background(), def.Name, "stat -c %Y "+GuestAgentPath+" 2>/dev/null || echo 0")
++	output, err := QgaExec(def, "cat "+GuestAgentBuildTimePath+" 2>/dev/null || echo 0")
+ 	if err != nil {
+ 		return 0, err
+ 	}
+ 
+-	return strconv.ParseInt(strings.TrimSpace(string(output)), 10, 64)
++	return strconv.ParseInt(strings.TrimSpace(output), 10, 64)
+ }
+ 
+ // GuestOutdated states whether the agent of a guest is older than the binary of
+diff --git a/internal/virt/launcher.go b/internal/virt/launcher.go
+index 16851ec21092b8551d578ad023f60387142d7476..a35aea37cc4d74585bb717827f58d360de9d0560 100644
+--- a/internal/virt/launcher.go
++++ b/internal/virt/launcher.go
+@@ -8,11 +8,13 @@ 	"fmt"
+ 	"log/slog"
+ 	"os"
+ 	"os/exec"
++	"os/signal"
+ 	"path/filepath"
+ 	"runtime"
+ 	"strconv"
+ 	"strings"
+ 	"sync"
++	"syscall"
+ 	"time"
+ 
+ 	systemdDbus "github.com/coreos/go-systemd/v22/dbus"
+@@ -267,39 +269,6 @@ }
+ 
+ // bridgeUsable reports whether the bridge of one tap carries a link, which
+ // needs a port that reaches the network.
+-var (
+-	drmNativeContextOnce sync.Once
+-	drmNativeContext     bool
+-)
+-
+-// supportsDRMNativeContext states whether the renderer of the host enables the
+-// DRM native context. The device of Venus states that option, and a renderer
+-// without support for it leaves the guest without a working display.
+-func supportsDRMNativeContext() bool {
+-	drmNativeContextOnce.Do(func() {
+-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+-		defer cancel()
+-
+-		command := exec.CommandContext(ctx, "qemu-system-x86_64",
+-			"-display", "none",
+-			"-nodefaults",
+-			"-machine", "q35,accel=kvm",
+-			"-device", "virtio-vga-gl,venus=on,blob=on,hostmem=4G,drm_native_context=on",
+-			"-S",
+-		)
+-
+-		var stderr strings.Builder
+-		command.Stderr = &stderr
+-		_ = command.Run()
+-
+-		drmNativeContext = !strings.Contains(stderr.String(), "DRM native context")
+-
+-		slog.Info("checked the DRM native context of the host renderer", "supported", drmNativeContext)
+-	})
+-
+-	return drmNativeContext
+-}
+-
+ func bridgeUsable(tap string) bool {
+ 	if !fileExists("/sys/class/net/" + tap) {
+ 		return false
+@@ -508,7 +477,7 @@
+ 		switch d.GPU {
+ 		case "venus":
+ 			device := "virtio-vga-gl,venus=on,blob=on,hostmem=4G"
+-			if supportsDRMNativeContext() {
++			if !d.NoNativeContext {
+ 				device += ",drm_native_context=on"
+ 			}
+ 
+@@ -658,11 +627,6 @@ 	if err := d.prepare(); err != nil {
+ 		return err
+ 	}
+ 
+-	args, err := d.BuildArgs(boot)
+-	if err != nil {
+-		return err
+-	}
+-
+ 	run := d.runtimePath()
+ 
+ 	if err := d.startDependencies(); err != nil {
+@@ -683,47 +647,108 @@ 	if err := waitForSockets(paths...); err != nil {
+ 		return err
+ 	}
+ 
+-	command, err := qemuCommand(ctx, args)
+-	if err != nil {
+-		return err
+-	}
+-	// QEMU states the reason for a failed start on its error stream, so the
+-	// message reaches the user.
+-	tail := &tailWriter{limit: 4096, out: os.Stderr}
+-	command.Stdout = os.Stdout
+-	command.Stderr = tail
++	// systemd stops the unit with a signal to this process only, so the stop
++	// shuts the guest down in order first, which flushes its writes.
++	stopped := make(chan os.Signal, 1)
++	signal.Notify(stopped, syscall.SIGTERM, syscall.SIGINT)
++	defer signal.Stop(stopped)
++
++	go func() {
++		<-stopped
++
++		GracefulStop(d)
++	}()
++
++	for {
++		args, err := d.BuildArgs(boot)
++		if err != nil {
++			return err
++		}
++
++		command, err := qemuCommand(ctx, args)
++		if err != nil {
++			return err
++		}
++		// QEMU states the reason for a failed start on its error stream, so
++		// the message reaches the user.
++		tail := &tailWriter{limit: 4096, out: os.Stderr, gpuBroken: make(chan struct{})}
++		command.Stdout = os.Stdout
++		command.Stderr = tail
++
++		if err := command.Start(); err != nil {
++			return err
++		}
++
++		go pinIOThread(command.Process.Pid)
++
++		go attachUSBWhenReady(d)
++
++		waitDone := make(chan error, 1)
++		go func() {
++			waitDone <- command.Wait()
++		}()
+ 
+-	if err := command.Start(); err != nil {
+-		return err
+-	}
++		var waitErr error
+ 
+-	go pinIOThread(command.Process.Pid)
++		select {
++		case waitErr = <-waitDone:
++		case <-tail.gpuBroken:
++			// The renderer of the host fails the DRM native context of Venus
++			// only when the guest initializes the GPU, so no probe can state it;
++			// a machine with such a renderer restarts without the option and
++			// keeps that choice.
++			if d.GPU == "venus" && !d.NoNativeContext {
++				slog.Info("the renderer of the host lacks the DRM native context, restarting the machine without it", "name", d.Name)
+ 
+-	go attachUSBWhenReady(d)
++				_ = command.Process.Kill()
++				<-waitDone
+ 
+-	if err := command.Wait(); err != nil {
+-		if detail := tail.Detail(); detail != "" {
+-			return fmt.Errorf("%w: %s", err, detail)
++				d.NoNativeContext = true
++
++				if err := d.Save(); err != nil {
++					slog.Warn("could not save the machine without the DRM native context", "name", d.Name, "err", err)
++				}
++
++				continue
++			}
++
++			waitErr = <-waitDone
+ 		}
+ 
+-		return err
++		if waitErr != nil {
++			if detail := tail.Detail(); detail != "" {
++				return fmt.Errorf("%w: %s", waitErr, detail)
++			}
++
++			return waitErr
++		}
++
++		return nil
+ 	}
+-
+-	return nil
+ }
+ 
+ // tailWriter passes the output of a command on and keeps its last bytes, so a
+ // failed start can state the reason.
+ type tailWriter struct {
+-	out   *os.File
+-	limit int
+-	tail  []byte
++	out       *os.File
++	limit     int
++	tail      []byte
++	gpuBroken chan struct{}
++	gpuOnce   sync.Once
+ }
+ 
+ func (w *tailWriter) Write(data []byte) (int, error) {
+ 	w.tail = append(w.tail, data...)
+ 	if len(w.tail) > w.limit {
+ 		w.tail = w.tail[len(w.tail)-w.limit:]
++	}
++
++	// The renderer of the host states a missing DRM native context when the
++	// guest initializes the GPU, so the machine restarts without the option.
++	if strings.Contains(string(w.tail), "DRM native context support was not enabled") {
++		w.gpuOnce.Do(func() {
++			close(w.gpuBroken)
++		})
+ 	}
+ 
+ 	return w.out.Write(data)
+diff --git a/internal/virt/qga.go b/internal/virt/qga.go
+index 7b6daed0446d0720ba5598b268c7cfc226efaa46..1766b739ac056dafdf1c07556543931c2a34292c 100644
+--- a/internal/virt/qga.go
++++ b/internal/virt/qga.go
+@@ -165,18 +165,16 @@
+ 	return err
+ }
+ 
+-// qgaRead states the reply of the agent of the machine for one request.
+-func qgaRead(decoder *json.Decoder) (json.RawMessage, error) {
++// qgaRead states one envelope of the agent of the machine, including its
++// error, so that the caller can skip the leftover replies of a connection that
++// ended early instead of failing on them.
++func qgaRead(decoder *json.Decoder) (qgaEnvelope, error) {
+ 	var envelope qgaEnvelope
+ 	if err := decoder.Decode(&envelope); err != nil {
+-		return nil, err
++		return qgaEnvelope{}, err
+ 	}
+ 
+-	if envelope.Error != nil {
+-		return nil, fmt.Errorf("%s", envelope.Error.Desc)
+-	}
+-
+-	return envelope.Return, nil
++	return envelope, nil
+ }
+ 
+ // QgaCall states the reply of the agent of the machine for one request. The
+@@ -195,8 +193,9 @@ 	_ = conn.SetDeadline(time.Now().Add(30 * time.Second))
+ 
+ 	decoder := json.NewDecoder(conn)
+ 
+-	// The agent can carry the reply of a connection that ended early, so the call
+-	// states a unique value first and reads until the agent states that value.
++	// The agent can carry the reply of a connection that ended early, so the
++	// call states a unique value first and reads until the agent states that
++	// value; every reply before it belongs to the connection that ended early.
+ 	sync := time.Now().UnixNano()
+ 
+ 	if err := qgaSend(conn, qgaRequest{Execute: "guest-sync", Arguments: map[string]interface{}{"id": sync}}); err != nil {
+@@ -204,13 +203,17 @@ 		return nil, err
+ 	}
+ 
+ 	for {
+-		raw, err := qgaRead(decoder)
++		envelope, err := qgaRead(decoder)
+ 		if err != nil {
+ 			return nil, err
++		}
++
++		if envelope.Error != nil {
++			continue
+ 		}
+ 
+ 		var value int64
+-		if err := json.Unmarshal(raw, &value); err != nil {
++		if err := json.Unmarshal(envelope.Return, &value); err != nil {
+ 			continue
+ 		}
+ 
+@@ -223,20 +226,19 @@ 	if err := qgaSend(conn, qgaRequest{Execute: execute, Arguments: arguments}); err != nil {
+ 		return nil, err
+ 	}
+ 
+-	for {
+-		raw, err := qgaRead(decoder)
+-		if err != nil {
+-			return nil, err
+-		}
++	// The synchronization flushed every leftover reply, so the next envelope is
++	// the reply of this request, even when it carries a number, like the handle
++	// of guest-file-open.
++	envelope, err := qgaRead(decoder)
++	if err != nil {
++		return nil, err
++	}
+ 
+-		// A value states a leftover synchronization, so the call keeps reading.
+-		var value int64
+-		if err := json.Unmarshal(raw, &value); err == nil {
+-			continue
+-		}
+-
+-		return raw, nil
++	if envelope.Error != nil {
++		return nil, fmt.Errorf("%s", envelope.Error.Desc)
+ 	}
++
++	return envelope.Return, nil
+ }
+ 
+ func QgaNetworkBytes(def Definition) (int64, int64, error) {
+diff --git a/internal/virt/stop.go b/internal/virt/stop.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..31afa1f95e560380add21167b7bc861c618128f3
+--- /dev/null
++++ b/internal/virt/stop.go
+@@ -0,0 +1,88 @@
++package virt
++
++import (
++	"log/slog"
++	"os"
++	"path/filepath"
++	"strconv"
++	"strings"
++	"syscall"
++	"time"
++)
++
++// gracefulStopTimeout bounds the shutdown of the guest, after which the
++// machine is switched off.
++const gracefulStopTimeout = 60 * time.Second
++
++// GracefulStop asks the guest of one machine to shut down and switches the
++// machine off when the guest does not shut down in time, so that a stop does
++// not lose the writes of the guest.
++func GracefulStop(d Definition) {
++	// The agent shuts the guest down in order, which flushes its writes;
++	// without an agent, the power button of the machine asks the guest for
++	// the same thing.
++	if _, err := QgaCall(d, "guest-shutdown", map[string]interface{}{"mode": "powerdown"}); err != nil {
++		slog.Debug("could not shut down the guest through the agent, pressing the power button instead", "name", d.Name, "err", err)
++
++		if err := qmpSystemPowerdown(d); err != nil {
++			slog.Warn("could not press the power button of the machine", "name", d.Name, "err", err)
++		}
++	}
++
++	deadline := time.Now().Add(gracefulStopTimeout)
++
++	for time.Now().Before(deadline) {
++		running, err := machineRuns(d)
++		if err == nil && !running {
++			return
++		}
++
++		time.Sleep(500 * time.Millisecond)
++	}
++
++	// The guest ignored the shutdown, so the machine is switched off, like a
++	// long press of the power button.
++	if err := qmpQuit(d); err != nil {
++		slog.Warn("could not switch off the machine after the guest shutdown timed out", "name", d.Name, "err", err)
++	}
++}
++
++func qmpSystemPowerdown(d Definition) error {
++	conn, reader, err := qmpConnect(d)
++	if err != nil {
++		return err
++	}
++	defer conn.Close()
++
++	return qmpCall(conn, reader, qmpCommand{Execute: "system_powerdown"})
++}
++
++func qmpQuit(d Definition) error {
++	conn, reader, err := qmpConnect(d)
++	if err != nil {
++		return err
++	}
++	defer conn.Close()
++
++	return qmpCall(conn, reader, qmpCommand{Execute: "quit"})
++}
++
++// machineRuns states whether the QEMU process of one machine is still alive.
++func machineRuns(d Definition) (bool, error) {
++	data, err := os.ReadFile(filepath.Join(d.runtimePath(), "qemu.pid"))
++	if err != nil {
++		return false, err
++	}
++
++	pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
++	if err != nil {
++		return false, err
++	}
++
++	process, err := os.FindProcess(pid)
++	if err != nil {
++		return false, err
++	}
++
++	return process.Signal(syscall.Signal(0)) == nil, nil
++}
+diff --git a/internal/virt/vm.go b/internal/virt/vm.go
+index 1cfa799fee339a2df1a0b163e72e3be19e0beb73..b1af436bc18b62cf0c07d320d642928897d036df 100644
+--- a/internal/virt/vm.go
++++ b/internal/virt/vm.go
+@@ -26,23 +26,24 @@ 	return "/usr/share/edk2/ovmf"
+ }
+ 
+ type Definition struct {
+-	Name           string            `json:"name"`
+-	VCPUs          int               `json:"vcpus"`
+-	Memory         string            `json:"memory"`
+-	Disk           string            `json:"disk"`
+-	DiskSize       string            `json:"disk_size"`
+-	Display        string            `json:"display"`
+-	GPU            string            `json:"gpu"`
+-	SecureBoot     bool              `json:"secure_boot"`
+-	HugePages      bool              `json:"hugepages"`
+-	USBDevices     []string          `json:"usb_devices"`
+-	USBXHCI        string            `json:"usb_xhci"`
+-	NetLAN         string            `json:"net_lan"`
+-	NetFallback    string            `json:"net_fallback"`
+-	Audio          string            `json:"audio"`
+-	Shares         []string          `json:"shares"`
+-	ShareTargets   map[string]string `json:"share_targets,omitempty"`
+-	ReadOnlyShares []string          `json:"read_only_shares,omitempty"`
++	Name            string            `json:"name"`
++	VCPUs           int               `json:"vcpus"`
++	Memory          string            `json:"memory"`
++	Disk            string            `json:"disk"`
++	DiskSize        string            `json:"disk_size"`
++	Display         string            `json:"display"`
++	GPU             string            `json:"gpu"`
++	SecureBoot      bool              `json:"secure_boot"`
++	HugePages       bool              `json:"hugepages"`
++	NoNativeContext bool              `json:"no_native_context,omitempty"`
++	USBDevices      []string          `json:"usb_devices"`
++	USBXHCI         string            `json:"usb_xhci"`
++	NetLAN          string            `json:"net_lan"`
++	NetFallback     string            `json:"net_fallback"`
++	Audio           string            `json:"audio"`
++	Shares          []string          `json:"shares"`
++	ShareTargets    map[string]string `json:"share_targets,omitempty"`
++	ReadOnlyShares  []string          `json:"read_only_shares,omitempty"`
+ }
+ 
+ func Defaults(name string) Definition {
+
