@@ -1,0 +1,168 @@
+From 894a648f1b74d0ae6283f0871215d0ecc49068a1 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Thu, 15 Oct 2026 23:03:10 -0700
+Subject: [PATCH] refactor: Use HIG properly for search in dialogs
+---
+diff --git a/internal/ui/app.go b/internal/ui/app.go
+index ef7403f9fa2f0a0dfd8bd168175567169659f8fc..4d3b586a9952196adb6997867054ee5a529a0b28 100644
+--- a/internal/ui/app.go
++++ b/internal/ui/app.go
+@@ -39,6 +39,11 @@ 	split   *adw.NavigationSplitView
+ 	sidebar *adw.Sidebar
+ 	content *adw.NavigationView
+ 
++	// searchToggle and searchEntry track the open list dialog, so that the
++	// screenshot run can open and drive its search.
++	searchToggle *gtk.ToggleButton
++	searchEntry  *gtk.SearchEntry
++
+ 	sidebarTitle     *adw.WindowTitle
+ 	newMachineButton *gtk.Button
+ 	mainMenuButton   *gtk.MenuButton
+@@ -325,6 +330,17 @@
+ 	stringParameter("select-page", func(tag string) { a.selectPage(tag) })
+ 	intParameter("select-machine", func(index int) { a.selectMachine(index) })
+ 	stringParameter("capture", func(path string) { a.capture(path) })
++
++	simple("toggle-search", func() {
++		if a.searchToggle != nil {
++			a.searchToggle.SetActive(!a.searchToggle.GetActive())
++		}
++	})
++	stringParameter("search-text", func(text string) {
++		if a.searchEntry != nil {
++			a.searchEntry.SetText(text)
++		}
++	})
+ 
+ 	a.app.SetAccelsForAction("app.sync", []string{"<Primary>r"})
+ 	a.app.SetAccelsForAction("app.toggle-machine", []string{"<Primary>Return"})
+diff --git a/internal/ui/dialogs.go b/internal/ui/dialogs.go
+index 9ee95d1429b4ffef8cca94d3161af5ccf9bd2d8e..a66f5d2f85ee5a7cd8cef8a26c93c811d7bfe12a 100644
+--- a/internal/ui/dialogs.go
++++ b/internal/ui/dialogs.go
+@@ -2,7 +2,9 @@ package ui
+ 
+ import (
+ 	"codeberg.org/puregotk/puregotk/v4/adw"
++	"codeberg.org/puregotk/puregotk/v4/gdk"
+ 	"codeberg.org/puregotk/puregotk/v4/glib"
++	"codeberg.org/puregotk/puregotk/v4/gobject"
+ 	"codeberg.org/puregotk/puregotk/v4/gtk"
+ 	"github.com/pojntfx/go-gettext/pkg/i18n"
+ )
+@@ -45,8 +47,9 @@ 	dialog.Present(&a.win.Widget)
+ }
+ 
+ // dialog builds a modal dialog with a cancel control and one affirmative
+-// control.
+-func (a *App) dialog(scope *callbackScope, title string, subtitle string, actionLabel string, content *gtk.Widget, action func() bool) *adw.Dialog {
++// control. The widgets of headerEnd sit in the header bar, to the left of the
++// native close button.
++func (a *App) dialog(scope *callbackScope, title string, subtitle string, actionLabel string, content *gtk.Widget, action func() bool, headerEnd ...*gtk.Widget) *adw.Dialog {
+ 	dialog := adw.NewDialog()
+ 	dialog.SetTitle(i18n.L(title))
+ 	dialog.SetContentWidth(460)
+@@ -60,6 +63,10 @@ 	// adds its own controls only for an action.
+ 	windowTitle := adw.NewWindowTitle(i18n.L(title), i18n.L(subtitle))
+ 	header.SetTitleWidget(&windowTitle.Widget)
+ 	if action == nil {
++		for _, widget := range headerEnd {
++			header.PackEnd(widget)
++		}
++
+ 		toolbar := adw.NewToolbarView()
+ 		toolbar.AddTopBar(&header.Widget)
+ 		toolbar.SetContent(content)
+@@ -68,6 +75,10 @@
+ 		return dialog
+ 	}
+ 
++	for _, widget := range headerEnd {
++		header.PackEnd(widget)
++	}
++
+ 	cancel := gtk.NewButton()
+ 	cancel.SetLabel(i18n.L("_Cancel"))
+ 	cancel.SetUseUnderline(true)
+@@ -129,6 +140,79 @@ 	dialog.ConnectResponse(&cb)
+ 	a.hold(&cb)
+ 
+ 	dialog.Present(&a.win.Widget)
++}
++
++// dialogSearch builds a modal list dialog with a search button at the start
++// of the header bar and a search bar that slides out below it. Typing into the
++// dialog opens the search bar too, as the HIG asks for searchable lists. The
++// widgets of headerEnd sit in the header bar, to the left of the native close
++// button.
++func (a *App) dialogSearch(scope *callbackScope, title string, subtitle string, content *gtk.Widget, placeholder string, headerEnd ...*gtk.Widget) (*adw.Dialog, *gtk.SearchEntry) {
++	dialog := adw.NewDialog()
++	dialog.SetTitle(i18n.L(title))
++	dialog.SetContentWidth(460)
++	dialog.SetContentHeight(560)
++
++	toolbar := adw.NewToolbarView()
++	header := adw.NewHeaderBar()
++
++	windowTitle := adw.NewWindowTitle(i18n.L(title), i18n.L(subtitle))
++	header.SetTitleWidget(&windowTitle.Widget)
++
++	searchButton := gtk.NewToggleButton()
++	searchButton.SetIconName("system-search-symbolic")
++	searchButton.SetTooltipText(i18n.L("Search"))
++	searchButton.SetValign(gtk.AlignCenterValue)
++	header.PackStart(&searchButton.Widget)
++
++	searchEntry := gtk.NewSearchEntry()
++	searchEntry.SetPlaceholderText(i18n.L(placeholder))
++	searchEntry.SetHexpand(true)
++
++	searchBar := gtk.NewSearchBar()
++	searchBar.SetChild(&searchEntry.Widget)
++	searchBar.SetKeyCaptureWidget(&dialog.Widget)
++	searchButton.BindProperty("active", &searchBar.Widget.Object, "search-mode-enabled", gobject.GBindingBidirectionalValue|gobject.GBindingSyncCreateValue)
++
++	keyController := gtk.NewEventControllerKey()
++
++	var onKey func(gtk.EventControllerKey, uint32, uint32, gdk.ModifierType) bool
++	onKey = func(_ gtk.EventControllerKey, keyval uint32, _ uint32, state gdk.ModifierType) bool {
++		if keyval == uint32(gdk.KEY_f) && state&gdk.ControlMaskValue != 0 {
++			searchButton.SetActive(!searchButton.GetActive())
++
++			return true
++		}
++
++		return false
++	}
++	keyController.ConnectKeyPressed(&onKey)
++	scope.hold(&onKey)
++	dialog.AddController(&keyController.EventController)
++
++	for _, widget := range headerEnd {
++		header.PackEnd(widget)
++	}
++
++	a.searchToggle = searchButton
++	a.searchEntry = searchEntry
++
++	var onClosed func(adw.Dialog)
++	onClosed = func(adw.Dialog) {
++		if a.searchToggle == searchButton {
++			a.searchToggle = nil
++			a.searchEntry = nil
++		}
++	}
++	dialog.ConnectClosed(&onClosed)
++	scope.hold(&onClosed)
++
++	toolbar.AddTopBar(&header.Widget)
++	toolbar.AddTopBar(&searchBar.Widget)
++	toolbar.SetContent(content)
++	dialog.SetChild(&toolbar.Widget)
++
++	return dialog, searchEntry
+ }
+ 
+ // formPage wraps rows into a scrollable preferences page.
+
