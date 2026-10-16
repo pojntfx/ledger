@@ -1,0 +1,31 @@
+From f7ac72496887d8f1e6b4364cb8ce8119cde67de8 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Thu, 15 Oct 2026 23:00:54 -0700
+Subject: [PATCH] fix: Manually kill old RDP sessions
+---
+diff --git a/internal/mcp/tools_display.go b/internal/mcp/tools_display.go
+index d55fa1e96ec4c35a5a70f8001113bda576038efd..9556182afddd314b659ea0dfdf94c1aa38bb4fa5 100644
+--- a/internal/mcp/tools_display.go
++++ b/internal/mcp/tools_display.go
+@@ -228,10 +228,19 @@ type RdpInput struct {
+ 	VM string `json:"vm" jsonschema:"the VM name"`
+ }
+ 
++// syncRdpCredentials writes the password into the guest and ends the graphical
++// sessions of a disconnected login. A client that goes away during the handover
++// leaves a headless session behind, and the next login then fails with "A
++// graphical session is already running", which shows as a grey screen.
+ func (s *Service) syncRdpCredentials(def virt.Definition, password string) error {
+ 	script := "echo \"phial:" + password + "\" | sudo chpasswd && " +
+ 		"sudo grdctl --system rdp set-credentials phial '" + password + "' && " +
+-		"sudo systemctl restart gnome-remote-desktop"
++		"sudo systemctl restart gnome-remote-desktop && " +
++		"(for session in $(loginctl list-sessions --no-legend | awk '$3 == \"phial\" {print $1}'); do " +
++		"case $(loginctl show-session $session -p Type --value) in " +
++		"wayland|x11) sudo loginctl terminate-session $session ;; " +
++		"esac; " +
++		"done) 2>/dev/null || true"
+ 
+ 	return virt.SSHExec(def.Name, script)
+ }
+
