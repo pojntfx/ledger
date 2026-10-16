@@ -1,0 +1,581 @@
+From a91bfe6cfe15f235b01054c42a45dd9dafb2e4a0 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Thu, 15 Oct 2026 23:07:48 -0700
+Subject: [PATCH] feat: Allow forwarding multiple USB hubs to the VM and standardize UX between USB device and hub forwarding
+---
+diff --git a/internal/mcp/tools_usb.go b/internal/mcp/tools_usb.go
+index 18b5f9f73e98d482c836848267304ee5c1d18710..4e5b5bd97a437cf21fe8284f0457c32c5847d7cb 100644
+--- a/internal/mcp/tools_usb.go
++++ b/internal/mcp/tools_usb.go
+@@ -57,7 +57,7 @@
+ type UsbLsOutput struct {
+ 	Devices    []UsbDeviceInfo `json:"devices" jsonschema:"the host USB devices"`
+ 	Passthru   []string        `json:"passthru" jsonschema:"the devices configured for the VM"`
+-	Controller string          `json:"controller" jsonschema:"the xHCI controller bound to the VM, if any"`
++	Controller []string        `json:"controller" jsonschema:"the xHCI controllers bound to the VM, if any"`
+ }
+ 
+ func (s *Service) UsbLs(ctx context.Context, req *mcpgo.CallToolRequest, input NameInput) (*mcpgo.CallToolResult, *UsbLsOutput, error) {
+@@ -89,7 +89,7 @@
+ 	if input.Name != "" {
+ 		if def, err := virt.Load(input.Name); err == nil {
+ 			out.Passthru = def.USBDevices
+-			out.Controller = def.USBXHCI
++			out.Controller = def.USBXHCIs
+ 		}
+ 	}
+ 
+diff --git a/internal/mcp/tools_vm.go b/internal/mcp/tools_vm.go
+index d0a04b405caf9aac0d6990a5c3958c2e8f65f1c9..af1f8f50ddb191840666b18ab4a9ac93f21d4d8b 100644
+--- a/internal/mcp/tools_vm.go
++++ b/internal/mcp/tools_vm.go
+@@ -103,7 +103,7 @@ 	Display     string   `json:"display,omitempty" jsonschema:"egl-headless, gtk, or none, optional"`
+ 	GPU         string   `json:"gpu,omitempty" jsonschema:"venus, virgl, or none, optional"`
+ 	SecureBoot  bool     `json:"secure_boot,omitempty" jsonschema:"whether Secure Boot runs, optional"`
+ 	USBDevices  []string `json:"usb_devices,omitempty" jsonschema:"the USB vendor:product list, optional"`
+-	USBXHCI     string   `json:"usb_xhci,omitempty" jsonschema:"the hub controller PCI address, optional"`
++	USBXHCIs    []string `json:"usb_xhci,omitempty" jsonschema:"the hub controller PCI addresses, optional"`
+ 	NetLAN      string   `json:"net_lan,omitempty" jsonschema:"auto, on, or off, optional"`
+ 	NetFallback string   `json:"net_fallback,omitempty" jsonschema:"passt, stream, or off, optional"`
+ 	Audio       string   `json:"audio,omitempty" jsonschema:"none or hda, optional"`
+@@ -150,8 +150,8 @@ 	if input.USBDevices != nil {
+ 		def.USBDevices = input.USBDevices
+ 	}
+ 
+-	if input.USBXHCI != "" {
+-		def.USBXHCI = input.USBXHCI
++	if input.USBXHCIs != nil {
++		def.USBXHCIs = input.USBXHCIs
+ 	}
+ 
+ 	if input.NetLAN != "" {
+@@ -293,15 +293,15 @@ 	return nil, map[string]string{"state": "installing"}, nil
+ }
+ 
+ type VmUpdateInput struct {
+-	Name       string `json:"name" jsonschema:"the VM name"`
+-	NewName    string `json:"new_name,omitempty" jsonschema:"a new name, optional"`
+-	Display    string `json:"display,omitempty" jsonschema:"egl-headless, gtk, or none, optional"`
+-	GPU        string `json:"gpu,omitempty" jsonschema:"venus, virgl, or none, optional"`
+-	VCPUs      *int   `json:"vcpus,omitempty" jsonschema:"the CPU count, optional"`
+-	Memory     string `json:"memory,omitempty" jsonschema:"the memory size such as 8G, optional"`
+-	DiskSize   string `json:"disk_size,omitempty" jsonschema:"the disk size such as 40G, optional"`
+-	SecureBoot *bool  `json:"secure_boot,omitempty" jsonschema:"whether Secure Boot runs, optional"`
+-	USBXHCI    string `json:"usb_xhci,omitempty" jsonschema:"the hub controller PCI address, optional"`
++	Name       string   `json:"name" jsonschema:"the VM name"`
++	NewName    string   `json:"new_name,omitempty" jsonschema:"a new name, optional"`
++	Display    string   `json:"display,omitempty" jsonschema:"egl-headless, gtk, or none, optional"`
++	GPU        string   `json:"gpu,omitempty" jsonschema:"venus, virgl, or none, optional"`
++	VCPUs      *int     `json:"vcpus,omitempty" jsonschema:"the CPU count, optional"`
++	Memory     string   `json:"memory,omitempty" jsonschema:"the memory size such as 8G, optional"`
++	DiskSize   string   `json:"disk_size,omitempty" jsonschema:"the disk size such as 40G, optional"`
++	SecureBoot *bool    `json:"secure_boot,omitempty" jsonschema:"whether Secure Boot runs, optional"`
++	USBXHCIs   []string `json:"usb_xhci,omitempty" jsonschema:"the hub controller PCI addresses, optional"`
+ }
+ 
+ var VmUpdateTool = &mcpgo.Tool{
+@@ -349,8 +349,8 @@ 	}
+ 	if input.SecureBoot != nil {
+ 		def.SecureBoot = *input.SecureBoot
+ 	}
+-	if input.USBXHCI != "" {
+-		def.USBXHCI = input.USBXHCI
++	if input.USBXHCIs != nil {
++		def.USBXHCIs = input.USBXHCIs
+ 	}
+ 	if input.VCPUs != nil {
+ 		def.VCPUs = *input.VCPUs
+diff --git a/internal/ui/app.go b/internal/ui/app.go
+index 4d3b586a9952196adb6997867054ee5a529a0b28..f8525fb37e46af3aa054a188823ffcdef653510f 100644
+--- a/internal/ui/app.go
++++ b/internal/ui/app.go
+@@ -294,6 +294,7 @@
+ 	simple("add-provider", func() { a.showProviderDialog("") })
+ 	simple("add-forward", func() { a.showAddForwardDialog() })
+ 	simple("add-device", func() { a.withMachine(func(def virt.Definition) { a.showAddDeviceDialog(def) }) })
++	simple("add-hub", func() { a.withMachine(func(def virt.Definition) { a.showAddHubDialog(def) }) })
+ 	simple("share-folder", func() { a.withMachine(func(def virt.Definition) { a.showShareDialog(def) }) })
+ 	simple("show-apps", func() { a.withMachine(func(def virt.Definition) { a.showGuestAppsDialog(def) }) })
+ 	simple("show-rdp", func() { a.withMachine(func(def virt.Definition) { a.showRdpDialog(def) }) })
+diff --git a/internal/ui/devices.go b/internal/ui/devices.go
+index 45d52d1f7903a38d5ecc7427f553bf30dd544067..67b41faad8453d0953d9ba2374a35a843fa00a4e 100644
+--- a/internal/ui/devices.go
++++ b/internal/ui/devices.go
+@@ -2,62 +2,102 @@ package ui
+ 
+ import (
+ 	"fmt"
++	"strings"
+ 
+ 	"codeberg.org/puregotk/puregotk/v4/adw"
++	"codeberg.org/puregotk/puregotk/v4/gtk"
+ 	"github.com/pojntfx/go-gettext/pkg/i18n"
+ 
+ 	"codeberg.org/pojntfx/phial-neo/internal/mcp"
+ 	"codeberg.org/pojntfx/phial-neo/internal/virt"
+ )
+ 
+-// refreshHubControllers fills the controller list of the hub group.
++// refreshHubControllers reconciles the controller rows of the hub group
++// with the definition. The names come from the same listing that the chooser
++// uses, so a controller keeps its name when it joins the list.
+ func (a *App) refreshHubControllers(page *machinePage) {
+-	_, output, err := a.Service.ListXhci(a.Ctx, nil, struct{}{})
+-	if err != nil {
+-		a.Log.Info("could not list the xHCI controllers", "err", err)
++	names := map[string]string{}
++	if _, output, err := a.Service.ListXhci(a.Ctx, nil, struct{}{}); err == nil && output != nil {
++		for _, controller := range output.Controllers {
++			if name := shortUSBName(controller.Name); name != "" {
++				names[controller.Address] = name
++			}
++		}
++	}
++
++	if sameStrings(page.hubNames, page.def.USBXHCIs) {
++		for index, row := range page.hubRows {
++			address := page.def.USBXHCIs[index]
++			row.SetTitle(hubText(address, names))
++			row.SetSubtitle(address)
++		}
+ 		return
+ 	}
+ 
+-	labels := []string{i18n.L("None")}
+-	values := []string{""}
++	page.hubGroup.Remove(&page.addHubRow.Widget)
++	for _, row := range page.hubRows {
++		page.hubGroup.Remove(&row.Widget)
++	}
++	page.hubRows = nil
+ 
+-	if output != nil {
+-		for _, controller := range output.Controllers {
+-			name := shortUSBName(controller.Name)
+-			if name == "" {
+-				name = controller.Address
+-			}
+-			labels = append(labels, fmt.Sprintf("%s (%s)", name, controller.Address))
+-			values = append(values, controller.Address)
+-		}
++	for _, address := range page.def.USBXHCIs {
++		address := address
++
++		row := adw.NewActionRow()
++		row.SetTitle(hubText(address, names))
++		row.SetSubtitle(address)
++		row.SetSubtitleSelectable(true)
++
++		remove := a.iconButton("user-trash-symbolic", i18n.L("Remove Hub"), func() {
++			a.removeHubController(page, address)
++		})
++		row.AddSuffix(&remove.Widget)
++		page.hubGroup.Add(&row.Widget)
++		page.hubRows = append(page.hubRows, row)
+ 	}
+ 
+-	page.hubRow.setModel(labels, values, page.def.USBXHCI)
++	page.hubNames = append(page.hubNames[:0], page.def.USBXHCIs...)
++	page.hubEmpty.SetVisible(len(page.def.USBXHCIs) == 0)
++	page.hubGroup.Add(&page.addHubRow.Widget)
++}
+ 
+-	if len(values) == 1 {
+-		page.hubHint.SetTitle(i18n.L("No second xHCI controller"))
+-		page.hubHint.SetSubtitle(i18n.L("Whole-hub passthrough needs a second xHCI controller on this host."))
+-		page.hubHint.SetVisible(true)
+-		return
++func hubText(address string, names map[string]string) string {
++	if name := names[address]; name != "" {
++		return name
+ 	}
+ 
+-	page.hubHint.SetVisible(false)
++	return i18n.L("xHCI controller")
+ }
+ 
+-func (a *App) setHubController(page *machinePage, address string) {
+-	previous := page.def.USBXHCI
++func (a *App) addHubController(page *machinePage, address string) {
++	a.goAsync(func() (string, error) {
++		if _, _, err := a.Service.UsbBind(a.Ctx, nil, mcp.AddressInput{Address: address}); err != nil {
++			return "", err
++		}
+ 
+-	a.goAsync(func() (string, error) {
+-		if previous != "" && previous != address {
+-			if _, _, err := a.Service.UsbRestore(a.Ctx, nil, mcp.AddressInput{Address: previous}); err != nil {
+-				return "", err
+-			}
++		def, err := virt.Load(page.def.Name)
++		if err != nil {
++			return "", err
+ 		}
+ 
+-		if address != "" {
+-			if _, _, err := a.Service.UsbBind(a.Ctx, nil, mcp.AddressInput{Address: address}); err != nil {
+-				return "", err
+-			}
++		def.USBXHCIs = append(def.USBXHCIs, address)
++		if err := def.Save(); err != nil {
++			return "", err
++		}
++
++		a.idle(func() {
++			page.def = def
++			a.refreshHubControllers(page)
++		})
++
++		return i18n.L("The hub belongs to the machine now"), nil
++	})
++}
++
++func (a *App) removeHubController(page *machinePage, address string) {
++	a.goAsync(func() (string, error) {
++		if _, _, err := a.Service.UsbRestore(a.Ctx, nil, mcp.AddressInput{Address: address}); err != nil {
++			return "", err
+ 		}
+ 
+ 		def, err := virt.Load(page.def.Name)
+@@ -65,7 +105,14 @@ 		if err != nil {
+ 			return "", err
+ 		}
+ 
+-		def.USBXHCI = address
++		kept := []string{}
++		for _, controller := range def.USBXHCIs {
++			if controller != address {
++				kept = append(kept, controller)
++			}
++		}
++		def.USBXHCIs = kept
++
+ 		if err := def.Save(); err != nil {
+ 			return "", err
+ 		}
+@@ -75,16 +122,176 @@ 			page.def = def
+ 			a.refreshHubControllers(page)
+ 		})
+ 
+-		if address == "" {
+-			return i18n.L("The hub went back to the host"), nil
++		return i18n.L("The hub went back to the host"), nil
++	})
++}
++
++// showAddHubDialog lists the xHCI controllers of the host and binds one of
++// them to the machine. A controller can only belong to one machine, so the
++// dialog hides the controllers that any machine already uses.
++func (a *App) showAddHubDialog(def virt.Definition) {
++	scope := a.newScope()
++
++	statusGroup := adw.NewPreferencesGroup()
++
++	statusRow := adw.NewActionRow()
++	statusRow.SetTitle(i18n.L("Looking for controllers"))
++	spinner := adw.NewSpinner()
++	statusRow.AddPrefix(&spinner.Widget)
++	statusGroup.Add(&statusRow.Widget)
++
++	group := adw.NewPreferencesGroup()
++	group.SetTitle(i18n.L("Controllers on This Host"))
++	group.SetDescription(i18n.L("The controller leaves this host while the machine runs."))
++	group.SetVisible(false)
++
++	var controllerRows []*adw.ActionRow
++
++	var dialog *adw.Dialog
++
++	var searchEntry *gtk.SearchEntry
++
++	var refresh *gtk.Button
++
++	var onSearch func(gtk.SearchEntry)
++	onSearch = func(gtk.SearchEntry) {
++		query := strings.ToLower(strings.TrimSpace(searchEntry.GetText()))
++		shown := 0
++
++		for _, row := range controllerRows {
++			match := query == "" ||
++				strings.Contains(strings.ToLower(row.GetTitle()), query) ||
++				strings.Contains(strings.ToLower(row.GetSubtitle()), query)
++			row.SetVisible(match)
++			if match {
++				shown++
++			}
++		}
++
++		if len(controllerRows) == 0 {
++			group.SetVisible(false)
++
++			return
++		}
++
++		if shown == 0 {
++			group.SetVisible(false)
++			statusRow.SetTitle(i18n.L("No controller matches"))
++			statusGroup.SetVisible(true)
++			return
++		}
++
++		group.SetVisible(true)
++		statusGroup.SetVisible(false)
++	}
++
++	var load func()
++	load = func() {
++		for _, row := range controllerRows {
++			group.Remove(&row.Widget)
++		}
++		controllerRows = nil
++
++		statusRow.SetTitle(i18n.L("Looking for controllers"))
++		statusRow.SetSubtitle("")
++		statusGroup.SetVisible(true)
++		spinner.SetVisible(true)
++		group.SetVisible(false)
++		refresh.SetSensitive(false)
++
++		taken := map[string]bool{}
++		if defs, err := virt.List(); err == nil {
++			for _, other := range defs {
++				for _, controller := range other.USBXHCIs {
++					taken[controller] = true
++				}
++			}
+ 		}
+ 
+-		return i18n.L("The hub belongs to the machine now"), nil
+-	})
++		go func() {
++			_, output, err := a.Service.ListXhci(a.Ctx, nil, struct{}{})
++
++			a.idle(func() {
++				spinner.SetVisible(false)
++				refresh.SetSensitive(true)
++
++				if err != nil {
++					statusRow.SetTitle(i18n.L("The controllers could not be listed"))
++					statusRow.SetSubtitle(err.Error())
++					return
++				}
++
++				controllers := []mcp.XhciController{}
++				if output != nil {
++					controllers = output.Controllers
++				}
++
++				statusGroup.SetVisible(false)
++
++				page := a.machinePages[def.Name]
++
++				for _, controller := range controllers {
++					controller := controller
++
++					if taken[controller.Address] {
++						continue
++					}
++
++					row := adw.NewActionRow()
++					if name := shortUSBName(controller.Name); name != "" {
++						row.SetTitle(name)
++					} else {
++						row.SetTitle(i18n.L("xHCI controller"))
++					}
++					row.SetSubtitle(controller.Address)
++					row.SetActivatable(true)
++
++					var cb func(adw.ActionRow)
++					cb = func(adw.ActionRow) {
++						if page != nil {
++							a.addHubController(page, controller.Address)
++						}
++						dialog.Close()
++					}
++					row.ConnectActivated(&cb)
++					scope.hold(&cb)
++
++					group.Add(&row.Widget)
++					controllerRows = append(controllerRows, row)
++				}
++
++				if len(controllerRows) == 0 {
++					statusRow.SetTitle(i18n.L("No second xHCI controller"))
++					statusRow.SetSubtitle(i18n.L("Whole-hub passthrough needs a second xHCI controller on this host."))
++					statusGroup.SetVisible(true)
++
++					return
++				}
++
++				onSearch(gtk.SearchEntry{})
++			})
++		}()
++	}
++
++	refresh = a.iconButton("view-refresh-symbolic", i18n.L("Refresh the Controller List"), func() { load() })
++
++	content := a.formPage(statusGroup, group)
++	dialog, searchEntry = a.dialogSearch(scope, "Add a USB Hub", def.Name, content, "Search controllers", &refresh.Widget)
++	searchEntry.ConnectSearchChanged(&onSearch)
++	scope.hold(&onSearch)
++
++	load()
++
++	a.present(dialog, scope)
+ }
+ 
+-// refreshDevices reconciles the device rows with the definition.
++// refreshDevices reconciles the device rows with the definition. A device
++// that the definition forwards but that is not attached right now shows as
++// disconnected, so that the list matches the desk of the user.
+ func (a *App) refreshDevices(page *machinePage) {
++	// The names of attached devices come from sysfs, the same source that the
++	// chooser uses, so a device keeps its name when it joins the list. The
++	// database names fill the gaps for detached devices.
+ 	names := map[string]string{}
+ 	if _, output, err := a.Service.UsbNames(a.Ctx, nil, mcp.UsbNamesInput{IDs: page.def.USBDevices}); err == nil && output != nil {
+ 		for id, name := range output.Names {
+diff --git a/internal/ui/machines.go b/internal/ui/machines.go
+index 09b32612d1defd478b268643c82a74fccba45268..62672d16891f85d35287680e2a27291bcaa1bb4f 100644
+--- a/internal/ui/machines.go
++++ b/internal/ui/machines.go
+@@ -71,9 +71,11 @@ 	deviceRows   []*adw.ActionRow
+ 	deviceEmpty  *adw.ActionRow
+ 	addDeviceRow *adw.ButtonRow
+ 
+-	hubGroup *adw.PreferencesGroup
+-	hubRow   *comboRow
+-	hubHint  *adw.ActionRow
++	hubGroup  *adw.PreferencesGroup
++	hubNames  []string
++	hubRows   []*adw.ActionRow
++	hubEmpty  *adw.ActionRow
++	addHubRow *adw.ButtonRow
+ 
+ 	sharesGroup *adw.PreferencesGroup
+ 	shareNames  []string
+@@ -176,16 +178,15 @@ 	})
+ 	page.devicesGroup.Add(&page.addDeviceRow.Widget)
+ 
+ 	page.hubGroup = adw.NewPreferencesGroup()
+-	page.hubGroup.SetTitle(i18n.L("Whole USB Hub"))
++	page.hubGroup.SetTitle(i18n.L("USB Hubs"))
+ 	page.hubGroup.SetDescription(i18n.L("A second xHCI controller gives the machine its own hub."))
+-	page.hubRow = a.comboRow("Controller", []string{i18n.L("None")}, []string{""}, "", func(value string) {
+-		a.setHubController(page, value)
++	page.hubEmpty = a.actionRow("No USB hubs", "Add a hub to pass it to this machine", nil)
++	page.hubEmpty.AddCssClass("dim-label")
++	page.hubGroup.Add(&page.hubEmpty.Widget)
++	page.addHubRow = a.buttonRow("_Add USB Hub", "list-add-symbolic", func() {
++		a.showAddHubDialog(page.def)
+ 	})
+-	page.hubGroup.Add(&page.hubRow.row.Widget)
+-	page.hubHint = a.actionRow("", "", nil)
+-	page.hubHint.AddCssClass("dim-label")
+-	page.hubHint.SetVisible(false)
+-	page.hubGroup.Add(&page.hubHint.Widget)
++	page.hubGroup.Add(&page.addHubRow.Widget)
+ 
+ 	// Everything that a dialog can change lives in Machine Settings, so the page
+ 	// carries only the facts that stay read-only.
+diff --git a/internal/virt/launcher.go b/internal/virt/launcher.go
+index a35aea37cc4d74585bb717827f58d360de9d0560..45be2d51eee156caa5c622a16a62a89249ed3e0c 100644
+--- a/internal/virt/launcher.go
++++ b/internal/virt/launcher.go
+@@ -525,22 +525,24 @@ 	if len(missing) > 0 {
+ 		fmt.Fprintf(os.Stderr, "phial: usb devices not present, skipping: %s\n", strings.Join(missing, " "))
+ 	}
+ 
+-	if d.USBXHCI != "" {
+-		if xhciControllerCount() <= 1 {
+-			return nil, errors.New("refusing to pass the only xHCI controller to the guest")
++	if len(d.USBXHCIs) > 0 {
++		if len(d.USBXHCIs) >= xhciControllerCount() {
++			return nil, errors.New("refusing to pass every xHCI controller to the guest")
+ 		}
+ 
+-		sysfs := filepath.Join("/sys/bus/pci/devices", d.USBXHCI)
+-		if _, err := os.Stat(sysfs); err != nil {
+-			return nil, fmt.Errorf("no PCI device %s", d.USBXHCI)
+-		}
++		for _, controller := range d.USBXHCIs {
++			sysfs := filepath.Join("/sys/bus/pci/devices", controller)
++			if _, err := os.Stat(sysfs); err != nil {
++				return nil, fmt.Errorf("no PCI device %s", controller)
++			}
++
++			driver, err := os.Readlink(filepath.Join(sysfs, "driver"))
++			if err != nil || filepath.Base(driver) != "vfio-pci" {
++				return nil, fmt.Errorf("%s is not bound to vfio-pci; run: run0 phial vfio bind %s", controller, controller)
++			}
+ 
+-		driver, err := os.Readlink(filepath.Join(sysfs, "driver"))
+-		if err != nil || filepath.Base(driver) != "vfio-pci" {
+-			return nil, fmt.Errorf("%s is not bound to vfio-pci; run: run0 phial vfio bind %s", d.USBXHCI, d.USBXHCI)
++			args = append(args, "-device", "vfio-pci,host="+controller)
+ 		}
+-
+-		args = append(args, "-device", "vfio-pci,host="+d.USBXHCI)
+ 	}
+ 
+ 	if boot.Shim != "" {
+diff --git a/internal/virt/vm.go b/internal/virt/vm.go
+index b1af436bc18b62cf0c07d320d642928897d036df..e76374a63bdcfe53c34e8fb2f5f74387e9bc19c5 100644
+--- a/internal/virt/vm.go
++++ b/internal/virt/vm.go
+@@ -37,7 +37,7 @@ 	SecureBoot      bool              `json:"secure_boot"`
+ 	HugePages       bool              `json:"hugepages"`
+ 	NoNativeContext bool              `json:"no_native_context,omitempty"`
+ 	USBDevices      []string          `json:"usb_devices"`
+-	USBXHCI         string            `json:"usb_xhci"`
++	USBXHCIs        []string          `json:"usb_xhci"`
+ 	NetLAN          string            `json:"net_lan"`
+ 	NetFallback     string            `json:"net_fallback"`
+ 	Audio           string            `json:"audio"`
+@@ -46,6 +46,37 @@ 	ShareTargets    map[string]string `json:"share_targets,omitempty"`
+ 	ReadOnlyShares  []string          `json:"read_only_shares,omitempty"`
+ }
+ 
++// UnmarshalJSON accepts the single controller of an old definition as well
++// as the list that a current definition carries, both under usb_xhci.
++func (d *Definition) UnmarshalJSON(data []byte) error {
++	type alias Definition
++
++	aux := struct {
++		alias
++		RawUSBXHCIs json.RawMessage `json:"usb_xhci"`
++	}{}
++
++	if err := json.Unmarshal(data, &aux); err != nil {
++		return err
++	}
++
++	*d = Definition(aux.alias)
++
++	var list []string
++	if err := json.Unmarshal(aux.RawUSBXHCIs, &list); err == nil {
++		d.USBXHCIs = list
++
++		return nil
++	}
++
++	single := ""
++	if err := json.Unmarshal(aux.RawUSBXHCIs, &single); err == nil && single != "" {
++		d.USBXHCIs = []string{single}
++	}
++
++	return nil
++}
++
+ func Defaults(name string) Definition {
+ 	return Definition{
+ 		Name:        name,
+@@ -57,6 +88,7 @@ 		GPU:         "venus",
+ 		SecureBoot:  true,
+ 		HugePages:   true,
+ 		USBDevices:  []string{"0403:6001", "1a86:55d3", "345f:2131", "16c0:05df", "0b95:1790"},
++		USBXHCIs:    []string{},
+ 		NetLAN:      "auto",
+ 		NetFallback: "passt",
+ 		Audio:       "none",
+
