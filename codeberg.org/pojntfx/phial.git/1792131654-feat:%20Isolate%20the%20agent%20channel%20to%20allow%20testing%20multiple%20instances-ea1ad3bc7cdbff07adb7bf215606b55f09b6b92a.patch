@@ -1,0 +1,125 @@
+From ea1ad3bc7cdbff07adb7bf215606b55f09b6b92a Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Thu, 15 Oct 2026 23:20:54 -0700
+Subject: [PATCH] feat: Isolate the agent channel to allow testing multiple instances
+---
+diff --git a/docs/DESIGN.md b/docs/DESIGN.md
+index 4a51eb2a081e1d3606a4d5a8504fa68f3b94e3ad..df3422ee1f15dc6bee9f9a24e83c87a8b3f2bfed 100644
+--- a/docs/DESIGN.md
++++ b/docs/DESIGN.md
+@@ -67,12 +67,16 @@    steps and Cancel Installation. The current step carries the precise progress in its
+    subtitle, such as the downloaded size and the share of the download, or the package
+    name with its position in the package list.
+ 2. **Overview** carries the state and, while the machine runs, the live CPU, memory,
+-   disk, network, and graphics figures.
++   disk, network, and graphics figures. The graphics row states the busy share of the
++   render engine of the host. The disk row states the read and the write rates.
+ 3. **Applications and Desktop** carries Guest Applications, Remote Desktop, Terminal,
+    Serial Console, and the SSH command. Each row opens a dialog or copies a command.
+ 4. **Shared Folders** lists the shared host directories and offers Share a Folder.
+-5. **USB Devices** lists the passed devices and offers Add USB Device.
+-6. **Whole USB Hub** offers one controller, or none.
++5. **USB Devices** lists the passed devices and offers Add USB Device. The chooser
++   hides the devices that any machine already forwards. A passed device that is not
++   attached right now states itself as disconnected.
++6. **USB Hubs** lists the passed controllers and offers Add USB Hub. The chooser
++   hides the controllers that any machine already uses.
+ 7. **Storage** carries the facts that no dialog changes: the disk image path, and a
+    control that shows the folder of the image in the file manager.
+ 
+@@ -84,7 +88,7 @@ - The pencil opens Machine Settings.
+ - The menu carries Logs, Reprovision the Guest Agent, Restart, and Delete Machine.
+ - Logs opens the log of the machine in the text editor: the console of the installer when it keeps one, else the service log of the machine.
+ - The Serial Console and Remote Desktop dialogs state the user and the password with a copy control for each, because the guest asks for both at its login.
+-- The Terminal and Remote Desktop dialogs carry Unlock the SSH Agent, which loads the key of the user into the dedicated agent of Phial and asks for the passphrase through pinentry.
++- The Terminal dialog carries Unlock the SSH Agent, which loads the key of the user into the dedicated agent of Phial and asks for the passphrase through pinentry.
+ - Every command in the guest states a timeout, so a guest that stops answering states an error instead of holding the app.
+ - The install provisions the machine: it boots the guest once, waits for the guest agent to answer, copies the units of the guest into it, and stops it again.
+ - The guest agent is the binary of Phial itself, so the reprovision step, which runs the provisioning again, replaces the agent of a machine as well.
+@@ -253,6 +257,11 @@
+ A dialog carries the Cancel control first and the affirmative control last. The
+ affirmative control stays insensitive until the form is valid. The Escape key closes
+ the dialog.
++
++A dialog that carries a list carries a search button at the start of its header bar
++and a refresh control at the end. The search bar slides out below the header bar, and
++typing into the dialog opens it as well. A query without matches states itself in the
++list.
+ 
+ ## Keyboard and accessibility
+ 
+diff --git a/internal/ui/app.go b/internal/ui/app.go
+index a1243c4d6045ffe180c55e335f6ece80bbb20443..96a9621f60559bf9862884fb33798323f47f3a98 100644
+--- a/internal/ui/app.go
++++ b/internal/ui/app.go
+@@ -5,6 +5,7 @@ 	"context"
+ 	"fmt"
+ 	"log/slog"
+ 	"os"
++	"path/filepath"
+ 	"strconv"
+ 	"strings"
+ 	"unsafe"
+@@ -121,7 +122,7 @@
+ 	var onStartup func(gio.Application)
+ 	onStartup = func(gio.Application) {
+ 		go func() {
+-			if err := a.Service.Run(runtimeDir()); err != nil {
++			if err := a.Service.Run(filepath.Dir(a.State.RuntimeDir())); err != nil {
+ 				log.Error("the agent channel stopped", "err", err)
+ 			}
+ 		}()
+diff --git a/tests/ui-test.sh b/tests/ui-test.sh
+index aff4b02e337adebd61e3905a1e39dc6a57917149..5cd0091ba8cac5f81931d8fcde2846d7c00188de 100755
+--- a/tests/ui-test.sh
++++ b/tests/ui-test.sh
+@@ -11,6 +11,11 @@ export DBUS_SESSION_BUS_ADDRESS="${DBUS_SESSION_BUS_ADDRESS:-unix:path=/run/user/$(id -u)/bus}"
+ GSETTINGS="${GSETTINGS:-/usr/bin/gsettings}"
+ export GSETTINGS_SCHEMA_DIR="$PWD/assets/resources"
+ 
++# The run keeps its own runtime directory, so it never takes the agent channel
++# of a running application.
++export PHIAL_RUNTIME_DIR="${PHIAL_RUNTIME_DIR:-/tmp/phial-ui-runtime/phial}"
++export SOCK="$PHIAL_RUNTIME_DIR/mcp.sock"
++
+ OUT="${OUT:-/tmp/phial-ui}"
+ LOG="${LOG:-/tmp/phial-ui.log}"
+ APP_ID="com.pojtinger.felicitas.Phial"
+@@ -84,6 +89,26 @@   capture "$1"
+   stop
+ }
+ 
++# dialog_search_shot opens a list dialog and captures its search bar open, the
++# list filtered by one query, and the empty state of a query without matches.
++dialog_search_shot() {
++  start
++  page "$2"
++  act "$3"
++  sleep 4
++  act toggle-search
++  sleep 1
++  capture "$1"
++  act_string search-text "$4"
++  sleep 2
++  capture "$5"
++  act_string search-text "zzzzz"
++  sleep 2
++  capture "$6"
++  stop
++}
++
++
+ pkill -f /tmp/phial-ui-app 2>/dev/null
+ 
+ # The run builds the machine that it shows and removes it again, so a host
+@@ -162,6 +187,9 @@ dialog_shot 13-remote-desktop "machine:$MACHINE" show-rdp
+ dialog_shot 14-terminal "machine:$MACHINE" show-terminal
+ dialog_shot 15-serial-console "machine:$MACHINE" show-serial
+ dialog_shot 16-add-usb-device "machine:$MACHINE" add-device
++dialog_shot 16b-add-usb-hub "machine:$MACHINE" add-hub
++dialog_search_shot 16c-add-usb-device-search "machine:$MACHINE" add-device "card" 16d-add-usb-device-filtered 16e-add-usb-device-empty
++dialog_search_shot 12b-guest-applications-search "machine:$MACHINE" show-apps "cal" 12d-guest-applications-filtered 12c-guest-applications-empty
+ dialog_shot 17-grant-access "provider:$PROVIDER" grant-access
+ dialog_shot 18-add-provider "providers" add-provider
+ dialog_shot 19-add-forward "connections" add-forward
+
