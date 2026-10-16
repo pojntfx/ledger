@@ -1,0 +1,272 @@
+From fcfd92373b200065db7e9c74871613e4cb0de6a1 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Thu, 15 Oct 2026 23:11:11 -0700
+Subject: [PATCH] fix: Prevent list and selector for forwarded USB names from drifting
+---
+diff --git a/internal/ui/devices.go b/internal/ui/devices.go
+index 67b41faad8453d0953d9ba2374a35a843fa00a4e..3c4a95feac8f8c426e4abc10762c312a2ddb987f 100644
+--- a/internal/ui/devices.go
++++ b/internal/ui/devices.go
+@@ -299,11 +299,21 @@ 			names[id] = name
+ 		}
+ 	}
+ 
++	attached := map[string]bool{}
++	if _, output, err := a.Service.UsbLs(a.Ctx, nil, mcp.NameInput{Name: page.def.Name}); err == nil && output != nil {
++		for _, device := range output.Devices {
++			id := fmt.Sprintf("%s:%s", device.Vendor, device.Product)
++			attached[id] = true
++
++			if name := shortUSBName(device.Name); name != "" {
++				names[id] = name
++			}
++		}
++	}
++
+ 	if sameStrings(page.deviceNames, page.def.USBDevices) {
+ 		for index, row := range page.deviceRows {
+-			title, subtitle := deviceText(page.def.USBDevices[index], names)
+-			row.SetTitle(title)
+-			row.SetSubtitle(subtitle)
++			styleDeviceRow(row, page.def.USBDevices[index], names, attached)
+ 		}
+ 		return
+ 	}
+@@ -318,9 +328,7 @@ 	for _, device := range page.def.USBDevices {
+ 		device := device
+ 
+ 		row := adw.NewActionRow()
+-		title, subtitle := deviceText(device, names)
+-		row.SetTitle(title)
+-		row.SetSubtitle(subtitle)
++		styleDeviceRow(row, device, names, attached)
+ 		row.SetSubtitleSelectable(true)
+ 
+ 		remove := a.iconButton("user-trash-symbolic", i18n.L("Remove Device"), func() {
+@@ -357,19 +365,41 @@ 	}
+ 	return device, ""
+ }
+ 
++// styleDeviceRow writes the name, the state, and the dimmed look of one device
++// row. The row stays sensitive, so the user can still remove the device.
++func styleDeviceRow(row *adw.ActionRow, device string, names map[string]string, attached map[string]bool) {
++	title, subtitle := deviceText(device, names)
++
++	if attached[device] {
++		row.RemoveCssClass("dimmed")
++	} else {
++		if subtitle == "" {
++			subtitle = i18n.L("Disconnected")
++		} else {
++			subtitle = subtitle + " · " + i18n.L("Disconnected")
++		}
++
++		row.AddCssClass("dimmed")
++	}
++
++	row.SetTitle(title)
++	row.SetSubtitle(subtitle)
++}
++
+ func (a *App) showAddDeviceDialog(def virt.Definition) {
+ 	scope := a.newScope()
+ 
+-	group := adw.NewPreferencesGroup()
+-	group.SetTitle(i18n.L("Devices on This Host"))
+-	group.SetDescription(i18n.L("The device leaves this host while the machine runs."))
++	statusGroup := adw.NewPreferencesGroup()
+ 
+ 	statusRow := adw.NewActionRow()
+ 	statusRow.SetTitle(i18n.L("Looking for devices"))
+ 	spinner := adw.NewSpinner()
+-	spinner.SetVisible(true)
+ 	statusRow.AddPrefix(&spinner.Widget)
+-	group.Add(&statusRow.Widget)
++	statusGroup.Add(&statusRow.Widget)
++
++	group := adw.NewPreferencesGroup()
++	group.SetTitle(i18n.L("Devices on This Host"))
++	group.SetDescription(i18n.L("The device leaves this host while the machine runs."))
+ 
+ 	manualGroup := formGroup("Manual Entry", "Use the identifier when the device is not attached right now.")
+ 
+@@ -408,58 +438,140 @@ 		}
+ 		add(device)
+ 	}).Widget)
+ 
+-	content := a.formPage(group, manualGroup)
+-	dialog := a.dialog(scope, "Add a USB Device", def.Name, "_Close", content, nil)
++	var deviceRows []*adw.ActionRow
+ 
+-	go func() {
+-		_, output, err := a.Service.UsbLs(a.Ctx, nil, mcp.NameInput{Name: def.Name})
++	var dialog *adw.Dialog
+ 
+-		a.idle(func() {
+-			spinner.SetVisible(false)
++	var searchEntry *gtk.SearchEntry
+ 
+-			if err != nil {
+-				statusRow.SetTitle(i18n.L("The devices could not be listed"))
+-				statusRow.SetSubtitle(err.Error())
+-				return
+-			}
++	var refresh *gtk.Button
+ 
+-			devices := []mcp.UsbDeviceInfo{}
+-			if output != nil {
+-				devices = output.Devices
++	var onSearch func(gtk.SearchEntry)
++	onSearch = func(gtk.SearchEntry) {
++		query := strings.ToLower(strings.TrimSpace(searchEntry.GetText()))
++		shown := 0
++
++		for _, row := range deviceRows {
++			match := query == "" ||
++				strings.Contains(strings.ToLower(row.GetTitle()), query) ||
++				strings.Contains(strings.ToLower(row.GetSubtitle()), query)
++			row.SetVisible(match)
++			if match {
++				shown++
+ 			}
++		}
++
++		if len(deviceRows) == 0 {
++			group.SetVisible(false)
+ 
+-			if len(devices) == 0 {
+-				statusRow.SetTitle(i18n.L("No device is attached"))
+-				return
++			return
++		}
++
++		if shown == 0 {
++			group.SetVisible(false)
++			statusRow.SetTitle(i18n.L("No device matches"))
++			statusGroup.SetVisible(true)
++			return
++		}
++
++		group.SetVisible(true)
++		statusGroup.SetVisible(false)
++	}
++
++	var load func()
++	load = func() {
++		for _, row := range deviceRows {
++			group.Remove(&row.Widget)
++		}
++		deviceRows = nil
++
++		statusRow.SetTitle(i18n.L("Looking for devices"))
++		statusRow.SetSubtitle("")
++		statusGroup.SetVisible(true)
++		spinner.SetVisible(true)
++		group.SetVisible(false)
++		refresh.SetSensitive(false)
++
++		// A device can only belong to one machine, so the chooser hides the
++		// devices that any machine already forwards.
++		taken := map[string]bool{}
++		if defs, err := virt.List(); err == nil {
++			for _, other := range defs {
++				for _, device := range other.USBDevices {
++					taken[device] = true
++				}
+ 			}
++		}
+ 
+-			group.Remove(&statusRow.Widget)
++		go func() {
++			_, output, err := a.Service.UsbLs(a.Ctx, nil, mcp.NameInput{Name: def.Name})
++
++			a.idle(func() {
++				spinner.SetVisible(false)
++				refresh.SetSensitive(true)
++
++				if err != nil {
++					statusRow.SetTitle(i18n.L("The devices could not be listed"))
++					statusRow.SetSubtitle(err.Error())
++					return
++				}
++
++				devices := []mcp.UsbDeviceInfo{}
++				if output != nil {
++					devices = output.Devices
++				}
++
++				statusGroup.SetVisible(false)
++
++				for _, device := range devices {
++					device := device
++
++					if taken[fmt.Sprintf("%s:%s", device.Vendor, device.Product)] {
++						continue
++					}
++
++					row := adw.NewActionRow()
++					if device.Name != "" {
++						row.SetTitle(shortUSBName(device.Name))
++						row.SetSubtitle(fmt.Sprintf("%s:%s", device.Vendor, device.Product))
++					} else {
++						row.SetTitle(fmt.Sprintf("%s:%s", device.Vendor, device.Product))
++						row.SetSubtitle(device.Address)
++					}
++					row.SetActivatable(true)
+ 
+-			for _, device := range devices {
+-				device := device
++					var cb func(adw.ActionRow)
++					cb = func(adw.ActionRow) {
++						add(fmt.Sprintf("%s:%s", device.Vendor, device.Product))
++						dialog.Close()
++					}
++					row.ConnectActivated(&cb)
++					scope.hold(&cb)
+ 
+-				row := adw.NewActionRow()
+-				if device.Name != "" {
+-					row.SetTitle(shortUSBName(device.Name))
+-					row.SetSubtitle(fmt.Sprintf("%s:%s", device.Vendor, device.Product))
+-				} else {
+-					row.SetTitle(fmt.Sprintf("%s:%s", device.Vendor, device.Product))
+-					row.SetSubtitle(device.Address)
++					group.Add(&row.Widget)
++					deviceRows = append(deviceRows, row)
+ 				}
+-				row.SetActivatable(true)
+ 
+-				var cb func(adw.ActionRow)
+-				cb = func(adw.ActionRow) {
+-					add(fmt.Sprintf("%s:%s", device.Vendor, device.Product))
+-					dialog.Close()
++				if len(deviceRows) == 0 {
++					statusRow.SetTitle(i18n.L("No device is attached"))
++					statusGroup.SetVisible(true)
++
++					return
+ 				}
+-				row.ConnectActivated(&cb)
+-				scope.hold(&cb)
+ 
+-				group.Add(&row.Widget)
+-			}
+-		})
+-	}()
++				onSearch(gtk.SearchEntry{})
++			})
++		}()
++	}
++
++	refresh = a.iconButton("view-refresh-symbolic", i18n.L("Refresh the Device List"), func() { load() })
++
++	content := a.formPage(statusGroup, group, manualGroup)
++	dialog, searchEntry = a.dialogSearch(scope, "Add a USB Device", def.Name, content, "Search devices", &refresh.Widget)
++	searchEntry.ConnectSearchChanged(&onSearch)
++	scope.hold(&onSearch)
++
++	load()
+ 
+ 	a.present(dialog, scope)
+ }
+
