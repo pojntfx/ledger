@@ -1,0 +1,186 @@
+From 52d3f1d47fbffed3ac715c4715121c6324d950e0 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Thu, 15 Oct 2026 23:16:37 -0700
+Subject: [PATCH] feat: Add disk and GPU current usage numbers
+---
+diff --git a/internal/ui/machines.go b/internal/ui/machines.go
+index 62672d16891f85d35287680e2a27291bcaa1bb4f..5e3de37e76c62085a1ecbcdfeeb06e3a09b938bb 100644
+--- a/internal/ui/machines.go
++++ b/internal/ui/machines.go
+@@ -658,11 +658,22 @@ 			}
+ 
+ 			page.memoryRow.SetSubtitle(fmt.Sprintf(i18n.L("%s of %s"), humanBytes(metrics.MemoryUsed), humanBytes(metrics.MemoryTotal)))
+ 
+-			page.diskRow.SetSubtitle(fmt.Sprintf(
++			diskText := fmt.Sprintf(
+ 				i18n.L("%s of %s on this host"),
+ 				humanBytes(metrics.DiskAllocated),
+ 				humanBytes(metrics.DiskTotal),
+-			))
++			)
++
++			if metrics.DiskReadRate > 0 || metrics.DiskWriteRate > 0 {
++				diskText = fmt.Sprintf(
++					i18n.L("%s · %s/s read, %s/s written"),
++					diskText,
++					humanBytes(int64(metrics.DiskReadRate)),
++					humanBytes(int64(metrics.DiskWriteRate)),
++				)
++			}
++
++			page.diskRow.SetSubtitle(diskText)
+ 
+ 			switch {
+ 			case !metrics.NetworkReady:
+@@ -678,7 +689,13 @@ 				))
+ 			}
+ 
+ 			if metrics.GPU != "" && metrics.GPU != "none" {
+-				page.gpuRow.SetSubtitle(graphicsText(metrics.GPU))
++				gpuText := graphicsText(metrics.GPU)
++
++				if metrics.GPUBusyReady {
++					gpuText = fmt.Sprintf(i18n.L("%s · %.0f%% busy"), gpuText, metrics.GPUBusyPercent)
++				}
++
++				page.gpuRow.SetSubtitle(gpuText)
+ 			}
+ 
+ 			page.render()
+diff --git a/internal/virt/metrics.go b/internal/virt/metrics.go
+index d955b4b1e92f559f9cb6f337d9d44fa9eacdb60a..25576009acef1b94fe832b77a84208a841b1c04c 100644
+--- a/internal/virt/metrics.go
++++ b/internal/virt/metrics.go
+@@ -21,6 +21,10 @@ 	NetworkRxRate  float64 `json:"network_rx_rate"`
+ 	NetworkTxRate  float64 `json:"network_tx_rate"`
+ 	NetworkReady   bool    `json:"network_ready"`
+ 	GPU            string  `json:"gpu"`
++	GPUBusyReady   bool    `json:"gpu_busy_ready"`
++	GPUBusyPercent float64 `json:"gpu_busy_percent"`
++	DiskReadRate   float64 `json:"disk_read_rate"`
++	DiskWriteRate  float64 `json:"disk_write_rate"`
+ 	VCPUs          int     `json:"vcpus"`
+ }
+ 
+@@ -72,6 +76,80 @@
+ 	return user + system, nil
+ }
+ 
++// gpuEngineNs sums the DRM engine times of one process, which count the
++// nanoseconds of GPU work that the process asked for. The second return value
++// states whether any engine answered, so an idle GPU and a missing driver look
++// different.
++func gpuEngineNs(pid int) (int64, bool) {
++	entries, err := os.ReadDir("/proc/" + strconv.Itoa(pid) + "/fdinfo")
++	if err != nil {
++		return 0, false
++	}
++
++	total := int64(0)
++	found := false
++
++	for _, entry := range entries {
++		data, err := os.ReadFile(filepath.Join("/proc", strconv.Itoa(pid), "fdinfo", entry.Name()))
++		if err != nil {
++			continue
++		}
++
++		for _, line := range strings.Split(string(data), "\n") {
++			if !strings.HasPrefix(line, "drm-engine-") {
++				continue
++			}
++
++			fields := strings.Fields(line)
++			if len(fields) < 2 {
++				continue
++			}
++
++			ns, err := strconv.ParseInt(fields[1], 10, 64)
++			if err != nil {
++				continue
++			}
++
++			total += ns
++			found = true
++		}
++	}
++
++	return total, found
++}
++
++// processDiskIO reads the block layer counters of one process, so the numbers
++// stay close to the disk image instead of the sockets of the process.
++func processDiskIO(pid int) (int64, int64) {
++	data, err := os.ReadFile("/proc/" + strconv.Itoa(pid) + "/io")
++	if err != nil {
++		return 0, 0
++	}
++
++	var read, written int64
++
++	for _, line := range strings.Split(string(data), "\n") {
++		fields := strings.Fields(line)
++		if len(fields) != 2 {
++			continue
++		}
++
++		value, err := strconv.ParseInt(fields[1], 10, 64)
++		if err != nil {
++			continue
++		}
++
++		switch fields[0] {
++		case "read_bytes:":
++			read = value
++		case "write_bytes:":
++			written = value
++		}
++	}
++
++	return read, written
++}
++
+ func processRSS(pid int) int64 {
+ 	data, err := os.ReadFile("/proc/" + strconv.Itoa(pid) + "/status")
+ 	if err != nil {
+@@ -130,6 +208,9 @@ 	if err != nil {
+ 		return metrics, nil
+ 	}
+ 
++	engineFirst, engineOK := gpuEngineNs(pid)
++	diskReadFirst, diskWriteFirst := processDiskIO(pid)
++
+ 	start := time.Now()
+ 
+ 	rx, tx, rxErr := QgaNetworkBytes(def)
+@@ -142,6 +223,9 @@ 	if err != nil {
+ 		return metrics, nil
+ 	}
+ 
++	engineSecond, _ := gpuEngineNs(pid)
++	diskReadSecond, diskWriteSecond := processDiskIO(pid)
++
+ 	// The counters count clock ticks of the whole process tree, so the rate
+ 	// divides by the interval that was measured.
+ 	elapsed := time.Since(start).Seconds()
+@@ -152,6 +236,19 @@
+ 	metrics.CPUPercent = float64(second-first) * 100 / 100 / elapsed
+ 
+ 	metrics.MemoryUsed = processRSS(pid)
++
++	if engineOK && engineSecond >= engineFirst {
++		metrics.GPUBusyReady = true
++		metrics.GPUBusyPercent = float64(engineSecond-engineFirst) / (elapsed * 1e9) * 100
++	}
++
++	if diskReadSecond >= diskReadFirst {
++		metrics.DiskReadRate = float64(diskReadSecond-diskReadFirst) / elapsed
++	}
++
++	if diskWriteSecond >= diskWriteFirst {
++		metrics.DiskWriteRate = float64(diskWriteSecond-diskWriteFirst) / elapsed
++	}
+ 
+ 	if metrics.NetworkReady {
+ 		metrics.NetworkRxBytes = rx
+
