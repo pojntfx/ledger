@@ -1,0 +1,32 @@
+From dd70fae15b442b65d88e9ed0848e1fb7f456040a Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Thu, 15 Oct 2026 22:59:51 -0700
+Subject: [PATCH] feat: Sign in with `phial` user for RDP
+---
+diff --git a/internal/guest/provision.go b/internal/guest/provision.go
+index b6bd0e21ee72af33126c63e0aa604af754b8030d..8130b988660600ffe38efe2c7205d5f954c41ac9 100644
+--- a/internal/guest/provision.go
++++ b/internal/guest/provision.go
+@@ -246,7 +246,7 @@ 		"sudo chown gnome-remote-desktop:gnome-remote-desktop " + key + " " + cert + " 2>/dev/null || true",
+ 		"sudo chmod 0600 " + key + " " + cert,
+ 		"sudo grdctl --system rdp set-tls-cert " + cert,
+ 		"sudo grdctl --system rdp set-tls-key " + key,
+-		"sudo grdctl --system rdp set-credentials " + name + " " + password,
++		"sudo grdctl --system rdp set-credentials " + guestUser + " " + password,
+ 		"sudo grdctl --system rdp disable-view-only",
+ 		"sudo grdctl --system rdp enable",
+ 		"sudo systemctl enable gnome-remote-desktop > /dev/null 2>&1 || true",
+diff --git a/internal/mcp/tools_display.go b/internal/mcp/tools_display.go
+index 03530030d0aa3bc4baf665fdb397b5d49542cfa4..d55fa1e96ec4c35a5a70f8001113bda576038efd 100644
+--- a/internal/mcp/tools_display.go
++++ b/internal/mcp/tools_display.go
+@@ -261,7 +261,7 @@ 	if err := s.unitStart(fmt.Sprintf("phial-guest-port@%d.service", def.GuestCIDValue())); err != nil {
+ 		return nil, nil, err
+ 	}
+ 
+-	command := exec.Command("xfreerdp", fmt.Sprintf("/v:[::1]:%d", def.RdpPortValue()), "/u:"+input.VM, "/p:"+password, "/cert:ignore", "+clipboard", "/sound", "/dynamic-resolution")
++	command := exec.Command("xfreerdp", fmt.Sprintf("/v:[::1]:%d", def.RdpPortValue()), "/u:phial", "/p:"+password, "/cert:ignore", "+clipboard", "/sound", "/dynamic-resolution")
+ 
+ 	var output strings.Builder
+ 	command.Stdout = &output
+
