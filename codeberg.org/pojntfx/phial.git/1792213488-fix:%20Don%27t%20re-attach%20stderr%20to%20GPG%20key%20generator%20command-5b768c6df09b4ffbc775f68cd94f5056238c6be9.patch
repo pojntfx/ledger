@@ -1,0 +1,33 @@
+From 5b768c6df09b4ffbc775f68cd94f5056238c6be9 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Fri, 16 Oct 2026 22:04:48 -0700
+Subject: [PATCH] fix: Don't re-attach stderr to GPG key generator command
+---
+diff --git a/docs/DESIGN.md b/docs/DESIGN.md
+index f8b6d35aa98d8461938fb35f89b9417347e09f91..1a08c91619fedc28bed1e2192627e9af0c9bc78b 100644
+--- a/docs/DESIGN.md
++++ b/docs/DESIGN.md
+@@ -133,7 +133,9 @@   fingerprint, and the type. Add SSH Key loads a key file into the agent, and
+   Unload drops it again. The file on disk stays.
+ - The GnuPG Keys group lists the secret keys of the host agent: the uid and the
+   short fingerprint. Add GnuPG Key imports a key file into the keyring, and
+-  Delete removes the secret part only, so old signatures still verify.
++  Delete removes the secret part only, so old signatures still verify. A GnuPG
++  key carries no unload, because the agent serves it from the keyring itself and
++  holds no second copy.
+ - Every list ends with its own actions, because a reader who adds one kind of
+   entry reads that list. Add Token sits below the tokens, and Add SSH Key and
+   Generate SSH Key sit below the SSH keys.
+diff --git a/internal/state/keys.go b/internal/state/keys.go
+index 29d890ace9fcd7b61a9a8e531863c6b0a2635e34..7ccc38c91ee790e302bb2f32fa64bc3f837461b9 100644
+--- a/internal/state/keys.go
++++ b/internal/state/keys.go
+@@ -254,7 +254,6 @@ 		uid = fmt.Sprintf("%s <%s>", name, email)
+ 	}
+ 
+ 	command := hostcmd.Command("gpg", "--batch", "--quick-generate-key", uid, "ed25519", "sign", "never")
+-	command.Stderr = os.Stderr
+ 
+ 	if output, err := command.CombinedOutput(); err != nil {
+ 		return fmt.Errorf("gpg: %s: %w", strings.TrimSpace(string(output)), err)
+
