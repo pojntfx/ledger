@@ -1,0 +1,352 @@
+From 2b6f66574a4c51e631dd8dc2711cb49ff178e162 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Fri, 16 Oct 2026 21:21:09 -0700
+Subject: [PATCH] feat: Stay in "stopping" state until VM has actually fully shut down
+---
+diff --git a/docs/DESIGN.md b/docs/DESIGN.md
+index 0f43f44d4176f34b9569cb60f5b64ac8433f8235..5e54ea5b6a80ca17e4c6cec7ac02d596519f7723 100644
+--- a/docs/DESIGN.md
++++ b/docs/DESIGN.md
+@@ -203,7 +203,8 @@ | Restarting | State "Restarting" | The control, insensitive |
+ 
+ A transition clears when the machine reaches the new state, or after three minutes.
+ The header control stays insensitive while a transition runs, so a second press
+-cannot start a second transition.
++cannot start a second transition. A stop ends only when the unit of the machine no
++longer runs, because the guest still shuts down while the unit deactivates.
+ 
+ ### The installation
+ 
+diff --git a/internal/ui/machines.go b/internal/ui/machines.go
+index 88ebb93a9606261c376386c89b85e51c7d16ef09..7fbd108b5a7e5ab13fc15fc7faac2cdf11b1bef6 100644
+--- a/internal/ui/machines.go
++++ b/internal/ui/machines.go
+@@ -89,7 +89,7 @@ 	rdpRow      *adw.ActionRow
+ 	serialRow   *adw.ActionRow
+ 
+ 	metricsRunning bool
+-	active         bool
++	runState       string
+ 	ready          bool
+ 	installing     bool
+ 	installed      bool
+@@ -284,7 +284,7 @@ func (a *App) machinePrimaryAction(page *machinePage) {
+ 	installed := vmInstalled(page.def)
+ 
+ 	switch {
+-	case page.active:
++	case page.active():
+ 		a.machineActionFor(page.def.Name, "stop")
+ 	case installed:
+ 		a.machineActionFor(page.def.Name, "start")
+@@ -430,15 +430,17 @@ }
+ 
+ // setState records the observed state of the machine and renders it. A pending
+ // transition clears as soon as the machine reaches the new state.
+-func (p *machinePage) setState(active bool, ready bool, installing bool, installed bool) {
++func (p *machinePage) setState(runState string, ready bool, installing bool, installed bool) {
+ 	if p.pending != "" {
+ 		reached := false
+ 
+ 		switch p.pending {
+ 		case "start", "restart":
+-			reached = active
++			reached = runState == "active" || runState == "failed"
+ 		case "stop":
+-			reached = !active
++			// A stop keeps the unit deactivating while the guest still shuts
++			// down, so the stop ends only once the unit no longer runs.
++			reached = runState == "inactive" || runState == "failed"
+ 		}
+ 
+ 		if reached || time.Since(p.pendingSince) > 3*time.Minute {
+@@ -446,7 +448,7 @@ 			p.pending = ""
+ 		}
+ 	}
+ 
+-	p.active = active
++	p.runState = runState
+ 	p.ready = ready
+ 	p.installing = installing
+ 	p.installed = installed
+@@ -454,9 +456,16 @@
+ 	p.render()
+ }
+ 
+-// setActive keeps the sidebar reconciler in step with the page.
+-func (p *machinePage) setActive(active bool, ready bool) {
+-	p.setState(active, ready, p.installing, p.installed)
++// active reports whether the machine runs. A unit that deactivates still runs
++// the guest until its shutdown ends, so it counts as running.
++func (p *machinePage) active() bool {
++	return p.runState == "active" || p.runState == "deactivating"
++}
++
++// transitioning reports whether the machine changes state, either because the
++// user asked for it or because the unit reports a start or a stop.
++func (p *machinePage) transitioning() bool {
++	return p.pending != "" || p.runState == "activating" || p.runState == "deactivating"
+ }
+ 
+ // setPending marks a transition that the user asked for.
+@@ -468,7 +477,7 @@ }
+ 
+ // stateText names the state of the machine, including the transition.
+ func (p *machinePage) stateText() string {
+-	return stateText(p.active, p.ready, p.installing, p.installed, p.pending)
++	return stateText(p.runState, p.ready, p.installing, p.installed, p.pending)
+ }
+ 
+ // render writes the state into the page.
+@@ -480,16 +489,18 @@
+ 	p.installGroup.SetVisible(p.installing)
+ 	p.installActions.SetVisible(p.installing)
+ 	p.editButton.SetSensitive(!p.installing)
+-	p.spinner.SetVisible(p.pending != "" && !p.installing)
++	// The spinner states that the machine changes state, which covers the gap
++	// between a press and the state that the unit reports.
++	p.spinner.SetVisible(!p.installing && p.transitioning())
+ 	p.banner.SetSensitive(p.pending == "")
+ 
+ 	for _, row := range []*adw.ActionRow{p.cpuRow, p.memoryRow, p.diskRow, p.networkRow} {
+-		row.SetVisible(p.active)
++		row.SetVisible(p.active())
+ 	}
+ 
+-	p.gpuRow.SetVisible(p.active && p.gpuRow.GetSubtitle() != "")
++	p.gpuRow.SetVisible(p.active() && p.gpuRow.GetSubtitle() != "")
+ 
+-	p.metricsIdle.SetVisible(!p.active || p.metricsFailed)
++	p.metricsIdle.SetVisible(!p.active() || p.metricsFailed)
+ 
+ 	if p.metricsFailed {
+ 		p.metricsIdle.SetTitle(i18n.L("The usage is unavailable"))
+@@ -508,7 +519,7 @@ 		return
+ 	}
+ 
+ 	p.actionButton.SetVisible(true)
+-	p.actionButton.SetSensitive(p.pending == "")
++	p.actionButton.SetSensitive(!p.transitioning())
+ 	p.actionButton.SetUseUnderline(true)
+ 
+ 	setStyle := func(label string, destructive bool, suggested bool) {
+@@ -537,7 +548,7 @@ 	case p.pending == "stop":
+ 		setStyle("_Stopping…", false, false)
+ 	case p.pending == "restart":
+ 		setStyle("_Restarting…", false, false)
+-	case p.active:
++	case p.active():
+ 		setStyle("_Stop", true, false)
+ 	case p.installed:
+ 		setStyle("_Start", false, true)
+@@ -555,20 +566,20 @@ 	if def, err := virt.Load(p.def.Name); err == nil {
+ 		p.def = def
+ 	}
+ 
+-	active, _ := p.def.Active()
++	runState, _ := p.def.RunState()
+ 	ready := false
+-	if active {
++	if runState == "active" {
+ 		ready = p.def.Ready()
+ 	}
+ 
+-	p.setState(active, ready, p.app.Service.Installing(p.def.Name), vmInstalled(p.def))
++	p.setState(runState, ready, p.app.Service.Installing(p.def.Name), vmInstalled(p.def))
+ 	p.refreshAgent()
+ }
+ 
+ // refreshAgent states whether the guest carries an agent that is as new as the
+ // binary of the host.
+ func (p *machinePage) refreshAgent() {
+-	if !p.active || !p.ready {
++	if !p.active() || !p.ready {
+ 		p.banner.SetRevealed(false)
+ 
+ 		return
+@@ -595,13 +606,13 @@ }
+ 
+ // refreshAccess turns the controls on that need a reachable guest.
+ func (p *machinePage) refreshAccess() {
+-	ready := p.active && p.ready
++	ready := p.active() && p.ready
+ 
+ 	for _, row := range []*adw.ActionRow{p.appRow, p.rdpRow, p.sshRow} {
+ 		row.SetSensitive(ready)
+ 	}
+ 
+-	p.serialRow.SetSensitive(p.active)
++	p.serialRow.SetSensitive(p.active())
+ }
+ 
+ // refreshStorage writes the facts that no dialog changes.
+@@ -628,7 +639,9 @@ 		return
+ 	}
+ 
+ 	page := a.machinePages[strings.TrimPrefix(tag, machineTagPrefix)]
+-	if page == nil || !page.active || page.metricsRunning {
++	// The sample needs a unit that runs, not one that still deactivates, so a
++	// machine that shuts down keeps its last figures.
++	if page == nil || page.runState != "active" || page.metricsRunning {
+ 		return
+ 	}
+ 
+diff --git a/internal/ui/util.go b/internal/ui/util.go
+index 7151dec2813c44c5bc7650fb343c7425c4586f75..3d186e881ccd3bdf009b7adcdb4bcebbe6224d78 100644
+--- a/internal/ui/util.go
++++ b/internal/ui/util.go
+@@ -454,20 +454,23 @@
+ 	return detail + ", " + i18n.L("enough for this machine")
+ }
+ 
+-func stateText(active bool, ready bool, installing bool, installed bool, pending string) string {
++// stateText names the state of a machine from the state of its unit. A stop
++// keeps the unit deactivating until the guest is gone, so the state stays
++// Stopping until the machine no longer runs.
++func stateText(runState string, ready bool, installing bool, installed bool, pending string) string {
+ 	switch {
+ 	case installing:
+ 		return i18n.L("Installing")
+-	case pending == "start" || (active && !ready):
++	case pending == "start" || runState == "activating" || (runState == "active" && !ready):
+ 		return i18n.L("Starting")
+ 	case pending == "restart":
+ 		return i18n.L("Restarting")
+ 	case pending == "provision":
+ 		return i18n.L("Updating the guest agent")
+-	case active:
+-		return i18n.L("Running")
+-	case pending == "stop":
++	case pending == "stop" || runState == "deactivating":
+ 		return i18n.L("Stopping")
++	case runState == "active":
++		return i18n.L("Running")
+ 	case installed:
+ 		return i18n.L("Stopped")
+ 	default:
+diff --git a/internal/ui/util_test.go b/internal/ui/util_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..b9709f70713650bb2590f7479918512d0fd44e01
+--- /dev/null
++++ b/internal/ui/util_test.go
+@@ -0,0 +1,49 @@
++package ui
++
++import (
++	"log/slog"
++	"testing"
++
++	"github.com/pojntfx/go-gettext/pkg/i18n"
++)
++
++// TestStateText keeps a stop in the Stopping state until the guest is gone,
++// because a stop keeps the unit deactivating while the guest still shuts down.
++func TestStateText(t *testing.T) {
++	t.Setenv("LC_ALL", "C")
++	t.Setenv("LANG", "C")
++
++	if err := i18n.InitI18n("phial", t.TempDir(), slog.Default()); err != nil {
++		t.Skipf("the translations cannot be initialized: %v", err)
++	}
++
++	tests := []struct {
++		name       string
++		runState   string
++		ready      bool
++		installing bool
++		installed  bool
++		pending    string
++		want       string
++	}{
++		{"fresh disk", "inactive", false, false, false, "", "Not installed"},
++		{"stopped", "inactive", false, false, true, "", "Stopped"},
++		{"start job", "activating", false, false, true, "", "Starting"},
++		{"guest not up", "active", false, false, true, "", "Starting"},
++		{"ready", "active", true, false, true, "", "Running"},
++		{"shutdown of the guest", "deactivating", false, false, true, "", "Stopping"},
++		{"stop requested", "inactive", false, false, true, "stop", "Stopping"},
++		{"stop requested while the guest answers", "active", true, false, true, "stop", "Stopping"},
++		{"restart", "deactivating", false, false, true, "restart", "Restarting"},
++		{"provision", "active", true, false, true, "provision", "Updating the guest agent"},
++		{"install", "inactive", false, true, true, "", "Installing"},
++	}
++
++	for _, tt := range tests {
++		t.Run(tt.name, func(t *testing.T) {
++			if got := stateText(tt.runState, tt.ready, tt.installing, tt.installed, tt.pending); got != tt.want {
++				t.Fatalf("stateText(%q, %v, %v, %v, %q) = %q, want %q", tt.runState, tt.ready, tt.installing, tt.installed, tt.pending, got, tt.want)
++			}
++		})
++	}
++}
+diff --git a/internal/ui/window.go b/internal/ui/window.go
+index e7f692caac61cec9181723f420278e27d027d859..765b8714e8b93c890a810060250b1de5e3ad3615 100644
+--- a/internal/ui/window.go
++++ b/internal/ui/window.go
+@@ -259,17 +259,17 @@ 			a.machineItems[def.Name] = item
+ 			a.machinesSection.Insert(item, int32(index))
+ 		}
+ 
+-		active, _ := def.Active()
++		runState, _ := def.RunState()
+ 		ready := false
+-		if active {
++		if runState == "active" {
+ 			ready = def.Ready()
+ 		}
+ 
+ 		if page := a.machinePages[def.Name]; page != nil {
+-			page.setState(active, ready, a.Service.Installing(def.Name), vmInstalled(def))
++			page.setState(runState, ready, a.Service.Installing(def.Name), vmInstalled(def))
+ 			item.SetSubtitle(page.stateText())
+ 		} else {
+-			item.SetSubtitle(stateText(active, ready, a.Service.Installing(def.Name), vmInstalled(def), ""))
++			item.SetSubtitle(stateText(runState, ready, a.Service.Installing(def.Name), vmInstalled(def), ""))
+ 		}
+ 	}
+ 
+diff --git a/internal/virt/launcher.go b/internal/virt/launcher.go
+index 5ae1a2ecd794169fdbe86a980878c13f2771d7f9..d6a6fadbaf0ef27c76fcddd8f26a4db3a40c7b57 100644
+--- a/internal/virt/launcher.go
++++ b/internal/virt/launcher.go
+@@ -887,21 +887,34 @@
+ 	return units
+ }
+ 
+-func (d Definition) Active() (bool, error) {
++// RunState names what systemd reports for the unit of the machine:
++// activating, active, deactivating, inactive, or failed. A stop keeps the unit
++// deactivating while the guest still shuts down, so a caller can tell a stop
++// that runs from one that ended.
++func (d Definition) RunState() (string, error) {
+ 	conn, err := userManager()
+ 	if err != nil {
+-		return false, err
++		return "", err
+ 	}
+ 	defer conn.Close()
+ 
+ 	property, err := conn.GetUnitPropertyContext(context.Background(), d.unit(), "ActiveState")
+ 	if err != nil {
++		return "", err
++	}
++
++	state, _ := property.Value.Value().(string)
++
++	return state, nil
++}
++
++func (d Definition) Active() (bool, error) {
++	state, err := d.RunState()
++	if err != nil {
+ 		return false, err
+ 	}
+ 
+-	state, ok := property.Value.Value().(string)
+-
+-	return ok && state == "active", nil
++	return state == "active", nil
+ }
+ 
+ func usbBusAddress(vendor string, product string) (string, string, bool) {
+
