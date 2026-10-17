@@ -1,0 +1,2698 @@
+From 33b4cd4adb1322660650d65c18b2a5c2ab5b8e8b Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Fri, 16 Oct 2026 22:43:57 -0700
+Subject: [PATCH] feat: Add basic initial setup wizard that sets up the host and folders to prevent static Flatpak permissions
+---
+diff --git a/Makefile b/Makefile
+index 1ea174298a9c60a5c4f60e7fb9b3bd4fd3444519..b4444d852f1456fffe6b801b7a71502bd802a1e6 100644
+--- a/Makefile
++++ b/Makefile
+@@ -1,13 +1,15 @@
+ export PATH := /home/linuxbrew/.linuxbrew/bin:$(PATH)
+ 
+-.PHONY: build generate install test acceptance ui-test pot flatpak flatpak-lint clean
++.PHONY: build generate install test acceptance ui-test wizard-test pot flatpak flatpak-lint clean
+ 
+ GUEST_AGENT := internal/guest/agent/phial
++HOST_BINARY := bin/phial-host
+ 
+ build:
+ 	: > $(GUEST_AGENT)
+ 	CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o $(GUEST_AGENT) .
+ 	CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o bin/phial .
++	CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o $(HOST_BINARY) .
+ 
+ guest-agent:
+ 	CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o $(GUEST_AGENT) .
+@@ -29,6 +31,9 @@
+ ui-test: generate
+ 	./tests/ui-test.sh
+ 
++wizard-test: generate
++	./tests/wizard-test.sh
++
+ pot:
+ 	cd po && go generate ./...
+ 
+@@ -40,4 +45,4 @@ 	flatpak-builder --disable-rofiles-fuse --force-clean --repo=flatpak/repo flatpak/build flatpak/com.pojtinger.felicitas.Phial.json
+ 	flatpak build-bundle flatpak/repo flatpak/phial.flatpak com.pojtinger.felicitas.Phial
+ 
+ clean:
+-	rm -rf bin/phial $(GUEST_AGENT) flatpak/build flatpak/repo flatpak/phial.flatpak
++	rm -rf bin/phial $(HOST_BINARY) $(GUEST_AGENT) flatpak/build flatpak/repo flatpak/phial.flatpak
+diff --git a/assets/resources/gschemas.compiled b/assets/resources/gschemas.compiled
+index 6dc0dc97fa1fc0c1e3a6342243951edc0b93dd39..436de1991a247795795f0505f07d640e57d5fff4 100644
+Binary files a/assets/resources/gschemas.compiled and b/assets/resources/gschemas.compiled differ
+diff --git a/assets/resources/index.go b/assets/resources/index.go
+index c349bc747ab728eb8d9c7bcb57af547b28088ff5..c54679285e3d21f826eaaf5f75d85ce18b354a06 100644
+--- a/assets/resources/index.go
++++ b/assets/resources/index.go
+@@ -21,6 +21,14 @@ 	SettingActivePageKey      = "active-page"
+ 	SettingNotificationsKey   = "notifications"
+ 	SettingKeepRunningKey     = "keep-running"
+ 	SettingGrantDurationKey   = "grant-duration"
++
++	SettingLocationsSetKey = "locations-set"
++	SettingConfigDirKey    = "config-dir"
++	SettingConfigPathKey   = "config-path"
++	SettingDataDirKey      = "data-dir"
++	SettingDataPathKey     = "data-path"
++	SettingSSHDirKey       = "ssh-dir"
++	SettingSSHPathKey      = "ssh-path"
+ )
+ 
+ var (
+@@ -33,6 +41,7 @@
+ 	ResourceWindowUIPath = path.Join(AppPath, "window.ui")
+ 	ResourceStyleCSSPath = path.Join(AppPath, "style.css")
+ 	ResourceMetainfoPath = path.Join(AppPath, "metainfo.xml")
++	ResourceIconPath     = path.Join(AppPath, "icons", "scalable", "apps", AppID+".svg")
+ )
+ 
+ //go:embed index.gresource
+diff --git a/assets/resources/index.gresource b/assets/resources/index.gresource
+index 2404e44c6189d53373959f145f097203a0d487b2..48f975102acf8826736c2dccc15d2f3b851a6abc 100644
+Binary files a/assets/resources/index.gresource and b/assets/resources/index.gresource differ
+diff --git a/assets/resources/index.gresource.xml b/assets/resources/index.gresource.xml
+index e178737919daa6a0d4c235bb207ea5e1167fba06..fd5886007671fcb1a0c43116c94cb7f06e9284c1 100644
+--- a/assets/resources/index.gresource.xml
++++ b/assets/resources/index.gresource.xml
+@@ -1,6 +1,7 @@
+ <?xml version="1.0" encoding="utf-8"?>
+ <gresources>
+   <gresource prefix="/com/pojtinger/felicitas/Phial">
++    <file alias="icons/scalable/apps/com.pojtinger.felicitas.Phial.svg">../meta/icon.svg</file>
+     <file preprocess="xml-stripblanks">window.ui</file>
+     <file>style.css</file>
+     <file preprocess="xml-stripblanks">metainfo.xml</file>
+diff --git a/assets/resources/index.gschema.xml b/assets/resources/index.gschema.xml
+index 0ff563bddf84da03c3feac78dd7400f7e55ff3ed..2be44e4b517c8d9b133813eb890a41e2b0d3a138 100644
+--- a/assets/resources/index.gschema.xml
++++ b/assets/resources/index.gschema.xml
+@@ -36,5 +36,40 @@       <default>'1h'</default>
+       <summary>Grant duration</summary>
+       <description>The default duration of a grant.</description>
+     </key>
++    <key name="locations-set" type="b">
++      <default>false</default>
++      <summary>Locations set</summary>
++      <description>Whether the user selected the folders that Phial uses.</description>
++    </key>
++    <key name="config-dir" type="s">
++      <default>''</default>
++      <summary>Configuration folder</summary>
++      <description>The path of the configuration folder as the host sees it.</description>
++    </key>
++    <key name="config-path" type="s">
++      <default>''</default>
++      <summary>Configuration access path</summary>
++      <description>The path of the configuration folder as this app sees it.</description>
++    </key>
++    <key name="data-dir" type="s">
++      <default>''</default>
++      <summary>Data folder</summary>
++      <description>The path of the data folder as the host sees it.</description>
++    </key>
++    <key name="data-path" type="s">
++      <default>''</default>
++      <summary>Data access path</summary>
++      <description>The path of the data folder as this app sees it.</description>
++    </key>
++    <key name="ssh-dir" type="s">
++      <default>''</default>
++      <summary>SSH folder</summary>
++      <description>The path of the SSH folder as the host sees it.</description>
++    </key>
++    <key name="ssh-path" type="s">
++      <default>''</default>
++      <summary>SSH access path</summary>
++      <description>The path of the SSH folder as this app sees it.</description>
++    </key>
+   </schema>
+ </schemalist>
+diff --git a/assets/resources/window.blp b/assets/resources/window.blp
+index fe01292f0581280de25a02a96ac415ec8d0d2ce4..c989277f5ca608a2b31a5477b3403f0d5b48ff2d 100644
+--- a/assets/resources/window.blp
++++ b/assets/resources/window.blp
+@@ -61,7 +61,7 @@               }
+               content: Adw.StatusPage no_machines_status {
+                 icon-name: "drive-harddisk-symbolic";
+                 title: _("No Machines");
+-                description: _("A machine runs Fedora on this host and only sees the secrets you grant it.");
++                description: _("A machine runs Fedora on this host and only sees the secrets you grant it");
+               };
+             };
+           }
+diff --git a/assets/resources/window.ui b/assets/resources/window.ui
+index 3c7bc4fce6dd88a8ab30531795c66857adf6936c..b7edeeb0c1283de691480ba2eb604b2aee53de03 100644
+--- a/assets/resources/window.ui
++++ b/assets/resources/window.ui
+@@ -84,7 +84,7 @@                             <property name="content">
+                               <object class="AdwStatusPage" id="no_machines_status">
+                                 <property name="icon-name">drive-harddisk-symbolic</property>
+                                 <property name="title" translatable="yes">No Machines</property>
+-                                <property name="description" translatable="yes">A machine runs Fedora on this host and only sees the secrets you grant it.</property>
++                                <property name="description" translatable="yes">A machine runs Fedora on this host and only sees the secrets you grant it</property>
+                               </object>
+                             </property>
+                           </object>
+diff --git a/flatpak/com.pojtinger.felicitas.Phial.json b/flatpak/com.pojtinger.felicitas.Phial.json
+index 2f2e041726ba8911ada71475c8143caa8cefab1c..e9de2bc8cc28220bd5a91fd5dc25957a58ff67f7 100644
+--- a/flatpak/com.pojtinger.felicitas.Phial.json
++++ b/flatpak/com.pojtinger.felicitas.Phial.json
+@@ -14,12 +14,10 @@     "--socket=fallback-x11",
+     "--share=ipc",
+     "--device=dri",
+     "--share=network",
++    "--socket=ssh-auth",
+     "--talk-name=org.freedesktop.secrets",
+     "--talk-name=org.freedesktop.systemd1",
+     "--talk-name=org.freedesktop.Flatpak",
+-    "--filesystem=~/.config/phial:create",
+-    "--filesystem=~/.local/share/phial:create",
+-    "--filesystem=~/.ssh",
+     "--filesystem=xdg-run/phial:create"
+   ],
+   "cleanup": [
+@@ -81,6 +79,7 @@         "bash -c '. /usr/lib/sdk/golang/enable.sh && ([ -f vendor/modules.txt ] || go mod vendor)'",
+         "bash -c '. /usr/lib/sdk/golang/enable.sh && mkdir -p internal/guest/agent && : > internal/guest/agent/phial'",
+         "bash -c '. /usr/lib/sdk/golang/enable.sh && CGO_ENABLED=0 go build -trimpath -mod=vendor -o internal/guest/agent/phial .'",
+         "bash -c '. /usr/lib/sdk/golang/enable.sh && go build -trimpath -mod=vendor -ldflags=\"-X main.LocaleDir=/app/share/locale\" -o /app/bin/phial .'",
++        "bash -c '. /usr/lib/sdk/golang/enable.sh && mkdir -p /app/share/phial && CGO_ENABLED=0 go build -trimpath -mod=vendor -o /app/share/phial/phial-host .'",
+         "bash -c 'desktop-file-install --dir=/app/share/applications assets/meta/$FLATPAK_ID.desktop'",
+         "bash -c 'install -D -m 0644 assets/resources/metainfo.xml /app/share/metainfo/$FLATPAK_ID.metainfo.xml'",
+         "bash -c 'install -D -m 0644 assets/meta/icon.svg /app/share/icons/hicolor/scalable/apps/$FLATPAK_ID.svg'",
+diff --git a/internal/mcp/tools_share.go b/internal/mcp/tools_share.go
+index cbb47b3ea87e19582e6fccb02c57d0bb660bab71..331b67ec550f992f2a56a5968cd29b9014df78d0 100644
+--- a/internal/mcp/tools_share.go
++++ b/internal/mcp/tools_share.go
+@@ -10,6 +10,7 @@ 	"strconv"
+ 
+ 	mcpgo "github.com/modelcontextprotocol/go-sdk/mcp"
+ 
++	"codeberg.org/pojntfx/phial-neo/internal/paths"
+ 	"codeberg.org/pojntfx/phial-neo/internal/virt"
+ )
+ 
+@@ -46,12 +47,7 @@ 	Shares []string `json:"shares" jsonschema:"the shared host directories"`
+ }
+ 
+ func writeShareConfig(share string) error {
+-	configDir, err := os.UserConfigDir()
+-	if err != nil {
+-		return err
+-	}
+-
+-	path := filepath.Join(configDir, "phial", "share-"+virt.ShareTag(share)+".conf")
++	path := filepath.Join(paths.Config().Path(), "share-"+virt.ShareTag(share)+".conf")
+ 
+ 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+ 		return err
+diff --git a/internal/paths/paths.go b/internal/paths/paths.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..171fb8b5eddbbbc2cca8989427cf41bda1384f2c
+--- /dev/null
++++ b/internal/paths/paths.go
+@@ -0,0 +1,278 @@
++package paths
++
++import (
++	"encoding/json"
++	"fmt"
++	"os"
++	"path/filepath"
++	"strings"
++	"sync"
++
++	"github.com/adrg/xdg"
++
++	"codeberg.org/pojntfx/phial-neo/internal/hostcmd"
++)
++
++// Location states one folder twice. Host is the path that a host process uses,
++// and Access is the path that this process uses. A native run sees the same path
++// in both fields. A sandboxed run sees the path of the document portal in
++// Access, and the real path of the host in Host.
++type Location struct {
++	Host   string `json:"host"`
++	Access string `json:"access"`
++}
++
++// Path states the path that this process reads and writes.
++func (l Location) Path() string {
++	if strings.TrimSpace(l.Access) != "" {
++		return l.Access
++	}
++
++	return l.Host
++}
++
++// HostPath states the path that a host process reads and writes.
++func (l Location) HostPath() string {
++	return l.Host
++}
++
++// AccessPath states the path that this process reads and writes.
++func (l Location) AccessPath() string {
++	return l.Path()
++}
++
++// IsSet reports whether the location names a host path and an access path.
++func (l Location) IsSet() bool {
++	return strings.TrimSpace(l.Host) != "" && strings.TrimSpace(l.AccessPath()) != ""
++}
++
++// Exists reports whether the access path is a directory right now.
++func (l Location) Exists() bool {
++	info, err := os.Stat(l.AccessPath())
++
++	return err == nil && info.IsDir()
++}
++
++// Set holds every folder that Phial reads or writes.
++type Set struct {
++	Config  Location `json:"config"`
++	Data    Location `json:"data"`
++	SSH     Location `json:"ssh"`
++	Runtime Location `json:"runtime"`
++}
++
++var (
++	lock    sync.RWMutex
++	current = Defaults()
++)
++
++// Sandboxed reports whether this process runs inside a Flatpak sandbox.
++func Sandboxed() bool {
++	return os.Getenv("FLATPAK_ID") != ""
++}
++
++// hostConfigHome states the configuration home of the host. A sandboxed run
++// reads the home variable of the host, because its own XDG directories point
++// into the sandbox.
++func hostConfigHome() string {
++	if Sandboxed() {
++		if home, err := os.UserHomeDir(); err == nil {
++			return filepath.Join(home, ".config")
++		}
++	}
++
++	return xdg.ConfigHome
++}
++
++// hostDataHome states the data home of the host.
++func hostDataHome() string {
++	if Sandboxed() {
++		if home, err := os.UserHomeDir(); err == nil {
++			return filepath.Join(home, ".local", "share")
++		}
++	}
++
++	return xdg.DataHome
++}
++
++// Defaults states the folders that Phial uses when the user selects nothing.
++func Defaults() Set {
++	home := xdg.Home
++	if home == "" {
++		home, _ = os.UserHomeDir()
++	}
++
++	runtimeBase := xdg.RuntimeDir
++	if runtimeBase == "" {
++		runtimeBase = fmt.Sprintf("/run/user/%d", os.Getuid())
++	}
++
++	config := filepath.Join(hostConfigHome(), "phial")
++	data := filepath.Join(hostDataHome(), "phial")
++	ssh := filepath.Join(home, ".ssh")
++	runtime := filepath.Join(runtimeBase, "phial")
++
++	return Set{
++		Config:  Location{Host: config, Access: config},
++		Data:    Location{Host: data, Access: data},
++		SSH:     Location{Host: ssh, Access: ssh},
++		Runtime: Location{Host: runtime, Access: runtime},
++	}
++}
++
++// Current states the folders of this process.
++func Current() Set {
++	lock.RLock()
++	defer lock.RUnlock()
++
++	return current
++}
++
++// SetCurrent replaces the folders of this process.
++func SetCurrent(next Set) {
++	lock.Lock()
++	defer lock.Unlock()
++
++	current = next
++}
++
++// Config states the configuration folder.
++func Config() Location {
++	return Current().Config
++}
++
++// Data states the data folder.
++func Data() Location {
++	return Current().Data
++}
++
++// SSH states the SSH folder.
++func SSH() Location {
++	return Current().SSH
++}
++
++// Runtime states the runtime folder.
++func Runtime() Location {
++	return Current().Runtime
++}
++
++// Valid reports whether every folder names a path and every access path exists.
++func Valid(set Set) bool {
++	for _, location := range []Location{set.Config, set.Data, set.SSH, set.Runtime} {
++		if !location.IsSet() || !location.Exists() {
++			return false
++		}
++	}
++
++	return true
++}
++
++// defaultConfigDir states the configuration folder of the host install, which
++// carries the locations file that a host process reads before it knows the
++// folders of the user.
++func defaultConfigDir() string {
++	return filepath.Join(hostConfigHome(), "phial")
++}
++
++func defaultLocationsFile() string {
++	return filepath.Join(defaultConfigDir(), "locations.json")
++}
++
++// hostFile states the folders in the form that a host process reads.
++type hostFile struct {
++	Config  string `json:"config"`
++	Data    string `json:"data"`
++	SSH     string `json:"ssh"`
++	Runtime string `json:"runtime"`
++}
++
++// LoadHostFile reads the locations file of the host install. A process that
++// runs outside the sandbox calls it before it reads a machine or a secret.
++func LoadHostFile() error {
++	data, err := os.ReadFile(defaultLocationsFile())
++	if os.IsNotExist(err) {
++		return nil
++	}
++	if err != nil {
++		return err
++	}
++
++	var file hostFile
++	if err := json.Unmarshal(data, &file); err != nil {
++		return fmt.Errorf("read %s: %w", defaultLocationsFile(), err)
++	}
++
++	next := Defaults()
++
++	if file.Config != "" {
++		next.Config = Location{Host: file.Config, Access: file.Config}
++	}
++	if file.Data != "" {
++		next.Data = Location{Host: file.Data, Access: file.Data}
++	}
++	if file.SSH != "" {
++		next.SSH = Location{Host: file.SSH, Access: file.SSH}
++	}
++	if file.Runtime != "" {
++		next.Runtime = Location{Host: file.Runtime, Access: file.Runtime}
++	}
++
++	SetCurrent(next)
++
++	return nil
++}
++
++// SaveHostFile writes the locations file that a host process reads. The file
++// always lands in the default configuration folder, so that a host process can
++// find the folders of the user before it reads them.
++func SaveHostFile(set Set) error {
++	file := hostFile{
++		Config:  set.Config.HostPath(),
++		Data:    set.Data.HostPath(),
++		SSH:     set.SSH.HostPath(),
++		Runtime: set.Runtime.HostPath(),
++	}
++
++	data, err := json.MarshalIndent(file, "", "  ")
++	if err != nil {
++		return err
++	}
++
++	data = append(data, '\n')
++
++	if err := writeHostFile(defaultLocationsFile(), data); err != nil {
++		return err
++	}
++
++	local := filepath.Join(set.Config.AccessPath(), "locations.json")
++	if local == defaultLocationsFile() {
++		return nil
++	}
++
++	if err := os.MkdirAll(filepath.Dir(local), 0o700); err != nil {
++		return err
++	}
++
++	return os.WriteFile(local, data, 0o600)
++}
++
++// writeHostFile writes one file in the default configuration folder. A
++// sandboxed process cannot reach that folder, so the write runs on the host.
++func writeHostFile(path string, data []byte) error {
++	if !Sandboxed() {
++		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
++			return err
++		}
++
++		return os.WriteFile(path, data, 0o600)
++	}
++
++	command := hostcmd.Command("sh", "-c", "umask 077; mkdir -p \"$1\" && cat > \"$2\"", "sh", filepath.Dir(path), path)
++	command.Stdin = strings.NewReader(string(data))
++
++	if output, err := command.CombinedOutput(); err != nil {
++		return fmt.Errorf("write %s on the host: %s: %w", path, strings.TrimSpace(string(output)), err)
++	}
++
++	return nil
++}
+diff --git a/internal/portals/portals.go b/internal/portals/portals.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..852aacecabec54d476b2413c03357ee1b6740801
+--- /dev/null
++++ b/internal/portals/portals.go
+@@ -0,0 +1,123 @@
++package portals
++
++import (
++	"fmt"
++	"net/url"
++	"os"
++	"path/filepath"
++	"strings"
++
++	"github.com/godbus/dbus/v5"
++	"github.com/rymdport/portal/filechooser"
++)
++
++const (
++	documentsService   = "org.freedesktop.portal.Documents"
++	documentsPath      = dbus.ObjectPath("/org/freedesktop/portal/documents")
++	documentsInterface = "org.freedesktop.portal.Documents"
++)
++
++// Folder states the folder that the user chose. Host is the path that a host
++// process uses, and Access is the path that this process uses. The two paths
++// differ only inside a sandbox, where the file chooser answers with a path of
++// the document portal.
++type Folder struct {
++	Host   string
++	Access string
++}
++
++// IsSet reports whether the user chose a folder.
++func (f Folder) IsSet() bool {
++	return strings.TrimSpace(f.Access) != ""
++}
++
++// FilePathFromURI turns one file URI into a path. A value that carries no
++// scheme is already a path.
++func FilePathFromURI(uri string) (string, error) {
++	if !strings.HasPrefix(uri, "file://") {
++		return uri, nil
++	}
++
++	parsed, err := url.Parse(uri)
++	if err != nil {
++		return "", err
++	}
++
++	path, err := url.PathUnescape(parsed.Path)
++	if err != nil {
++		return "", err
++	}
++
++	return path, nil
++}
++
++// ChooseFolder opens the file chooser portal for one folder.
++func ChooseFolder(title string, acceptLabel string, currentFolder string) (Folder, error) {
++	uris, err := filechooser.OpenFile("", title, &filechooser.OpenFileOptions{
++		Directory:     true,
++		AcceptLabel:   acceptLabel,
++		CurrentFolder: currentFolder,
++	})
++	if err != nil {
++		return Folder{}, err
++	}
++
++	if len(uris) == 0 {
++		return Folder{}, nil
++	}
++
++	access, err := FilePathFromURI(uris[0])
++	if err != nil {
++		return Folder{}, err
++	}
++
++	host, err := HostPath(access)
++	if err != nil {
++		return Folder{}, err
++	}
++
++	return Folder{Host: host, Access: access}, nil
++}
++
++// HostPath states the path that a host process uses for one path of this
++// process. A path outside the document portal is already a host path.
++func HostPath(path string) (string, error) {
++	id, ok := documentID(path)
++	if !ok {
++		return path, nil
++	}
++
++	connection, err := dbus.SessionBus()
++	if err != nil {
++		return "", fmt.Errorf("reach the document portal: %w", err)
++	}
++
++	var paths map[string][]byte
++	if err := connection.Object(documentsService, documentsPath).Call(
++		documentsInterface+".GetHostPaths",
++		0,
++		[]string{id},
++	).Store(&paths); err != nil {
++		return "", fmt.Errorf("ask the document portal for %s: %w", path, err)
++	}
++
++	host, ok := paths[id]
++	if !ok {
++		return "", fmt.Errorf("the document portal holds no path for %s", path)
++	}
++
++	return string(host), nil
++}
++
++// documentID states the identifier of one document portal path.
++func documentID(path string) (string, bool) {
++	prefix := filepath.Join(os.Getenv("XDG_RUNTIME_DIR"), "doc") + string(filepath.Separator)
++	if !strings.HasPrefix(path, prefix) {
++		return "", false
++	}
++
++	rest := strings.TrimPrefix(path, prefix)
++	id := strings.SplitN(rest, string(filepath.Separator), 2)[0]
++
++	return id, id != ""
++}
+diff --git a/internal/setup/assets.go b/internal/setup/assets.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..154a5992b49f9e2b12e00a3f3ddfe1bee6708f11
+--- /dev/null
++++ b/internal/setup/assets.go
+@@ -0,0 +1,109 @@
++package setup
++
++import (
++	"fmt"
++	"os"
++	"path/filepath"
++	"strings"
++)
++
++// Asset states one file of the host install.
++type Asset struct {
++	Name string
++	Data []byte
++}
++
++// Assets holds the host units, the host tools, the desktop file, and the
++// settings schema. A source tree reads them from the repository, and a bundle
++// carries them inside the binary.
++type Assets struct {
++	Units        []Asset
++	Binaries     []Asset
++	DesktopFiles []Asset
++	Icons        []Asset
++	Schema       []byte
++}
++
++var embeddedAssets *Assets
++
++// SetEmbeddedAssets carries the host install into the binary, so that the
++// window can install the host without a source tree.
++func SetEmbeddedAssets(assets *Assets) {
++	embeddedAssets = assets
++}
++
++func loadAssets(options InstallOptions) (*Assets, error) {
++	if options.Embedded {
++		if embeddedAssets == nil {
++			return nil, fmt.Errorf("the embedded install assets are missing")
++		}
++
++		return embeddedAssets, nil
++	}
++
++	if options.RepoDir == "" {
++		return nil, fmt.Errorf("no repository directory given")
++	}
++
++	return readAssets(options.RepoDir)
++}
++
++func readAssets(repoDir string) (*Assets, error) {
++	assets := &Assets{}
++
++	units, err := readAssetsDir(filepath.Join(repoDir, "host", "systemd"), ".service")
++	if err != nil {
++		return nil, err
++	}
++	assets.Units = units
++
++	binaries, err := readAssetsDir(filepath.Join(repoDir, "host", "bin"), "")
++	if err != nil && !os.IsNotExist(err) {
++		return nil, err
++	}
++	assets.Binaries = binaries
++
++	desktopFiles, err := readAssetsDir(filepath.Join(repoDir, "assets", "meta"), ".desktop")
++	if err != nil {
++		return nil, err
++	}
++	assets.DesktopFiles = desktopFiles
++
++	icons, err := readAssetsDir(filepath.Join(repoDir, "assets", "meta"), ".svg")
++	if err != nil {
++		return nil, err
++	}
++	assets.Icons = icons
++
++	schema, err := os.ReadFile(filepath.Join(repoDir, "assets", "resources", "index.gschema.xml"))
++	if err != nil {
++		return nil, err
++	}
++	assets.Schema = schema
++
++	return assets, nil
++}
++
++func readAssetsDir(dir string, suffix string) ([]Asset, error) {
++	entries, err := os.ReadDir(dir)
++	if err != nil {
++		return nil, err
++	}
++
++	assets := []Asset{}
++
++	for _, entry := range entries {
++		if entry.IsDir() || (suffix != "" && !strings.HasSuffix(entry.Name(), suffix)) {
++			continue
++		}
++
++		data, err := os.ReadFile(filepath.Join(dir, entry.Name()))
++		if err != nil {
++			return nil, err
++		}
++
++		assets = append(assets, Asset{Name: entry.Name(), Data: data})
++	}
++
++	return assets, nil
++}
+diff --git a/internal/setup/install.go b/internal/setup/install.go
+index 0dd589ec24a4957510ebfdf733e26c1c181865ea..ea7465449d5b0c052befd28b14eb096bf8771fdb 100644
+--- a/internal/setup/install.go
++++ b/internal/setup/install.go
+@@ -9,6 +9,7 @@ 	"strings"
+ 
+ 	"github.com/adrg/xdg"
+ 
++	"codeberg.org/pojntfx/phial-neo/internal/paths"
+ 	"codeberg.org/pojntfx/phial-neo/internal/virt"
+ )
+ 
+@@ -16,6 +17,7 @@ type InstallOptions struct {
+ 	RepoDir   string
+ 	BrewRoot  string
+ 	Overwrite bool
++	Embedded  bool
+ }
+ 
+ func toolPath(name string) (string, error) {
+@@ -47,24 +49,21 @@ 	return os.Rename(tmp, target)
+ }
+ 
+ func Install(options InstallOptions) error {
+-	if options.RepoDir == "" {
+-		return fmt.Errorf("no repository directory given")
++	assets, err := loadAssets(options)
++	if err != nil {
++		return err
+ 	}
+ 
+ 	configHome := xdg.ConfigHome
+-	runtimeDir := xdg.RuntimeDir
+-	if runtimeDir == "" {
+-		runtimeDir = fmt.Sprintf("/run/user/%d", os.Getuid())
+-	}
+ 
+ 	home, err := os.UserHomeDir()
+ 	if err != nil {
+ 		return err
+ 	}
+ 
+-	phialConfig := filepath.Join(configHome, "phial")
++	phialConfig := paths.Config().HostPath()
+ 	unitDir := filepath.Join(configHome, "systemd", "user")
+-	dataDir := filepath.Join(xdg.DataHome, "phial")
++	dataDir := paths.Data().HostPath()
+ 
+ 	for _, dir := range []string{phialConfig, filepath.Join(phialConfig, "keys"), unitDir, filepath.Join(dataDir, "hostshare"), filepath.Join(home, ".local", "bin"), filepath.Join(home, ".local", "share", "applications")} {
+ 		if err := os.MkdirAll(dir, 0o700); err != nil {
+@@ -102,19 +101,10 @@ 	if brewPrefix == "" {
+ 		brewPrefix = "/home/linuxbrew/.linuxbrew"
+ 	}
+ 
+-	units, err := os.ReadDir(filepath.Join(options.RepoDir, "host", "systemd"))
+-	if err != nil {
+-		return err
+-	}
+-
+ 	wanted := map[string]bool{}
+ 
+-	for _, unit := range units {
+-		if unit.IsDir() || !strings.HasSuffix(unit.Name(), ".service") {
+-			continue
+-		}
+-
+-		wanted[unit.Name()] = true
++	for _, unit := range assets.Units {
++		wanted[unit.Name] = true
+ 	}
+ 
+ 	installed, err := os.ReadDir(unitDir)
+@@ -141,17 +131,8 @@ 	if err != nil {
+ 		return err
+ 	}
+ 
+-	for _, unit := range units {
+-		if unit.IsDir() || !strings.HasSuffix(unit.Name(), ".service") {
+-			continue
+-		}
+-
+-		data, err := os.ReadFile(filepath.Join(options.RepoDir, "host", "systemd", unit.Name()))
+-		if err != nil {
+-			return err
+-		}
+-
+-		text := string(data)
++	for _, unit := range assets.Units {
++		text := string(unit.Data)
+ 		text = strings.ReplaceAll(text, "@BREW_PREFIX@", brewPrefix)
+ 		text = strings.ReplaceAll(text, "@VIRTIOFSD@", tools["virtiofsd"])
+ 		text = strings.ReplaceAll(text, "@SWTPM@", tools["swtpm"])
+@@ -160,27 +141,13 @@ 		text = strings.ReplaceAll(text, "@SSH_AGENT@", tools["ssh-agent"])
+ 		text = strings.ReplaceAll(text, "@PHIAL@", phialBinary)
+ 		text = strings.ReplaceAll(text, "@PASST@", tools["passt"])
+ 
+-		if err := installFile([]byte(text), filepath.Join(unitDir, unit.Name()), 0o644, true); err != nil {
++		if err := installFile([]byte(text), filepath.Join(unitDir, unit.Name), 0o644, true); err != nil {
+ 			return err
+ 		}
+ 	}
+ 
+-	binaries, err := os.ReadDir(filepath.Join(options.RepoDir, "host", "bin"))
+-	if err != nil && !os.IsNotExist(err) {
+-		return err
+-	}
+-
+-	for _, binary := range binaries {
+-		if binary.IsDir() {
+-			continue
+-		}
+-
+-		data, err := os.ReadFile(filepath.Join(options.RepoDir, "host", "bin", binary.Name()))
+-		if err != nil {
+-			return err
+-		}
+-
+-		if err := installFile(data, filepath.Join(home, ".local", "bin", binary.Name()), 0o755, true); err != nil {
++	for _, binary := range assets.Binaries {
++		if err := installFile(binary.Data, filepath.Join(home, ".local", "bin", binary.Name), 0o755, true); err != nil {
+ 			return err
+ 		}
+ 	}
+@@ -201,8 +168,8 @@ 	for _, stale := range []string{"forward-proxy.conf", "forward-ssh-agent.conf", "forward-gpg-extra.conf", "forward-mcp.conf", "Caddyfile", "share-phial-secrets.conf"} {
+ 		_ = os.Remove(filepath.Join(phialConfig, stale))
+ 	}
+ 
+-	sshConfig := filepath.Join(home, ".ssh", "config")
+-	sshBlock := "\n# >>> phial >>>\nInclude " + filepath.Join(configHome, "phial", "ssh_config") + "\n# <<< phial <<<\n"
++	sshConfig := filepath.Join(paths.SSH().HostPath(), "config")
++	sshBlock := "\n# >>> phial >>>\nInclude " + filepath.Join(paths.Config().HostPath(), "ssh_config") + "\n# <<< phial <<<\n"
+ 
+ 	if err := virt.WriteSSHConfig(); err != nil {
+ 		return err
+@@ -224,13 +191,20 @@ 	if err := appendBlock(gpgAgent, gpgBlock, "# phial"); err != nil {
+ 		return err
+ 	}
+ 
+-	for _, desktop := range []string{"com.pojtinger.felicitas.Phial.desktop"} {
+-		data, err := os.ReadFile(filepath.Join(options.RepoDir, "assets", "meta", desktop))
+-		if err != nil {
+-			continue
++	for _, desktop := range assets.DesktopFiles {
++		if err := installFile(desktop.Data, filepath.Join(home, ".local", "share", "applications", desktop.Name), 0o644, true); err != nil {
++			return err
+ 		}
++	}
+ 
+-		if err := installFile(data, filepath.Join(home, ".local", "share", "applications", desktop), 0o644, true); err != nil {
++	for _, icon := range assets.Icons {
++		theme := "scalable"
++		if strings.Contains(icon.Name, "symbolic") {
++			theme = "symbolic"
++		}
++
++		name := "com.pojtinger.felicitas.Phial" + strings.TrimPrefix(icon.Name, "icon")
++		if err := installFile(icon.Data, filepath.Join(home, ".local", "share", "icons", "hicolor", theme, "apps", name), 0o644, true); err != nil {
+ 			return err
+ 		}
+ 	}
+@@ -238,12 +212,8 @@
+ 	// The window reads its settings from the schema of the application, so the
+ 	// schema must live in the schema directory of the user.
+ 	schemaDir := filepath.Join(xdg.DataHome, "glib-2.0", "schemas")
+-	schema, err := os.ReadFile(filepath.Join(options.RepoDir, "assets", "resources", "index.gschema.xml"))
+-	if err != nil {
+-		return err
+-	}
+ 
+-	if err := installFile(schema, filepath.Join(schemaDir, "com.pojtinger.felicitas.Phial.gschema.xml"), 0o644, true); err != nil {
++	if err := installFile(assets.Schema, filepath.Join(schemaDir, "com.pojtinger.felicitas.Phial.gschema.xml"), 0o644, true); err != nil {
+ 		return err
+ 	}
+ 
+diff --git a/internal/state/gate.go b/internal/state/gate.go
+index 8f9a05b7f074795745acfc735cadfe990223bcbb..4fef30126b692952e08e8923d0557ebb137f3fe3 100644
+--- a/internal/state/gate.go
++++ b/internal/state/gate.go
+@@ -10,11 +10,11 @@ 	"path/filepath"
+ 	"sync"
+ 	"time"
+ 
+-	"github.com/adrg/xdg"
+ 	"github.com/mdlayher/vsock"
+ 	"golang.org/x/crypto/ssh"
+ 	"golang.org/x/crypto/ssh/agent"
+ 
++	"codeberg.org/pojntfx/phial-neo/internal/paths"
+ 	"codeberg.org/pojntfx/phial-neo/internal/virt"
+ )
+ 
+@@ -380,12 +380,7 @@
+ // gpgAgentSocket states the extra socket of the GnuPG agent of the host,
+ // which exists for exactly this kind of forwarding.
+ func gpgAgentSocket() string {
+-	runtimeBase := xdg.RuntimeDir
+-	if runtimeBase == "" {
+-		runtimeBase = fmt.Sprintf("/run/user/%d", os.Getuid())
+-	}
+-
+-	return filepath.Join(runtimeBase, "gnupg", "S.gpg-agent.extra")
++	return filepath.Join(filepath.Dir(paths.Runtime().Path()), "gnupg", "S.gpg-agent.extra")
+ }
+ 
+ // serveGPGGate carries the agent protocol of GnuPG from a granted machine to
+diff --git a/internal/state/keys.go b/internal/state/keys.go
+index 7ccc38c91ee790e302bb2f32fa64bc3f837461b9..7057ea7b2aea6d457f1c73bd064af5c350d9f297 100644
+--- a/internal/state/keys.go
++++ b/internal/state/keys.go
+@@ -8,7 +8,7 @@ 	"path/filepath"
+ 	"strings"
+ 
+ 	"codeberg.org/pojntfx/phial-neo/internal/hostcmd"
+-	"github.com/adrg/xdg"
++	"codeberg.org/pojntfx/phial-neo/internal/paths"
+ 	"golang.org/x/crypto/ssh"
+ 	"golang.org/x/crypto/ssh/agent"
+ )
+@@ -87,7 +87,7 @@ 		return SSHKey{}, err
+ 	}
+ 
+ 	wanted := []byte(nil)
+-	if data, err := os.ReadFile(filepath.Join(xdg.Home, ".ssh", name+".pub")); err == nil {
++	if data, err := os.ReadFile(filepath.Join(paths.SSH().Path(), name+".pub")); err == nil {
+ 		if key, _, _, _, err := ssh.ParseAuthorizedKey(data); err == nil {
+ 			wanted = key.Marshal()
+ 		}
+@@ -151,8 +151,8 @@
+ 	return nil
+ }
+ 
+-// GenerateSSHKey writes a new key pair into ~/.ssh and loads it into the
+-// agent of the session.
++// GenerateSSHKey writes a new key pair into the SSH folder and loads it into
++// the agent of the session.
+ func (c *Client) GenerateSSHKey(comment string) error {
+ 	if strings.TrimSpace(comment) == "" {
+ 		return fmt.Errorf("a comment is required")
+@@ -166,16 +166,17 @@
+ 		return '_'
+ 	}, comment)
+ 
+-	path := filepath.Join(xdg.Home, ".ssh", "phial_"+sanitized)
+-	if _, err := os.Stat(path); err == nil {
+-		return fmt.Errorf("the file %s already exists", path)
++	accessPath := filepath.Join(paths.SSH().Path(), "phial_"+sanitized)
++	if _, err := os.Stat(accessPath); err == nil {
++		return fmt.Errorf("the file %s already exists", accessPath)
+ 	}
+ 
+-	if output, err := hostcmd.Command("ssh-keygen", "-t", "ed25519", "-N", "", "-C", comment, "-f", path).CombinedOutput(); err != nil {
++	hostPath := filepath.Join(paths.SSH().HostPath(), "phial_"+sanitized)
++	if output, err := hostcmd.Command("ssh-keygen", "-t", "ed25519", "-N", "", "-C", comment, "-f", hostPath).CombinedOutput(); err != nil {
+ 		return fmt.Errorf("ssh-keygen: %s: %w", strings.TrimSpace(string(output)), err)
+ 	}
+ 
+-	if err := c.AddSSHKey(path); err != nil {
++	if err := c.AddSSHKey(hostPath); err != nil {
+ 		return err
+ 	}
+ 
+diff --git a/internal/state/phial.go b/internal/state/phial.go
+index af65fb06af82fcf8a712311e44867f52c815b875..e1439e4d011dfcfd98d5aae6e772058d7d4f0bca 100644
+--- a/internal/state/phial.go
++++ b/internal/state/phial.go
+@@ -9,8 +9,9 @@ 	"regexp"
+ 	"strconv"
+ 	"strings"
+ 
+-	"github.com/adrg/xdg"
+ 	"github.com/google/renameio/v2"
++
++	"codeberg.org/pojntfx/phial-neo/internal/paths"
+ )
+ 
+ // Placeholder is the token that a guest uses where a proxied secret belongs.
+@@ -30,22 +31,22 @@ 	gateSock    string
+ }
+ 
+ func NewClient(log *slog.Logger) *Client {
+-	configDir := filepath.Join(xdg.ConfigHome, "phial")
++	client := &Client{log: log}
++	client.Reload()
++
++	return client
++}
++
++// Reload points the client at the folders that the process uses now. A
++// sandboxed run reads the selected folders, and a host run reads the same host
++// folders through the locations file.
++func (c *Client) Reload() {
++	configDir := paths.Config().Path()
+ 	if override := os.Getenv("PHIAL_CONFIG_DIR"); override != "" {
+ 		configDir = override
+-	} else if os.Getenv("FLATPAK_ID") != "" {
+-		// The window reads the same mapping and grants as the host gate, so
+-		// the Flatpak uses the host configuration directory.
+-		if home, err := os.UserHomeDir(); err == nil {
+-			configDir = filepath.Join(home, ".config", "phial")
+-		}
+ 	}
+ 
+-	runtimeBase := xdg.RuntimeDir
+-	if runtimeBase == "" {
+-		runtimeBase = fmt.Sprintf("/run/user/%d", os.Getuid())
+-	}
+-	runtimeDir := filepath.Join(runtimeBase, "phial")
++	runtimeDir := paths.Runtime().Path()
+ 	if override := os.Getenv("PHIAL_RUNTIME_DIR"); override != "" {
+ 		runtimeDir = override
+ 	}
+@@ -55,14 +56,29 @@ 	if override := os.Getenv("PHIAL_AGENT_SOCK"); override != "" {
+ 		agentSock = override
+ 	}
+ 
+-	return &Client{
+-		log:         log,
+-		mappingFile: filepath.Join(configDir, "mapping"),
+-		grantsDir:   filepath.Join(runtimeDir, "grants"),
+-		secretsDir:  filepath.Join(runtimeDir, "secrets"),
+-		agentSock:   agentSock,
+-		gateSock:    filepath.Join(runtimeDir, "gate", "ctl.sock"),
++	c.mappingFile = filepath.Join(configDir, "mapping")
++	c.grantsDir = filepath.Join(runtimeDir, "grants")
++	c.secretsDir = filepath.Join(runtimeDir, "secrets")
++	c.agentSock = agentSock
++	c.gateSock = filepath.Join(runtimeDir, "gate", "ctl.sock")
++}
++
++// ConfigHostDir states the configuration folder that a host process uses.
++func (c *Client) ConfigHostDir() string {
++	if override := os.Getenv("PHIAL_CONFIG_DIR"); override != "" {
++		return override
+ 	}
++
++	return paths.Config().HostPath()
++}
++
++// RuntimeHostDir states the runtime folder that a host process uses.
++func (c *Client) RuntimeHostDir() string {
++	if override := os.Getenv("PHIAL_RUNTIME_DIR"); override != "" {
++		return override
++	}
++
++	return paths.Runtime().HostPath()
+ }
+ 
+ func (c *Client) ensureDirs() error {
+diff --git a/internal/state/systemd.go b/internal/state/systemd.go
+index f30e63490ac0d5b1832b8a601223f8cf7f018969..301aa11c96f982e0a7c7369009572dd2e6aabfe0 100644
+--- a/internal/state/systemd.go
++++ b/internal/state/systemd.go
+@@ -55,8 +55,8 @@ 		systemdDbus.PropDescription("phial grant expiry for " + id),
+ 		systemdDbus.PropType("oneshot"),
+ 		systemdDbus.PropExecStart([]string{binary, "revoke", id}, false),
+ 		{Name: "Environment", Value: dbus.MakeVariant([]string{
+-			"PHIAL_CONFIG_DIR=" + c.ConfigDir(),
+-			"PHIAL_RUNTIME_DIR=" + c.RuntimeDir(),
++			"PHIAL_CONFIG_DIR=" + c.ConfigHostDir(),
++			"PHIAL_RUNTIME_DIR=" + c.RuntimeHostDir(),
+ 			"PATH=" + os.Getenv("PATH"),
+ 		})},
+ 		{Name: "CollectMode", Value: dbus.MakeVariant("inactive-or-failed")},
+diff --git a/internal/ui/app.go b/internal/ui/app.go
+index 11e5fc103e033fbf7e4dc1feb4beaf123a500522..3882127c6b5dc23d7aee8c9545dd70cb2826fb7a 100644
+--- a/internal/ui/app.go
++++ b/internal/ui/app.go
+@@ -107,11 +107,18 @@
+ 	// openDialog is the dialog on screen, so that the screenshot run can close it
+ 	// and carry on with the next state.
+ 	openDialog *adw.Dialog
++
++	actionsRegistered bool
++	setupDialog       *adw.Dialog
++	setupNavigation   *adw.NavigationView
++	locationForm      *locationForm
+ }
+ 
+ // Run builds the application, serves the agent channel, and blocks until the
+ // application quits. It returns the exit status.
+ func Run(ctx context.Context, log *slog.Logger, settings *gio.Settings, kickstart []byte, showWindow bool) int {
++	applySettingsLocations(settings)
++
+ 	a := &App{
+ 		Ctx:          ctx,
+ 		Log:          log,
+@@ -141,12 +148,28 @@ 	a.hold(&onStartup)
+ 
+ 	var onActivate func(gio.Application)
+ 	onActivate = func(gio.Application) {
++		if !a.actionsRegistered {
++			a.registerActions()
++			a.actionsRegistered = true
++		}
++
++		if a.setupDialog != nil {
++			a.setupDialog.Present(&a.win.Widget)
++			return
++		}
++
+ 		if a.win != nil {
+ 			a.win.Present()
+ 			return
+ 		}
++
++		setupRequired := a.prepareLocations()
+ 
+ 		a.buildWindow(showWindow)
++
++		if setupRequired {
++			a.showSetupDialog(true)
++		}
+ 	}
+ 	a.app.ConnectActivate(&onActivate)
+ 	a.hold(&onActivate)
+@@ -244,6 +267,8 @@ 	a.app.SendNotification("phial", notification)
+ }
+ 
+ func (a *App) registerActions() {
++	a.Log.Info("registering the actions")
++
+ 	simple := func(name string, fn func()) {
+ 		action := gio.NewSimpleAction(name, nil)
+ 
+@@ -294,6 +319,7 @@ 	simple("new-machine", func() { a.showNewMachineDialog() })
+ 	simple("system-setup", func() { a.showSystemSetupDialog() })
+ 	simple("shortcuts", func() { a.showShortcuts() })
+ 	simple("preferences", func() { a.showPreferences() })
++	simple("setup-wizard", func() { a.showSetupDialog(false) })
+ 	simple("about", func() { a.showAbout() })
+ 	simple("quit", func() { a.confirmQuit() })
+ 	simple("show-requests", func() {
+@@ -353,6 +379,16 @@ 		}
+ 	})
+ 
+ 	stringParameter("select-page", func(tag string) { a.selectPage(tag) })
++	stringParameter("wizard-step", func(tag string) {
++		if a.setupNavigation != nil {
++			a.setupNavigation.PushByTag(tag)
++		}
++	})
++	simple("wizard-finish", func() {
++		if a.setupDialog != nil {
++			a.finishSetupDialog()
++		}
++	})
+ 	intParameter("select-machine", func(index int) { a.selectMachine(index) })
+ 	stringParameter("capture", func(path string) { a.capture(path) })
+ 
+@@ -388,6 +424,8 @@ 	a.app.SetAccelsForAction("app.shortcuts", []string{"<Primary>question"})
+ 	a.app.SetAccelsForAction("app.preferences", []string{"<Primary>comma"})
+ 	a.app.SetAccelsForAction("app.quit", []string{"<Primary>q"})
+ 	a.app.SetAccelsForAction("app.close-window", []string{"<Primary>w"})
++
++	a.Log.Info("registered the actions", "count", len(a.actions))
+ 
+ 	for index := 1; index <= 9; index++ {
+ 		a.app.SetAccelsForAction(
+diff --git a/internal/ui/keys.go b/internal/ui/keys.go
+index 7a6b3e8109a025be5dc4485f6a7cb52d78edebac..1da0980fafda816e895ccdbc6e3b8ef37a0b495e 100644
+--- a/internal/ui/keys.go
++++ b/internal/ui/keys.go
+@@ -12,6 +12,8 @@ 	"codeberg.org/puregotk/puregotk/v4/glib"
+ 	"codeberg.org/puregotk/puregotk/v4/gtk"
+ 	"github.com/pojntfx/go-gettext/pkg/i18n"
+ 
++	"codeberg.org/pojntfx/phial-neo/internal/paths"
++	"codeberg.org/pojntfx/phial-neo/internal/portals"
+ 	"codeberg.org/pojntfx/phial-neo/internal/state"
+ )
+ 
+@@ -30,7 +32,7 @@ func (a *App) showAddSSHKeyDialog() {
+ 	dialog := gtk.NewFileDialog()
+ 	dialog.SetTitle(i18n.L("Select the private key"))
+ 
+-	startDir := gio.FileNewForPath(glib.GetHomeDir() + "/.ssh")
++	startDir := gio.FileNewForPath(paths.SSH().HostPath())
+ 	dialog.SetInitialFolder(startDir)
+ 
+ 	var cb gio.AsyncReadyCallback
+@@ -41,8 +43,15 @@ 		if err != nil || file == nil {
+ 			return
+ 		}
+ 
++		path, err := portals.HostPath(file.GetPath())
++		if err != nil {
++			a.idle(func() { a.showError(err) })
++
++			return
++		}
++
+ 		a.goAsync(func() (string, error) {
+-			if err := a.State.AddSSHKey(file.GetPath()); err != nil {
++			if err := a.State.AddSSHKey(path); err != nil {
+ 				return "", err
+ 			}
+ 
+@@ -80,8 +89,15 @@ 		if err != nil || file == nil {
+ 			return
+ 		}
+ 
++		path, err := portals.HostPath(file.GetPath())
++		if err != nil {
++			a.idle(func() { a.showError(err) })
++
++			return
++		}
++
+ 		a.goAsync(func() (string, error) {
+-			if err := a.State.AddGPGKey(file.GetPath()); err != nil {
++			if err := a.State.AddGPGKey(path); err != nil {
+ 				return "", err
+ 			}
+ 
+@@ -105,7 +121,7 @@ func (a *App) showGenerateKeyDialog(kind string) {
+ 	scope := a.newScope()
+ 
+ 	title := "Generate SSH Key"
+-	group := formGroup("SSH Key", "The key pair lives in ~/.ssh of this host and loads into the agent.")
++	group := formGroup("SSH Key", "The key pair lives in the SSH folder of this host and loads into the agent.")
+ 	if kind != "ssh" {
+ 		title = "Generate GnuPG Key"
+ 		group = formGroup("GnuPG Key", "The key lives in the keyring of this host, and its pinentry asks for the passphrase.")
+diff --git a/internal/ui/locations.go b/internal/ui/locations.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..69c39f8b201b9ce743c5550edbd46fe882ff588a
+--- /dev/null
++++ b/internal/ui/locations.go
+@@ -0,0 +1,720 @@
++package ui
++
++import (
++	"fmt"
++	"os"
++	"path/filepath"
++	"strings"
++
++	"codeberg.org/puregotk/puregotk/v4/adw"
++	"codeberg.org/puregotk/puregotk/v4/gdk"
++	"codeberg.org/puregotk/puregotk/v4/gio"
++	"codeberg.org/puregotk/puregotk/v4/gtk"
++	"github.com/pojntfx/go-gettext/pkg/i18n"
++
++	"codeberg.org/pojntfx/phial-neo/assets/resources"
++	"codeberg.org/pojntfx/phial-neo/internal/hostcmd"
++	"codeberg.org/pojntfx/phial-neo/internal/mcp"
++	"codeberg.org/pojntfx/phial-neo/internal/paths"
++	"codeberg.org/pojntfx/phial-neo/internal/portals"
++)
++
++// locationsFromSettings states the folders that the settings name. A setting
++// that names nothing keeps the folder that the process already uses, so that a
++// native run without settings follows the host install.
++func locationsFromSettings(settings *gio.Settings) paths.Set {
++	set := paths.Current()
++
++	if !settings.GetBoolean(resources.SettingLocationsSetKey) {
++		return set
++	}
++
++	set.Config = settingLocation(settings, resources.SettingConfigDirKey, resources.SettingConfigPathKey, set.Config)
++	set.Data = settingLocation(settings, resources.SettingDataDirKey, resources.SettingDataPathKey, set.Data)
++	set.SSH = settingLocation(settings, resources.SettingSSHDirKey, resources.SettingSSHPathKey, set.SSH)
++
++	return set
++}
++
++func settingLocation(settings *gio.Settings, hostKey, accessKey string, fallback paths.Location) paths.Location {
++	host := settings.GetString(hostKey)
++	access := settings.GetString(accessKey)
++
++	if strings.TrimSpace(host) == "" && strings.TrimSpace(access) == "" {
++		return fallback
++	}
++
++	if strings.TrimSpace(host) == "" {
++		host = access
++	}
++	if strings.TrimSpace(access) == "" {
++		access = host
++	}
++
++	return paths.Location{Host: host, Access: access}
++}
++
++// applySettingsLocations points the process at the folders of the settings. It
++// runs before the state client is built, so that every later read follows the
++// same folders.
++func applySettingsLocations(settings *gio.Settings) {
++	paths.SetCurrent(locationsFromSettings(settings))
++}
++
++// existingState reports whether a configuration folder already carries the
++// state of an earlier run, so that a native install keeps its folders.
++func existingState(dir string) bool {
++	for _, name := range []string{"mapping", "vms"} {
++		if _, err := os.Stat(filepath.Join(dir, name)); err == nil {
++			return true
++		}
++	}
++
++	return false
++}
++
++// prepareLocations applies the folders and reports whether the window must
++// show the setup page.
++func (a *App) prepareLocations() bool {
++	set := a.loadLocations()
++
++	paths.SetCurrent(set)
++
++	configured := a.Settings.GetBoolean(resources.SettingLocationsSetKey)
++	existing := !paths.Sandboxed() && existingState(set.Config.AccessPath())
++	required := !configured && !existing || configured && !paths.Valid(set)
++
++	a.Log.Info(
++		"preparing the folders",
++		"configured", configured,
++		"sandboxed", paths.Sandboxed(),
++		"existing", existing,
++		"valid", paths.Valid(set),
++		"config", set.Config.AccessPath(),
++		"required", required,
++	)
++
++	if configured {
++		return !paths.Valid(set)
++	}
++
++	if existing {
++		if err := a.saveLocations(set); err != nil {
++			a.Log.Warn("could not write the locations of an existing install", "err", err)
++		}
++
++		return false
++	}
++
++	return true
++}
++
++// loadLocations states the folders of the settings.
++func (a *App) loadLocations() paths.Set {
++	return locationsFromSettings(a.Settings)
++}
++
++// saveLocations writes the folders into the settings, the process, and the
++// host file. The host file lands first, so a failure keeps the setup page.
++func (a *App) saveLocations(set paths.Set) error {
++	paths.SetCurrent(set)
++
++	if a.State != nil {
++		a.State.Reload()
++	}
++
++	if err := paths.SaveHostFile(set); err != nil {
++		return err
++	}
++
++	a.Settings.SetBoolean(resources.SettingLocationsSetKey, true)
++	a.Settings.SetString(resources.SettingConfigDirKey, set.Config.HostPath())
++	a.Settings.SetString(resources.SettingConfigPathKey, set.Config.AccessPath())
++	a.Settings.SetString(resources.SettingDataDirKey, set.Data.HostPath())
++	a.Settings.SetString(resources.SettingDataPathKey, set.Data.AccessPath())
++	a.Settings.SetString(resources.SettingSSHDirKey, set.SSH.HostPath())
++	a.Settings.SetString(resources.SettingSSHPathKey, set.SSH.AccessPath())
++	a.Settings.Apply()
++
++	return nil
++}
++
++// locationForm holds the rows that choose one folder. The first run embeds it
++// in a page, and the preferences embed it in a preferences page.
++type locationForm struct {
++	app *App
++	set paths.Set
++
++	banner *adw.Banner
++
++	foldersGroup *adw.PreferencesGroup
++	runtimeGroup *adw.PreferencesGroup
++
++	configRow  *adw.ActionRow
++	dataRow    *adw.ActionRow
++	sshRow     *adw.ActionRow
++	runtimeRow *adw.ActionRow
++
++	onChanged func()
++}
++
++func (a *App) newLocationForm(set paths.Set) *locationForm {
++	form := &locationForm{app: a, set: set}
++
++	form.foldersGroup = adw.NewPreferencesGroup()
++	form.foldersGroup.SetTitle(i18n.L("Locations"))
++	form.foldersGroup.SetDescription(i18n.L("Keep these folders or choose your own"))
++
++	form.configRow = form.row("Configuration Folder", "Machines, tokens, and the SSH configuration", set.Config, func() {
++		form.choose("config")
++	})
++	form.dataRow = form.row("Data Folder", "Disks, install images, and shared files", set.Data, func() {
++		form.choose("data")
++	})
++	form.sshRow = form.row("SSH Keys Folder", "Key pairs that Phial generates and loads", set.SSH, func() {
++		form.choose("ssh")
++	})
++
++	form.foldersGroup.Add(&form.configRow.Widget)
++	form.foldersGroup.Add(&form.dataRow.Widget)
++	form.foldersGroup.Add(&form.sshRow.Widget)
++
++	defaults := a.buttonRow("_Use Default Folders", "folder-symbolic", func() {
++		form.useDefaults()
++	})
++	form.foldersGroup.Add(&defaults.Widget)
++
++	form.runtimeGroup = adw.NewPreferencesGroup()
++	form.runtimeGroup.SetTitle(i18n.L("Runtime"))
++	form.runtimeGroup.SetDescription(i18n.L("A temporary folder for running machines, provided by the system"))
++
++	form.runtimeRow = a.propertyRow("Folder", set.Runtime.HostPath())
++	form.runtimeGroup.Add(&form.runtimeRow.Widget)
++
++	form.refresh()
++
++	return form
++}
++
++// row builds one folder row with a choose control.
++func (f *locationForm) row(title string, description string, location paths.Location, choose func()) *adw.ActionRow {
++	row := adw.NewActionRow()
++	row.SetTitle(i18n.L(title))
++	row.SetSubtitle(locationText(location))
++	row.SetSubtitleSelectable(true)
++	row.SetTooltipText(i18n.L(description))
++
++	button := f.app.labelButton("_Choose", choose)
++	button.SetValign(gtk.AlignCenterValue)
++	row.AddSuffix(&button.Widget)
++
++	return row
++}
++
++// locationText names the folder that the user chose. A folder that the process
++// cannot reach states itself, so the row never looks ready when it is not.
++func locationText(location paths.Location) string {
++	if !location.IsSet() {
++		return i18n.L("Not selected")
++	}
++
++	if !location.Exists() {
++		return i18n.L("Not accessible")
++	}
++
++	if host := location.HostPath(); strings.TrimSpace(host) != "" {
++		return host
++	}
++
++	return location.AccessPath()
++}
++
++func (f *locationForm) refresh() {
++	f.configRow.SetSubtitle(locationText(f.set.Config))
++	f.dataRow.SetSubtitle(locationText(f.set.Data))
++	f.sshRow.SetSubtitle(locationText(f.set.SSH))
++	f.runtimeRow.SetSubtitle(locationText(f.set.Runtime))
++
++	if f.onChanged != nil {
++		f.onChanged()
++	}
++}
++
++func (f *locationForm) valid() bool {
++	return paths.Valid(f.set)
++}
++
++// fail states one problem in the banner of the first run, or in a toast when
++// the form sits in the preferences.
++func (f *locationForm) fail(message string) {
++	if f.banner != nil {
++		f.banner.SetTitle(message)
++		f.banner.SetRevealed(true)
++
++		return
++	}
++
++	f.app.toast(message)
++}
++
++func (f *locationForm) clearFailure() {
++	if f.banner != nil {
++		f.banner.SetRevealed(false)
++	}
++}
++
++func (f *locationForm) location(kind string) paths.Location {
++	switch kind {
++	case "config":
++		return f.set.Config
++	case "data":
++		return f.set.Data
++	default:
++		return f.set.SSH
++	}
++}
++
++func (f *locationForm) setLocation(kind string, location paths.Location) {
++	switch kind {
++	case "config":
++		f.set.Config = location
++	case "data":
++		f.set.Data = location
++	default:
++		f.set.SSH = location
++	}
++}
++
++func (f *locationForm) title(kind string) string {
++	switch kind {
++	case "config":
++		return i18n.L("Choose the Configuration Folder")
++	case "data":
++		return i18n.L("Choose the Data Folder")
++	default:
++		return i18n.L("Choose the SSH Keys Folder")
++	}
++}
++
++// choose asks the file chooser portal for one folder.
++func (f *locationForm) choose(kind string) {
++	current := f.location(kind).HostPath()
++
++	go func() {
++		folder, err := portals.ChooseFolder(f.title(kind), i18n.L("_Choose"), current)
++
++		f.app.idle(func() {
++			if err != nil {
++				f.fail(fmt.Sprintf(i18n.L("Could not choose the folder: %s"), err))
++
++				return
++			}
++
++			if !folder.IsSet() {
++				return
++			}
++
++			f.setLocation(kind, paths.Location{Host: folder.Host, Access: folder.Access})
++			f.refresh()
++			f.apply()
++		})
++	}()
++}
++
++// useDefaults asks the portal for the folder of every default, one after the
++// other, so that the defaults are one flow rather than three separate choices.
++func (f *locationForm) useDefaults() {
++	defaults := paths.Defaults()
++
++	go func() {
++		for _, kind := range []string{"config", "data", "ssh"} {
++			location := defaults.Config
++			if kind == "data" {
++				location = defaults.Data
++			} else if kind == "ssh" {
++				location = defaults.SSH
++			}
++
++			if err := ensureHostDir(location.HostPath()); err != nil {
++				message := fmt.Sprintf(i18n.L("Could not create the folder: %s"), err)
++				f.app.idle(func() { f.fail(message) })
++
++				return
++			}
++
++			folder, err := portals.ChooseFolder(f.title(kind), i18n.L("_Choose"), location.HostPath())
++			if err != nil {
++				message := fmt.Sprintf(i18n.L("Could not choose the folder: %s"), err)
++				f.app.idle(func() { f.fail(message) })
++
++				return
++			}
++
++			if !folder.IsSet() {
++				return
++			}
++
++			kind := kind
++			f.app.idle(func() {
++				f.setLocation(kind, paths.Location{Host: folder.Host, Access: folder.Access})
++				f.refresh()
++			})
++		}
++
++		f.app.idle(func() {
++			f.refresh()
++			f.apply()
++		})
++	}()
++}
++
++// ensureHostDir creates one folder on the host. A sandboxed process runs the
++// creation through flatpak-spawn, because the folder is outside the sandbox.
++func ensureHostDir(host string) error {
++	if strings.TrimSpace(host) == "" {
++		return fmt.Errorf("the folder is empty")
++	}
++
++	if !paths.Sandboxed() {
++		return os.MkdirAll(host, 0o700)
++	}
++
++	if output, err := hostcmd.Command("mkdir", "-p", host).CombinedOutput(); err != nil {
++		return fmt.Errorf("%s: %w", strings.TrimSpace(string(output)), err)
++	}
++
++	return nil
++}
++
++// apply creates the folders, writes the settings, and reports whether the
++// folders are ready.
++func (f *locationForm) apply() bool {
++	for _, location := range []paths.Location{f.set.Config, f.set.Data, f.set.SSH, f.set.Runtime} {
++		if paths.Sandboxed() && location.AccessPath() == location.HostPath() && location != f.set.Runtime {
++			continue
++		}
++
++		if err := os.MkdirAll(location.AccessPath(), 0o700); err != nil {
++			f.fail(fmt.Sprintf(i18n.L("Could not create the folder: %s"), err))
++
++			return false
++		}
++	}
++
++	if !f.valid() {
++		f.fail(i18n.L("Choose every folder first"))
++
++		return false
++	}
++
++	if err := f.app.saveLocations(f.set); err != nil {
++		f.fail(fmt.Sprintf(i18n.L("Could not save the folders: %s"), err))
++
++		return false
++	}
++
++	f.clearFailure()
++	f.refresh()
++
++	return true
++}
++
++// showSetupDialog presents the setup wizard over the window. The first run
++// opens it, and the preferences can open it again.
++func (a *App) showSetupDialog(firstRun bool) {
++	if a.win == nil {
++		return
++	}
++
++	a.win.Present()
++
++	if a.setupDialog != nil {
++		a.setupDialog.Present(&a.win.Widget)
++
++		return
++	}
++
++	set := a.loadLocations()
++
++	// A native run reaches the default folders directly, so the defaults are
++	// ready to continue. A sandboxed run must ask the portal for each one.
++	if !paths.Sandboxed() && !a.Settings.GetBoolean(resources.SettingLocationsSetKey) {
++		for _, location := range []paths.Location{set.Config, set.Data, set.SSH, set.Runtime} {
++			_ = os.MkdirAll(location.AccessPath(), 0o700)
++		}
++	}
++
++	form := a.newLocationForm(set)
++	form.banner = adw.NewBanner("")
++	form.banner.SetRevealed(false)
++
++	a.locationForm = form
++
++	navigation := adw.NewNavigationView()
++	navigation.SetPopOnEscape(true)
++	a.setupNavigation = navigation
++
++	navigation.Add(a.buildWelcomePage(navigation))
++	navigation.Add(a.buildHostSetupPage(navigation))
++	navigation.Add(a.buildFoldersPage(navigation, form))
++	navigation.Add(a.buildFinishPage(navigation, form))
++
++	width := a.win.GetWidth()
++	if width <= 0 {
++		width = a.Settings.GetInt(resources.SettingWindowWidthKey)
++	}
++
++	height := a.win.GetHeight()
++	if height <= 0 {
++		height = a.Settings.GetInt(resources.SettingWindowHeightKey)
++	}
++
++	contentWidth := int32(720)
++	if width > 0 && int32(width-96) < contentWidth {
++		contentWidth = int32(width - 96)
++	}
++	if contentWidth < 280 {
++		contentWidth = 280
++	}
++
++	contentHeight := int32(640)
++	if height > 0 && int32(height-96) < contentHeight {
++		contentHeight = int32(height - 96)
++	}
++	if contentHeight < 360 {
++		contentHeight = 360
++	}
++
++	dialog := adw.NewDialog()
++	dialog.SetTitle(i18n.L("Set Up Phial"))
++	dialog.SetContentWidth(contentWidth)
++	dialog.SetContentHeight(contentHeight)
++	dialog.SetCanClose(!firstRun)
++	dialog.SetChild(&navigation.Widget)
++
++	var onClosed func(adw.Dialog)
++	onClosed = func(adw.Dialog) {
++		a.setupDialog = nil
++		a.setupNavigation = nil
++	}
++	dialog.ConnectClosed(&onClosed)
++	a.hold(&onClosed)
++
++	a.setupDialog = dialog
++
++	dialog.Present(&a.win.Widget)
++}
++
++// wizardPage builds one step of the setup wizard.
++func (a *App) wizardPage(tag string, title string, subtitle string, content *gtk.Widget) (*adw.NavigationPage, *adw.HeaderBar) {
++	header := adw.NewHeaderBar()
++	header.SetShowEndTitleButtons(false)
++	windowTitle := adw.NewWindowTitle(i18n.L(title), i18n.L(subtitle))
++	header.SetTitleWidget(&windowTitle.Widget)
++
++	toolbar := adw.NewToolbarView()
++	toolbar.AddTopBar(&header.Widget)
++	toolbar.SetContent(content)
++
++	page := adw.NewNavigationPage(&toolbar.Widget, i18n.L(title))
++	page.SetTag(tag)
++
++	return page, header
++}
++
++// buildWelcomePage builds the splash step with the call to action.
++func (a *App) buildWelcomePage(navigation *adw.NavigationView) *adw.NavigationPage {
++	status := adw.NewStatusPage()
++	status.SetTitle(i18n.L("Phial"))
++	status.SetDescription(i18n.L("Run development machines with secrets that expire"))
++
++	if icon := gdk.NewTextureFromResource(resources.ResourceIconPath); icon != nil {
++		status.SetPaintable(icon)
++	} else {
++		status.SetIconName("drive-harddisk-symbolic")
++	}
++
++	start := a.labelButton("_Get Started", func() {
++		navigation.PushByTag("host")
++	})
++	start.AddCssClass("suggested-action")
++	start.AddCssClass("pill")
++	start.SetHalign(gtk.AlignCenterValue)
++	status.SetChild(&start.Widget)
++
++	page, _ := a.wizardPage("welcome", "Welcome", "", &status.Widget)
++
++	return page
++}
++
++// buildHostSetupPage builds the step that sets up the host.
++func (a *App) buildHostSetupPage(navigation *adw.NavigationView) *adw.NavigationPage {
++	banner := adw.NewBanner("")
++	banner.SetRevealed(false)
++
++	hostRow := a.setupActionRow(
++		"Service",
++		"Adds the command-line tools",
++		"_Install",
++		func() error { return a.installHost() },
++		banner,
++	)
++
++	hostGroup := adw.NewPreferencesGroup()
++	hostGroup.SetTitle(i18n.L("Host Services"))
++	hostGroup.SetDescription(i18n.L("Runs your machines in the background"))
++	hostGroup.Add(&hostRow.Widget)
++
++	systemRow := a.setupActionRow(
++		"Prepare This Computer",
++		"Needs your password",
++		"_Apply",
++		func() error {
++			_, _, err := a.Service.SystemRootSetup(a.Ctx, nil, mcp.RootSetupInput{})
++
++			return err
++		},
++		banner,
++	)
++
++	systemGroup := adw.NewPreferencesGroup()
++	systemGroup.SetTitle(i18n.L("System Setup"))
++	systemGroup.SetDescription(i18n.L("For virtual machines and USB devices"))
++	systemGroup.Add(&systemRow.Widget)
++
++	preferences := adw.NewPreferencesPage()
++	preferences.SetBanner(banner)
++	preferences.Add(hostGroup)
++	preferences.Add(systemGroup)
++
++	page, header := a.wizardPage("host", "Host Setup", "", &preferences.Widget)
++
++	next := a.labelButton("_Continue", func() {
++		navigation.PushByTag("folders")
++	})
++	next.AddCssClass("suggested-action")
++	header.PackEnd(&next.Widget)
++
++	return page
++}
++
++// setupActionRow builds a row with one action and its progress.
++func (a *App) setupActionRow(title string, subtitle string, label string, action func() error, banner *adw.Banner) *adw.ActionRow {
++	row := adw.NewActionRow()
++	row.SetTitle(i18n.L(title))
++	row.SetSubtitle(i18n.L(subtitle))
++
++	box := gtk.NewBox(gtk.OrientationHorizontalValue, 6)
++	box.SetValign(gtk.AlignCenterValue)
++
++	spinner := adw.NewSpinner()
++	spinner.SetVisible(false)
++
++	var button *gtk.Button
++	button = a.labelButton(label, func() {
++		button.SetSensitive(false)
++		spinner.SetVisible(true)
++
++		go func() {
++			err := action()
++
++			a.idle(func() {
++				spinner.SetVisible(false)
++
++				if err != nil {
++					banner.SetTitle(i18n.L("Could not set up this host"))
++					banner.SetRevealed(true)
++					button.SetSensitive(true)
++					a.Log.Error("the host setup failed", "err", err)
++
++					return
++				}
++
++				button.SetLabel(i18n.L("Done"))
++				button.SetSensitive(false)
++				row.SetSubtitle(i18n.L("Ready"))
++				banner.SetRevealed(false)
++			})
++		}()
++	})
++
++	box.Append(&spinner.Widget)
++	box.Append(&button.Widget)
++	row.AddSuffix(&box.Widget)
++
++	return row
++}
++
++// buildFoldersPage builds the step that chooses the folders.
++func (a *App) buildFoldersPage(navigation *adw.NavigationView, form *locationForm) *adw.NavigationPage {
++	content := a.pageContentWithBanner(form.banner, form.foldersGroup, form.runtimeGroup)
++
++	page, header := a.wizardPage("folders", "Folders", "Where Phial keeps its files", content)
++
++	next := a.labelButton("_Continue", func() {
++		if !form.apply() {
++			return
++		}
++
++		navigation.PushByTag("finish")
++	})
++	next.AddCssClass("suggested-action")
++	next.SetSensitive(form.valid())
++	header.PackEnd(&next.Widget)
++
++	form.onChanged = func() {
++		next.SetSensitive(form.valid())
++	}
++	form.refresh()
++
++	return page
++}
++
++// buildFinishPage builds the last step.
++func (a *App) buildFinishPage(navigation *adw.NavigationView, form *locationForm) *adw.NavigationPage {
++	status := adw.NewStatusPage()
++	status.SetIconName("object-select-symbolic")
++	status.SetTitle(i18n.L("You're Ready"))
++	status.SetDescription(i18n.L("Phial is set up for your first machine"))
++
++	page, header := a.wizardPage("finish", "Done", "", &status.Widget)
++
++	finish := a.labelButton("_Finish", func() {
++		if !form.apply() {
++			return
++		}
++
++		a.finishSetupDialog()
++	})
++	finish.AddCssClass("suggested-action")
++	header.PackEnd(&finish.Widget)
++
++	return page
++}
++
++// finishSetupDialog closes the wizard and refreshes the window.
++func (a *App) finishSetupDialog() {
++	a.Log.Info("finishing the setup", "form", a.locationForm != nil, "valid", a.locationForm != nil && a.locationForm.valid())
++
++	if a.locationForm != nil && !a.locationForm.apply() {
++		a.Log.Warn("the setup folders are not ready")
++
++		return
++	}
++
++	if a.setupDialog != nil {
++		a.Log.Info("closing the setup dialog")
++		a.setupDialog.ForceClose()
++		a.setupDialog = nil
++	}
++
++	a.setupNavigation = nil
++
++	a.refreshSidebar()
++	a.refreshSecretsPage()
++	a.refreshGrantsPage()
++	a.refreshCounts()
++	a.restoreActivePage()
++
++	a.win.Present()
++}
+diff --git a/internal/ui/preferences.go b/internal/ui/preferences.go
+index 7f6d99016e61c52614b57939068c4910eb9cc9f1..4cb2b3df0b748f1bb4d3566b48d546b8292f0623 100644
+--- a/internal/ui/preferences.go
++++ b/internal/ui/preferences.go
+@@ -49,6 +49,22 @@ 	grants.Add(&duration.row.Widget)
+ 
+ 	page.Add(grants)
+ 
++	setup := adw.NewPreferencesGroup()
++	setup.SetTitle(i18n.L("Setup"))
++	setup.Add(&a.buttonRow("_Run the Setup Wizard", "preferences-system-symbolic", func() {
++		a.activate("setup-wizard")
++	}).Widget)
++	page.Add(setup)
++
++	locationsPage := adw.NewPreferencesPage()
++	locationsPage.SetTitle(i18n.L("Folders"))
++	locationsPage.SetIconName("folder-symbolic")
++
++	locations := a.newLocationForm(a.loadLocations())
++	locationsPage.Add(locations.foldersGroup)
++	locationsPage.Add(locations.runtimeGroup)
++
+ 	dialog.Add(page)
++	dialog.Add(locationsPage)
+ 	dialog.Present(&a.win.Widget)
+ }
+diff --git a/internal/ui/selfinstall.go b/internal/ui/selfinstall.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..2124fc5a281efd20e281aadf11d8a7b4a82abd62
+--- /dev/null
++++ b/internal/ui/selfinstall.go
+@@ -0,0 +1,45 @@
++package ui
++
++import (
++	"bytes"
++	"fmt"
++	"os"
++	"strings"
++
++	"codeberg.org/pojntfx/phial-neo/internal/hostcmd"
++	"codeberg.org/pojntfx/phial-neo/internal/paths"
++	"codeberg.org/pojntfx/phial-neo/internal/setup"
++)
++
++// hostBinaryPath states the host build inside the bundle. The window copies
++// this binary to the host, so the installer needs no source tree.
++const hostBinaryPath = "/app/share/phial/phial-host"
++
++// installHost installs the host service and the tools.
++func (a *App) installHost() error {
++	if paths.Sandboxed() {
++		data, err := os.ReadFile(hostBinaryPath)
++		if err != nil {
++			return fmt.Errorf("read the host installer: %w", err)
++		}
++
++		copy := hostcmd.Command("sh", "-c", "cat > /tmp/phial-install && chmod 755 /tmp/phial-install")
++		copy.Stdin = bytes.NewReader(data)
++
++		if output, err := copy.CombinedOutput(); err != nil {
++			return fmt.Errorf("copy the host installer: %s: %w", strings.TrimSpace(string(output)), err)
++		}
++
++		defer func() {
++			_ = hostcmd.Command("rm", "-f", "/tmp/phial-install").Run()
++		}()
++
++		if output, err := hostcmd.Command("/tmp/phial-install", "install", "--embedded").CombinedOutput(); err != nil {
++			return fmt.Errorf("install the host service: %s: %w", strings.TrimSpace(string(output)), err)
++		}
++
++		return nil
++	}
++
++	return setup.Install(setup.InstallOptions{Embedded: true})
++}
+diff --git a/internal/ui/shares.go b/internal/ui/shares.go
+index a555d04c033b3bc22991036b308c504a9344e730..d607625c92cfa2ac4d42ccda35e4669057db9e2d 100644
+--- a/internal/ui/shares.go
++++ b/internal/ui/shares.go
+@@ -1,14 +1,13 @@
+ package ui
+ 
+ import (
+-	"net/url"
+ 	"strings"
+ 
+ 	"codeberg.org/puregotk/puregotk/v4/adw"
+ 	"github.com/pojntfx/go-gettext/pkg/i18n"
+-	"github.com/rymdport/portal/filechooser"
+ 
+ 	"codeberg.org/pojntfx/phial-neo/internal/mcp"
++	"codeberg.org/pojntfx/phial-neo/internal/portals"
+ 	"codeberg.org/pojntfx/phial-neo/internal/virt"
+ )
+ 
+@@ -73,45 +72,18 @@ }
+ 
+ func (a *App) showShareDialog(def virt.Definition) {
+ 	go func() {
+-		paths, err := filechooser.OpenFile("", i18n.L("Share a Folder"), &filechooser.OpenFileOptions{
+-			Directory:   true,
+-			AcceptLabel: i18n.L("_Share"),
+-		})
++		folder, err := portals.ChooseFolder(i18n.L("Share a Folder"), i18n.L("_Share"), "")
+ 		if err != nil {
+ 			a.idle(func() { a.showError(err) })
+ 			return
+ 		}
+ 
+-		if len(paths) == 0 {
++		if !folder.IsSet() {
+ 			return
+ 		}
+ 
+-		path, err := filePathFromURI(paths[0])
+-		if err != nil {
+-			a.idle(func() { a.showError(err) })
+-			return
+-		}
+-
+-		a.idle(func() { a.showShareTargetDialog(def, path) })
++		a.idle(func() { a.showShareTargetDialog(def, folder.Host) })
+ 	}()
+-}
+-
+-func filePathFromURI(uri string) (string, error) {
+-	if !strings.HasPrefix(uri, "file://") {
+-		return uri, nil
+-	}
+-
+-	parsed, err := url.Parse(uri)
+-	if err != nil {
+-		return "", err
+-	}
+-
+-	path, err := url.PathUnescape(parsed.Path)
+-	if err != nil {
+-		return "", err
+-	}
+-
+-	return path, nil
+ }
+ 
+ func (a *App) showShareTargetDialog(def virt.Definition, path string) {
+diff --git a/internal/ui/window.go b/internal/ui/window.go
+index 765b8714e8b93c890a810060250b1de5e3ad3615..20067f166564a2932aae5691e084b58e26aaf727 100644
+--- a/internal/ui/window.go
++++ b/internal/ui/window.go
+@@ -100,8 +100,6 @@ 	}
+ 	a.win.ConnectCloseRequest(&onCloseRequest)
+ 	a.hold(&onCloseRequest)
+ 
+-	a.registerActions()
+-
+ 	a.buildSidebar()
+ 
+ 	a.secretsPage = a.buildSecretsPage()
+@@ -495,16 +493,18 @@
+ // capture renders the window into a PNG file. It exists for the automated
+ // screenshot runs in tests/.
+ func (a *App) capture(path string) string {
+-	if a.win == nil {
++	window := a.win
++	if window == nil {
+ 		return "no window"
+ 	}
+ 
+ 	// A window that just gained or lost an in-window dialog can sit without an
+ 	// allocation for a moment. Asking for one makes the next frame whole.
+-	a.win.Widget.QueueAllocate()
++	window.Widget.QueueAllocate()
++	window.Widget.QueueDraw()
+ 
+ 	children := []*gtk.Widget{}
+-	for child := a.win.Widget.GetFirstChild(); child != nil; child = child.GetNextSibling() {
++	for child := window.Widget.GetFirstChild(); child != nil; child = child.GetNextSibling() {
+ 		children = append(children, child)
+ 	}
+ 
+@@ -515,8 +515,8 @@
+ 	// An AdwApplicationWindow holds the content and the host that draws an
+ 	// in-window dialog. The host has no size of its own once a dialog closed, so
+ 	// the size comes from the window and every child is drawn in order.
+-	width := a.win.Widget.GetWidth()
+-	height := a.win.Widget.GetHeight()
++	width := window.Widget.GetWidth()
++	height := window.Widget.GetHeight()
+ 	if width <= 0 || height <= 0 {
+ 		width = children[0].GetWidth()
+ 		height = children[0].GetHeight()
+@@ -532,9 +532,9 @@ 	bounds := &graphene.Rect{}
+ 	bounds.Init(0, 0, float32(width), float32(height))
+ 
+ 	var background gdk.RGBA
+-	a.win.Widget.GetStyleContext().LookupColor("window_bg_color", &background)
++	window.Widget.GetStyleContext().LookupColor("window_bg_color", &background)
+ 
+-	native := a.win.Widget.GetNative()
++	native := window.Widget.GetNative()
+ 	if native == nil {
+ 		return "no native surface"
+ 	}
+@@ -545,7 +545,23 @@ 		snapshot.AppendColor(&background, bounds)
+ 
+ 		for _, child := range children {
+ 			snapshot.Save()
+-			a.win.Widget.SnapshotChild(child, snapshot)
++
++			// A dialog host can lose its allocation while its page changes. Its
++			// child still carries the content, so the capture draws that child
++			// in the middle of the window instead.
++			if child.GetWidth() > 0 && child.GetHeight() > 0 {
++				window.Widget.SnapshotChild(child, snapshot)
++			} else if content := child.GetFirstChild(); content != nil && content.GetWidth() > 0 && content.GetHeight() > 0 {
++				point := graphene.Point{
++					X: float32((width - content.GetWidth()) / 2),
++					Y: float32((height - content.GetHeight()) / 2),
++				}
++				snapshot.Translate(&point)
++				child.SnapshotChild(content, snapshot)
++			} else {
++				window.Widget.SnapshotChild(child, snapshot)
++			}
++
+ 			snapshot.Restore()
+ 		}
+ 
+@@ -573,11 +589,11 @@ 		return "could not save " + path
+ 	}
+ 
+ 	message := "captured " + path + fmt.Sprintf(" (%dx%d)", texture.GetWidth(), texture.GetHeight())
+-	a.Log.Info(message,
+-		"window_width", a.win.Widget.GetWidth(),
+-		"window_height", a.win.Widget.GetHeight(),
+-		"collapsed", a.split.GetCollapsed(),
+-	)
++	fields := []any{"window_width", window.Widget.GetWidth(), "window_height", window.Widget.GetHeight()}
++	if a.split != nil {
++		fields = append(fields, "collapsed", a.split.GetCollapsed())
++	}
++	a.Log.Info(message, fields...)
+ 
+ 	return message
+ }
+diff --git a/internal/virt/hotplug.go b/internal/virt/hotplug.go
+index c4fc786e4b65c49b1009cd2bd04522aa2141316b..35cfc6db51bcbcaa92728415a8d22d91132fbec3 100644
+--- a/internal/virt/hotplug.go
++++ b/internal/virt/hotplug.go
+@@ -6,10 +6,11 @@ 	"context"
+ 	"encoding/json"
+ 	"fmt"
+ 	"net"
+-	"os"
+ 	"path/filepath"
+ 	"strings"
+ 	"time"
++
++	"codeberg.org/pojntfx/phial-neo/internal/paths"
+ )
+ 
+ type qmpCommand struct {
+@@ -115,7 +116,7 @@ 	return conn, reader, nil
+ }
+ 
+ func shareSocket(tag string) string {
+-	return filepath.Join(os.Getenv("XDG_RUNTIME_DIR"), "phial", "vm", "virtiofsd-"+tag+".sock")
++	return filepath.Join(paths.Runtime().Path(), "vm", "virtiofsd-"+tag+".sock")
+ }
+ 
+ func releaseShare(conn net.Conn, reader *bufio.Reader, tag string) {
+diff --git a/internal/virt/ssh.go b/internal/virt/ssh.go
+index fb09a525d429ac2bc1d1d08be1659a01f8e09b90..81b215cbff2d3488eb9d62a1368e4bea8323711e 100644
+--- a/internal/virt/ssh.go
++++ b/internal/virt/ssh.go
+@@ -12,6 +12,7 @@ 	"strings"
+ 	"time"
+ 
+ 	"codeberg.org/pojntfx/phial-neo/internal/hostcmd"
++	"codeberg.org/pojntfx/phial-neo/internal/paths"
+ )
+ 
+ const (
+@@ -38,12 +39,7 @@ // HostPublicKeys states the public keys of the host. The installer writes them
+ // into the guest, so that a machine is reachable without a password and without
+ // the network that a fetch would need.
+ func HostPublicKeys() []string {
+-	home, err := os.UserHomeDir()
+-	if err != nil {
+-		return nil
+-	}
+-
+-	entries, err := os.ReadDir(filepath.Join(home, ".ssh"))
++	entries, err := os.ReadDir(paths.SSH().Path())
+ 	if err != nil {
+ 		return nil
+ 	}
+@@ -55,7 +51,7 @@ 		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".pub") {
+ 			continue
+ 		}
+ 
+-		data, err := os.ReadFile(filepath.Join(home, ".ssh", entry.Name()))
++		data, err := os.ReadFile(filepath.Join(paths.SSH().Path(), entry.Name()))
+ 		if err != nil {
+ 			continue
+ 		}
+@@ -70,23 +66,13 @@ }
+ 
+ // AgentSocket states the socket of the dedicated agent of Phial.
+ func AgentSocket() string {
+-	runtimeDir := os.Getenv("XDG_RUNTIME_DIR")
+-	if runtimeDir == "" {
+-		runtimeDir = fmt.Sprintf("/run/user/%d", os.Getuid())
+-	}
+-
+-	return filepath.Join(runtimeDir, "phial", "agent", "ssh.sock")
++	return filepath.Join(paths.Runtime().Path(), "agent", "ssh.sock")
+ }
+ 
+ // SSHConfigPath states the configuration that carries one host alias per
+ // machine.
+ func SSHConfigPath() string {
+-	configDir, err := os.UserConfigDir()
+-	if err != nil {
+-		configDir = filepath.Join(os.Getenv("HOME"), ".config")
+-	}
+-
+-	return filepath.Join(configDir, "phial", "ssh_config")
++	return filepath.Join(paths.Config().Path(), "ssh_config")
+ }
+ 
+ // SSHConfigText states the configuration of every machine, which points ssh at
+@@ -100,8 +86,8 @@ 		// The configuration names no agent, so ssh uses the agent of the session,
+ 		// which is the agent of the user, and that agent asks for the passphrase
+ 		// of the key on the first signature.
+ 		fmt.Fprintf(&builder,
+-			"Host %s\n    User phial\n    ProxyCommand socat - VSOCK-CONNECT:%d:2222\n    IdentityFile ~/.ssh/%s\n    IdentitiesOnly yes\n    StrictHostKeyChecking accept-new\n    ServerAliveInterval 5\n    ServerAliveCountMax 3\n\n",
+-			def.Name, def.guestCID(), sshKeyName)
++			"Host %s\n    User phial\n    ProxyCommand socat - VSOCK-CONNECT:%d:2222\n    IdentityFile %s\n    IdentitiesOnly yes\n    StrictHostKeyChecking accept-new\n    ServerAliveInterval 5\n    ServerAliveCountMax 3\n\n",
++			def.Name, def.guestCID(), filepath.Join(paths.SSH().HostPath(), sshKeyName))
+ 	}
+ 
+ 	return builder.String()
+@@ -204,12 +190,7 @@ 	if AgentKeyLoaded() {
+ 		return nil
+ 	}
+ 
+-	home, err := os.UserHomeDir()
+-	if err != nil {
+-		return err
+-	}
+-
+-	key := filepath.Join(home, ".ssh", sshKeyName)
++	key := filepath.Join(paths.SSH().Path(), sshKeyName)
+ 	if _, err := os.Stat(key); err != nil {
+ 		return fmt.Errorf("could not find the SSH key %s: %w", key, err)
+ 	}
+@@ -217,7 +198,7 @@
+ 	unlockCtx, cancel := context.WithTimeout(ctx, unlockTimeout)
+ 	defer cancel()
+ 
+-	command := hostcmd.CommandContext(unlockCtx, "ssh-add", key)
++	command := hostcmd.CommandContext(unlockCtx, "ssh-add", filepath.Join(paths.SSH().HostPath(), sshKeyName))
+ 	command.Stdout = os.Stdout
+ 	command.Stderr = os.Stderr
+ 
+diff --git a/internal/virt/vm.go b/internal/virt/vm.go
+index 0eb2b09b84a9db8c94b6a9cc8db1e1ead97803de..fd1ea2e368834aef22a96904a5013078dc66070e 100644
+--- a/internal/virt/vm.go
++++ b/internal/virt/vm.go
+@@ -11,8 +11,9 @@ 	"path/filepath"
+ 	"regexp"
+ 	"strings"
+ 
+-	"github.com/adrg/xdg"
+ 	"github.com/google/renameio/v2"
++
++	"codeberg.org/pojntfx/phial-neo/internal/paths"
+ )
+ 
+ func OVMFDirValue() string {
+@@ -95,46 +96,16 @@ 		Audio:       "none",
+ 	}
+ }
+ 
+-// hostHome states the home of the user. The Flatpak redirects the XDG
+-// directories, so the host paths come from the home variable, which stays.
+-func hostHome() string {
+-	home, err := os.UserHomeDir()
+-	if err != nil {
+-		return ""
+-	}
+-
+-	return home
+-}
+-
+ func configDir() string {
+-	// The window reads the same machines as the host units, so the Flatpak
+-	// uses the host configuration directory.
+-	if os.Getenv("FLATPAK_ID") != "" {
+-		if home := hostHome(); home != "" {
+-			return filepath.Join(home, ".config", "phial")
+-		}
+-	}
+-
+-	return filepath.Join(xdg.ConfigHome, "phial")
++	return paths.Config().Path()
+ }
+ 
+ func dataDir() string {
+-	if os.Getenv("FLATPAK_ID") != "" {
+-		if home := hostHome(); home != "" {
+-			return filepath.Join(home, ".local", "share", "phial")
+-		}
+-	}
+-
+-	return filepath.Join(xdg.DataHome, "phial")
++	return paths.Data().Path()
+ }
+ 
+ func runtimeDir() string {
+-	base := xdg.RuntimeDir
+-	if base == "" {
+-		base = fmt.Sprintf("/run/user/%d", os.Getuid())
+-	}
+-
+-	return filepath.Join(base, "phial")
++	return paths.Runtime().Path()
+ }
+ 
+ func (d Definition) diskPath() string {
+@@ -317,11 +288,6 @@ 	return os.Truncate(image, target)
+ }
+ 
+ func (d Definition) Rename(newName string) error {
+-	configDirValue, err := os.UserConfigDir()
+-	if err != nil {
+-		return err
+-	}
+-
+ 	renamed := d
+ 	renamed.Name = newName
+ 
+@@ -336,7 +302,7 @@ 			}
+ 		}
+ 	}
+ 
+-	oldConfig := filepath.Join(configDirValue, "phial", "vms", d.Name+".json")
++	oldConfig := filepath.Join(configDir(), "vms", d.Name+".json")
+ 
+ 	if err := os.Remove(oldConfig); err != nil && !os.IsNotExist(err) {
+ 		return err
+diff --git a/main.go b/main.go
+index dfaa6b4737b76e5bd9eda25dfbe586e38f52548e..64ecb3a812c1b7b85b196636a36d2305e68bc95c 100644
+--- a/main.go
++++ b/main.go
+@@ -2,6 +2,7 @@ package main
+ 
+ import (
+ 	"context"
++	"embed"
+ 	"fmt"
+ 	"log/slog"
+ 	"os"
+@@ -14,6 +15,7 @@ 	"codeberg.org/puregotk/puregotk/v4/glib"
+ 	"github.com/pojntfx/go-gettext/pkg/i18n"
+ 
+ 	"codeberg.org/pojntfx/phial-neo/assets/resources"
++	"codeberg.org/pojntfx/phial-neo/internal/paths"
+ 	"codeberg.org/pojntfx/phial-neo/internal/setup"
+ 	"codeberg.org/pojntfx/phial-neo/internal/state"
+ 	"codeberg.org/pojntfx/phial-neo/internal/ui"
+@@ -29,7 +31,7 @@   phial vm exec <name>      run one virtual machine in the foreground
+   phial vfio <bind|restore> <address>  bind or restore a PCI controller
+   phial gate                serve the gate that a guest may reach
+   phial root-setup [ethernet] [memory] apply the system setup, needs run0
+-  phial install [repo]      install the binary and the configuration
++  phial install [--embedded] [repo] install the binary and the configuration
+   phial acceptance          run the host acceptance checks
+   phial forward-guest <name> forward one socket to the host, guest side
+   phial run <command...>    run a command with the granted secrets, guest side
+@@ -48,6 +50,59 @@ // LocaleDir holds the directory of the compiled translations. A development
+ // build points it at the po directory of the tree.
+ var LocaleDir = "/usr/share/locale"
+ 
++//go:embed host/systemd/*.service
++var embeddedUnits embed.FS
++
++//go:embed host/bin/*
++var embeddedBinaries embed.FS
++
++//go:embed assets/meta/*.desktop
++var embeddedDesktopFiles embed.FS
++
++//go:embed assets/meta/*.svg
++var embeddedIcons embed.FS
++
++//go:embed assets/resources/index.gschema.xml
++var embeddedSchema []byte
++
++func embeddedInstallAssets() *setup.Assets {
++	assets := &setup.Assets{Schema: embeddedSchema}
++
++	if entries, err := embeddedUnits.ReadDir("host/systemd"); err == nil {
++		for _, entry := range entries {
++			if data, err := embeddedUnits.ReadFile("host/systemd/" + entry.Name()); err == nil {
++				assets.Units = append(assets.Units, setup.Asset{Name: entry.Name(), Data: data})
++			}
++		}
++	}
++
++	if entries, err := embeddedBinaries.ReadDir("host/bin"); err == nil {
++		for _, entry := range entries {
++			if data, err := embeddedBinaries.ReadFile("host/bin/" + entry.Name()); err == nil {
++				assets.Binaries = append(assets.Binaries, setup.Asset{Name: entry.Name(), Data: data})
++			}
++		}
++	}
++
++	if entries, err := embeddedDesktopFiles.ReadDir("assets/meta"); err == nil {
++		for _, entry := range entries {
++			if data, err := embeddedDesktopFiles.ReadFile("assets/meta/" + entry.Name()); err == nil {
++				assets.DesktopFiles = append(assets.DesktopFiles, setup.Asset{Name: entry.Name(), Data: data})
++			}
++		}
++	}
++
++	if entries, err := embeddedIcons.ReadDir("assets/meta"); err == nil {
++		for _, entry := range entries {
++			if data, err := embeddedIcons.ReadFile("assets/meta/" + entry.Name()); err == nil {
++				assets.Icons = append(assets.Icons, setup.Asset{Name: entry.Name(), Data: data})
++			}
++		}
++	}
++
++	return assets
++}
++
+ func init() {
+ 	glib.SetPrgname("phial")
+ 	glib.SetApplicationName("Phial")
+@@ -62,10 +117,18 @@ 		panic(err)
+ 	}
+ 
+ 	gio.ResourcesRegister(resource)
++
++	setup.SetEmbeddedAssets(embeddedInstallAssets())
+ }
+ 
+ func main() {
+ 	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
++
++	if !paths.Sandboxed() {
++		if err := paths.LoadHostFile(); err != nil {
++			log.Warn("could not read the locations file", "err", err)
++		}
++	}
+ 
+ 	args := os.Args[1:]
+ 
+@@ -237,13 +300,25 @@ }
+ 
+ func runInstall(args []string) error {
+ 	repo := ""
+-	if len(args) > 0 {
+-		repo = args[0]
+-	} else if self, err := os.Executable(); err == nil {
+-		repo = filepath.Dir(filepath.Dir(self))
++	embedded := false
++
++	for _, arg := range args {
++		if arg == "--embedded" {
++			embedded = true
++
++			continue
++		}
++
++		repo = arg
+ 	}
+ 
+-	return setup.Install(setup.InstallOptions{RepoDir: repo})
++	if !embedded && repo == "" {
++		if self, err := os.Executable(); err == nil {
++			repo = filepath.Dir(filepath.Dir(self))
++		}
++	}
++
++	return setup.Install(setup.InstallOptions{RepoDir: repo, Embedded: embedded})
+ }
+ 
+ // runtimeDir states the runtime directory of the session, which holds the
+diff --git a/tests/wizard-test.sh b/tests/wizard-test.sh
+new file mode 100755
+index 0000000000000000000000000000000000000000..823d5641240cb004718630c70a44339bb5e6a8f3
+--- /dev/null
++++ b/tests/wizard-test.sh
+@@ -0,0 +1,111 @@
++#!/usr/bin/env bash
++set -u
++
++cd "$(dirname "$0")/.."
++
++export WAYLAND_DISPLAY="${WAYLAND_DISPLAY:-wayland-0}"
++export DISPLAY="${DISPLAY:-:0}"
++export DBUS_SESSION_BUS_ADDRESS="${DBUS_SESSION_BUS_ADDRESS:-unix:path=/run/user/$(id -u)/bus}"
++export GSETTINGS_SCHEMA_DIR="$PWD/assets/resources"
++export GSETTINGS_BACKEND="${GSETTINGS_BACKEND:-keyfile}"
++GSETTINGS="${GSETTINGS:-/usr/bin/gsettings}"
++
++OUT="${OUT:-/tmp/phial-wizard}"
++LOG="${LOG:-/tmp/phial-wizard.log}"
++APP_ID="com.pojtinger.felicitas.Phial"
++APP_PATH="/com/pojtinger/felicitas/Phial"
++
++export XDG_CONFIG_HOME="${XDG_CONFIG_HOME:-/tmp/phial-wizard-config}"
++export XDG_DATA_HOME="${XDG_DATA_HOME:-/tmp/phial-wizard-data}"
++export PHIAL_RUNTIME_DIR="${PHIAL_RUNTIME_DIR:-/tmp/phial-wizard-runtime/phial}"
++
++rm -rf "$XDG_CONFIG_HOME" "$XDG_DATA_HOME" "$PHIAL_RUNTIME_DIR" "$OUT"
++mkdir -p "$PHIAL_RUNTIME_DIR" "$OUT"
++
++pkill -x phial-wizard-app 2>/dev/null || true
++
++go build -o /tmp/phial-wizard-app -ldflags="-X 'main.LocaleDir=$PWD/po'" . || exit 1
++
++pid=""
++
++start() {
++  /tmp/phial-wizard-app >"$LOG" 2>&1 &
++  pid=$!
++
++  for _ in $(seq 1 30); do
++    if gdbus call --session --dest "$APP_ID" --object-path "$APP_PATH" --method org.gtk.Actions.List >/dev/null 2>&1; then
++      sleep 3
++      return 0
++    fi
++    sleep 1
++  done
++
++  echo "the application did not start" >&2
++  exit 1
++}
++
++stop() {
++  kill "$pid" 2>/dev/null
++  sleep 1
++  kill -9 "$pid" 2>/dev/null
++  wait "$pid" 2>/dev/null
++  pid=""
++}
++
++act() {
++  gdbus call --session --dest "$APP_ID" --object-path "$APP_PATH" --method org.gtk.Actions.Activate "$1" "[]" "[]" >/dev/null 2>&1
++}
++
++act_string() {
++  gdbus call --session --dest "$APP_ID" --object-path "$APP_PATH" --method org.gtk.Actions.Activate "$1" "[<@s '$2'>]" "[]" >/dev/null 2>&1
++}
++
++capture() {
++  sleep 1
++  act_string capture "$OUT/$1.png"
++  sleep 1
++  act_string capture "$OUT/$1.png"
++  sleep 1
++}
++
++set_size() {
++  "$GSETTINGS" set "$APP_ID" window-width "$1"
++  "$GSETTINGS" set "$APP_ID" window-height "$2"
++}
++
++set_size 1020 720
++start
++capture 01-welcome
++act_string wizard-step host
++sleep 2
++capture 02-host-setup
++act_string wizard-step folders
++sleep 2
++capture 03-folders
++act_string wizard-step finish
++sleep 2
++capture 04-finish
++act wizard-finish
++sleep 3
++capture 05-main
++stop
++
++rm -rf "$XDG_CONFIG_HOME" "$XDG_DATA_HOME" "$PHIAL_RUNTIME_DIR"
++mkdir -p "$PHIAL_RUNTIME_DIR"
++
++set_size 430 800
++start
++capture 10-welcome-mobile
++act_string wizard-step host
++sleep 2
++capture 11-host-setup-mobile
++act_string wizard-step folders
++sleep 2
++capture 12-folders-mobile
++act_string wizard-step finish
++sleep 2
++capture 13-finish-mobile
++stop
++
++ls -la "$OUT"
++echo "the wizard test finished"
+
