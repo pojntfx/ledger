@@ -1,0 +1,909 @@
+From 7c0ab9f1c16f79bb913b259b12d56ddad540b2f0 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Fri, 16 Oct 2026 21:09:22 -0700
+Subject: [PATCH] feat: Use standard-ish `rdp://` scheme to support most RDP apps on the host
+---
+diff --git a/README.md b/README.md
+index a301439e868b6fc73260e51aee7f6f9e476ee52a..6286bcae75dd8fd06239084a4dcab0a69724a31e 100644
+--- a/README.md
++++ b/README.md
+@@ -29,6 +29,14 @@ Install the tools for the host setup:
+ 
+     sudo dnf install waypipe virt-firmware pinentry-gnome3
+ 
++Install a client for `rdp://` links, such as Remmina:
++
++    flatpak install flathub org.remmina.Remmina
++
++Set the client as the default handler for `rdp://` links:
++
++    xdg-mime default org.remmina.Remmina.desktop x-scheme-handler/rdp
++
+ Build the binary and install the pieces into your user directories:
+ 
+     make install
+@@ -149,8 +157,8 @@
+ ## Flatpak
+ 
+ The manifest sits at flatpak/com.pojtinger.felicitas.Phial.json. It builds
+-virtiofsd, passt, swtpm, socat, waypipe, FreeRDP, the OVMF firmware pair, and
+-Phial itself from source. Run `make flatpak`. Read
++waypipe, the OVMF firmware pair, and Phial itself from source. Run
++`make flatpak`. Read
+ [flatpak/README.md](flatpak/README.md) for the module list and the
+ permissions. QEMU runs on the host.
+ 
+diff --git a/docs/DESIGN.md b/docs/DESIGN.md
+index 549994a79f6c1dc5f75b6932ef2c2d5beac2e94e..0f43f44d4176f34b9569cb60f5b64ac8433f8235 100644
+--- a/docs/DESIGN.md
++++ b/docs/DESIGN.md
+@@ -88,6 +88,8 @@ - The pencil opens Machine Settings.
+ - The menu carries Logs, Reprovision the Guest Agent, Restart, and Delete Machine.
+ - Logs opens the log of the machine in the text editor: the console of the installer when it keeps one, else the service log of the machine.
+ - The Serial Console and Remote Desktop dialogs state the user and the password with a copy control for each, because the guest asks for both at its login.
++- The Remote Desktop dialog carries the `rdp://` link of the machine. It opens the link in the default handler of the desktop.
++- The link uses `localhost`, which resolves to `::1` first. The forward listens on the IPv6 loopback only.
+ - The Terminal dialog carries Unlock the SSH Agent, which loads the key of the user into the agent of the session and asks for the passphrase through pinentry.
+ - Every command in the guest states a timeout, so a guest that stops answering states an error instead of holding the app.
+ - The install provisions the machine: it boots the guest once, waits for the guest agent to answer, copies the units of the guest into it, and stops it again.
+diff --git a/flatpak/README.md b/flatpak/README.md
+index d0fd0719a24f097e0fe205474c1538cafae62f72..ef93e45b05a20575d08e1393339b19b7eb275603 100644
+--- a/flatpak/README.md
++++ b/flatpak/README.md
+@@ -33,9 +33,10 @@ repository.
+ 
+ The machine tools stay on the host. The units that the host install writes run
+ swtpm, virtiofsd, passt, socat, and QEMU on the host, and QEMU reads the OVMF
+-pair from the host. The RDP client also runs on the host: the window starts
+-xfreerdp through flatpak-spawn. A bundle copy of these tools cannot serve the
+-host QEMU or the host client, because /app exists only inside the sandbox.
++pair from the host. The RDP client stays outside the bundle as well. The window
++opens an `rdp://` link, and the handler of the desktop starts the client. A
++bundle copy of these tools cannot serve the host QEMU or the host client,
++because /app exists only inside the sandbox.
+ 
+ ## Permissions
+ 
+@@ -50,8 +51,8 @@   keyring of the session.
+ - `--talk-name=org.freedesktop.systemd1` starts and stops the user units that
+   run the machine, the gate, and the tools.
+ - `--talk-name=org.freedesktop.Flatpak` runs the tools of the host through
+-  flatpak-spawn, because ssh-add, gpg, run0, xfreerdp, and pinentry live outside
+-  the sandbox.
++  flatpak-spawn, because ssh-add, gpg, run0, and pinentry live outside the
++  sandbox.
+ - `--filesystem=~/.config/phial`, `--filesystem=~/.local/share/phial`, and
+   `--filesystem=xdg-run/phial` share the state of the host install.
+ - `--filesystem=~/.ssh` reads the public keys that the session agent holds.
+@@ -69,8 +70,9 @@
+ - qemu-system-x86_64 and edk2-ovmf for the machine.
+ - swtpm, virtiofsd, passt, and socat for the units.
+ - ssh-agent from openssh, for the session agent.
+-- ssh-add, ssh-keygen, ssh, gpg, and xfreerdp for the tools that flatpak-spawn
+-  runs.
++- ssh-add, ssh-keygen, ssh, and gpg for the tools that flatpak-spawn runs.
++- Remmina, or another client for `rdp://` links, for the Remote Desktop
++  control.
+ - pinentry-gnome3 and run0 for the gate and the root setup.
+ - virt-fw-vars for the Secure Boot enrollment.
+ 
+diff --git a/go.mod b/go.mod
+index 63868a9633ca03b17dc9b6ab665062a2271df769..d4ef5a6ed3c51dcda5fd254181eabf29e7122b1e 100644
+--- a/go.mod
++++ b/go.mod
+@@ -3,6 +3,7 @@
+ go 1.27
+ 
+ require (
++	codeberg.org/puregotk/puregotk v0.0.0-20261003054014-d92056b0aa41
+ 	github.com/adrg/xdg v0.5.3
+ 	github.com/coreos/go-systemd/v22 v22.7.0
+ 	github.com/godbus/dbus/v5 v5.2.2
+@@ -10,31 +11,25 @@ 	github.com/google/renameio/v2 v2.0.2
+ 	github.com/mdlayher/vsock v1.3.0
+ 	github.com/modelcontextprotocol/go-sdk v1.8.0
+ 	github.com/pojntfx/go-gettext v0.4.2
++	github.com/rymdport/portal v0.4.2
+ 	golang.org/x/crypto v0.57.0
+ 	golang.org/x/sys v0.48.0
+ )
+ 
+ require (
+ 	codeberg.org/puregotk/purego v0.0.0-20260224095105-2513c838cb80 // indirect
+-	codeberg.org/puregotk/puregotk v0.0.0-20261003054014-d92056b0aa41 // indirect
+ 	github.com/dennwc/flatpak-go-mod v0.1.1-0.20250809093520-ddf8d84264aa // indirect
+-	github.com/fatih/color v1.10.0 // indirect
+ 	github.com/goccy/go-yaml v1.18.0 // indirect
+ 	github.com/google/jsonschema-go v0.4.3 // indirect
+-	github.com/mattn/go-colorable v0.1.8 // indirect
+-	github.com/mattn/go-isatty v0.0.12 // indirect
+ 	github.com/mdlayher/socket v0.6.0 // indirect
+-	github.com/rymdport/portal v0.4.2 // indirect
+ 	github.com/segmentio/asm v1.1.3 // indirect
+ 	github.com/segmentio/encoding v0.5.4 // indirect
+-	github.com/stretchr/testify v1.11.1 // indirect
+ 	github.com/yosida95/uritemplate/v3 v3.0.2 // indirect
+ 	golang.org/x/mod v0.27.0 // indirect
+ 	golang.org/x/net v0.58.0 // indirect
+ 	golang.org/x/oauth2 v0.35.0 // indirect
+ 	golang.org/x/sync v0.20.0 // indirect
+ 	golang.org/x/time v0.15.0 // indirect
+-	golang.org/x/xerrors v0.0.0-20200804184101-5ec99f83aff1 // indirect
+ )
+ 
+ tool github.com/dennwc/flatpak-go-mod
+diff --git a/go.mod.json b/go.mod.json
+index 35d0dfb323611914d7b5bfd03837deacffcd823e..88bf8c36112ab794e2e6c6c87824003e1bb7319e 100644
+--- a/go.mod.json
++++ b/go.mod.json
+@@ -1,8 +1,15 @@
+ [
+   {
+     "dest": "vendor",
+-    "path": "../modules.txt",
++    "path": "modules.txt",
+     "type": "file"
++  },
++  {
++    "dest": "vendor/codeberg.org/puregotk/puregotk",
++    "sha256": "e17cbcc2bc03da1670fe3093bb06af4ad06f760851d757baeaa52362971af4b2",
++    "strip-components": 3,
++    "type": "archive",
++    "url": "https://proxy.golang.org/codeberg.org/puregotk/puregotk/@v/v0.0.0-20261003054014-d92056b0aa41.zip"
+   },
+   {
+     "dest": "vendor/github.com/adrg/xdg",
+@@ -54,6 +61,13 @@     "type": "archive",
+     "url": "https://proxy.golang.org/github.com/pojntfx/go-gettext/@v/v0.4.2.zip"
+   },
+   {
++    "dest": "vendor/github.com/rymdport/portal",
++    "sha256": "433ccc7d9646ae7f68570052ed06071b0881466f9203705f7cc6b6a6991069fe",
++    "strip-components": 3,
++    "type": "archive",
++    "url": "https://proxy.golang.org/github.com/rymdport/portal/@v/v0.4.2.zip"
++  },
++  {
+     "dest": "vendor/golang.org/x/crypto",
+     "sha256": "856c916b92f1fc5b53983c04f6249f632f56c47ebc003bbcdfc503500dfb58b8",
+     "strip-components": 3,
+@@ -75,13 +89,6 @@     "type": "archive",
+     "url": "https://proxy.golang.org/codeberg.org/puregotk/purego/@v/v0.0.0-20260224095105-2513c838cb80.zip"
+   },
+   {
+-    "dest": "vendor/codeberg.org/puregotk/puregotk",
+-    "sha256": "e17cbcc2bc03da1670fe3093bb06af4ad06f760851d757baeaa52362971af4b2",
+-    "strip-components": 3,
+-    "type": "archive",
+-    "url": "https://proxy.golang.org/codeberg.org/puregotk/puregotk/@v/v0.0.0-20261003054014-d92056b0aa41.zip"
+-  },
+-  {
+     "dest": "vendor/github.com/dennwc/flatpak-go-mod",
+     "sha256": "30c89a77609df65ae4c1bfc183935a7df443da219827370c07d0c743f1d76709",
+     "strip-components": 3,
+@@ -89,13 +96,6 @@     "type": "archive",
+     "url": "https://proxy.golang.org/github.com/dennwc/flatpak-go-mod/@v/v0.1.1-0.20250809093520-ddf8d84264aa.zip"
+   },
+   {
+-    "dest": "vendor/github.com/fatih/color",
+-    "sha256": "e1b2da810ca48a16d9ecd808b7aaae757f1c3c906cf1e8ca1d149b8db7cdb91b",
+-    "strip-components": 3,
+-    "type": "archive",
+-    "url": "https://proxy.golang.org/github.com/fatih/color/@v/v1.10.0.zip"
+-  },
+-  {
+     "dest": "vendor/github.com/goccy/go-yaml",
+     "sha256": "51bf59a85a7e3e2b8e83e5f376a3229b01b673a39601c99e3a2c05931cc3e339",
+     "strip-components": 3,
+@@ -110,20 +110,6 @@     "type": "archive",
+     "url": "https://proxy.golang.org/github.com/google/jsonschema-go/@v/v0.4.3.zip"
+   },
+   {
+-    "dest": "vendor/github.com/mattn/go-colorable",
+-    "sha256": "7a488866ca8dbefc2b9e62a9a7ab6de3db4e1b85a9a665908ff03515d365cdc1",
+-    "strip-components": 3,
+-    "type": "archive",
+-    "url": "https://proxy.golang.org/github.com/mattn/go-colorable/@v/v0.1.8.zip"
+-  },
+-  {
+-    "dest": "vendor/github.com/mattn/go-isatty",
+-    "sha256": "07941d24e0894c29dc42bcd29d644815cd7b5ee84e3c14bbe6d51ad13efcbf07",
+-    "strip-components": 3,
+-    "type": "archive",
+-    "url": "https://proxy.golang.org/github.com/mattn/go-isatty/@v/v0.0.12.zip"
+-  },
+-  {
+     "dest": "vendor/github.com/mdlayher/socket",
+     "sha256": "0b6d1f9f64462bcf94a8dc7dc9fc0084f35af3434ab67a724464a95d47bc87af",
+     "strip-components": 3,
+@@ -131,13 +117,6 @@     "type": "archive",
+     "url": "https://proxy.golang.org/github.com/mdlayher/socket/@v/v0.6.0.zip"
+   },
+   {
+-    "dest": "vendor/github.com/rymdport/portal",
+-    "sha256": "433ccc7d9646ae7f68570052ed06071b0881466f9203705f7cc6b6a6991069fe",
+-    "strip-components": 3,
+-    "type": "archive",
+-    "url": "https://proxy.golang.org/github.com/rymdport/portal/@v/v0.4.2.zip"
+-  },
+-  {
+     "dest": "vendor/github.com/segmentio/asm",
+     "sha256": "1911909b67b0f86c04fb895434c4072602d7b7523350ab45cb1549425b3a3b1b",
+     "strip-components": 3,
+@@ -150,13 +129,6 @@     "sha256": "2189639875fe1153571445dc9b5dcaf221554143fe6701426fba69aa77780681",
+     "strip-components": 3,
+     "type": "archive",
+     "url": "https://proxy.golang.org/github.com/segmentio/encoding/@v/v0.5.4.zip"
+-  },
+-  {
+-    "dest": "vendor/github.com/stretchr/testify",
+-    "sha256": "b7325b561ead5304b72b9f32aebc871ff49b3823667d530a49fd6c8f3adfc96e",
+-    "strip-components": 3,
+-    "type": "archive",
+-    "url": "https://proxy.golang.org/github.com/stretchr/testify/@v/v1.11.1.zip"
+   },
+   {
+     "dest": "vendor/github.com/yosida95/uritemplate/v3",
+@@ -199,12 +171,5 @@     "sha256": "8cfb20e915fa5d6c3fd264304233f8d71a3385e48a37819239c532ad9da27f84",
+     "strip-components": 3,
+     "type": "archive",
+     "url": "https://proxy.golang.org/golang.org/x/time/@v/v0.15.0.zip"
+-  },
+-  {
+-    "dest": "vendor/golang.org/x/xerrors",
+-    "sha256": "380aaa3368ae165628bb487cf4e695a55c1420072b8b7a6f59c122f6a23bb255",
+-    "strip-components": 3,
+-    "type": "archive",
+-    "url": "https://proxy.golang.org/golang.org/x/xerrors/@v/v0.0.0-20200804184101-5ec99f83aff1.zip"
+   }
+ ]
+diff --git a/go.sum b/go.sum
+index f5b2f22604a85ce1971bbea5886d547b84f925bd..3e4953bdc7bd6429e1bbf26055f478850bff5a4f 100644
+--- a/go.sum
++++ b/go.sum
+@@ -8,14 +8,8 @@ github.com/coreos/go-systemd/v22 v22.7.0 h1:LAEzFkke61DFROc7zNLX/WA2i5J8gYqe0rSj9KI28KA=
+ github.com/coreos/go-systemd/v22 v22.7.0/go.mod h1:xNUYtjHu2EDXbsxz1i41wouACIwT7Ybq9o0BQhMwD0w=
+ github.com/davecgh/go-spew v1.1.1 h1:vj9j/u1bqnvCEfJOwUhtlOARqs3+rkHYY13jYWTU97c=
+ github.com/davecgh/go-spew v1.1.1/go.mod h1:J7Y8YcW2NihsgmVo/mv3lAwl/skON4iLHjSsI+c5H38=
+-github.com/dennwc/flatpak-go-mod v0.1.0 h1:QNP9gDmQpL2Lm6BKvX2DTNBwjr0EyN2YjZTxdHiKQag=
+-github.com/dennwc/flatpak-go-mod v0.1.0/go.mod h1:Y5jggk1w7ur/3Dk+fh/eJvuaR5UiGdpGGp6snvEqcSo=
+ github.com/dennwc/flatpak-go-mod v0.1.1-0.20250809093520-ddf8d84264aa h1:c5k0CB16zFqMTKviySxusHVRFAnggzX3l6JK3Cw6fiQ=
+ github.com/dennwc/flatpak-go-mod v0.1.1-0.20250809093520-ddf8d84264aa/go.mod h1:4akg2uvMr36H/vDzQSPofcff2LBk4u+bTAPy2bxVoOo=
+-github.com/fatih/color v1.10.0 h1:s36xzo75JdqLaaWoiEHk767eHiwo0598uUxyfiPkDsg=
+-github.com/fatih/color v1.10.0/go.mod h1:ELkj/draVOlAH/xkhN6mQ50Qd0MPOk5AAr3maGEBuJM=
+-github.com/goccy/go-yaml v1.12.0 h1:/1WHjnMsI1dlIBQutrvSMGZRQufVO3asrHfTwfACoPM=
+-github.com/goccy/go-yaml v1.12.0/go.mod h1:wKnAMd44+9JAAnGQpWVEgBzGt3YuTaQ4uXoHvE4m7WU=
+ github.com/goccy/go-yaml v1.18.0 h1:8W7wMFS12Pcas7KU+VVkaiCng+kG8QiFeFwzFb+rwuw=
+ github.com/goccy/go-yaml v1.18.0/go.mod h1:XBurs7gK8ATbW4ZPGKgcbrY1Br56PdM69F7LkFRi1kA=
+ github.com/godbus/dbus/v5 v5.2.2 h1:TUR3TgtSVDmjiXOgAAyaZbYmIeP3DPkld3jgKGV8mXQ=
+@@ -28,10 +22,6 @@ github.com/google/jsonschema-go v0.4.3 h1:/DBOLZTfDow7pe2GmaJNhltueGTtDKICi8V8p+DQPd0=
+ github.com/google/jsonschema-go v0.4.3/go.mod h1:r5quNTdLOYEz95Ru18zA0ydNbBuYoo9tgaYcxEYhJVE=
+ github.com/google/renameio/v2 v2.0.2 h1:qKZs+tfn+arruZZhQ7TKC/ergJunuJicWS6gLDt/dGw=
+ github.com/google/renameio/v2 v2.0.2/go.mod h1:OX+G6WHHpHq3NVj7cAOleLOwJfcQ1s3uUJQCrr78SWo=
+-github.com/mattn/go-colorable v0.1.8 h1:c1ghPdyEDarC70ftn0y+A/Ee++9zz8ljHG1b13eJ0s8=
+-github.com/mattn/go-colorable v0.1.8/go.mod h1:u6P/XSegPjTcexA+o6vUJrdnUu04hMope9wVRipJSqc=
+-github.com/mattn/go-isatty v0.0.12 h1:wuysRhFDzyxgEmMf5xjvJ2M9dZoWAXNNr5LSBS7uHXY=
+-github.com/mattn/go-isatty v0.0.12/go.mod h1:cbi8OIDigv2wuxKPP5vlRcQ1OAZbq2CE4Kysco4FUpU=
+ github.com/mdlayher/socket v0.6.0 h1:ScZPaAGyO1icQnbFrhPM8mnXyMu9qukC1K4ZoM2IQKU=
+ github.com/mdlayher/socket v0.6.0/go.mod h1:q7vozUAnxSqnjHc12Fik5yUKIzfZ8ITCfMkhOtE9z18=
+ github.com/mdlayher/vsock v1.3.0 h1:bqQfZ1OznI03y6YiXp2sze05RVdzLn/zsfjnjd4+ivI=
+@@ -54,8 +44,6 @@ github.com/yosida95/uritemplate/v3 v3.0.2 h1:Ed3Oyj9yrmi9087+NczuL5BwkIc4wvTb5zIM+UJPGz4=
+ github.com/yosida95/uritemplate/v3 v3.0.2/go.mod h1:ILOh0sOhIJR3+L/8afwt/kE++YT040gmv5BQTMR2HP4=
+ golang.org/x/crypto v0.57.0 h1:3ZVCjf8Ggz7zneR/EHRVx68Ctf+2pmIMP2UFhh9cC6M=
+ golang.org/x/crypto v0.57.0/go.mod h1:Fdz0i5U6CoizGwLda9DttjSk6qlZo25zYNtR+ycvuZA=
+-golang.org/x/mod v0.16.0 h1:QX4fJ0Rr5cPQCF7O9lh9Se4pmwfwskqZfq5moyldzic=
+-golang.org/x/mod v0.16.0/go.mod h1:hTbmBsO62+eylJbnUtE2MGJUyE7QWk4xUqPFrRgJ+7c=
+ golang.org/x/mod v0.27.0 h1:kb+q2PyFnEADO2IEF935ehFUXlWiNjJWtRNgBLSfbxQ=
+ golang.org/x/mod v0.27.0/go.mod h1:rWI627Fq0DEoudcK+MBkNkCe0EetEaDSwJJkCcjpazc=
+ golang.org/x/net v0.58.0 h1:ynWG7rqYi4ccpTEuPZ2QGWHktVEM9DMCj9yzDE0Q7To=
+@@ -64,8 +52,6 @@ golang.org/x/oauth2 v0.35.0 h1:Mv2mzuHuZuY2+bkyWXIHMfhNdJAdwW3FuWeCPYN5GVQ=
+ golang.org/x/oauth2 v0.35.0/go.mod h1:lzm5WQJQwKZ3nwavOZ3IS5Aulzxi68dUSgRHujetwEA=
+ golang.org/x/sync v0.20.0 h1:e0PTpb7pjO8GAtTs2dQ6jYa5BWYlMuX047Dco/pItO4=
+ golang.org/x/sync v0.20.0/go.mod h1:9xrNwdLfx4jkKbNva9FpL6vEN7evnE43NNNJQ2LF3+0=
+-golang.org/x/sys v0.0.0-20200116001909-b77594299b42/go.mod h1:h1NjWce9XRLGQEsW7wpKNCjG9DtNlClVuFLEZdDNbEs=
+-golang.org/x/sys v0.0.0-20200223170610-d5e6a3e2c0ae/go.mod h1:h1NjWce9XRLGQEsW7wpKNCjG9DtNlClVuFLEZdDNbEs=
+ golang.org/x/sys v0.48.0 h1:bbX/i/6MgT9BVLM9RT1thmxL04yeTAhbEz4SyadbXoo=
+ golang.org/x/sys v0.48.0/go.mod h1:hNLxWAXmnKAxqDtdwIYC4bM9oQPEecfsnNMuSxOs3og=
+ golang.org/x/term v0.46.0 h1:3+OXuTbaKDgwk8jTi3aSLHRlmWqHEUDUtxnbFigO4YE=
+@@ -74,7 +60,5 @@ golang.org/x/time v0.15.0 h1:bbrp8t3bGUeFOx08pvsMYRTCVSMk89u4tKbNOZbp88U=
+ golang.org/x/time v0.15.0/go.mod h1:Y4YMaQmXwGQZoFaVFk4YpCt4FLQMYKZe9oeV/f4MSno=
+ golang.org/x/tools v0.42.0 h1:uNgphsn75Tdz5Ji2q36v/nsFSfR/9BRFvqhGBaJGd5k=
+ golang.org/x/tools v0.42.0/go.mod h1:Ma6lCIwGZvHK6XtgbswSoWroEkhugApmsXyrUmBhfr0=
+-golang.org/x/xerrors v0.0.0-20200804184101-5ec99f83aff1 h1:go1bK/D/BFZV2I8cIQd1NKEZ+0owSTG1fDTci4IqFcE=
+-golang.org/x/xerrors v0.0.0-20200804184101-5ec99f83aff1/go.mod h1:I/5z698sn9Ka8TeJc9MKroUUfqBBauWjQqLJ2OPfmY0=
+ gopkg.in/yaml.v3 v3.0.1 h1:fxVm/GzAzEWqLHuvctI91KS9hhNmmWOoWu0XTYJS7CA=
+ gopkg.in/yaml.v3 v3.0.1/go.mod h1:K4uyk7z7BCEPqu6E+C64Yfv1cQ7kz7rIZviUmN+EgEM=
+diff --git a/internal/mcp/tools_display.go b/internal/mcp/tools_display.go
+index dac942572350edbd847dcf7a726f3e5bc2a0855a..b8e475914caf150ff39c9a3051434bd03c6ff699 100644
+--- a/internal/mcp/tools_display.go
++++ b/internal/mcp/tools_display.go
+@@ -11,7 +11,7 @@ 	"time"
+ 
+ 	mcpgo "github.com/modelcontextprotocol/go-sdk/mcp"
+ 
+-	"codeberg.org/pojntfx/phial-neo/internal/hostcmd"
++	"codeberg.org/pojntfx/phial-neo/internal/rdp"
+ 	"codeberg.org/pojntfx/phial-neo/internal/virt"
+ )
+ 
+@@ -31,7 +31,7 @@
+ 	DisplayOpenRdpTool = &mcpgo.Tool{
+ 		Name:        "display.openRdp",
+ 		Title:       "Open the RDP session",
+-		Description: "Open the full desktop session of one VM over RDP.",
++		Description: "Open the full desktop session of one VM in the default RDP client.",
+ 	}
+ 
+ 	DisplayOpenSerialTool = &mcpgo.Tool{
+@@ -271,35 +271,13 @@ 	if err := s.unitStart(fmt.Sprintf("phial-guest-port@%d.service", def.GuestCIDValue())); err != nil {
+ 		return nil, nil, err
+ 	}
+ 
+-	command := hostcmd.Command("xfreerdp", fmt.Sprintf("/v:[::1]:%d", def.RdpPortValue()), "/u:phial", "/p:"+password, "/cert:ignore", "+clipboard", "/sound", "/dynamic-resolution")
++	uri := def.RdpURI()
+ 
+-	var output strings.Builder
+-	command.Stdout = &output
+-	command.Stderr = &output
+-
+-	if err := command.Start(); err != nil {
++	if err := rdp.Open(uri); err != nil {
+ 		return nil, nil, err
+ 	}
+ 
+-	done := make(chan error, 1)
+-	go func() { done <- command.Wait() }()
+-
+-	select {
+-	case err := <-done:
+-		message := strings.TrimSpace(output.String())
+-
+-		if lines := strings.Split(message, "\n"); len(lines) > 6 {
+-			message = strings.Join(lines[len(lines)-6:], "\n")
+-		}
+-
+-		if err != nil {
+-			return nil, nil, fmt.Errorf("the RDP client stopped: %s", message)
+-		}
+-
+-		return nil, nil, fmt.Errorf("the RDP client stopped at once: %s", message)
+-	case <-time.After(6 * time.Second):
+-		return nil, map[string]string{"state": "running"}, nil
+-	}
++	return nil, map[string]string{"state": "running", "uri": uri}, nil
+ }
+ 
+ func (s *Service) DisplayOpenSerial(ctx context.Context, req *mcpgo.CallToolRequest, input RdpInput) (*mcpgo.CallToolResult, any, error) {
+diff --git a/internal/rdp/rdp.go b/internal/rdp/rdp.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..29b7cea794bc44dac5c983cd79f648fda859633f
+--- /dev/null
++++ b/internal/rdp/rdp.go
+@@ -0,0 +1,15 @@
++package rdp
++
++import (
++	"fmt"
++
++	"github.com/rymdport/portal/openuri"
++)
++
++func Open(uri string) error {
++	if err := openuri.OpenURI("", uri, nil); err != nil {
++		return fmt.Errorf("could not open %s: install a client for rdp:// links (%w)", uri, err)
++	}
++
++	return nil
++}
+diff --git a/internal/setup/acceptance.go b/internal/setup/acceptance.go
+index f3d1aed9e9c07b455dd7ab48b87cb801b4a1e670..036016237861544f1bec2d81100d74547e10dc73 100644
+--- a/internal/setup/acceptance.go
++++ b/internal/setup/acceptance.go
+@@ -73,7 +73,7 @@ 	add("OVMF secboot vars file exists", fileExists("/usr/share/edk2/ovmf/OVMF_VARS.secboot.fd"), "")
+ 	add("firmware descriptor declares requires-smm", descriptorRequiresSMM(), "")
+ 	add("nested virtualization is on", nestedOn(), "")
+ 
+-	for _, tool := range []string{"swtpm", "passt", "socat", "gpg", "ssh-add", "ssh-keygen", "zenity", "wl-copy", "xfreerdp", "mokutil", "pinentry-gnome3"} {
++	for _, tool := range []string{"swtpm", "passt", "socat", "gpg", "ssh-add", "ssh-keygen", "zenity", "wl-copy", "mokutil", "pinentry-gnome3"} {
+ 		add(tool+" is installed", toolPresent(tool), "")
+ 	}
+ 
+diff --git a/internal/ui/access.go b/internal/ui/access.go
+index 6d1015b982d9ecf184d5e87a8a98303d7645ad3f..5dbdfb430a1a537207db8834f5d9d25d4ae1e09f 100644
+--- a/internal/ui/access.go
++++ b/internal/ui/access.go
+@@ -1,7 +1,6 @@
+ package ui
+ 
+ import (
+-	"fmt"
+ 	"os"
+ 	"os/exec"
+ 	"strings"
+@@ -180,21 +179,23 @@ 	password := a.Service.RdpPassword()
+ 
+ 	signIn := a.credentialGroup("phial", password)
+ 
+-	listenAddress := fmt.Sprintf("[::1]:%d", def.RdpPortValue())
++	remote := formGroup(
++		"Remote Desktop",
++		"The handler of the desktop for rdp:// links opens this link.",
++	)
+ 
+-	address := formGroup("Address", "The port is forwarded from the machine to this host.")
+-	addressRow := a.entryRow("Local to this host")
+-	addressRow.SetText(listenAddress)
+-	addressRow.SetEditable(false)
+-	addressRow.SetShowApplyButton(false)
++	linkRow := a.entryRow("RDP link")
++	linkRow.SetText(def.RdpURI())
++	linkRow.SetEditable(false)
++	linkRow.SetShowApplyButton(false)
+ 
+-	copyAddress := a.iconButton("edit-copy-symbolic", i18n.L("Copy the Address"), func() {
+-		a.copyText(listenAddress, i18n.L("Address copied"))
++	copyLink := a.iconButton("edit-copy-symbolic", i18n.L("Copy the Link"), func() {
++		a.copyText(def.RdpURI(), i18n.L("Link copied"))
+ 	})
+-	addressRow.AddSuffix(&copyAddress.Widget)
+-	address.Add(&addressRow.Widget)
++	linkRow.AddSuffix(&copyLink.Widget)
++	remote.Add(&linkRow.Widget)
+ 
+-	address.Add(&a.buttonRow("_Open the Remote Desktop", "video-display-symbolic", func() {
++	remote.Add(&a.buttonRow("_Open the Remote Desktop", "video-display-symbolic", func() {
+ 		a.goAsync(func() (string, error) {
+ 			if _, _, err := a.Service.DisplayOpenRdp(a.Ctx, nil, mcp.RdpInput{VM: def.Name}); err != nil {
+ 				return "", err
+@@ -203,14 +204,19 @@ 			return i18n.L("The remote desktop opens in a moment"), nil
+ 		})
+ 	}).Widget)
+ 
+-	address.Add(&a.buttonRow("_Copy the Command for Another Client", "edit-copy-symbolic", func() {
+-		a.copyText(
+-			fmt.Sprintf("xfreerdp /v:%s /u:phial /cert:ignore", listenAddress),
+-			i18n.L("Command copied"),
+-		)
+-	}).Widget)
++	address := formGroup("Address", "The port is forwarded to the IPv6 loopback of this host. The link uses localhost, which resolves to ::1 first.")
++	addressRow := a.entryRow("Local to this host")
++	addressRow.SetText(def.RdpAddress())
++	addressRow.SetEditable(false)
++	addressRow.SetShowApplyButton(false)
++
++	copyAddress := a.iconButton("edit-copy-symbolic", i18n.L("Copy the Address"), func() {
++		a.copyText(def.RdpAddress(), i18n.L("Address copied"))
++	})
++	addressRow.AddSuffix(&copyAddress.Widget)
++	address.Add(&addressRow.Widget)
+ 
+-	content := a.formPage(address, signIn)
++	content := a.formPage(remote, address, signIn)
+ 	dialog := a.dialog(scope, "Remote Desktop", def.Name, "_Close", content, nil)
+ 
+ 	a.present(dialog, scope)
+diff --git a/internal/virt/accessors.go b/internal/virt/accessors.go
+index 6ffdf7fdc09a060b80afee30bbbf8e40f0a8f4e0..161f1a3020937ab7d9b33bf334cb9ba62c4d0781 100644
+--- a/internal/virt/accessors.go
++++ b/internal/virt/accessors.go
+@@ -1,6 +1,7 @@
+ package virt
+ 
+ import (
++	"fmt"
+ 	"path/filepath"
+ 	"slices"
+ 	"strings"
+@@ -14,6 +15,14 @@ }
+ 
+ func (d Definition) RdpPortValue() int {
+ 	return 3389 + int(d.guestCID())
++}
++
++func (d Definition) RdpAddress() string {
++	return fmt.Sprintf("localhost:%d", d.RdpPortValue())
++}
++
++func (d Definition) RdpURI() string {
++	return "rdp://phial@" + d.RdpAddress()
+ }
+ 
+ func (d Definition) RuntimePathValue() string {
+diff --git a/internal/virt/accessors_test.go b/internal/virt/accessors_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..a8b045c0dc9a4c5338a53f1798d88d08bb0f7119
+--- /dev/null
++++ b/internal/virt/accessors_test.go
+@@ -0,0 +1,15 @@
++package virt
++
++import "testing"
++
++func TestRdpEndpoint(t *testing.T) {
++	def := Defaults("phial")
++
++	if got, want := def.RdpAddress(), "localhost:3392"; got != want {
++		t.Fatalf("RdpAddress() = %q, want %q", got, want)
++	}
++
++	if got, want := def.RdpURI(), "rdp://phial@localhost:3392"; got != want {
++		t.Fatalf("RdpURI() = %q, want %q", got, want)
++	}
++}
+diff --git a/modules.txt b/modules.txt
+index f7f20f4b2b8638f437a34e0ef5f71df5d840dc23..092c2a0ca028fcaac935d007e0ee6fb7664f641d 100644
+--- a/modules.txt
++++ b/modules.txt
+@@ -33,8 +33,6 @@ github.com/coreos/go-systemd/v22/dbus
+ # github.com/dennwc/flatpak-go-mod v0.1.1-0.20250809093520-ddf8d84264aa
+ ## explicit; go 1.24.4
+ github.com/dennwc/flatpak-go-mod
+-# github.com/fatih/color v1.10.0
+-## explicit; go 1.13
+ # github.com/goccy/go-yaml v1.18.0
+ ## explicit; go 1.21.0
+ github.com/goccy/go-yaml
+@@ -55,10 +53,6 @@ github.com/google/jsonschema-go/jsonschema
+ # github.com/google/renameio/v2 v2.0.2
+ ## explicit; go 1.25
+ github.com/google/renameio/v2
+-# github.com/mattn/go-colorable v0.1.8
+-## explicit; go 1.13
+-# github.com/mattn/go-isatty v0.0.12
+-## explicit; go 1.12
+ # github.com/mdlayher/socket v0.6.0
+ ## explicit; go 1.25.0
+ github.com/mdlayher/socket
+@@ -88,6 +82,7 @@ github.com/rymdport/portal/filechooser
+ github.com/rymdport/portal/internal/apis
+ github.com/rymdport/portal/internal/convert
+ github.com/rymdport/portal/internal/request
++github.com/rymdport/portal/openuri
+ # github.com/segmentio/asm v1.1.3
+ ## explicit; go 1.17
+ github.com/segmentio/asm/ascii
+@@ -104,8 +99,6 @@ ## explicit; go 1.23
+ github.com/segmentio/encoding/ascii
+ github.com/segmentio/encoding/iso8601
+ github.com/segmentio/encoding/json
+-# github.com/stretchr/testify v1.11.1
+-## explicit; go 1.17
+ # github.com/yosida95/uritemplate/v3 v3.0.2
+ ## explicit; go 1.14
+ github.com/yosida95/uritemplate/v3
+@@ -145,5 +138,3 @@ golang.org/x/sys/windows
+ # golang.org/x/time v0.15.0
+ ## explicit; go 1.25.0
+ golang.org/x/time/rate
+-# golang.org/x/xerrors v0.0.0-20200804184101-5ec99f83aff1
+-## explicit; go 1.11
+diff --git a/po/phial.pot b/po/phial.pot
+index 2249fde725c33e459b28b3f39cfa6d781fc75345..07e98d8cbf410c934457ba49da2e923bf1a6f4eb 100644
+--- a/po/phial.pot
++++ b/po/phial.pot
+@@ -8,7 +8,7 @@ msgid ""
+ msgstr ""
+ "Project-Id-Version: PACKAGE VERSION\n"
+ "Report-Msgid-Bugs-To: \n"
+-"POT-Creation-Date: 2026-10-14 17:20-0700\n"
++"POT-Creation-Date: 2026-10-16 20:22-0700\n"
+ "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+ "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+ "Language-Team: LANGUAGE <LL@li.org>\n"
+@@ -25,105 +25,13 @@ #: ../internal/ui/logs.go:45
+ msgid "This machine has no log yet"
+ msgstr ""
+ 
+-#: ../internal/ui/access.go:56
+-msgid "No terminal emulator was found"
+-msgstr ""
+-
+-#: ../internal/ui/access.go:69
+-msgid "The SSH agent holds your key"
+-msgstr ""
+-
+-#: ../internal/ui/access.go:86
+-msgid "Copy User"
+-msgstr ""
+-
+-#: ../internal/ui/access.go:87
+-msgid "User copied"
++#: ../internal/ui/app.go:187
++msgid "Machines can ask for access while Phial runs."
+ msgstr ""
+ 
+-#: ../internal/ui/access.go:93
+-msgid "_Password"
+-msgstr ""
+-
+-#: ../internal/ui/access.go:98
+-msgid "Copy Password"
+-msgstr ""
+-
+-#: ../internal/ui/access.go:99
+-msgid "Password copied"
+-msgstr ""
+-
+-#: ../internal/ui/access.go:114
+-msgid "Socket on this host"
+-msgstr ""
+-
+-#: ../internal/ui/access.go:126 ../internal/ui/access.go:165
+-#: ../internal/ui/access.go:209 ../internal/ui/app.go:343
++#: ../internal/ui/app.go:343 ../internal/ui/access.go:125
++#: ../internal/ui/access.go:164
+ msgid "Command copied"
+-msgstr ""
+-
+-#: ../internal/ui/access.go:148
+-msgid "Copy the Alias"
+-msgstr ""
+-
+-#: ../internal/ui/access.go:149
+-msgid "Alias copied"
+-msgstr ""
+-
+-#: ../internal/ui/access.go:191
+-msgid "Copy the Address"
+-msgstr ""
+-
+-#: ../internal/ui/access.go:192
+-msgid "Address copied"
+-msgstr ""
+-
+-#: ../internal/ui/access.go:202
+-msgid "The remote desktop opens in a moment"
+-msgstr ""
+-
+-#: ../internal/ui/access.go:228
+-msgid "On this host (waypipe)"
+-msgstr ""
+-
+-#: ../internal/ui/access.go:228
+-msgid "In the remote desktop"
+-msgstr ""
+-
+-#: ../internal/ui/access.go:240 ../internal/ui/access.go:323
+-msgid "Looking for applications"
+-msgstr ""
+-
+-#: ../internal/ui/access.go:274
+-msgid "No application matches"
+-msgstr ""
+-
+-#: ../internal/ui/access.go:290
+-msgid "The application opens in the remote desktop"
+-msgstr ""
+-
+-#: ../internal/ui/access.go:293
+-msgid "The application opens on this host"
+-msgstr ""
+-
+-#: ../internal/ui/access.go:306
+-msgid "Enter a command first"
+-msgstr ""
+-
+-#: ../internal/ui/access.go:338
+-msgid "The applications could not be listed"
+-msgstr ""
+-
+-#: ../internal/ui/access.go:349
+-msgid "The guest lists no applications"
+-msgstr ""
+-
+-#: ../internal/ui/access.go:377
+-msgid "Refresh the Application List"
+-msgstr ""
+-
+-#: ../internal/ui/app.go:187
+-msgid "Machines can ask for access while Phial runs."
+ msgstr ""
+ 
+ #: ../internal/ui/app.go:586
+@@ -784,7 +692,9 @@ #: ../internal/ui/preferences.go:25
+ msgid "Keep the machines running when the window closes."
+ msgstr ""
+ 
+-#: ../internal/ui/preferences.go:30 ../assets/resources/index.gschema.xml:26
++#: ../internal/ui/preferences.go:30
++#: ../flatpak/build/files/share/glib-2.0/schemas/com.pojtinger.felicitas.Phial.gschema.xml:26
++#: ../assets/resources/index.gschema.xml:26
+ msgid "Notifications"
+ msgstr ""
+ 
+@@ -1111,8 +1021,110 @@ #, c-format
+ msgid "%d %s"
+ msgstr ""
+ 
++#: ../internal/ui/access.go:55
++msgid "No terminal emulator was found"
++msgstr ""
++
++#: ../internal/ui/access.go:68
++msgid "The SSH agent holds your key"
++msgstr ""
++
++#: ../internal/ui/access.go:85
++msgid "Copy User"
++msgstr ""
++
++#: ../internal/ui/access.go:86
++msgid "User copied"
++msgstr ""
++
++#: ../internal/ui/access.go:92
++msgid "_Password"
++msgstr ""
++
++#: ../internal/ui/access.go:97
++msgid "Copy Password"
++msgstr ""
++
++#: ../internal/ui/access.go:98
++msgid "Password copied"
++msgstr ""
++
++#: ../internal/ui/access.go:113
++msgid "Socket on this host"
++msgstr ""
++
++#: ../internal/ui/access.go:147
++msgid "Copy the Alias"
++msgstr ""
++
++#: ../internal/ui/access.go:148
++msgid "Alias copied"
++msgstr ""
++
++#: ../internal/ui/access.go:192
++msgid "Copy the Link"
++msgstr ""
++
++#: ../internal/ui/access.go:193
++msgid "Link copied"
++msgstr ""
++
++#: ../internal/ui/access.go:203
++msgid "The remote desktop opens in a moment"
++msgstr ""
++
++#: ../internal/ui/access.go:213
++msgid "Copy the Address"
++msgstr ""
++
++#: ../internal/ui/access.go:214
++msgid "Address copied"
++msgstr ""
++
++#: ../internal/ui/access.go:234
++msgid "On this host (waypipe)"
++msgstr ""
++
++#: ../internal/ui/access.go:234
++msgid "In the remote desktop"
++msgstr ""
++
++#: ../internal/ui/access.go:246 ../internal/ui/access.go:329
++msgid "Looking for applications"
++msgstr ""
++
++#: ../internal/ui/access.go:280
++msgid "No application matches"
++msgstr ""
++
++#: ../internal/ui/access.go:296
++msgid "The application opens in the remote desktop"
++msgstr ""
++
++#: ../internal/ui/access.go:299
++msgid "The application opens on this host"
++msgstr ""
++
++#: ../internal/ui/access.go:312
++msgid "Enter a command first"
++msgstr ""
++
++#: ../internal/ui/access.go:344
++msgid "The applications could not be listed"
++msgstr ""
++
++#: ../internal/ui/access.go:355
++msgid "The guest lists no applications"
++msgstr ""
++
++#: ../internal/ui/access.go:383
++msgid "Refresh the Application List"
++msgstr ""
++
+ #: ../assets/resources/window.blp:7 ../assets/resources/window.blp:22
+ #: ../assets/resources/window.blp:27
++#: ../flatpak/build/files/share/applications/com.pojtinger.felicitas.Phial.desktop:2
++#: ../flatpak/build/export/share/applications/com.pojtinger.felicitas.Phial.desktop:2
+ #: ../assets/meta/com.pojtinger.felicitas.Phial.desktop:2
+ #: ../assets/resources/metainfo.xml:7
+ msgid "Phial"
+@@ -1155,10 +1167,14 @@ #: ../assets/resources/window.blp:97
+ msgid "_Quit"
+ msgstr ""
+ 
++#: ../flatpak/build/files/share/applications/com.pojtinger.felicitas.Phial.desktop:3
++#: ../flatpak/build/export/share/applications/com.pojtinger.felicitas.Phial.desktop:3
+ #: ../assets/meta/com.pojtinger.felicitas.Phial.desktop:3
+ msgid "Development virtual machines with time-boxed secrets"
+ msgstr ""
+ 
++#: ../flatpak/build/files/share/applications/com.pojtinger.felicitas.Phial.desktop:9
++#: ../flatpak/build/export/share/applications/com.pojtinger.felicitas.Phial.desktop:9
+ #: ../assets/meta/com.pojtinger.felicitas.Phial.desktop:9
+ msgid "virtual;machine;secrets;agent;development;vm;"
+ msgstr ""
+@@ -1265,55 +1281,68 @@ "the keys and secrets of the host, time-boxed grants per machine, and a "
+ "requests page that approves what an agent inside a machine asks for."
+ msgstr ""
+ 
++#: ../flatpak/build/files/share/glib-2.0/schemas/com.pojtinger.felicitas.Phial.gschema.xml:6
+ #: ../assets/resources/index.gschema.xml:6
+ msgid "Window width"
+ msgstr ""
+ 
++#: ../flatpak/build/files/share/glib-2.0/schemas/com.pojtinger.felicitas.Phial.gschema.xml:7
+ #: ../assets/resources/index.gschema.xml:7
+ msgid "The width of the window in logical pixels."
+ msgstr ""
+ 
++#: ../flatpak/build/files/share/glib-2.0/schemas/com.pojtinger.felicitas.Phial.gschema.xml:11
+ #: ../assets/resources/index.gschema.xml:11
+ msgid "Window height"
+ msgstr ""
+ 
++#: ../flatpak/build/files/share/glib-2.0/schemas/com.pojtinger.felicitas.Phial.gschema.xml:12
+ #: ../assets/resources/index.gschema.xml:12
+ msgid "The height of the window in logical pixels."
+ msgstr ""
+ 
++#: ../flatpak/build/files/share/glib-2.0/schemas/com.pojtinger.felicitas.Phial.gschema.xml:16
+ #: ../assets/resources/index.gschema.xml:16
+ msgid "Window maximized"
+ msgstr ""
+ 
++#: ../flatpak/build/files/share/glib-2.0/schemas/com.pojtinger.felicitas.Phial.gschema.xml:17
+ #: ../assets/resources/index.gschema.xml:17
+ msgid "Whether the window is maximized."
+ msgstr ""
+ 
++#: ../flatpak/build/files/share/glib-2.0/schemas/com.pojtinger.felicitas.Phial.gschema.xml:21
+ #: ../assets/resources/index.gschema.xml:21
+ msgid "Active page"
+ msgstr ""
+ 
++#: ../flatpak/build/files/share/glib-2.0/schemas/com.pojtinger.felicitas.Phial.gschema.xml:22
+ #: ../assets/resources/index.gschema.xml:22
+ msgid "The tag of the page that was open when the window closed."
+ msgstr ""
+ 
++#: ../flatpak/build/files/share/glib-2.0/schemas/com.pojtinger.felicitas.Phial.gschema.xml:27
+ #: ../assets/resources/index.gschema.xml:27
+ msgid ""
+ "Whether to show a notification for agent requests and finished installs."
+ msgstr ""
+ 
++#: ../flatpak/build/files/share/glib-2.0/schemas/com.pojtinger.felicitas.Phial.gschema.xml:31
+ #: ../assets/resources/index.gschema.xml:31
+ msgid "Keep running"
+ msgstr ""
+ 
++#: ../flatpak/build/files/share/glib-2.0/schemas/com.pojtinger.felicitas.Phial.gschema.xml:32
+ #: ../assets/resources/index.gschema.xml:32
+ msgid "Whether the agent channel stays open when the window closes."
+ msgstr ""
+ 
++#: ../flatpak/build/files/share/glib-2.0/schemas/com.pojtinger.felicitas.Phial.gschema.xml:36
+ #: ../assets/resources/index.gschema.xml:36
+ msgid "Grant duration"
+ msgstr ""
+ 
++#: ../flatpak/build/files/share/glib-2.0/schemas/com.pojtinger.felicitas.Phial.gschema.xml:37
+ #: ../assets/resources/index.gschema.xml:37
+ msgid "The default duration of a grant."
+ msgstr ""
+
