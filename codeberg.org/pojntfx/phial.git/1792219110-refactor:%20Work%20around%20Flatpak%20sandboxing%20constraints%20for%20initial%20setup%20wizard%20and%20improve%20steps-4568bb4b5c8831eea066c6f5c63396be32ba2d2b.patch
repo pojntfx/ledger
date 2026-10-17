@@ -1,0 +1,1798 @@
+From 4568bb4b5c8831eea066c6f5c63396be32ba2d2b Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Fri, 16 Oct 2026 23:38:30 -0700
+Subject: [PATCH] refactor: Work around Flatpak sandboxing constraints for initial setup wizard and improve steps
+---
+diff --git a/internal/paths/paths.go b/internal/paths/paths.go
+index 171fb8b5eddbbbc2cca8989427cf41bda1384f2c..709f50113250284f420a853ddbc7283d5a84c0b5 100644
+--- a/internal/paths/paths.go
++++ b/internal/paths/paths.go
+@@ -9,8 +9,6 @@ 	"strings"
+ 	"sync"
+ 
+ 	"github.com/adrg/xdg"
+-
+-	"codeberg.org/pojntfx/phial-neo/internal/hostcmd"
+ )
+ 
+ // Location states one folder twice. Host is the path that a host process uses,
+@@ -224,55 +222,61 @@ }
+ 
+ // SaveHostFile writes the locations file that a host process reads. The file
+ // always lands in the default configuration folder, so that a host process can
+-// find the folders of the user before it reads them.
++// find the folders of the user before it reads them. A host process calls it;
++// a sandboxed process writes the same file into the chosen configuration
++// folder through SaveLocationsFile.
+ func SaveHostFile(set Set) error {
+-	file := hostFile{
+-		Config:  set.Config.HostPath(),
+-		Data:    set.Data.HostPath(),
+-		SSH:     set.SSH.HostPath(),
+-		Runtime: set.Runtime.HostPath(),
++	data, err := marshalHostFile(set)
++	if err != nil {
++		return err
+ 	}
+ 
+-	data, err := json.MarshalIndent(file, "", "  ")
+-	if err != nil {
++	path := defaultLocationsFile()
++
++	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+ 		return err
+ 	}
+ 
+-	data = append(data, '\n')
++	if err := os.WriteFile(path, data, 0o600); err != nil {
++		return err
++	}
+ 
+-	if err := writeHostFile(defaultLocationsFile(), data); err != nil {
++	return SaveLocationsFile(set)
++}
++
++// SaveLocationsFile writes the locations file into the chosen configuration
++// folder. The folder is reachable through the document portal, so a sandboxed
++// process can write it without host access.
++func SaveLocationsFile(set Set) error {
++	data, err := marshalHostFile(set)
++	if err != nil {
+ 		return err
+ 	}
+ 
+-	local := filepath.Join(set.Config.AccessPath(), "locations.json")
+-	if local == defaultLocationsFile() {
++	path := filepath.Join(set.Config.AccessPath(), "locations.json")
++	if path == defaultLocationsFile() {
+ 		return nil
+ 	}
+ 
+-	if err := os.MkdirAll(filepath.Dir(local), 0o700); err != nil {
++	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+ 		return err
+ 	}
+ 
+-	return os.WriteFile(local, data, 0o600)
++	return os.WriteFile(path, data, 0o600)
+ }
+ 
+-// writeHostFile writes one file in the default configuration folder. A
+-// sandboxed process cannot reach that folder, so the write runs on the host.
+-func writeHostFile(path string, data []byte) error {
+-	if !Sandboxed() {
+-		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+-			return err
+-		}
+-
+-		return os.WriteFile(path, data, 0o600)
++func marshalHostFile(set Set) ([]byte, error) {
++	file := hostFile{
++		Config:  set.Config.HostPath(),
++		Data:    set.Data.HostPath(),
++		SSH:     set.SSH.HostPath(),
++		Runtime: set.Runtime.HostPath(),
+ 	}
+ 
+-	command := hostcmd.Command("sh", "-c", "umask 077; mkdir -p \"$1\" && cat > \"$2\"", "sh", filepath.Dir(path), path)
+-	command.Stdin = strings.NewReader(string(data))
+-
+-	if output, err := command.CombinedOutput(); err != nil {
+-		return fmt.Errorf("write %s on the host: %s: %w", path, strings.TrimSpace(string(output)), err)
++	data, err := json.MarshalIndent(file, "", "  ")
++	if err != nil {
++		return nil, err
+ 	}
+ 
+-	return nil
++	return append(data, '\n'), nil
+ }
+diff --git a/internal/setup/install.go b/internal/setup/install.go
+index ea7465449d5b0c052befd28b14eb096bf8771fdb..591183a7c909e7040f5c7f0f9d94b75644b9f928 100644
+--- a/internal/setup/install.go
++++ b/internal/setup/install.go
+@@ -20,6 +20,17 @@ 	Overwrite bool
+ 	Embedded  bool
+ }
+ 
++// HostCLI states the command that the host install writes. The window names it
++// in the command that prepares the host.
++func HostCLI() string {
++	home, err := os.UserHomeDir()
++	if err != nil {
++		return ""
++	}
++
++	return filepath.Join(home, ".local", "bin", "phial")
++}
++
+ func toolPath(name string) (string, error) {
+ 	path, err := exec.LookPath(name)
+ 	if err != nil {
+@@ -221,6 +232,13 @@ 	if out, err := exec.Command("glib-compile-schemas", schemaDir).CombinedOutput(); err != nil {
+ 		return fmt.Errorf("could not compile the settings schema: %w: %s", err, strings.TrimSpace(string(out)))
+ 	}
+ 
++	// The host process reads the folders from this file before it knows the
++	// folders of the user. The window names the folders in the install command,
++	// so the file lands here rather than in the sandbox.
++	if err := paths.SaveHostFile(paths.Current()); err != nil {
++		return err
++	}
++
+ 	_ = exec.Command("systemctl", "--user", "daemon-reload").Run()
+ 	_ = exec.Command("systemctl", "--user", "enable", "--now", "phial-gate.service").Run()
+ 
+@@ -258,6 +276,10 @@ func prependBlock(path, block, marker string) error {
+ 	data, err := os.ReadFile(path)
+ 	if err != nil {
+ 		if !os.IsNotExist(err) {
++			return err
++		}
++
++		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+ 			return err
+ 		}
+ 
+diff --git a/internal/ui/app.go b/internal/ui/app.go
+index 3882127c6b5dc23d7aee8c9545dd70cb2826fb7a..396c2f74a671ade4c8524e4ee4506330eae5528d 100644
+--- a/internal/ui/app.go
++++ b/internal/ui/app.go
+@@ -111,6 +111,8 @@
+ 	actionsRegistered bool
+ 	setupDialog       *adw.Dialog
+ 	setupNavigation   *adw.NavigationView
++	setupSteps        map[string]*setupStep
++	setupToasts       *adw.ToastOverlay
+ 	locationForm      *locationForm
+ }
+ 
+@@ -316,7 +318,7 @@ 		a.app.AddAction(action)
+ 	}
+ 
+ 	simple("new-machine", func() { a.showNewMachineDialog() })
+-	simple("system-setup", func() { a.showSystemSetupDialog() })
++	simple("system-setup", func() { a.showSetupDialogAt(false, wizardSystemTag) })
+ 	simple("shortcuts", func() { a.showShortcuts() })
+ 	simple("preferences", func() { a.showPreferences() })
+ 	simple("setup-wizard", func() { a.showSetupDialog(false) })
+@@ -384,13 +386,22 @@ 		if a.setupNavigation != nil {
+ 			a.setupNavigation.PushByTag(tag)
+ 		}
+ 	})
++	simple("wizard-copy", func() {
++		if a.setupNavigation == nil {
++			return
++		}
++
++		if step := a.setupSteps[a.setupNavigation.GetVisiblePageTag()]; step != nil {
++			step.copyCommand()
++		}
++	})
+ 	simple("wizard-finish", func() {
+ 		if a.setupDialog != nil {
+ 			a.finishSetupDialog()
+ 		}
+ 	})
+ 	intParameter("select-machine", func(index int) { a.selectMachine(index) })
+-	stringParameter("capture", func(path string) { a.capture(path) })
++	stringParameter("capture", func(path string) { a.later(200, func() { a.capture(path) }) })
+ 
+ 	simple("toggle-search", func() {
+ 		if a.searchToggle != nil {
+diff --git a/internal/ui/locations.go b/internal/ui/locations.go
+index 69c39f8b201b9ce743c5550edbd46fe882ff588a..7f3b0e1164431f03ac5107c40ffee83bca8b4446 100644
+--- a/internal/ui/locations.go
++++ b/internal/ui/locations.go
+@@ -3,18 +3,14 @@
+ import (
+ 	"fmt"
+ 	"os"
+-	"path/filepath"
+ 	"strings"
+ 
+ 	"codeberg.org/puregotk/puregotk/v4/adw"
+-	"codeberg.org/puregotk/puregotk/v4/gdk"
+ 	"codeberg.org/puregotk/puregotk/v4/gio"
+ 	"codeberg.org/puregotk/puregotk/v4/gtk"
+ 	"github.com/pojntfx/go-gettext/pkg/i18n"
+ 
+ 	"codeberg.org/pojntfx/phial-neo/assets/resources"
+-	"codeberg.org/pojntfx/phial-neo/internal/hostcmd"
+-	"codeberg.org/pojntfx/phial-neo/internal/mcp"
+ 	"codeberg.org/pojntfx/phial-neo/internal/paths"
+ 	"codeberg.org/pojntfx/phial-neo/internal/portals"
+ )
+@@ -59,54 +55,33 @@ // runs before the state client is built, so that every later read follows the
+ // same folders.
+ func applySettingsLocations(settings *gio.Settings) {
+ 	paths.SetCurrent(locationsFromSettings(settings))
+-}
+-
+-// existingState reports whether a configuration folder already carries the
+-// state of an earlier run, so that a native install keeps its folders.
+-func existingState(dir string) bool {
+-	for _, name := range []string{"mapping", "vms"} {
+-		if _, err := os.Stat(filepath.Join(dir, name)); err == nil {
+-			return true
+-		}
+-	}
+-
+-	return false
+ }
+ 
+ // prepareLocations applies the folders and reports whether the window must
+-// show the setup page.
++// show the setup wizard.
+ func (a *App) prepareLocations() bool {
+ 	set := a.loadLocations()
+ 
+ 	paths.SetCurrent(set)
++
++	// The runtime folder belongs to this process, so the window can create it
++	// before it asks whether the folders are ready.
++	if err := os.MkdirAll(set.Runtime.AccessPath(), 0o700); err != nil {
++		a.Log.Warn("could not create the runtime folder", "err", err)
++	}
+ 
+ 	configured := a.Settings.GetBoolean(resources.SettingLocationsSetKey)
+-	existing := !paths.Sandboxed() && existingState(set.Config.AccessPath())
+-	required := !configured && !existing || configured && !paths.Valid(set)
++	required := !configured || !paths.Valid(set)
+ 
+ 	a.Log.Info(
+ 		"preparing the folders",
+ 		"configured", configured,
+-		"sandboxed", paths.Sandboxed(),
+-		"existing", existing,
+ 		"valid", paths.Valid(set),
+ 		"config", set.Config.AccessPath(),
+ 		"required", required,
+ 	)
+ 
+-	if configured {
+-		return !paths.Valid(set)
+-	}
+-
+-	if existing {
+-		if err := a.saveLocations(set); err != nil {
+-			a.Log.Warn("could not write the locations of an existing install", "err", err)
+-		}
+-
+-		return false
+-	}
+-
+-	return true
++	return required
+ }
+ 
+ // loadLocations states the folders of the settings.
+@@ -115,7 +90,8 @@ 	return locationsFromSettings(a.Settings)
+ }
+ 
+ // saveLocations writes the folders into the settings, the process, and the
+-// host file. The host file lands first, so a failure keeps the setup page.
++// locations file of the chosen configuration folder. The host install command
++// carries the same folders, so the window never writes to the host.
+ func (a *App) saveLocations(set paths.Set) error {
+ 	paths.SetCurrent(set)
+ 
+@@ -123,7 +99,7 @@ 	if a.State != nil {
+ 		a.State.Reload()
+ 	}
+ 
+-	if err := paths.SaveHostFile(set); err != nil {
++	if err := paths.SaveLocationsFile(set); err != nil {
+ 		return err
+ 	}
+ 
+@@ -140,20 +116,26 @@ 	return nil
+ }
+ 
+ // locationForm holds the rows that choose one folder. The first run embeds it
+-// in a page, and the preferences embed it in a preferences page.
++// in a step of the setup wizard, and the preferences embed it in a page.
+ type locationForm struct {
+ 	app *App
+ 	set paths.Set
+ 
++	// live writes the folders as soon as the user chooses one. The preferences
++	// need it; the setup wizard writes them when its step continues.
++	live bool
++
+ 	banner *adw.Banner
+ 
+ 	foldersGroup *adw.PreferencesGroup
+-	runtimeGroup *adw.PreferencesGroup
+ 
+-	configRow  *adw.ActionRow
+-	dataRow    *adw.ActionRow
+-	sshRow     *adw.ActionRow
+-	runtimeRow *adw.ActionRow
++	configRow *adw.ActionRow
++	dataRow   *adw.ActionRow
++	sshRow    *adw.ActionRow
++
++	configIcon *gtk.Image
++	dataIcon   *gtk.Image
++	sshIcon    *gtk.Image
+ 
+ 	onChanged func()
+ }
+@@ -162,16 +144,15 @@ func (a *App) newLocationForm(set paths.Set) *locationForm {
+ 	form := &locationForm{app: a, set: set}
+ 
+ 	form.foldersGroup = adw.NewPreferencesGroup()
+-	form.foldersGroup.SetTitle(i18n.L("Locations"))
+-	form.foldersGroup.SetDescription(i18n.L("Keep these folders or choose your own"))
++	form.foldersGroup.SetDescription(i18n.L("Phial keeps its machines, keys, and secrets in these folders"))
+ 
+-	form.configRow = form.row("Configuration Folder", "Machines, tokens, and the SSH configuration", set.Config, func() {
++	form.configRow, form.configIcon = form.row("Configuration Folder", "Machines, tokens, and the SSH configuration", set.Config, func() {
+ 		form.choose("config")
+ 	})
+-	form.dataRow = form.row("Data Folder", "Disks, install images, and shared files", set.Data, func() {
++	form.dataRow, form.dataIcon = form.row("Data Folder", "Disks, install images, and shared files", set.Data, func() {
+ 		form.choose("data")
+ 	})
+-	form.sshRow = form.row("SSH Keys Folder", "Key pairs that Phial generates and loads", set.SSH, func() {
++	form.sshRow, form.sshIcon = form.row("SSH Keys Folder", "Key pairs that Phial generates and loads", set.SSH, func() {
+ 		form.choose("ssh")
+ 	})
+ 
+@@ -179,36 +160,28 @@ 	form.foldersGroup.Add(&form.configRow.Widget)
+ 	form.foldersGroup.Add(&form.dataRow.Widget)
+ 	form.foldersGroup.Add(&form.sshRow.Widget)
+ 
+-	defaults := a.buttonRow("_Use Default Folders", "folder-symbolic", func() {
+-		form.useDefaults()
+-	})
+-	form.foldersGroup.Add(&defaults.Widget)
+-
+-	form.runtimeGroup = adw.NewPreferencesGroup()
+-	form.runtimeGroup.SetTitle(i18n.L("Runtime"))
+-	form.runtimeGroup.SetDescription(i18n.L("A temporary folder for running machines, provided by the system"))
+-
+-	form.runtimeRow = a.propertyRow("Folder", set.Runtime.HostPath())
+-	form.runtimeGroup.Add(&form.runtimeRow.Widget)
+-
+ 	form.refresh()
+ 
+ 	return form
+ }
+ 
+ // row builds one folder row with a choose control.
+-func (f *locationForm) row(title string, description string, location paths.Location, choose func()) *adw.ActionRow {
++func (f *locationForm) row(title string, description string, location paths.Location, choose func()) (*adw.ActionRow, *gtk.Image) {
+ 	row := adw.NewActionRow()
+ 	row.SetTitle(i18n.L(title))
+ 	row.SetSubtitle(locationText(location))
+ 	row.SetSubtitleSelectable(true)
+ 	row.SetTooltipText(i18n.L(description))
+ 
++	icon := gtk.NewImageFromIconName("folder-symbolic")
++	icon.SetValign(gtk.AlignCenterValue)
++	row.AddPrefix(&icon.Widget)
++
+ 	button := f.app.labelButton("_Choose", choose)
+ 	button.SetValign(gtk.AlignCenterValue)
+ 	row.AddSuffix(&button.Widget)
+ 
+-	return row
++	return row, icon
+ }
+ 
+ // locationText names the folder that the user chose. A folder that the process
+@@ -229,11 +202,28 @@
+ 	return location.AccessPath()
+ }
+ 
++// locationIcon names the state of one folder. The shape carries the state, so
++// the row reads the same without color.
++func locationIcon(icon *gtk.Image, location paths.Location) {
++	if location.IsSet() && location.Exists() {
++		icon.SetFromIconName("folder-symbolic")
++		icon.RemoveCssClass("warning")
++
++		return
++	}
++
++	icon.SetFromIconName("dialog-warning-symbolic")
++	icon.AddCssClass("warning")
++}
++
+ func (f *locationForm) refresh() {
+ 	f.configRow.SetSubtitle(locationText(f.set.Config))
+ 	f.dataRow.SetSubtitle(locationText(f.set.Data))
+ 	f.sshRow.SetSubtitle(locationText(f.set.SSH))
+-	f.runtimeRow.SetSubtitle(locationText(f.set.Runtime))
++
++	locationIcon(f.configIcon, f.set.Config)
++	locationIcon(f.dataIcon, f.set.Data)
++	locationIcon(f.sshIcon, f.set.SSH)
+ 
+ 	if f.onChanged != nil {
+ 		f.onChanged()
+@@ -241,11 +231,17 @@ 	}
+ }
+ 
+ func (f *locationForm) valid() bool {
+-	return paths.Valid(f.set)
++	for _, location := range []paths.Location{f.set.Config, f.set.Data, f.set.SSH} {
++		if !location.IsSet() || !location.Exists() {
++			return false
++		}
++	}
++
++	return true
+ }
+ 
+-// fail states one problem in the banner of the first run, or in a toast when
+-// the form sits in the preferences.
++// fail states one problem in the banner of the step, or in a toast when the
++// form sits in the preferences.
+ func (f *locationForm) fail(message string) {
+ 	if f.banner != nil {
+ 		f.banner.SetTitle(message)
+@@ -316,91 +312,22 @@ 			}
+ 
+ 			f.setLocation(kind, paths.Location{Host: folder.Host, Access: folder.Access})
+ 			f.refresh()
+-			f.apply()
+-		})
+-	}()
+-}
+-
+-// useDefaults asks the portal for the folder of every default, one after the
+-// other, so that the defaults are one flow rather than three separate choices.
+-func (f *locationForm) useDefaults() {
+-	defaults := paths.Defaults()
+-
+-	go func() {
+-		for _, kind := range []string{"config", "data", "ssh"} {
+-			location := defaults.Config
+-			if kind == "data" {
+-				location = defaults.Data
+-			} else if kind == "ssh" {
+-				location = defaults.SSH
+-			}
+-
+-			if err := ensureHostDir(location.HostPath()); err != nil {
+-				message := fmt.Sprintf(i18n.L("Could not create the folder: %s"), err)
+-				f.app.idle(func() { f.fail(message) })
+-
+-				return
+-			}
+-
+-			folder, err := portals.ChooseFolder(f.title(kind), i18n.L("_Choose"), location.HostPath())
+-			if err != nil {
+-				message := fmt.Sprintf(i18n.L("Could not choose the folder: %s"), err)
+-				f.app.idle(func() { f.fail(message) })
+-
+-				return
+-			}
+-
+-			if !folder.IsSet() {
+-				return
+-			}
+-
+-			kind := kind
+-			f.app.idle(func() {
+-				f.setLocation(kind, paths.Location{Host: folder.Host, Access: folder.Access})
+-				f.refresh()
+-			})
+-		}
+-
+-		f.app.idle(func() {
+-			f.refresh()
+-			f.apply()
++			f.changed()
+ 		})
+ 	}()
+ }
+ 
+-// ensureHostDir creates one folder on the host. A sandboxed process runs the
+-// creation through flatpak-spawn, because the folder is outside the sandbox.
+-func ensureHostDir(host string) error {
+-	if strings.TrimSpace(host) == "" {
+-		return fmt.Errorf("the folder is empty")
+-	}
+-
+-	if !paths.Sandboxed() {
+-		return os.MkdirAll(host, 0o700)
+-	}
+-
+-	if output, err := hostcmd.Command("mkdir", "-p", host).CombinedOutput(); err != nil {
+-		return fmt.Errorf("%s: %w", strings.TrimSpace(string(output)), err)
++// changed writes the folders in the preferences, where a choice applies at
++// once. A step of the wizard writes them when it continues.
++func (f *locationForm) changed() {
++	if f.live {
++		f.apply()
+ 	}
+-
+-	return nil
+ }
+ 
+-// apply creates the folders, writes the settings, and reports whether the
+-// folders are ready.
++// apply writes the folders and reports whether they are ready. The portal
++// hands out folders that already exist, so the step creates nothing on the host.
+ func (f *locationForm) apply() bool {
+-	for _, location := range []paths.Location{f.set.Config, f.set.Data, f.set.SSH, f.set.Runtime} {
+-		if paths.Sandboxed() && location.AccessPath() == location.HostPath() && location != f.set.Runtime {
+-			continue
+-		}
+-
+-		if err := os.MkdirAll(location.AccessPath(), 0o700); err != nil {
+-			f.fail(fmt.Sprintf(i18n.L("Could not create the folder: %s"), err))
+-
+-			return false
+-		}
+-	}
+-
+ 	if !f.valid() {
+ 		f.fail(i18n.L("Choose every folder first"))
+ 
+@@ -418,303 +345,3 @@ 	f.refresh()
+ 
+ 	return true
+ }
+-
+-// showSetupDialog presents the setup wizard over the window. The first run
+-// opens it, and the preferences can open it again.
+-func (a *App) showSetupDialog(firstRun bool) {
+-	if a.win == nil {
+-		return
+-	}
+-
+-	a.win.Present()
+-
+-	if a.setupDialog != nil {
+-		a.setupDialog.Present(&a.win.Widget)
+-
+-		return
+-	}
+-
+-	set := a.loadLocations()
+-
+-	// A native run reaches the default folders directly, so the defaults are
+-	// ready to continue. A sandboxed run must ask the portal for each one.
+-	if !paths.Sandboxed() && !a.Settings.GetBoolean(resources.SettingLocationsSetKey) {
+-		for _, location := range []paths.Location{set.Config, set.Data, set.SSH, set.Runtime} {
+-			_ = os.MkdirAll(location.AccessPath(), 0o700)
+-		}
+-	}
+-
+-	form := a.newLocationForm(set)
+-	form.banner = adw.NewBanner("")
+-	form.banner.SetRevealed(false)
+-
+-	a.locationForm = form
+-
+-	navigation := adw.NewNavigationView()
+-	navigation.SetPopOnEscape(true)
+-	a.setupNavigation = navigation
+-
+-	navigation.Add(a.buildWelcomePage(navigation))
+-	navigation.Add(a.buildHostSetupPage(navigation))
+-	navigation.Add(a.buildFoldersPage(navigation, form))
+-	navigation.Add(a.buildFinishPage(navigation, form))
+-
+-	width := a.win.GetWidth()
+-	if width <= 0 {
+-		width = a.Settings.GetInt(resources.SettingWindowWidthKey)
+-	}
+-
+-	height := a.win.GetHeight()
+-	if height <= 0 {
+-		height = a.Settings.GetInt(resources.SettingWindowHeightKey)
+-	}
+-
+-	contentWidth := int32(720)
+-	if width > 0 && int32(width-96) < contentWidth {
+-		contentWidth = int32(width - 96)
+-	}
+-	if contentWidth < 280 {
+-		contentWidth = 280
+-	}
+-
+-	contentHeight := int32(640)
+-	if height > 0 && int32(height-96) < contentHeight {
+-		contentHeight = int32(height - 96)
+-	}
+-	if contentHeight < 360 {
+-		contentHeight = 360
+-	}
+-
+-	dialog := adw.NewDialog()
+-	dialog.SetTitle(i18n.L("Set Up Phial"))
+-	dialog.SetContentWidth(contentWidth)
+-	dialog.SetContentHeight(contentHeight)
+-	dialog.SetCanClose(!firstRun)
+-	dialog.SetChild(&navigation.Widget)
+-
+-	var onClosed func(adw.Dialog)
+-	onClosed = func(adw.Dialog) {
+-		a.setupDialog = nil
+-		a.setupNavigation = nil
+-	}
+-	dialog.ConnectClosed(&onClosed)
+-	a.hold(&onClosed)
+-
+-	a.setupDialog = dialog
+-
+-	dialog.Present(&a.win.Widget)
+-}
+-
+-// wizardPage builds one step of the setup wizard.
+-func (a *App) wizardPage(tag string, title string, subtitle string, content *gtk.Widget) (*adw.NavigationPage, *adw.HeaderBar) {
+-	header := adw.NewHeaderBar()
+-	header.SetShowEndTitleButtons(false)
+-	windowTitle := adw.NewWindowTitle(i18n.L(title), i18n.L(subtitle))
+-	header.SetTitleWidget(&windowTitle.Widget)
+-
+-	toolbar := adw.NewToolbarView()
+-	toolbar.AddTopBar(&header.Widget)
+-	toolbar.SetContent(content)
+-
+-	page := adw.NewNavigationPage(&toolbar.Widget, i18n.L(title))
+-	page.SetTag(tag)
+-
+-	return page, header
+-}
+-
+-// buildWelcomePage builds the splash step with the call to action.
+-func (a *App) buildWelcomePage(navigation *adw.NavigationView) *adw.NavigationPage {
+-	status := adw.NewStatusPage()
+-	status.SetTitle(i18n.L("Phial"))
+-	status.SetDescription(i18n.L("Run development machines with secrets that expire"))
+-
+-	if icon := gdk.NewTextureFromResource(resources.ResourceIconPath); icon != nil {
+-		status.SetPaintable(icon)
+-	} else {
+-		status.SetIconName("drive-harddisk-symbolic")
+-	}
+-
+-	start := a.labelButton("_Get Started", func() {
+-		navigation.PushByTag("host")
+-	})
+-	start.AddCssClass("suggested-action")
+-	start.AddCssClass("pill")
+-	start.SetHalign(gtk.AlignCenterValue)
+-	status.SetChild(&start.Widget)
+-
+-	page, _ := a.wizardPage("welcome", "Welcome", "", &status.Widget)
+-
+-	return page
+-}
+-
+-// buildHostSetupPage builds the step that sets up the host.
+-func (a *App) buildHostSetupPage(navigation *adw.NavigationView) *adw.NavigationPage {
+-	banner := adw.NewBanner("")
+-	banner.SetRevealed(false)
+-
+-	hostRow := a.setupActionRow(
+-		"Service",
+-		"Adds the command-line tools",
+-		"_Install",
+-		func() error { return a.installHost() },
+-		banner,
+-	)
+-
+-	hostGroup := adw.NewPreferencesGroup()
+-	hostGroup.SetTitle(i18n.L("Host Services"))
+-	hostGroup.SetDescription(i18n.L("Runs your machines in the background"))
+-	hostGroup.Add(&hostRow.Widget)
+-
+-	systemRow := a.setupActionRow(
+-		"Prepare This Computer",
+-		"Needs your password",
+-		"_Apply",
+-		func() error {
+-			_, _, err := a.Service.SystemRootSetup(a.Ctx, nil, mcp.RootSetupInput{})
+-
+-			return err
+-		},
+-		banner,
+-	)
+-
+-	systemGroup := adw.NewPreferencesGroup()
+-	systemGroup.SetTitle(i18n.L("System Setup"))
+-	systemGroup.SetDescription(i18n.L("For virtual machines and USB devices"))
+-	systemGroup.Add(&systemRow.Widget)
+-
+-	preferences := adw.NewPreferencesPage()
+-	preferences.SetBanner(banner)
+-	preferences.Add(hostGroup)
+-	preferences.Add(systemGroup)
+-
+-	page, header := a.wizardPage("host", "Host Setup", "", &preferences.Widget)
+-
+-	next := a.labelButton("_Continue", func() {
+-		navigation.PushByTag("folders")
+-	})
+-	next.AddCssClass("suggested-action")
+-	header.PackEnd(&next.Widget)
+-
+-	return page
+-}
+-
+-// setupActionRow builds a row with one action and its progress.
+-func (a *App) setupActionRow(title string, subtitle string, label string, action func() error, banner *adw.Banner) *adw.ActionRow {
+-	row := adw.NewActionRow()
+-	row.SetTitle(i18n.L(title))
+-	row.SetSubtitle(i18n.L(subtitle))
+-
+-	box := gtk.NewBox(gtk.OrientationHorizontalValue, 6)
+-	box.SetValign(gtk.AlignCenterValue)
+-
+-	spinner := adw.NewSpinner()
+-	spinner.SetVisible(false)
+-
+-	var button *gtk.Button
+-	button = a.labelButton(label, func() {
+-		button.SetSensitive(false)
+-		spinner.SetVisible(true)
+-
+-		go func() {
+-			err := action()
+-
+-			a.idle(func() {
+-				spinner.SetVisible(false)
+-
+-				if err != nil {
+-					banner.SetTitle(i18n.L("Could not set up this host"))
+-					banner.SetRevealed(true)
+-					button.SetSensitive(true)
+-					a.Log.Error("the host setup failed", "err", err)
+-
+-					return
+-				}
+-
+-				button.SetLabel(i18n.L("Done"))
+-				button.SetSensitive(false)
+-				row.SetSubtitle(i18n.L("Ready"))
+-				banner.SetRevealed(false)
+-			})
+-		}()
+-	})
+-
+-	box.Append(&spinner.Widget)
+-	box.Append(&button.Widget)
+-	row.AddSuffix(&box.Widget)
+-
+-	return row
+-}
+-
+-// buildFoldersPage builds the step that chooses the folders.
+-func (a *App) buildFoldersPage(navigation *adw.NavigationView, form *locationForm) *adw.NavigationPage {
+-	content := a.pageContentWithBanner(form.banner, form.foldersGroup, form.runtimeGroup)
+-
+-	page, header := a.wizardPage("folders", "Folders", "Where Phial keeps its files", content)
+-
+-	next := a.labelButton("_Continue", func() {
+-		if !form.apply() {
+-			return
+-		}
+-
+-		navigation.PushByTag("finish")
+-	})
+-	next.AddCssClass("suggested-action")
+-	next.SetSensitive(form.valid())
+-	header.PackEnd(&next.Widget)
+-
+-	form.onChanged = func() {
+-		next.SetSensitive(form.valid())
+-	}
+-	form.refresh()
+-
+-	return page
+-}
+-
+-// buildFinishPage builds the last step.
+-func (a *App) buildFinishPage(navigation *adw.NavigationView, form *locationForm) *adw.NavigationPage {
+-	status := adw.NewStatusPage()
+-	status.SetIconName("object-select-symbolic")
+-	status.SetTitle(i18n.L("You're Ready"))
+-	status.SetDescription(i18n.L("Phial is set up for your first machine"))
+-
+-	page, header := a.wizardPage("finish", "Done", "", &status.Widget)
+-
+-	finish := a.labelButton("_Finish", func() {
+-		if !form.apply() {
+-			return
+-		}
+-
+-		a.finishSetupDialog()
+-	})
+-	finish.AddCssClass("suggested-action")
+-	header.PackEnd(&finish.Widget)
+-
+-	return page
+-}
+-
+-// finishSetupDialog closes the wizard and refreshes the window.
+-func (a *App) finishSetupDialog() {
+-	a.Log.Info("finishing the setup", "form", a.locationForm != nil, "valid", a.locationForm != nil && a.locationForm.valid())
+-
+-	if a.locationForm != nil && !a.locationForm.apply() {
+-		a.Log.Warn("the setup folders are not ready")
+-
+-		return
+-	}
+-
+-	if a.setupDialog != nil {
+-		a.Log.Info("closing the setup dialog")
+-		a.setupDialog.ForceClose()
+-		a.setupDialog = nil
+-	}
+-
+-	a.setupNavigation = nil
+-
+-	a.refreshSidebar()
+-	a.refreshSecretsPage()
+-	a.refreshGrantsPage()
+-	a.refreshCounts()
+-	a.restoreActivePage()
+-
+-	a.win.Present()
+-}
+diff --git a/internal/ui/preferences.go b/internal/ui/preferences.go
+index 4cb2b3df0b748f1bb4d3566b48d546b8292f0623..768c40e1953004fa190c3e2ae11551ac6edea05b 100644
+--- a/internal/ui/preferences.go
++++ b/internal/ui/preferences.go
+@@ -61,8 +61,8 @@ 	locationsPage.SetTitle(i18n.L("Folders"))
+ 	locationsPage.SetIconName("folder-symbolic")
+ 
+ 	locations := a.newLocationForm(a.loadLocations())
++	locations.live = true
+ 	locationsPage.Add(locations.foldersGroup)
+-	locationsPage.Add(locations.runtimeGroup)
+ 
+ 	dialog.Add(page)
+ 	dialog.Add(locationsPage)
+diff --git a/internal/ui/selfinstall.go b/internal/ui/selfinstall.go
+deleted file mode 100644
+index 2124fc5a281efd20e281aadf11d8a7b4a82abd62..0000000000000000000000000000000000000000
+--- a/internal/ui/selfinstall.go
++++ /dev/null
+@@ -1,45 +0,0 @@
+-package ui
+-
+-import (
+-	"bytes"
+-	"fmt"
+-	"os"
+-	"strings"
+-
+-	"codeberg.org/pojntfx/phial-neo/internal/hostcmd"
+-	"codeberg.org/pojntfx/phial-neo/internal/paths"
+-	"codeberg.org/pojntfx/phial-neo/internal/setup"
+-)
+-
+-// hostBinaryPath states the host build inside the bundle. The window copies
+-// this binary to the host, so the installer needs no source tree.
+-const hostBinaryPath = "/app/share/phial/phial-host"
+-
+-// installHost installs the host service and the tools.
+-func (a *App) installHost() error {
+-	if paths.Sandboxed() {
+-		data, err := os.ReadFile(hostBinaryPath)
+-		if err != nil {
+-			return fmt.Errorf("read the host installer: %w", err)
+-		}
+-
+-		copy := hostcmd.Command("sh", "-c", "cat > /tmp/phial-install && chmod 755 /tmp/phial-install")
+-		copy.Stdin = bytes.NewReader(data)
+-
+-		if output, err := copy.CombinedOutput(); err != nil {
+-			return fmt.Errorf("copy the host installer: %s: %w", strings.TrimSpace(string(output)), err)
+-		}
+-
+-		defer func() {
+-			_ = hostcmd.Command("rm", "-f", "/tmp/phial-install").Run()
+-		}()
+-
+-		if output, err := hostcmd.Command("/tmp/phial-install", "install", "--embedded").CombinedOutput(); err != nil {
+-			return fmt.Errorf("install the host service: %s: %w", strings.TrimSpace(string(output)), err)
+-		}
+-
+-		return nil
+-	}
+-
+-	return setup.Install(setup.InstallOptions{Embedded: true})
+-}
+diff --git a/internal/ui/setup.go b/internal/ui/setup.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..3a8c9d184b9401b0ae7775c5cd5b91ac2a1e5311
+--- /dev/null
++++ b/internal/ui/setup.go
+@@ -0,0 +1,532 @@
++package ui
++
++import (
++	"os"
++	"strings"
++
++	"codeberg.org/puregotk/puregotk/v4/adw"
++	"codeberg.org/puregotk/puregotk/v4/gdk"
++	"codeberg.org/puregotk/puregotk/v4/gtk"
++	"codeberg.org/puregotk/puregotk/v4/pango"
++	"github.com/pojntfx/go-gettext/pkg/i18n"
++
++	"codeberg.org/pojntfx/phial-neo/assets/resources"
++	"codeberg.org/pojntfx/phial-neo/internal/paths"
++	"codeberg.org/pojntfx/phial-neo/internal/setup"
++)
++
++const (
++	wizardWelcomeTag = "welcome"
++	wizardFoldersTag = "folders"
++	wizardHostTag    = "host"
++	wizardSystemTag  = "system"
++	wizardFinishTag  = "finish"
++)
++
++// setupStep is one page of the setup wizard. A step carries either a folder
++// form that the window can check, or a host command that the user copies and
++// runs in a terminal.
++type setupStep struct {
++	app *App
++
++	tag      string
++	nextTag  string
++	title    string
++	subtitle string
++
++	navigation *adw.NavigationView
++	page       *adw.NavigationPage
++
++	banner    *adw.Banner
++	actionRow *adw.ButtonRow
++	next      *gtk.Button
++
++	command      string
++	commandFunc  func() string
++	commandLabel *gtk.Label
++
++	validate func() bool
++	refresh  func()
++	apply    func() bool
++
++	copied bool
++	ready  bool
++}
++
++// showSetupDialog presents the setup wizard over the window. The first run
++// opens it, and the preferences can open it again.
++func (a *App) showSetupDialog(firstRun bool) {
++	a.showSetupDialogAt(firstRun, wizardWelcomeTag)
++}
++
++// showSetupDialogAt presents the wizard and opens one of its steps.
++func (a *App) showSetupDialogAt(firstRun bool, tag string) {
++	if a.win == nil {
++		return
++	}
++
++	a.win.Present()
++
++	if a.setupDialog != nil {
++		a.setupDialog.Present(&a.win.Widget)
++
++		if a.setupNavigation != nil && a.setupNavigation.GetVisiblePageTag() != tag {
++			a.setupNavigation.PushByTag(tag)
++		}
++
++		return
++	}
++
++	set := a.loadLocations()
++
++	// The runtime folder belongs to this process, so the wizard creates it
++	// without asking the user.
++	if err := os.MkdirAll(set.Runtime.AccessPath(), 0o700); err != nil {
++		a.Log.Warn("could not create the runtime folder", "err", err)
++	}
++
++	form := a.newLocationForm(set)
++	form.live = false
++
++	a.locationForm = form
++
++	navigation := adw.NewNavigationView()
++	navigation.SetPopOnEscape(true)
++	a.setupNavigation = navigation
++
++	foldersStep := a.buildFoldersStep(form, navigation)
++	hostStep := a.buildHostStep(navigation)
++	systemStep := a.buildSystemStep(navigation)
++
++	a.setupSteps = map[string]*setupStep{
++		wizardFoldersTag: foldersStep,
++		wizardHostTag:    hostStep,
++		wizardSystemTag:  systemStep,
++	}
++
++	navigation.Add(a.buildWelcomeStep(navigation))
++	navigation.Add(foldersStep.page)
++	navigation.Add(hostStep.page)
++	navigation.Add(systemStep.page)
++	navigation.Add(a.buildFinishStep())
++
++	width := int32(a.win.GetWidth())
++	if width <= 0 {
++		width = a.Settings.GetInt(resources.SettingWindowWidthKey)
++	}
++
++	height := int32(a.win.GetHeight())
++	if height <= 0 {
++		height = a.Settings.GetInt(resources.SettingWindowHeightKey)
++	}
++
++	contentWidth := int32(720)
++	if width > 0 && width-96 < contentWidth {
++		contentWidth = width - 96
++	}
++	if contentWidth < 280 {
++		contentWidth = 280
++	}
++
++	contentHeight := int32(640)
++	if height > 0 && height-96 < contentHeight {
++		contentHeight = height - 96
++	}
++	if contentHeight < 360 {
++		contentHeight = 360
++	}
++
++	dialog := adw.NewDialog()
++	dialog.SetTitle(i18n.L("Set Up Phial"))
++	dialog.SetContentWidth(contentWidth)
++	dialog.SetContentHeight(contentHeight)
++	dialog.SetCanClose(!firstRun)
++	overlay := adw.NewToastOverlay()
++	overlay.SetChild(&navigation.Widget)
++	a.setupToasts = overlay
++
++	dialog.SetChild(&overlay.Widget)
++
++	var onClosed func(adw.Dialog)
++	onClosed = func(adw.Dialog) {
++		a.setupDialog = nil
++		a.setupNavigation = nil
++		a.setupSteps = nil
++		a.setupToasts = nil
++		a.locationForm = nil
++	}
++	dialog.ConnectClosed(&onClosed)
++	a.hold(&onClosed)
++
++	a.setupDialog = dialog
++
++	if tag != wizardWelcomeTag {
++		navigation.PushByTag(tag)
++	}
++
++	dialog.Present(&a.win.Widget)
++}
++
++// wizardPage builds one step of the setup wizard.
++func (a *App) wizardPage(tag string, title string, subtitle string, content *gtk.Widget) (*adw.NavigationPage, *adw.HeaderBar) {
++	header := adw.NewHeaderBar()
++	header.SetShowEndTitleButtons(false)
++	windowTitle := adw.NewWindowTitle(i18n.L(title), i18n.L(subtitle))
++	header.SetTitleWidget(&windowTitle.Widget)
++
++	toolbar := adw.NewToolbarView()
++	toolbar.AddTopBar(&header.Widget)
++	toolbar.SetContent(content)
++
++	page := adw.NewNavigationPage(&toolbar.Widget, i18n.L(title))
++	page.SetTag(tag)
++
++	return page, header
++}
++
++// buildSetupPage builds the page of one step with its action row and its
++// continue control.
++func (a *App) buildSetupPage(step *setupStep, groups ...*adw.PreferencesGroup) *adw.NavigationPage {
++	step.banner = adw.NewBanner("")
++	step.banner.SetRevealed(false)
++
++	content := append([]*adw.PreferencesGroup{}, groups...)
++
++	if step.validate != nil {
++		step.actionRow = a.buttonRow("_Check Again", "view-refresh-symbolic", func() {
++			if step.refresh != nil {
++				step.refresh()
++			}
++
++			step.update()
++		})
++	} else {
++		step.actionRow = a.buttonRow("_Copy Command", "edit-copy-symbolic", func() {
++			step.copyCommand()
++		})
++	}
++
++	if len(content) > 0 {
++		content[len(content)-1].Add(&step.actionRow.Widget)
++	}
++
++	page, header := a.wizardPage(step.tag, step.title, step.subtitle, a.pageContentWithBanner(step.banner, content...))
++	step.page = page
++
++	step.next = a.labelButton("_Continue", func() { step.advance() })
++	step.next.AddCssClass("suggested-action")
++	header.PackEnd(&step.next.Widget)
++
++	step.update()
++
++	var onShown func(adw.NavigationPage)
++	onShown = func(adw.NavigationPage) {
++		if step.commandFunc != nil {
++			step.refreshCommand()
++		}
++
++		step.update()
++	}
++	page.ConnectShown(&onShown)
++	a.hold(&onShown)
++
++	return page
++}
++
++// buildWelcomeStep builds the splash step with the call to action.
++func (a *App) buildWelcomeStep(navigation *adw.NavigationView) *adw.NavigationPage {
++	status := adw.NewStatusPage()
++	status.SetTitle(i18n.L("Welcome to Phial"))
++	status.SetDescription(i18n.L("Run machines that see only the secrets you grant them"))
++
++	if icon := gdk.NewTextureFromResource(resources.ResourceIconPath); icon != nil {
++		status.SetPaintable(icon)
++	} else {
++		status.SetIconName("drive-harddisk-symbolic")
++	}
++
++	start := a.labelButton("_Get Started", func() {
++		navigation.PushByTag(wizardFoldersTag)
++	})
++	start.AddCssClass("suggested-action")
++	start.AddCssClass("pill")
++	start.SetHalign(gtk.AlignCenterValue)
++	status.SetChild(&start.Widget)
++
++	page, _ := a.wizardPage(wizardWelcomeTag, "Welcome", "", &status.Widget)
++
++	return page
++}
++
++// buildFoldersStep builds the step that chooses the folders. The rows of the
++// form carry the state of every folder, so the step can check itself.
++func (a *App) buildFoldersStep(form *locationForm, navigation *adw.NavigationView) *setupStep {
++	step := &setupStep{
++		app:        a,
++		tag:        wizardFoldersTag,
++		nextTag:    wizardHostTag,
++		title:      i18n.L("Folders"),
++		subtitle:   i18n.L("Step 1 of 3"),
++		navigation: navigation,
++		validate:   form.valid,
++		refresh:    form.refresh,
++		apply:      form.apply,
++	}
++
++	step.page = a.buildSetupPage(step, form.foldersGroup)
++
++	form.banner = step.banner
++	form.onChanged = func() { step.update() }
++	form.refresh()
++
++	return step
++}
++
++// buildHostStep builds the step that installs the host service.
++func (a *App) buildHostStep(navigation *adw.NavigationView) *setupStep {
++	step := &setupStep{
++		app:         a,
++		tag:         wizardHostTag,
++		nextTag:     wizardSystemTag,
++		title:       i18n.L("Host Services"),
++		subtitle:    i18n.L("Step 2 of 3"),
++		navigation:  navigation,
++		commandFunc: a.installCommand,
++	}
++
++	group := a.setupCommandGroup(
++		step,
++		"Run this command in a terminal. It installs the command and the services that run your machines.",
++	)
++
++	step.page = a.buildSetupPage(step, group)
++
++	return step
++}
++
++// buildSystemStep builds the step that prepares the host.
++func (a *App) buildSystemStep(navigation *adw.NavigationView) *setupStep {
++	step := &setupStep{
++		app:         a,
++		tag:         wizardSystemTag,
++		nextTag:     wizardFinishTag,
++		title:       i18n.L("System Setup"),
++		subtitle:    i18n.L("Step 3 of 3"),
++		navigation:  navigation,
++		commandFunc: a.rootSetupCommand,
++	}
++
++	group := a.setupCommandGroup(
++		step,
++		"Run this command in a terminal. It reserves huge pages and adds the rules for USB devices. It needs your password.",
++	)
++
++	step.page = a.buildSetupPage(step, group)
++
++	return step
++}
++
++// buildFinishStep builds the last step with the finished feeling of the wizard.
++func (a *App) buildFinishStep() *adw.NavigationPage {
++	status := adw.NewStatusPage()
++	status.SetIconName("object-select-symbolic")
++	status.SetTitle(i18n.L("You're Ready"))
++	status.SetDescription(i18n.L("Now make a machine your own"))
++
++	finish := a.labelButton("_Finish", func() { a.finishSetupDialog() })
++	finish.AddCssClass("suggested-action")
++	finish.AddCssClass("pill")
++	finish.SetHalign(gtk.AlignCenterValue)
++	status.SetChild(&finish.Widget)
++
++	page, _ := a.wizardPage(wizardFinishTag, i18n.L("Done"), "", &status.Widget)
++
++	return page
++}
++
++// setupCommandGroup builds the group that carries one command and its copy
++// control. The control marks the step as read, so the step can trust a copy
++// that the window cannot check.
++func (a *App) setupCommandGroup(step *setupStep, description string) *adw.PreferencesGroup {
++	group := adw.NewPreferencesGroup()
++	group.SetTitle(i18n.L("Command"))
++	group.SetDescription(i18n.L(description))
++
++	box := gtk.NewBox(gtk.OrientationHorizontalValue, 6)
++	box.SetMarginTop(12)
++	box.SetMarginBottom(12)
++	box.SetMarginStart(12)
++	box.SetMarginEnd(6)
++
++	step.command = a.currentCommand(step)
++	step.commandLabel = gtk.NewLabel(step.command)
++	step.commandLabel.AddCssClass("monospace")
++	step.commandLabel.SetWrap(true)
++	step.commandLabel.SetWrapMode(pango.WrapWordCharValue)
++	step.commandLabel.SetXalign(0)
++	step.commandLabel.SetHexpand(true)
++
++	box.Append(&step.commandLabel.Widget)
++
++	row := gtk.NewListBoxRow()
++	row.SetActivatable(false)
++	row.SetSelectable(false)
++	row.SetChild(&box.Widget)
++
++	group.Add(&row.Widget)
++
++	return group
++}
++
++// currentCommand states the command of a step from its source.
++func (a *App) currentCommand(step *setupStep) string {
++	if step.commandFunc == nil {
++		return step.command
++	}
++
++	return step.commandFunc()
++}
++
++// refreshCommand updates the command of a step, so that the folders of the
++// folder step reach the commands of the steps that follow it.
++func (s *setupStep) refreshCommand() {
++	s.command = s.app.currentCommand(s)
++
++	if s.commandLabel != nil {
++		s.commandLabel.SetText(s.command)
++	}
++}
++
++// installCommand states the command that installs the host service. The
++// command carries the chosen folders, because the host process cannot read the
++// settings of the sandbox.
++func (a *App) installCommand() string {
++	binary := "phial"
++
++	if !paths.Sandboxed() {
++		if self, err := os.Executable(); err == nil {
++			binary = shellQuote(self)
++		}
++	}
++
++	set := paths.Current()
++
++	return strings.Join([]string{
++		binary, "install", "--embedded",
++		"--config", shellQuote(set.Config.HostPath()),
++		"--data", shellQuote(set.Data.HostPath()),
++		"--ssh", shellQuote(set.SSH.HostPath()),
++	}, " ")
++}
++
++// rootSetupCommand states the command that prepares the host. It names the
++// installed command, because the host does not reach the folder of the user.
++func (a *App) rootSetupCommand() string {
++	binary := setup.HostCLI()
++	if binary == "" {
++		binary = "phial"
++	}
++
++	return "run0 " + shellQuote(binary) + " root-setup"
++}
++
++// copyCommand copies the command and marks the step as read. The window cannot
++// read the host state from the sandbox, so the step trusts the copy.
++func (s *setupStep) copyCommand() {
++	if s.command == "" {
++		return
++	}
++
++	s.app.copyText(s.command, "")
++
++	if s.app.setupToasts != nil {
++		toast := adw.NewToast(i18n.L("Command copied"))
++		toast.SetTimeout(4)
++		s.app.setupToasts.AddToast(toast)
++	}
++
++	s.copied = true
++
++	if s.actionRow != nil {
++		s.actionRow.SetTitle(i18n.L("Command Copied"))
++		s.actionRow.SetStartIconName("object-select-symbolic")
++	}
++
++	s.update()
++}
++
++// update states whether the step is done and enables the continue control.
++func (s *setupStep) update() {
++	if s.validate != nil {
++		s.ready = s.validate()
++	} else {
++		s.ready = s.copied
++	}
++
++	s.next.SetSensitive(s.ready)
++}
++
++// advance validates the step again and opens the next one. A step that is not
++// done never opens the next one.
++func (s *setupStep) advance() {
++	s.update()
++
++	if !s.ready {
++		if s.validate != nil {
++			s.banner.SetTitle(i18n.L("Finish this step before you continue"))
++		} else {
++			s.banner.SetTitle(i18n.L("Copy the command before you continue"))
++		}
++
++		s.banner.SetRevealed(true)
++
++		return
++	}
++
++	if s.apply != nil && !s.apply() {
++		return
++	}
++
++	s.banner.SetRevealed(false)
++	s.navigation.PushByTag(s.nextTag)
++}
++
++// shellQuote wraps a value so that a shell reads it as one word.
++func shellQuote(value string) string {
++	if value == "" {
++		return "''"
++	}
++
++	if !strings.ContainsAny(value, " \t\n'\"\\$\x60!&|;<>()[]{}*?~#") {
++		return value
++	}
++
++	return "'" + strings.ReplaceAll(value, "'", "'\\''") + "'"
++}
++
++// finishSetupDialog closes the wizard and refreshes the window.
++func (a *App) finishSetupDialog() {
++	if a.locationForm != nil && a.locationForm.valid() {
++		if err := a.saveLocations(a.locationForm.set); err != nil {
++			a.Log.Warn("could not save the folders of the setup", "err", err)
++		}
++	}
++
++	a.locationForm = nil
++	a.setupNavigation = nil
++	a.setupSteps = nil
++	a.setupToasts = nil
++
++	if a.setupDialog != nil {
++		a.setupDialog.ForceClose()
++		a.setupDialog = nil
++	}
++
++	a.refreshSidebar()
++	a.refreshSecretsPage()
++	a.refreshGrantsPage()
++	a.refreshCounts()
++	a.restoreActivePage()
++
++	a.win.Present()
++}
+diff --git a/internal/ui/system.go b/internal/ui/system.go
+deleted file mode 100644
+index fa809645b27113a9a08b88f0b37dd5325f9456a0..0000000000000000000000000000000000000000
+--- a/internal/ui/system.go
++++ /dev/null
+@@ -1,136 +0,0 @@
+-package ui
+-
+-import (
+-	"strconv"
+-	"strings"
+-
+-	"codeberg.org/puregotk/puregotk/v4/adw"
+-	"codeberg.org/puregotk/puregotk/v4/gtk"
+-	"github.com/pojntfx/go-gettext/pkg/i18n"
+-
+-	"codeberg.org/pojntfx/phial-neo/internal/mcp"
+-	"codeberg.org/pojntfx/phial-neo/internal/virt"
+-)
+-
+-// statusOK reports whether a status item looks healthy.
+-func statusOK(item mcp.StatusItem) bool {
+-	value := strings.ToLower(strings.TrimSpace(item.Value))
+-
+-	switch value {
+-	case "present", "active", "up":
+-		return true
+-	case "", "missing", "inactive", "down", "unknown", "none":
+-		return false
+-	}
+-
+-	if count, err := strconv.Atoi(value); err == nil {
+-		return count > 0
+-	}
+-
+-	return false
+-}
+-
+-func (a *App) showSystemSetupDialog() {
+-	scope := a.newScope()
+-
+-	statusGroup := adw.NewPreferencesGroup()
+-	statusGroup.SetTitle(i18n.L("Requirements"))
+-	statusGroup.SetDescription(i18n.L("Phial needs huge pages, memory lock, udev rules, a bridge, and three user services."))
+-
+-	loadingRow := adw.NewActionRow()
+-	loadingRow.SetTitle(i18n.L("Reading the host state"))
+-	spinner := adw.NewSpinner()
+-	spinner.SetVisible(true)
+-	loadingRow.AddPrefix(&spinner.Widget)
+-	statusGroup.Add(&loadingRow.Widget)
+-
+-	actionGroup := adw.NewPreferencesGroup()
+-	actionGroup.SetDescription(i18n.L("Phial writes system files and asks for administrator approval."))
+-
+-	hugePagesRow := adw.NewActionRow()
+-	hugePagesRow.SetTitle(i18n.L("Huge Pages"))
+-	hugePagesRow.SetSubtitle(hugePagesDetail(""))
+-	hugePagesRow.AddCssClass("property")
+-	hugePagesRow.SetSubtitleSelectable(true)
+-	statusGroup.Add(&hugePagesRow.Widget)
+-
+-	detail := adw.NewActionRow()
+-	detail.SetTitle(i18n.L("Applies"))
+-	detail.SetSubtitle(i18n.L("Huge pages, memory lock, USB and vfio udev rules, and the bridge"))
+-	detail.AddCssClass("property")
+-	actionGroup.Add(&detail.Widget)
+-
+-	actionGroup.Add(&a.buttonRow("_Apply System Setup", "system-run-symbolic", func() {
+-		a.applySystemSetup()
+-	}).Widget)
+-
+-	content := a.formPage(statusGroup, actionGroup)
+-	dialog := a.dialog(scope, "System Setup", "", "_Close", content, nil)
+-
+-	go func() {
+-		_, output, err := a.Service.SystemStatus(a.Ctx, nil, struct{}{})
+-
+-		a.idle(func() {
+-			spinner.SetVisible(false)
+-
+-			if err != nil {
+-				loadingRow.SetTitle(i18n.L("The host state could not be read"))
+-				loadingRow.SetSubtitle(err.Error())
+-				return
+-			}
+-
+-			statusGroup.Remove(&loadingRow.Widget)
+-
+-			if output == nil {
+-				return
+-			}
+-
+-			for _, item := range output.Items {
+-				row := adw.NewActionRow()
+-				row.SetTitle(item.Name)
+-				row.SetSubtitle(item.Value)
+-				row.SetSubtitleSelectable(true)
+-				row.AddCssClass("property")
+-
+-				icon := gtk.NewImageFromIconName("object-select-symbolic")
+-				if !statusOK(item) {
+-					icon = gtk.NewImageFromIconName("dialog-warning-symbolic")
+-					icon.AddCssClass("warning")
+-				}
+-				row.AddPrefix(&icon.Widget)
+-
+-				statusGroup.Add(&row.Widget)
+-			}
+-		})
+-	}()
+-
+-	a.present(dialog, scope)
+-}
+-
+-func (a *App) applySystemSetup() {
+-	var devices []string
+-
+-	if defs, err := virt.List(); err == nil {
+-		seen := map[string]bool{}
+-		for _, def := range defs {
+-			for _, device := range def.USBDevices {
+-				if seen[device] {
+-					continue
+-				}
+-				seen[device] = true
+-				devices = append(devices, device)
+-			}
+-		}
+-	}
+-
+-	a.goAsync(func() (string, error) {
+-		if _, _, err := a.Service.SystemRootSetup(a.Ctx, nil, mcp.RootSetupInput{
+-			Memory:  "16G",
+-			Devices: devices,
+-		}); err != nil {
+-			return "", err
+-		}
+-
+-		return i18n.L("The system setup finished"), nil
+-	})
+-}
+diff --git a/internal/ui/util.go b/internal/ui/util.go
+index 3d186e881ccd3bdf009b7adcdb4bcebbe6224d78..9e66a188a6b9c3738acd15955b93ba8aaec7e2b4 100644
+--- a/internal/ui/util.go
++++ b/internal/ui/util.go
+@@ -41,6 +41,18 @@ 	a.hold(&cb)
+ 	glib.TimeoutAddSeconds(seconds, &cb, 0)
+ }
+ 
++// later runs one function once the window has had time to lay out.
++func (a *App) later(milliseconds uint32, fn func()) {
++	var cb glib.SourceFunc
++	cb = glib.SourceFunc(func(uintptr) bool {
++		defer glib.UnrefCallback(&cb)
++		fn()
++
++		return false
++	})
++	glib.TimeoutAdd(milliseconds, &cb, 0)
++}
++
+ func (a *App) toast(text string) {
+ 	if a.suppressToasts || a.toasts == nil {
+ 		return
+diff --git a/internal/ui/window.go b/internal/ui/window.go
+index 20067f166564a2932aae5691e084b58e26aaf727..925f89be909361028cdbadc8583a11c1212ff055 100644
+--- a/internal/ui/window.go
++++ b/internal/ui/window.go
+@@ -558,7 +558,7 @@ 					Y: float32((height - content.GetHeight()) / 2),
+ 				}
+ 				snapshot.Translate(&point)
+ 				child.SnapshotChild(content, snapshot)
+-			} else {
++			} else if child.GetFirstChild() != nil {
+ 				window.Widget.SnapshotChild(child, snapshot)
+ 			}
+ 
+diff --git a/main.go b/main.go
+index 64ecb3a812c1b7b85b196636a36d2305e68bc95c..3df87755fa6330f4af42efeaaadb2c3b615e0cc1 100644
+--- a/main.go
++++ b/main.go
+@@ -31,7 +31,8 @@   phial vm exec <name>      run one virtual machine in the foreground
+   phial vfio <bind|restore> <address>  bind or restore a PCI controller
+   phial gate                serve the gate that a guest may reach
+   phial root-setup [ethernet] [memory] apply the system setup, needs run0
+-  phial install [--embedded] [repo] install the binary and the configuration
++  phial install [--embedded] [--config <path>] [--data <path>] [--ssh <path>] [repo]
++                            install the binary and the configuration
+   phial acceptance          run the host acceptance checks
+   phial forward-guest <name> forward one socket to the host, guest side
+   phial run <command...>    run a command with the granted secrets, guest side
+@@ -301,15 +302,57 @@
+ func runInstall(args []string) error {
+ 	repo := ""
+ 	embedded := false
++	configPath := ""
++	dataPath := ""
++	sshPath := ""
++
++	for index := 0; index < len(args); index++ {
++		arg := args[index]
++
++		value := func() string {
++			if index+1 < len(args) {
++				index++
++
++				return args[index]
++			}
+ 
+-	for _, arg := range args {
+-		if arg == "--embedded" {
++			return ""
++		}
++
++		switch {
++		case arg == "--embedded":
+ 			embedded = true
++		case arg == "--config":
++			configPath = value()
++		case strings.HasPrefix(arg, "--config="):
++			configPath = strings.TrimPrefix(arg, "--config=")
++		case arg == "--data":
++			dataPath = value()
++		case strings.HasPrefix(arg, "--data="):
++			dataPath = strings.TrimPrefix(arg, "--data=")
++		case arg == "--ssh":
++			sshPath = value()
++		case strings.HasPrefix(arg, "--ssh="):
++			sshPath = strings.TrimPrefix(arg, "--ssh=")
++		default:
++			repo = arg
++		}
++	}
+ 
+-			continue
++	if configPath != "" || dataPath != "" || sshPath != "" {
++		set := paths.Current()
++
++		if configPath != "" {
++			set.Config = paths.Location{Host: configPath, Access: configPath}
++		}
++		if dataPath != "" {
++			set.Data = paths.Location{Host: dataPath, Access: dataPath}
++		}
++		if sshPath != "" {
++			set.SSH = paths.Location{Host: sshPath, Access: sshPath}
+ 		}
+ 
+-		repo = arg
++		paths.SetCurrent(set)
+ 	}
+ 
+ 	if !embedded && repo == "" {
+diff --git a/tests/wizard-test.sh b/tests/wizard-test.sh
+index 823d5641240cb004718630c70a44339bb5e6a8f3..f2c4c6dce8ed450097f5aace18ab2353c4321ab1 100755
+--- a/tests/wizard-test.sh
++++ b/tests/wizard-test.sh
+@@ -20,7 +20,7 @@ export XDG_DATA_HOME="${XDG_DATA_HOME:-/tmp/phial-wizard-data}"
+ export PHIAL_RUNTIME_DIR="${PHIAL_RUNTIME_DIR:-/tmp/phial-wizard-runtime/phial}"
+ 
+ rm -rf "$XDG_CONFIG_HOME" "$XDG_DATA_HOME" "$PHIAL_RUNTIME_DIR" "$OUT"
+-mkdir -p "$PHIAL_RUNTIME_DIR" "$OUT"
++mkdir -p "$PHIAL_RUNTIME_DIR" "$XDG_CONFIG_HOME/phial" "$XDG_DATA_HOME/phial" "$OUT"
+ 
+ pkill -x phial-wizard-app 2>/dev/null || true
+ 
+@@ -73,38 +73,46 @@   "$GSETTINGS" set "$APP_ID" window-width "$1"
+   "$GSETTINGS" set "$APP_ID" window-height "$2"
+ }
+ 
++steps() {
++  act_string wizard-step folders
++  sleep 1
++  capture "$1-folders"
++  act_string wizard-step host
++  sleep 2
++  capture "$1-host-services"
++  act wizard-copy
++  sleep 1
++  capture "$1-host-services-copied"
++  act_string wizard-step system
++  sleep 2
++  capture "$1-system-setup"
++  act wizard-copy
++  sleep 1
++  capture "$1-system-setup-copied"
++  act_string wizard-step finish
++  sleep 2
++  capture "$1-finish"
++}
++
+ set_size 1020 720
+ start
+ capture 01-welcome
+-act_string wizard-step host
+-sleep 2
+-capture 02-host-setup
+-act_string wizard-step folders
+-sleep 2
+-capture 03-folders
+-act_string wizard-step finish
+-sleep 2
+-capture 04-finish
++steps 02
+ act wizard-finish
+ sleep 3
+-capture 05-main
++capture 03-main
+ stop
+ 
+ rm -rf "$XDG_CONFIG_HOME" "$XDG_DATA_HOME" "$PHIAL_RUNTIME_DIR"
+-mkdir -p "$PHIAL_RUNTIME_DIR"
++mkdir -p "$PHIAL_RUNTIME_DIR" "$XDG_CONFIG_HOME/phial" "$XDG_DATA_HOME/phial"
+ 
+ set_size 430 800
+ start
+ capture 10-welcome-mobile
+-act_string wizard-step host
+-sleep 2
+-capture 11-host-setup-mobile
+-act_string wizard-step folders
+-sleep 2
+-capture 12-folders-mobile
+-act_string wizard-step finish
+-sleep 2
+-capture 13-finish-mobile
++steps 11
++act wizard-finish
++sleep 3
++capture 14-main-mobile
+ stop
+ 
+ ls -la "$OUT"
+
