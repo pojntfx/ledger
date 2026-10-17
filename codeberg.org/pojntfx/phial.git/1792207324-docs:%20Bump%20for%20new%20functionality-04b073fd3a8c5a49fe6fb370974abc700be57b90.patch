@@ -1,0 +1,2227 @@
+From 04b073fd3a8c5a49fe6fb370974abc700be57b90 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Fri, 16 Oct 2026 20:22:04 -0700
+Subject: [PATCH] docs: Bump for new functionality
+---
+diff --git a/README.md b/README.md
+index 92352be9df21b4e4254488e664eeed58872f1936..a301439e868b6fc73260e51aee7f6f9e476ee52a 100644
+--- a/README.md
++++ b/README.md
+@@ -6,26 +6,28 @@ ![The machine page](assets/meta/screenshot-machine.png)
+ 
+ ## Overview
+ 
+-Phial runs Fedora virtual machines on your desktop. Every secret stays on the host.
+-A machine receives access to one secret for a set time and nothing more.
++Phial runs Fedora virtual machines on your desktop. Every secret and every private
++key stays on the host. A machine receives access to one secret or one key, for one
++machine, for a set time, and nothing more.
+ 
+ The host is trusted. The machine is not trusted. Read [docs/DESIGN.md](docs/DESIGN.md)
+-for the interface design and [ROADMAP.md](ROADMAP.md) for the engine design and the
+-threat model.
++for the interface design, the gate design, and the threat model.
+ 
+ ## Terms
+ 
+ - A machine is one Fedora guest with its own disk, memory, and device list.
+-- Env mode means that the machine reads a secret from a file.
++- A secret is a value in the keyring of the host, the Secret Service of the session.
++- Env mode means that the machine reads a secret from a file in its own share.
+ - Proxy mode means that the host injects a secret into an outbound request.
+-- A grant is a time box on one secret.
++- A key lives in the SSH agent of the session or in the GnuPG agent of the host.
++- A grant is a time box or a single use of one secret or key for one machine.
+ - A share is a host directory that the machine mounts over virtiofs.
+ 
+ ## Install
+ 
+ Install the tools for the host setup:
+ 
+-    sudo dnf install waypipe virt-firmware keepassxc pinentry-gnome3
++    sudo dnf install waypipe virt-firmware pinentry-gnome3
+ 
+ Build the binary and install the pieces into your user directories:
+ 
+@@ -35,17 +37,14 @@ Apply the system setup. The application does the same from the System Setup dialog:
+ 
+     ./bin/phial root-setup
+ 
+-Open KeePassXC and keep the window unlocked. Its Secret Service answers one lookup
+-with no prompt.
+-
+ ## The application
+ 
+ Start Phial with no argument to open the window:
+ 
+     phial
+ 
+-The window carries a sidebar. The sidebar lists every machine, then Providers, then
+-Requests. Select an entry to show it in the content area.
++The window carries a sidebar. The sidebar lists every machine, then Secrets and
++Grants. Select an entry to show it in the content area.
+ 
+ ### Machines
+ 
+@@ -59,26 +58,26 @@
+ Press Install to fetch the Fedora netinst image and to write the system. The page
+ then lists every install step and a Cancel Installation control.
+ 
+-### Providers
++### Secrets
+ 
+-A provider names one secret in your password store. Press Add Provider to create
+-one. Select a provider to open its page.
++The Secrets page lists what a machine can be granted: the SSH keys of your session
++agent, the GnuPG keys of the host, and the secrets of the host keyring. Add a key
++from a file, generate a new one, or store a secret. The private parts never leave
++the host. Grant an entry to a machine from its row.
+ 
+-The provider page shows the mode, the source, and the upstream. It also grants and
+-revokes access. A grant ends on its own when the time runs out.
++### Grants
+ 
+-### Forwards
++A grant opens one secret or key for one machine: time-boxed, one use, or until
++revoked. The Grants page lists every open grant with its machine and its remaining
++time. Revoke a grant from its row.
+ 
+-A forward carries one socket from a machine to this host. Select Forwards in the
+-sidebar to see every forward, its state, and its address pair. Use the switch to start
+-or stop a forward and the remove control to delete one. The agent channel needs the mcp
+-forward on vsock port 8080.
+-
+-### Requests
++An agent inside a machine can ask the host for a grant, or to store or remove a
++secret or a key. Every request waits on the Grants page. Approve or deny each
++request. A request that nobody answers within five minutes counts as denied.
+ 
+-An agent inside a machine can ask the host for a provider, a grant, or a device.
+-Every request appears on the Requests page. Approve or deny each request. A request
+-that nobody answers within five minutes counts as denied.
++The gate on the host enforces every grant. The machine reaches the SSH agent, the
++GnuPG agent, and the proxy through it. Before the gate signs with a key, it asks
++you with a prompt on the host.
+ 
+ ### System Setup
+ 
+@@ -94,8 +93,9 @@ - `$XDG_RUNTIME_DIR/phial/mcp.sock` serves the host.
+ - `$XDG_RUNTIME_DIR/phial/mcp-guest.sock` serves the machine.
+ 
+ The machine reaches the host endpoint through vsock port 8080 at
+-`http://host.internal:8080/mcp`. List the tools with the `tools/list` request.
+-Every control in the window has a matching tool.
++`http://host.internal:8080/mcp`. The host knows which machine a request comes
++from by the vsock address of the connection. List the tools with the
++`tools/list` request. Every control in the window has a matching tool.
+ 
+ ## The command line
+ 
+@@ -106,13 +106,16 @@     phial vfio <bind|restore> <address>   bind or restore a PCI controller
+     phial root-setup [ethernet] [memory]  apply the system setup, needs run0
+     phial install [repo]      install the binary and the configuration
+     phial acceptance          run the host acceptance checks
++    phial gate                serve the gate that a machine may reach
+     phial forward-guest <name> forward one socket to the host, machine side
+     phial run <command...>    run a command with the granted secrets, machine side
+-    phial sync                sync the secrets
+-    phial allow [--for <duration>] [--kind <kind>] <name>
+-    phial revoke <name>
+-    phial status              show the grant status
+-    phial ls                  list the secret names, never the values
++    phial allow (--for <duration> | --once | --until-revoked) [--vm <machine>] <target>
++    phial revoke [--vm <machine>] <id or target>
++    phial status              show the grants
++    phial ls                  list the secret and key names, never the values
++
++A target is a secret name, `agent://<comment>` for an SSH key of the session, or
++`gpg-agent://` for the GnuPG agent of the host.
+ 
+ ## Development
+ 
+@@ -145,9 +148,11 @@ machine and provider.
+ 
+ ## Flatpak
+ 
+-The manifest sits at flatpak/com.pojtinger.felicitas.Phial.json. It builds QEMU,
+-virtiofsd, passt, swtpm, socat, Caddy, waypipe, FreeRDP, edk2, and Phial itself
+-from source. Run `make flatpak`. Read [flatpak/README.md](flatpak/README.md).
++The manifest sits at flatpak/com.pojtinger.felicitas.Phial.json. It builds
++virtiofsd, passt, swtpm, socat, waypipe, FreeRDP, the OVMF firmware pair, and
++Phial itself from source. Run `make flatpak`. Read
++[flatpak/README.md](flatpak/README.md) for the module list and the
++permissions. QEMU runs on the host.
+ 
+ ## Translations
+ 
+diff --git a/docs/DESIGN.md b/docs/DESIGN.md
+index df3422ee1f15dc6bee9f9a24e83c87a8b3f2bfed..549994a79f6c1dc5f75b6932ef2c2d5beac2e94e 100644
+--- a/docs/DESIGN.md
++++ b/docs/DESIGN.md
+@@ -14,10 +14,10 @@     └── AdwNavigationSplitView          collapsed below 550sp
+         ├── sidebar  AdwNavigationPage
+         │   └── AdwToolbarView
+         │       ├── AdwHeaderBar        New Machine, Main Menu
+-        │       └── AdwSidebar          Machines, Providers, Requests
++        │       └── AdwSidebar          Machines, Secrets, Grants
+         └── content  AdwNavigationPage
+-            └── AdwNavigationView       one page per machine, per provider, and the
+-                                        Providers and Requests pages
++            └── AdwNavigationView       one page per machine, and the Secrets and
++                                        Grants pages
+ ```
+ 
+ The sidebar holds the machine list, because a user switches between machines often.
+@@ -37,10 +37,10 @@
+ The sidebar carries one section for the machines and one section for the tools.
+ 
+ - A machine row carries the hard disk icon, the name, and the state as a subtitle.
+-- The Providers row carries the key icon, the count as a subtitle, and a badge with
+-  the number of open grants.
+-- The Requests row carries the inbox icon, the pending count as a subtitle, and a
+-  badge with the same count.
++- The Secrets row carries the password icon and a quiet pill with the number of
++  secrets and keys.
++- The Grants row carries the alarm icon, a quiet pill with the number of open
++  grants, and an accent pill with the number of waiting requests.
+ 
+ The New Machine control and the main menu sit in the header bar of the sidebar. The
+ navigation guideline asks for sidebar controls above the list and for the main menu
+@@ -88,7 +88,7 @@ - The pencil opens Machine Settings.
+ - The menu carries Logs, Reprovision the Guest Agent, Restart, and Delete Machine.
+ - Logs opens the log of the machine in the text editor: the console of the installer when it keeps one, else the service log of the machine.
+ - The Serial Console and Remote Desktop dialogs state the user and the password with a copy control for each, because the guest asks for both at its login.
+-- The Terminal dialog carries Unlock the SSH Agent, which loads the key of the user into the dedicated agent of Phial and asks for the passphrase through pinentry.
++- The Terminal dialog carries Unlock the SSH Agent, which loads the key of the user into the agent of the session and asks for the passphrase through pinentry.
+ - Every command in the guest states a timeout, so a guest that stops answering states an error instead of holding the app.
+ - The install provisions the machine: it boots the guest once, waits for the guest agent to answer, copies the units of the guest into it, and stops it again.
+ - The guest agent is the binary of Phial itself, so the reprovision step, which runs the provisioning again, replaces the agent of a machine as well.
+@@ -113,44 +113,73 @@   can reach a machine that does not run.
+ - The page shows the disk path and the configuration as property rows, because a
+   property row carries a name and a value and it reflows at any width.
+ 
+-## The Providers page and the provider page
++## The Secrets page
+ 
+-The Providers page carries one group of provider rows and one group with Sync
+-Secrets Now. An empty list becomes a status page with an Add Provider control.
++The Secrets page lists what a machine can be granted, in three groups. The
++private parts never leave the host.
+ 
+-A provider row carries the name, the mode, the source or the upstream, and the
+-remaining grant time. A row opens the provider page.
++- The Secrets group lists the secrets of the host keyring, one row per secret. A
++  row carries the name, the mode, and the machines that hold a grant on it. The
++  page never shows a value.
++- A row opens the edit dialog. An empty value field keeps the stored value.
++  Add Secret stores a value in the Secret Service of the session. Delete removes
++  the value, the row, and every grant on the secret.
++- The SSH Keys group lists the keys of the session agent: the comment, the
++  fingerprint, and the type. Add SSH Key loads a key file into the agent, and
++  Unload drops it again. The file on disk stays.
++- The GnuPG Keys group lists the secret keys of the host agent: the uid and the
++  short fingerprint. Delete removes the secret part only, so old signatures still
++  verify.
++- Generate Key creates a key on the host: an SSH pair in ~/.ssh, or a GnuPG key
++  in the host keyring. The GnuPG agent asks for the passphrase through the
++  pinentry of the host.
++- Every row carries Grant Access, which opens the grant dialog for that entry.
+ 
+-The provider page carries two groups:
++## The Grants page
+ 
+-- **Secret** carries the mode, the source, and the upstream. The page never shows a
+-  value, and the group description says so.
+-- **Grant** carries the access state, Grant Access, and Revoke Access. The state
+-  counts down while a grant is open.
++A grant opens one target for one machine. The kind of the target comes from its
++source: a bare name is a secret, agent:// is a key of the session agent, and
++gpg-agent:// is the GnuPG agent of the host. One name can never mean two kinds,
++so the grant dialog asks for the machine and the duration only.
+ 
+-## The Forwards page
++- The Pending group lists every request that waits for an answer: a grant, or a
++  change to the secrets or the keys of the host. The row carries the action, the
++  machine, and the age, with Approve and Deny on the row.
++- The Active group lists every open grant: the name, the kind, the machine, and
++  the remaining time, with a revoke control on the row.
++- A duration is a time box, one use, or until revoked. A once grant closes after
++  the first signature or the first proxied request. An env secret cannot take a
++  once grant, because the host never sees the read.
++- The grant dialog defaults to a machine that runs.
+ 
+-The Forwards page carries one row for each forward. A forward is one socket that a
+-machine reaches on this host.
++## The gate
+ 
+-- A row carries the forward name, the listen address, the target address, and a
+-  switch. The switch starts or stops the user service of the forward.
+-- A remove control sits at the end of the row and asks for confirmation, because the
+-  control deletes the configuration of the forward.
+-- One Add Forward control sits at the end of the list.
+-- The sidebar entry states the count and the number of running forwards, because a
+-  stopped agent channel is the reason that an agent cannot reach the host.
++The gate is one user service, phial-gate.service, that runs phial gate. It
++listens on three vsock ports, and every port enforces the grants on its own:
+ 
+-## The Requests page
++- Port 5551 answers the SSH agent protocol. List returns only the keys that the
++  grants of the calling machine open. Sign asks the user with a host prompt
++  before it forwards to the agent of the session, once per key per minute.
++- Port 5552 carries the GnuPG agent protocol. A connection needs an open gpg
++  grant for the calling machine, and the user approves each connection with a
++  host prompt. The agent of the host still asks for the passphrase through its
++  own pinentry.
++- Port 4000 is the secret proxy. The path of a request names one secret, and the
++  gate answers only with an open grant for the calling machine. The gate injects
++  the Authorization header and rewrites the Host header to the upstream.
+ 
+-The Requests page holds the pending approvals. Each row carries the action, the
+-detail, the age, and two controls, Deny and Approve.
++The vsock address of a connection names the machine, so a guest cannot claim to
++be another machine. A connection from an address that no machine owns serves
++nothing. The local socket of the gate belongs to the host itself and sees every
++grant; it exists for the tests.
+ 
+-The page shows a status page while no request waits. The description states the
+-five minute limit, so that a user knows what happens to an ignored request.
++The transports stay open: a guest always finds the gate listening, and a grant
++decides what the gate serves. A machine mounts only its own secrets directory,
++so an env file written for one machine never reaches another.
+ 
+-A request also raises a notification with a Review action. The notification carries
+-the user to this page.
++A request also raises a notification with a Review action. The notification
++carries the user to the Grants page. A request that nobody answers within five
++minutes counts as denied.
+ 
+ ## States and long-running tasks
+ 
+@@ -227,27 +256,22 @@ - The guest agent does not answer: the network row states this.
+ - No traffic: the network row states this.
+ - The metrics fail: one dimmed row reports the failure.
+ 
+-### The secret sync
+-
+-The Providers page carries one Sync Secrets control. The control reports the result as
+-a toast, and the grant list refreshes on its own.
+-
+ ### The requests
+ 
+-A request waits for an answer. The Requests page states the five minute limit in its
++A request waits for an answer. The Grants page states the five minute limit in its
+ empty state, and the sidebar badge counts the waiting requests.
+ 
+-### The forwards
++### The grants
+ 
+-A forward runs or it does not. The switch reports the state of the user service, and a
+-failed start returns the switch to the real state.
++A grant is open or it is not. The Grants page counts down the time, and a grant
++that runs out closes on its own, because the expiry timer runs on the host.
+ 
+ ## Dialogs
+ 
+ A dialog carries a short form or one decision. The application uses a dialog for
+ these tasks:
+ 
+-- Create a machine, edit a machine, add or edit a provider, grant access, add a USB
++- Create a machine, edit a machine, add or edit a secret, generate a key, grant access, add a USB
+   device, and share a folder.
+ - Show the guest applications, the remote desktop, the terminal, and the serial
+   console.
+@@ -265,7 +289,7 @@ list.
+ 
+ ## Keyboard and accessibility
+ 
+-- Ctrl+N creates a machine, Ctrl+R syncs the secrets, Ctrl+Comma opens the
++- Ctrl+N creates a machine, a secret, or a key, Ctrl+Comma opens the
+   preferences, Ctrl+Question opens the shortcuts, Ctrl+W closes the window, and
+   Ctrl+Q quits.
+ - Ctrl+1 to Ctrl+9 select the first nine machines.
+@@ -287,11 +311,11 @@
+ One term carries one meaning in the interface, the documentation, and the code.
+ 
+ - A machine runs one Fedora guest. The command line calls it a virtual machine.
+-- A provider names one secret in the password store.
+-- A secret is the value that a provider names.
+-- A grant is a time box on one secret.
+-- A request is an agent's ask for a provider, a grant, or a device.
+-- A forward carries one socket between a machine and this host. Its page carries the name Forwards.
++- A secret is a value in the keyring of the host.
++- A key lives in the SSH agent of the session or in the GnuPG agent of the host.
++- A grant is a time box or a single use of one secret or key for one machine.
++- A request is an agent's ask for a change or a grant.
++- The gate is the service on the host that enforces the grants on every transport.
+ - A shared folder is a host folder that the machine mounts. The interface writes shared folders, never shares.
+ - A USB device is one device that a machine claims. A USB hub is the whole hub.
+ - This host is the computer that runs Phial.
+diff --git a/main.go b/main.go
+index d339ff3007e359a0990efd5c3ae3e5913256c84e..dfaa6b4737b76e5bd9eda25dfbe586e38f52548e 100644
+--- a/main.go
++++ b/main.go
+@@ -27,18 +27,21 @@   phial                     open the window (also serves the agent channel)
+   phial --background        start in the background, for autostart
+   phial vm exec <name>      run one virtual machine in the foreground
+   phial vfio <bind|restore> <address>  bind or restore a PCI controller
++  phial gate                serve the gate that a guest may reach
+   phial root-setup [ethernet] [memory] apply the system setup, needs run0
+   phial install [repo]      install the binary and the configuration
+   phial acceptance          run the host acceptance checks
+   phial forward-guest <name> forward one socket to the host, guest side
+   phial run <command...>    run a command with the granted secrets, guest side
+-  phial sync                sync the secrets
+-  phial allow [--for <duration>] [--kind <kind>] <name>
+-  phial revoke <name>
+-  phial status              show the grant status
+-  phial ls                  list the secret names, never the values
++  phial set <name> [--mode env|proxy] [--upstream <url>]   store a secret, value from stdin
++  phial allow (--for <duration> | --once | --until-revoked) [--vm <machine>] <target>
++                            grant a secret, agent://<comment>, or gpg-agent:// to a machine
++  phial revoke [--vm <machine>] <id or target>
++  phial status              show the grants
++  phial ls                  list the secret and key names, never the values
+ `
+ 
++//go:generate sh -c "if [ -z \"$FLATPAK_ID\" ]; then go tool github.com/dennwc/flatpak-go-mod --json .; fi"
+ const gettextPackage = "phial"
+ 
+ // LocaleDir holds the directory of the compiled translations. A development
+@@ -87,12 +90,15 @@ 	case "acceptance":
+ 		os.Exit(setup.PrintAcceptance(setup.Acceptance()))
+ 	case "forward-guest":
+ 		fail(runForwardGuest(args[1:]))
++	case "gate", "agent":
++		client := state.NewClient(log)
++		fail(client.ServeGate())
+ 	case "run":
+ 		client := state.NewClient(log)
+ 		fail(client.Run(args[1:]))
+-	case "sync":
++	case "set":
+ 		client := state.NewClient(log)
+-		fail(client.Sync())
++		fail(client.Set(args[1:], os.Stdin))
+ 	case "allow":
+ 		client := state.NewClient(log)
+ 		fail(client.Allow(args[1:]))
+@@ -122,6 +128,10 @@
+ func runApp(log *slog.Logger, showWindow bool) int {
+ 	ctx, cancel := context.WithCancel(context.Background())
+ 	defer cancel()
++
++	// The application library parses the arguments of the process, so the
++	// flag that started the background mode leaves first.
++	os.Args = os.Args[:1]
+ 
+ 	return ui.Run(ctx, log, gio.NewSettings(resources.AppID), loadKickstart(), showWindow)
+ }
+@@ -236,6 +246,17 @@
+ 	return setup.Install(setup.InstallOptions{RepoDir: repo})
+ }
+ 
++// runtimeDir states the runtime directory of the session, which holds the
++// sockets that a service and its client share.
++func runtimeDir() string {
++	dir := os.Getenv("XDG_RUNTIME_DIR")
++	if dir == "" {
++		dir = fmt.Sprintf("/run/user/%d", os.Getuid())
++	}
++
++	return dir
++}
++
+ func runForwardGuest(args []string) error {
+ 	if len(args) < 1 {
+ 		return fmt.Errorf("usage: phial forward-guest <name>")
+@@ -258,9 +279,11 @@ 	switch kind {
+ 	case "tcp":
+ 		command = exec.Command(binary, "TCP6-LISTEN:"+port+",fork,bind=[::1],reuseaddr", vsock)
+ 	case "unix":
+-		socket := os.Getenv("PHIAL_SOCKET")
++		target := os.Getenv("PHIAL_SOCKET")
+ 
+-		target := socket
++		// %t is the runtime directory, where the sockets of a session live.
++		target = strings.ReplaceAll(target, "%t", runtimeDir())
++
+ 		if strings.HasPrefix(target, "~/") {
+ 			home, err := os.UserHomeDir()
+ 			if err != nil {
+@@ -269,17 +292,12 @@ 			}
+ 
+ 			target = filepath.Join(home, target[2:])
+ 		} else if !strings.HasPrefix(target, "/") {
+-			configHome := os.Getenv("XDG_CONFIG_HOME")
+-			if configHome == "" {
+-				home, err := os.UserHomeDir()
+-				if err != nil {
+-					return err
+-				}
+-
+-				configHome = filepath.Join(home, ".config")
+-			}
++			target = filepath.Join(runtimeDir(), "phial", target)
++		}
+ 
+-			target = filepath.Join(configHome, "phial", target)
++		// A session starts without the directory of its sockets, so make it here.
++		if err := os.MkdirAll(filepath.Dir(target), 0o700); err != nil {
++			return err
+ 		}
+ 
+ 		command = exec.Command(binary, "UNIX-LISTEN:"+target+",fork,unlink-early", vsock)
+diff --git a/po/phial.pot b/po/phial.pot
+index db60f4868551a73232c697b4e7155120e7ce4882..2249fde725c33e459b28b3f39cfa6d781fc75345 100644
+--- a/po/phial.pot
++++ b/po/phial.pot
+@@ -8,7 +8,7 @@ msgid ""
+ msgstr ""
+ "Project-Id-Version: PACKAGE VERSION\n"
+ "Report-Msgid-Bugs-To: \n"
+-"POT-Creation-Date: 2026-10-14 17:05-0700\n"
++"POT-Creation-Date: 2026-10-14 17:20-0700\n"
+ "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+ "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+ "Language-Team: LANGUAGE <LL@li.org>\n"
+@@ -17,1019 +17,1098 @@ "MIME-Version: 1.0\n"
+ "Content-Type: text/plain; charset=UTF-8\n"
+ "Content-Transfer-Encoding: 8bit\n"
+ 
+-#: ../internal/mcp/tools_vm.go:456
++#: ../internal/mcp/tools_vm.go:465
+ msgid "Phial RDP password"
+ msgstr ""
+ 
+-#: ../internal/ui/shares.go:40
+-msgid "Stop Sharing"
++#: ../internal/ui/logs.go:45
++msgid "This machine has no log yet"
+ msgstr ""
+ 
+-#: ../internal/ui/shares.go:53
+-msgid "The folder is no longer shared"
++#: ../internal/ui/access.go:56
++msgid "No terminal emulator was found"
+ msgstr ""
+ 
+-#: ../internal/ui/shares.go:69
+-msgid "Read-only"
++#: ../internal/ui/access.go:69
++msgid "The SSH agent holds your key"
+ msgstr ""
+ 
+-#: ../internal/ui/shares.go:76
+-msgid "Share a Folder"
++#: ../internal/ui/access.go:86
++msgid "Copy User"
+ msgstr ""
+ 
+-#: ../internal/ui/shares.go:78
+-msgid "_Share"
++#: ../internal/ui/access.go:87
++msgid "User copied"
+ msgstr ""
+ 
+-#: ../internal/ui/shares.go:121
+-msgid "_Mount Point in the Machine"
++#: ../internal/ui/access.go:93
++msgid "_Password"
+ msgstr ""
+ 
+-#: ../internal/ui/shares.go:137
+-msgid "Host Folder"
++#: ../internal/ui/access.go:98
++msgid "Copy Password"
+ msgstr ""
+ 
+-#: ../internal/ui/shares.go:149
+-msgid "Enter a mount point first"
++#: ../internal/ui/access.go:99
++msgid "Password copied"
+ msgstr ""
+ 
+-#: ../internal/ui/shares.go:172
+-msgid "The folder is shared"
++#: ../internal/ui/access.go:114
++msgid "Socket on this host"
+ msgstr ""
+ 
+-#: ../internal/ui/providers.go:68 ../internal/ui/window.go:167
+-#: ../internal/ui/window.go:330
+-msgid "Providers"
++#: ../internal/ui/access.go:126 ../internal/ui/access.go:165
++#: ../internal/ui/access.go:209 ../internal/ui/app.go:343
++msgid "Command copied"
+ msgstr ""
+ 
+-#: ../internal/ui/providers.go:127 ../internal/ui/providers.go:240
+-msgid "Env"
++#: ../internal/ui/access.go:148
++msgid "Copy the Alias"
+ msgstr ""
+ 
+-#: ../internal/ui/providers.go:129 ../internal/ui/providers.go:242
+-msgid "Proxy"
++#: ../internal/ui/access.go:149
++msgid "Alias copied"
+ msgstr ""
+ 
+-#: ../internal/ui/providers.go:140
+-#, c-format
+-msgid "granted for %s"
++#: ../internal/ui/access.go:191
++msgid "Copy the Address"
+ msgstr ""
+ 
+-#: ../internal/ui/providers.go:167
+-msgid "Secret"
++#: ../internal/ui/access.go:192
++msgid "Address copied"
+ msgstr ""
+ 
+-#: ../internal/ui/providers.go:168
+-msgid "Phial never shows the value of a secret."
++#: ../internal/ui/access.go:202
++msgid "The remote desktop opens in a moment"
+ msgstr ""
+ 
+-#: ../internal/ui/providers.go:179
+-msgid "Grant"
++#: ../internal/ui/access.go:228
++msgid "On this host (waypipe)"
+ msgstr ""
+ 
+-#: ../internal/ui/providers.go:180
+-msgid ""
+-"The timer belongs to the system, so a grant ends even when Phial is closed."
++#: ../internal/ui/access.go:228
++msgid "In the remote desktop"
+ msgstr ""
+ 
+-#: ../internal/ui/providers.go:198 ../internal/ui/window.go:330
+-msgid "Provider"
++#: ../internal/ui/access.go:240 ../internal/ui/access.go:323
++msgid "Looking for applications"
++msgstr ""
++
++#: ../internal/ui/access.go:274
++msgid "No application matches"
++msgstr ""
++
++#: ../internal/ui/access.go:290
++msgid "The application opens in the remote desktop"
++msgstr ""
++
++#: ../internal/ui/access.go:293
++msgid "The application opens on this host"
++msgstr ""
++
++#: ../internal/ui/access.go:306
++msgid "Enter a command first"
++msgstr ""
++
++#: ../internal/ui/access.go:338
++msgid "The applications could not be listed"
+ msgstr ""
+ 
+-#: ../internal/ui/providers.go:205
+-msgid "_Edit Provider\342\200\246"
++#: ../internal/ui/access.go:349
++msgid "The guest lists no applications"
++msgstr ""
++
++#: ../internal/ui/access.go:377
++msgid "Refresh the Application List"
++msgstr ""
++
++#: ../internal/ui/app.go:187
++msgid "Machines can ask for access while Phial runs."
++msgstr ""
++
++#: ../internal/ui/app.go:586
++msgid "translator-credits"
++msgstr ""
++
++#: ../internal/ui/app.go:613 ../internal/ui/preferences.go:17
++msgid "General"
++msgstr ""
++
++#: ../internal/ui/app.go:614
++msgid "New Machine, Secret, or Key"
++msgstr ""
++
++#: ../internal/ui/app.go:615 ../internal/ui/preferences.go:13
++msgid "Preferences"
++msgstr ""
++
++#: ../internal/ui/app.go:616
++msgid "Keyboard Shortcuts"
++msgstr ""
++
++#: ../internal/ui/app.go:617
++msgid "Close window"
++msgstr ""
++
++#: ../internal/ui/app.go:618
++msgid "Quit"
++msgstr ""
++
++#: ../internal/ui/app.go:621 ../internal/ui/window.go:159
++#: ../assets/resources/window.blp:52 ../assets/resources/window.blp:58
++msgid "Machines"
++msgstr ""
++
++#: ../internal/ui/app.go:622
++msgid "Switch to Machine 1 to 9"
+ msgstr ""
+ 
+-#: ../internal/ui/providers.go:206
+-msgid "_Remove Provider\342\200\246"
++#: ../internal/ui/app.go:623
++msgid "Install, Start, or Stop the Machine"
+ msgstr ""
+ 
+-#: ../internal/ui/providers.go:210
+-msgid "Provider Menu"
++#: ../internal/ui/app.go:650
++msgid "Stop the machines and quit?"
+ msgstr ""
+ 
+-#: ../internal/ui/providers.go:260
++#: ../internal/ui/app.go:652
+ #, c-format
+-msgid "Granted as %s for another %s"
++msgid "This stops %s. Close the window to keep the channel open."
+ msgstr ""
+ 
+-#: ../internal/ui/providers.go:265
+-msgid "_Extend the Grant\342\200\246"
++#: ../internal/ui/app.go:656 ../internal/ui/dialogs.go:103
++#: ../internal/ui/dialogs.go:142 ../internal/ui/keys.go:172
++#: ../internal/ui/keys.go:209 ../internal/ui/machines.go:342
++#: ../internal/ui/secrets.go:409
++msgid "_Cancel"
+ msgstr ""
+ 
+-#: ../internal/ui/providers.go:271
+-msgid "Not granted"
++#: ../internal/ui/app.go:657
++msgid "_Stop and Quit"
+ msgstr ""
+ 
+-#: ../internal/ui/providers.go:273
+-msgid "_Grant Access\342\200\246"
++#: ../internal/ui/app.go:709
++msgid "Start the machine first"
+ msgstr ""
+ 
+-#: ../internal/ui/providers.go:290 ../internal/ui/connections.go:198
+-#: ../internal/ui/machine_dialogs.go:29 ../internal/ui/machine_dialogs.go:97
+-msgid "_Name"
++#: ../internal/ui/app.go:734
++msgid "The guest agent is up to date"
+ msgstr ""
+ 
+-#: ../internal/ui/providers.go:297
+-msgid "_Upstream URL"
++#: ../internal/ui/devices.go:51
++msgid "Remove Hub"
+ msgstr ""
+ 
+-#: ../internal/ui/providers.go:302
+-msgid "_Source"
++#: ../internal/ui/devices.go:69 ../internal/ui/devices.go:244
++msgid "xHCI controller"
+ msgstr ""
+ 
+-#: ../internal/ui/providers.go:308
+-msgid "keepassxc://name"
++#: ../internal/ui/devices.go:93
++msgid "The hub belongs to the machine now"
+ msgstr ""
+ 
+-#: ../internal/ui/providers.go:309
+-msgid "The entry in KeePassXC whose attribute phial is set to this name"
++#: ../internal/ui/devices.go:125
++msgid "The hub went back to the host"
+ msgstr ""
+ 
+-#: ../internal/ui/providers.go:314
+-msgid "Env, the machine reads a file"
++#: ../internal/ui/devices.go:138 ../internal/ui/devices.go:195
++msgid "Looking for controllers"
+ msgstr ""
+ 
+-#: ../internal/ui/providers.go:314
+-msgid "Proxy, the host injects the value"
++#: ../internal/ui/devices.go:144
++msgid "Controllers on This Host"
+ msgstr ""
+ 
+-#: ../internal/ui/providers.go:349
+-msgid "One secret from your password store"
++#: ../internal/ui/devices.go:145
++msgid "The controller leaves the host while the machine runs."
+ msgstr ""
+ 
+-#: ../internal/ui/providers.go:354
+-msgid "A name and a keepassxc:// source are required"
++#: ../internal/ui/devices.go:179
++msgid "No controller matches"
+ msgstr ""
+ 
+-#: ../internal/ui/providers.go:362
+-msgid "A proxy provider needs an upstream URL"
++#: ../internal/ui/devices.go:219
++msgid "The controllers could not be listed"
+ msgstr ""
+ 
+-#: ../internal/ui/providers.go:382
+-msgid "The provider was added"
++#: ../internal/ui/devices.go:264
++msgid "No second xHCI controller"
+ msgstr ""
+ 
+-#: ../internal/ui/providers.go:389
+-msgid "Edit Provider"
++#: ../internal/ui/devices.go:265
++msgid "Whole-hub passthrough needs a second xHCI controller."
+ msgstr ""
+ 
+-#: ../internal/ui/providers.go:414
+-msgid "Remove the provider?"
++#: ../internal/ui/devices.go:276
++msgid "Refresh the Controller List"
+ msgstr ""
+ 
+-#: ../internal/ui/providers.go:415
+-#, c-format
+-msgid ""
+-"This removes %s and revokes its grants. The entry in your password store "
+-"stays."
++#: ../internal/ui/devices.go:334
++msgid "Remove Device"
+ msgstr ""
+ 
+-#: ../internal/ui/providers.go:417 ../internal/ui/connections.go:167
+-#: ../internal/ui/dialogs.go:72 ../internal/ui/dialogs.go:111
+-#: ../internal/ui/machines.go:346 ../internal/ui/app.go:483
+-msgid "_Cancel"
++#: ../internal/ui/devices.go:348
++msgid "The device was removed"
+ msgstr ""
+ 
+-#: ../internal/ui/providers.go:418 ../internal/ui/connections.go:168
+-msgid "_Remove"
++#: ../internal/ui/devices.go:377 ../internal/ui/devices.go:379
++msgid "Disconnected"
+ msgstr ""
+ 
+-#: ../internal/ui/providers.go:443
+-msgid "The provider was removed"
++#: ../internal/ui/devices.go:395 ../internal/ui/devices.go:487
++msgid "Looking for devices"
+ msgstr ""
+ 
+-#: ../internal/ui/providers.go:463 ../internal/ui/preferences.go:43
+-msgid "15 minutes"
++#: ../internal/ui/devices.go:401
++msgid "Devices on This Host"
+ msgstr ""
+ 
+-#: ../internal/ui/providers.go:463 ../internal/ui/preferences.go:43
+-msgid "1 hour"
++#: ../internal/ui/devices.go:402
++msgid "The device leaves the host while the machine runs."
+ msgstr ""
+ 
+-#: ../internal/ui/providers.go:463 ../internal/ui/preferences.go:43
+-msgid "4 hours"
++#: ../internal/ui/devices.go:427
++msgid "The device was added"
+ msgstr ""
+ 
+-#: ../internal/ui/providers.go:463 ../internal/ui/preferences.go:43
+-msgid "1 day"
++#: ../internal/ui/devices.go:434
++msgid "Enter a vendor and product ID first"
+ msgstr ""
+ 
+-#: ../internal/ui/providers.go:471 ../internal/ui/preferences.go:52
+-msgid "API key"
++#: ../internal/ui/devices.go:471
++msgid "No device matches"
+ msgstr ""
+ 
+-#: ../internal/ui/providers.go:471 ../internal/ui/preferences.go:52
+-msgid "SSH key"
++#: ../internal/ui/devices.go:513
++msgid "The devices could not be listed"
+ msgstr ""
+ 
+-#: ../internal/ui/providers.go:471 ../internal/ui/preferences.go:52
+-msgid "GnuPG key"
++#: ../internal/ui/devices.go:555
++msgid "No device is attached"
+ msgstr ""
+ 
+-#: ../internal/ui/providers.go:505
+-msgid "The secret is granted"
++#: ../internal/ui/devices.go:566
++msgid "Refresh the Device List"
+ msgstr ""
+ 
+-#: ../internal/ui/providers.go:534
+-msgid "The grant was revoked"
++#: ../internal/ui/dialogs.go:184
++msgid "Search"
+ msgstr ""
+ 
+-#: ../internal/ui/providers.go:549
+-msgid "The secrets are in sync"
++#: ../internal/ui/grants.go:32
++msgid "Active Grants"
+ msgstr ""
+ 
+-#: ../internal/ui/requests.go:25
++#: ../internal/ui/grants.go:35
+ msgid "Pending Requests"
+ msgstr ""
+ 
+-#: ../internal/ui/requests.go:72
++#: ../internal/ui/grants.go:42 ../internal/ui/preferences.go:38
++#: ../internal/ui/window.go:172
++msgid "Grants"
++msgstr ""
++
++#: ../internal/ui/grants.go:63 ../internal/ui/keys.go:82
++msgid "SSH key"
++msgstr ""
++
++#: ../internal/ui/grants.go:65
++msgid "GnuPG keys"
++msgstr ""
++
++#: ../internal/ui/grants.go:67
++msgid "Secret"
++msgstr ""
++
++#: ../internal/ui/grants.go:76
++msgid "one use"
++msgstr ""
++
++#: ../internal/ui/grants.go:78
++msgid "until revoked"
++msgstr ""
++
++#: ../internal/ui/grants.go:82
++msgid "expired"
++msgstr ""
++
++#: ../internal/ui/grants.go:84
+ #, c-format
+-msgid "%s, %s ago"
++msgid "%s left"
+ msgstr ""
+ 
+-#: ../internal/ui/requests.go:77
+-msgid "Deny"
++#: ../internal/ui/grants.go:88
++#, c-format
++msgid "%s to %s, %s"
+ msgstr ""
+ 
+-#: ../internal/ui/requests.go:82
++#: ../internal/ui/grants.go:140
++msgid "Revoke"
++msgstr ""
++
++#: ../internal/ui/grants.go:164
++#, c-format
++msgid "%s ago"
++msgstr ""
++
++#: ../internal/ui/grants.go:170
+ msgid "Approve"
+ msgstr ""
+ 
+-#: ../internal/ui/requests.go:107
+-msgid "The request was approved"
++#: ../internal/ui/grants.go:178
++msgid "Deny"
+ msgstr ""
+ 
+-#: ../internal/ui/requests.go:110
+-msgid "The request was denied"
++#: ../internal/ui/grants.go:204
++msgid "The grant was revoked"
+ msgstr ""
+ 
+-#: ../internal/ui/preferences.go:13 ../internal/ui/app.go:442
+-msgid "Preferences"
++#: ../internal/ui/grants.go:221
++msgid "Create a machine first"
+ msgstr ""
+ 
+-#: ../internal/ui/preferences.go:17 ../internal/ui/app.go:439
+-msgid "General"
++#: ../internal/ui/grants.go:245
++msgid "One use"
+ msgstr ""
+ 
+-#: ../internal/ui/preferences.go:21
+-msgid "Behaviour"
++#: ../internal/ui/grants.go:246 ../internal/ui/preferences.go:43
++msgid "15 minutes"
+ msgstr ""
+ 
+-#: ../internal/ui/preferences.go:24
+-msgid "Keep the Agent Channel Open"
++#: ../internal/ui/grants.go:247 ../internal/ui/preferences.go:43
++msgid "1 hour"
+ msgstr ""
+ 
+-#: ../internal/ui/preferences.go:25
+-msgid ""
+-"Close the window without stopping the machines. The channel answers requests "
+-"from the background."
++#: ../internal/ui/grants.go:248 ../internal/ui/preferences.go:43
++msgid "4 hours"
+ msgstr ""
+ 
+-#: ../internal/ui/preferences.go:30 ../assets/resources/index.gschema.xml:26
+-msgid "Notifications"
++#: ../internal/ui/grants.go:249 ../internal/ui/preferences.go:43
++msgid "1 day"
+ msgstr ""
+ 
+-#: ../internal/ui/preferences.go:31
+-msgid "Show a notification for a new request and for a finished installation."
++#: ../internal/ui/grants.go:250
++msgid "Until revoked"
+ msgstr ""
+ 
+-#: ../internal/ui/preferences.go:38
+-msgid "Grants"
++#: ../internal/ui/grants.go:266
++msgid "The timer runs on the host, so a grant ends after Phial closes."
+ msgstr ""
+ 
+-#: ../internal/ui/preferences.go:39
+-msgid "These values are the starting point of a new grant."
++#: ../internal/ui/grants.go:297
++msgid "Grant Access"
+ msgstr ""
+ 
+-#: ../internal/ui/devices.go:21 ../internal/ui/connections.go:93
+-#: ../internal/ui/machines.go:185
+-msgid "None"
++#: ../internal/ui/grants.go:300
++msgid "The GnuPG keys of this host"
+ msgstr ""
+ 
+-#: ../internal/ui/devices.go:38
+-msgid "No second xHCI controller"
++#: ../internal/ui/grants.go:329
++msgid "The grant is open"
+ msgstr ""
+ 
+-#: ../internal/ui/devices.go:39
+-msgid "Whole-hub passthrough needs a second xHCI controller on this host."
++#: ../internal/ui/grants.go:353
++msgid "The request was approved"
+ msgstr ""
+ 
+-#: ../internal/ui/devices.go:79
+-msgid "The hub went back to the host"
++#: ../internal/ui/grants.go:356
++msgid "The request was denied"
+ msgstr ""
+ 
+-#: ../internal/ui/devices.go:82
+-msgid "The hub belongs to the machine now"
++#: ../internal/ui/install.go:127
++#, c-format
++msgid "%s of %s, %.0f%%"
+ msgstr ""
+ 
+-#: ../internal/ui/devices.go:119
+-msgid "Remove Device"
++#: ../internal/ui/install.go:133
++#, c-format
++msgid "%d of %d packages"
++msgstr ""
++
++#: ../internal/ui/install.go:154
++msgid "Waiting for the first bytes"
++msgstr ""
++
++#: ../internal/ui/install.go:156
++msgid "The installer virtual machine starts"
+ msgstr ""
+ 
+-#: ../internal/ui/devices.go:133
+-msgid "The device was removed"
++#: ../internal/ui/install.go:158
++msgid "The installer reads the kickstart file"
+ msgstr ""
+ 
+-#: ../internal/ui/devices.go:157
+-msgid "Devices on This Host"
++#: ../internal/ui/install.go:160
++msgid "The installer solves the package list"
+ msgstr ""
+ 
+-#: ../internal/ui/devices.go:158
+-msgid "The device leaves this host while the machine runs."
++#: ../internal/ui/install.go:162
++msgid "The installer runs the post-install scripts"
+ msgstr ""
+ 
+-#: ../internal/ui/devices.go:161
+-msgid "Looking for devices"
++#: ../internal/ui/install.go:164
++msgid "The installer configures the system"
+ msgstr ""
+ 
+-#: ../internal/ui/devices.go:170
+-msgid "Vendor and Product ID"
++#: ../internal/ui/install.go:166
++msgid "The installer finishes and restarts the machine"
+ msgstr ""
+ 
+-#: ../internal/ui/devices.go:191
+-msgid "The device was added"
++#: ../internal/ui/install.go:174
++msgid "Cancel the installation?"
+ msgstr ""
+ 
+-#: ../internal/ui/devices.go:198
+-msgid "Enter a vendor and product ID first"
++#: ../internal/ui/install.go:175
++msgid "This stops the installer and removes the partial disk."
+ msgstr ""
+ 
+-#: ../internal/ui/devices.go:214
+-msgid "The devices could not be listed"
++#: ../internal/ui/install.go:177
++msgid "_Cancel Installation"
+ msgstr ""
+ 
+-#: ../internal/ui/devices.go:225
+-msgid "No device is attached"
++#: ../internal/ui/install.go:178
++msgid "_Keep Installing"
+ msgstr ""
+ 
+-#: ../internal/ui/connections.go:107
+-#, c-format
+-msgid "%s, %d running"
++#: ../internal/ui/install.go:199
++msgid "The installation was cancelled"
+ msgstr ""
+ 
+-#: ../internal/ui/connections.go:108
+-msgid "Forward"
++#: ../internal/ui/keys.go:29
++msgid "Select the private key"
+ msgstr ""
+ 
+-#: ../internal/ui/connections.go:108 ../internal/ui/window.go:181
+-msgid "Forwards"
++#: ../internal/ui/keys.go:52
++msgid "The key was loaded into the agent"
+ msgstr ""
+ 
+-#: ../internal/ui/connections.go:117
+-#, c-format
+-msgid "%s to %s"
++#: ../internal/ui/keys.go:82
++msgid "GnuPG key"
+ msgstr ""
+ 
+-#: ../internal/ui/connections.go:122
+-msgid "Remove Forward"
++#: ../internal/ui/keys.go:102
++msgid "A new key for the agent of this host"
+ msgstr ""
+ 
+-#: ../internal/ui/connections.go:147
+-msgid "The forward runs"
++#: ../internal/ui/keys.go:107
++msgid "A comment is required"
+ msgstr ""
+ 
+-#: ../internal/ui/connections.go:150
+-msgid "The forward stopped"
++#: ../internal/ui/keys.go:121
++msgid "The SSH key was generated"
+ msgstr ""
+ 
+-#: ../internal/ui/connections.go:164
+-msgid "Remove the forward?"
++#: ../internal/ui/keys.go:126 ../internal/ui/secrets.go:335
++msgid "A name is required"
+ msgstr ""
+ 
+-#: ../internal/ui/connections.go:165
+-#, c-format
+-msgid "This stops %s and removes its configuration."
++#: ../internal/ui/keys.go:142
++msgid "The GnuPG key was generated"
+ msgstr ""
+ 
+-#: ../internal/ui/connections.go:185
+-msgid "The forward was removed"
++#: ../internal/ui/keys.go:169
++msgid "Unload the key from the agent?"
+ msgstr ""
+ 
+-#: ../internal/ui/connections.go:203
+-msgid "A machine reaches this port over vsock"
++#: ../internal/ui/keys.go:170
++#, c-format
++msgid "This unloads %s from the agent of the session. The file on disk stays."
+ msgstr ""
+ 
+-#: ../internal/ui/connections.go:206
+-msgid "Host _Socket"
++#: ../internal/ui/keys.go:173
++msgid "_Unload"
+ msgstr ""
+ 
+-#: ../internal/ui/connections.go:216
+-msgid "TCP port on this host"
++#: ../internal/ui/keys.go:193
++msgid "The key was unloaded"
+ msgstr ""
+ 
+-#: ../internal/ui/connections.go:216
+-msgid "Unix socket on this host"
++#: ../internal/ui/keys.go:206
++msgid "Delete the secret key?"
+ msgstr ""
+ 
+-#: ../internal/ui/connections.go:237
+-msgid "One socket from a machine to this host"
++#: ../internal/ui/keys.go:207
++#, c-format
++msgid ""
++"This deletes the secret part of %s. The public part stays, so old signatures "
++"still verify."
+ msgstr ""
+ 
+-#: ../internal/ui/connections.go:240 ../internal/ui/machine_dialogs.go:59
+-#: ../internal/ui/machine_dialogs.go:190
+-msgid "Give a name without spaces"
++#: ../internal/ui/keys.go:210 ../internal/ui/secrets.go:410
++msgid "_Delete"
+ msgstr ""
+ 
+-#: ../internal/ui/connections.go:248
+-msgid "Give the socket path on this host"
++#: ../internal/ui/keys.go:230
++msgid "The secret key was deleted"
+ msgstr ""
+ 
+-#: ../internal/ui/connections.go:264
+-msgid "The forward was added"
++#: ../internal/ui/machine_dialogs.go:53
++msgid "A Fedora machine that sees only granted secrets"
+ msgstr ""
+ 
+-#: ../internal/ui/machine_dialogs.go:55
+-msgid "A Fedora machine that only sees granted secrets"
++#: ../internal/ui/machine_dialogs.go:57 ../internal/ui/machine_dialogs.go:187
++msgid "Give a name without spaces"
+ msgstr ""
+ 
+-#: ../internal/ui/machine_dialogs.go:80
++#: ../internal/ui/machine_dialogs.go:78
+ msgid "The machine was created"
+ msgstr ""
+ 
+-#: ../internal/ui/machine_dialogs.go:104
+-msgid "Zero uses every physical core but one"
++#: ../internal/ui/machine_dialogs.go:101
++msgid "Zero uses one core less than the host"
+ msgstr ""
+ 
+-#: ../internal/ui/machine_dialogs.go:123
++#: ../internal/ui/machine_dialogs.go:120
+ msgid "Headless"
+ msgstr ""
+ 
+-#: ../internal/ui/machine_dialogs.go:123
++#: ../internal/ui/machine_dialogs.go:120
+ msgid "Window on this host"
+ msgstr ""
+ 
+-#: ../internal/ui/machine_dialogs.go:123 ../internal/ui/machine_dialogs.go:132
+-#: ../internal/ui/machine_dialogs.go:141 ../internal/ui/machine_dialogs.go:160
+-#: ../internal/ui/machine_dialogs.go:169 ../internal/ui/machines.go:620
++#: ../internal/ui/machine_dialogs.go:120 ../internal/ui/machine_dialogs.go:129
++#: ../internal/ui/machine_dialogs.go:138 ../internal/ui/machine_dialogs.go:157
++#: ../internal/ui/machine_dialogs.go:166 ../internal/ui/machines.go:617
+ msgid "Off"
+ msgstr ""
+ 
+-#: ../internal/ui/machine_dialogs.go:132 ../internal/ui/machines.go:622
++#: ../internal/ui/machine_dialogs.go:129 ../internal/ui/machines.go:619
+ msgid "Venus"
+ msgstr ""
+ 
+-#: ../internal/ui/machine_dialogs.go:132 ../internal/ui/machines.go:618
++#: ../internal/ui/machine_dialogs.go:129 ../internal/ui/machines.go:615
+ msgid "VirGL"
+ msgstr ""
+ 
+-#: ../internal/ui/machine_dialogs.go:141
++#: ../internal/ui/machine_dialogs.go:138
+ msgid "On"
+ msgstr ""
+ 
+-#: ../internal/ui/machine_dialogs.go:160
++#: ../internal/ui/machine_dialogs.go:157
+ msgid "Bridge when available"
+ msgstr ""
+ 
+-#: ../internal/ui/machine_dialogs.go:160
++#: ../internal/ui/machine_dialogs.go:157
+ msgid "Bridge only"
+ msgstr ""
+ 
+-#: ../internal/ui/machine_dialogs.go:169
++#: ../internal/ui/machine_dialogs.go:166
+ msgid "passt"
+ msgstr ""
+ 
+-#: ../internal/ui/machine_dialogs.go:169
++#: ../internal/ui/machine_dialogs.go:166
+ msgid "Socket"
+ msgstr ""
+ 
+-#: ../internal/ui/machine_dialogs.go:251
++#: ../internal/ui/machine_dialogs.go:248
+ msgid "The machine was updated"
+ msgstr ""
+ 
+-#: ../internal/ui/system.go:37
+-msgid "Requirements"
++#: ../internal/ui/machines.go:111
++msgid "Installation"
+ msgstr ""
+ 
+-#: ../internal/ui/system.go:38
+-msgid ""
+-"Phial needs huge pages, memory lock, udev rules, a bridge, and three user "
+-"services on this host."
++#: ../internal/ui/machines.go:112
++msgid "The installer writes Fedora to the disk, step by step."
+ msgstr ""
+ 
+-#: ../internal/ui/system.go:41
+-msgid "Reading the host state"
++#: ../internal/ui/machines.go:118
++msgid "Overview"
+ msgstr ""
+ 
+-#: ../internal/ui/system.go:48
+-msgid ""
+-"Phial writes system files and asks your desktop for administrator approval."
++#: ../internal/ui/machines.go:139
++msgid "Applications and Desktop"
+ msgstr ""
+ 
+-#: ../internal/ui/system.go:51
+-msgid "Huge Pages"
++#: ../internal/ui/machines.go:160
++msgid "Shared Folders"
+ msgstr ""
+ 
+-#: ../internal/ui/system.go:58
+-msgid "Applies"
++#: ../internal/ui/machines.go:161
++msgid "Mounted with virtiofs."
+ msgstr ""
+ 
+-#: ../internal/ui/system.go:59
+-msgid ""
+-"Huge pages, the memory lock limit, the udev rules for USB and vfio, and the "
+-"bridge with the tap device"
++#: ../internal/ui/machines.go:171
++msgid "USB Devices"
+ msgstr ""
+ 
+-#: ../internal/ui/system.go:68
+-msgid "Host Requirements"
++#: ../internal/ui/machines.go:181
++msgid "USB Hubs"
+ msgstr ""
+ 
+-#: ../internal/ui/system.go:77 ../internal/ui/util.go:383
+-msgid "The host state could not be read"
++#: ../internal/ui/machines.go:182
++msgid "A second xHCI controller gives the machine its own hub."
+ msgstr ""
+ 
+-#: ../internal/ui/system.go:134
+-msgid "The system setup finished"
++#: ../internal/ui/machines.go:194
++msgid "Storage"
+ msgstr ""
+ 
+-#: ../internal/ui/util.go:76
+-msgid "The action failed"
++#: ../internal/ui/machines.go:201
++msgid "Open Containing Folder"
+ msgstr ""
+ 
+-#: ../internal/ui/util.go:77
+-msgid "_Copy Error"
++#: ../internal/ui/machines.go:215
++msgid "The machine changes state"
+ msgstr ""
+ 
+-#: ../internal/ui/util.go:78
+-msgid "_Close"
++#: ../internal/ui/machines.go:228
++msgid "Machine Settings"
+ msgstr ""
+ 
+-#: ../internal/ui/util.go:86
+-msgid "Error copied"
++#: ../internal/ui/machines.go:236
++msgid "_Logs"
+ msgstr ""
+ 
+-#: ../internal/ui/util.go:367
+-#, c-format
+-msgid "%d d"
++#: ../internal/ui/machines.go:237
++msgid "_Reprovision the Guest Agent"
+ msgstr ""
+ 
+-#: ../internal/ui/util.go:369
+-#, c-format
+-msgid "%d h"
++#: ../internal/ui/machines.go:238
++msgid "_Restart"
+ msgstr ""
+ 
+-#: ../internal/ui/util.go:371
+-#, c-format
+-msgid "%d min"
++#: ../internal/ui/machines.go:239
++msgid "_Delete Machine\342\200\246"
+ msgstr ""
+ 
+-#: ../internal/ui/util.go:373
+-#, c-format
+-msgid "%d s"
++#: ../internal/ui/machines.go:243
++msgid "Machine Menu"
+ msgstr ""
+ 
+-#: ../internal/ui/util.go:387
+-#, c-format
+-msgid "%s free of %s reserved"
++#: ../internal/ui/machines.go:250
++msgid "The guest agent is out of date"
+ msgstr ""
+ 
+-#: ../internal/ui/util.go:402
+-msgid "too little for this machine"
++#: ../internal/ui/machines.go:251
++msgid "_Reprovision"
+ msgstr ""
+ 
+-#: ../internal/ui/util.go:405
+-msgid "enough for this machine"
++#: ../internal/ui/machines.go:336
++msgid "Install the machine?"
+ msgstr ""
+ 
+-#: ../internal/ui/util.go:411
+-msgid "Installing"
++#: ../internal/ui/machines.go:338
++#, c-format
++msgid "Phial installs Fedora onto %s. This takes about fifteen minutes."
+ msgstr ""
+ 
+-#: ../internal/ui/util.go:413
+-msgid "Starting"
++#: ../internal/ui/machines.go:343
++msgid "_Install"
+ msgstr ""
+ 
+-#: ../internal/ui/util.go:415
+-msgid "Restarting"
++#: ../internal/ui/machines.go:364
++msgid "The installer runs in the background"
+ msgstr ""
+ 
+-#: ../internal/ui/util.go:417
+-msgid "Running"
++#: ../internal/ui/machines.go:394
++#, c-format
++msgid "This removes %s. The disk image stays unless you remove it."
+ msgstr ""
+ 
+-#: ../internal/ui/util.go:419
+-msgid "Stopping"
++#: ../internal/ui/machines.go:421
++msgid "The machine and its disk were deleted"
+ msgstr ""
+ 
+-#: ../internal/ui/util.go:421
+-msgid "Stopped"
++#: ../internal/ui/machines.go:424
++msgid "The machine was deleted"
+ msgstr ""
+ 
+-#: ../internal/ui/util.go:423
+-msgid "Not installed"
++#: ../internal/ui/machines.go:495
++msgid "The usage is unavailable"
+ msgstr ""
+ 
+-#: ../internal/ui/install.go:127
+-#, c-format
+-msgid "%s of %s, %.0f%%"
++#: ../internal/ui/machines.go:496
++msgid "Phial could not read live usage"
+ msgstr ""
+ 
+-#: ../internal/ui/install.go:133
+-#, c-format
+-msgid "%d of %d packages"
++#: ../internal/ui/machines.go:498
++msgid "No live usage"
+ msgstr ""
+ 
+-#: ../internal/ui/install.go:154
+-msgid "Waiting for the first bytes of the download"
++#: ../internal/ui/machines.go:499
++msgid "Start the machine to read live usage"
+ msgstr ""
+ 
+-#: ../internal/ui/install.go:156
+-msgid "The installer virtual machine starts"
++#: ../internal/ui/machines.go:654
++#, c-format
++msgid "%.1f of %d cores"
+ msgstr ""
+ 
+-#: ../internal/ui/install.go:158
+-msgid "The installer reads the kickstart file"
++#: ../internal/ui/machines.go:656
++#, c-format
++msgid "%.0f%% of one core"
+ msgstr ""
+ 
+-#: ../internal/ui/install.go:160
+-msgid "The installer solves the package list"
++#: ../internal/ui/machines.go:659
++#, c-format
++msgid "%s of %s"
+ msgstr ""
+ 
+-#: ../internal/ui/install.go:162
+-msgid "The installer runs the post-install scripts"
++#: ../internal/ui/machines.go:662
++#, c-format
++msgid "%s of %s on this host"
+ msgstr ""
+ 
+-#: ../internal/ui/install.go:164
+-msgid "The installer configures the system"
++#: ../internal/ui/machines.go:669
++#, c-format
++msgid "%s \302\267 %s/s read, %s/s written"
+ msgstr ""
+ 
+-#: ../internal/ui/install.go:166
+-msgid "The installer finishes and restarts the machine"
++#: ../internal/ui/machines.go:680
++msgid "The guest agent does not answer"
+ msgstr ""
+ 
+-#: ../internal/ui/install.go:174
+-msgid "Cancel the installation?"
++#: ../internal/ui/machines.go:682
++msgid "No traffic"
+ msgstr ""
+ 
+-#: ../internal/ui/install.go:175
+-msgid "This stops the installer and removes the partial disk of the machine."
++#: ../internal/ui/machines.go:685
++#, c-format
++msgid "%s/s received, %s/s sent"
+ msgstr ""
+ 
+-#: ../internal/ui/install.go:177
+-msgid "_Cancel Installation"
++#: ../internal/ui/machines.go:695
++#, c-format
++msgid "%s \302\267 %.0f%% busy"
+ msgstr ""
+ 
+-#: ../internal/ui/install.go:178
+-msgid "_Keep Installing"
++#: ../internal/ui/preferences.go:21
++msgid "Behaviour"
+ msgstr ""
+ 
+-#: ../internal/ui/install.go:199
+-msgid "The installation was cancelled"
++#: ../internal/ui/preferences.go:24
++msgid "Keep the Agent Channel Open"
+ msgstr ""
+ 
+-#: ../internal/ui/logs.go:45
+-msgid "This machine has no log yet"
++#: ../internal/ui/preferences.go:25
++msgid "Keep the machines running when the window closes."
+ msgstr ""
+ 
+-#: ../internal/ui/window.go:163 ../internal/ui/app.go:448
+-#: ../assets/resources/window.blp:52 ../assets/resources/window.blp:58
+-msgid "Machines"
++#: ../internal/ui/preferences.go:30 ../assets/resources/index.gschema.xml:26
++msgid "Notifications"
+ msgstr ""
+ 
+-#: ../internal/ui/window.go:174
+-msgid "Requests"
++#: ../internal/ui/preferences.go:31
++msgid "Notify on a new request or a finished installation."
+ msgstr ""
+ 
+-#: ../internal/ui/window.go:275
+-msgid "Get Started"
++#: ../internal/ui/preferences.go:39
++msgid "The default duration of a new grant."
+ msgstr ""
+ 
+-#: ../internal/ui/window.go:341
+-#, c-format
+-msgid "%d waiting for approval"
++#: ../internal/ui/secrets.go:38 ../internal/ui/secrets.go:65
++#: ../internal/ui/window.go:165
++msgid "Secrets"
+ msgstr ""
+ 
+-#: ../internal/ui/window.go:345
+-msgid "None pending"
++#: ../internal/ui/secrets.go:39
++msgid ""
++"The keyring of this host holds these values. A machine never sees a value "
++"without a grant."
+ msgstr ""
+ 
+-#: ../internal/ui/window.go:352
+-#, c-format
+-msgid "1 %s"
++#: ../internal/ui/secrets.go:42
++msgid "SSH Keys"
+ msgstr ""
+ 
+-#: ../internal/ui/window.go:354
+-#, c-format
+-msgid "%d %s"
++#: ../internal/ui/secrets.go:43
++msgid ""
++"The agent of your session holds these keys. A machine signs with one only "
++"while a grant is open."
+ msgstr ""
+ 
+-#: ../internal/ui/access.go:55
+-msgid "No terminal emulator was found"
++#: ../internal/ui/secrets.go:46
++msgid "GnuPG Keys"
+ msgstr ""
+ 
+-#: ../internal/ui/access.go:68
+-msgid "The SSH agent holds your key"
++#: ../internal/ui/secrets.go:47
++msgid ""
++"The GnuPG agent of this host holds these keys. A machine signs with one only "
++"while a grant is open."
+ msgstr ""
+ 
+-#: ../internal/ui/access.go:81
+-msgid "_User"
++#: ../internal/ui/secrets.go:125
++msgid "No secrets stored"
+ msgstr ""
+ 
+-#: ../internal/ui/access.go:86
+-msgid "Copy User"
++#: ../internal/ui/secrets.go:142 ../internal/ui/secrets.go:170
++#: ../internal/ui/secrets.go:200
++msgid "_Grant\342\200\246"
+ msgstr ""
+ 
+-#: ../internal/ui/access.go:87
+-msgid "User copied"
++#: ../internal/ui/secrets.go:156
++msgid "The agent of the session could not be reached"
+ msgstr ""
+ 
+-#: ../internal/ui/access.go:93
+-msgid "_Password"
++#: ../internal/ui/secrets.go:158
++msgid "The agent of the session holds no keys"
+ msgstr ""
+ 
+-#: ../internal/ui/access.go:98
+-msgid "Copy Password"
++#: ../internal/ui/secrets.go:177
++msgid "Unload from the Agent"
+ msgstr ""
+ 
+-#: ../internal/ui/access.go:99
+-msgid "Password copied"
++#: ../internal/ui/secrets.go:186
++msgid "The GnuPG agent of this host could not be reached"
+ msgstr ""
+ 
+-#: ../internal/ui/access.go:114
+-msgid "Socket on this host"
++#: ../internal/ui/secrets.go:188
++msgid "The GnuPG agent of this host holds no keys"
+ msgstr ""
+ 
+-#: ../internal/ui/access.go:126 ../internal/ui/access.go:161
+-#: ../internal/ui/access.go:201 ../internal/ui/app.go:313
+-msgid "Command copied"
++#: ../internal/ui/secrets.go:207
++msgid "Delete Secret Key\342\200\246"
+ msgstr ""
+ 
+-#: ../internal/ui/access.go:145
+-msgid "A host alias that Phial keeps in your SSH configuration"
++#: ../internal/ui/secrets.go:218
++msgid "Environment file"
+ msgstr ""
+ 
+-#: ../internal/ui/access.go:182
+-msgid "Local to this host"
++#: ../internal/ui/secrets.go:220
++msgid "Proxy"
+ msgstr ""
+ 
+-#: ../internal/ui/access.go:194
+-msgid "The remote desktop opens in a moment"
++#: ../internal/ui/secrets.go:233
++#, c-format
++msgid "granted to %s"
+ msgstr ""
+ 
+-#: ../internal/ui/access.go:220
+-msgid "On this host (waypipe)"
++#: ../internal/ui/secrets.go:243
++msgid "_Edit Secret\342\200\246"
+ msgstr ""
+ 
+-#: ../internal/ui/access.go:220
+-msgid "In the remote desktop"
++#: ../internal/ui/secrets.go:247
++msgid "_Delete Secret\342\200\246"
+ msgstr ""
+ 
+-#: ../internal/ui/access.go:230
+-msgid "Search applications"
++#: ../internal/ui/secrets.go:253
++msgid "Secret Menu"
+ msgstr ""
+ 
+-#: ../internal/ui/access.go:237
+-msgid "Looking for applications"
++#: ../internal/ui/secrets.go:271
++msgid "_Value"
+ msgstr ""
+ 
+-#: ../internal/ui/access.go:263
+-msgid "No application matches"
++#: ../internal/ui/secrets.go:285
++msgid "Environment file in the machine"
+ msgstr ""
+ 
+-#: ../internal/ui/access.go:280
+-msgid "The application opens in the remote desktop"
++#: ../internal/ui/secrets.go:285
++msgid "Injected into host requests"
+ msgstr ""
+ 
+-#: ../internal/ui/access.go:283
+-msgid "The application opens on this host"
++#: ../internal/ui/secrets.go:323
++msgid "Add a Secret"
+ msgstr ""
+ 
+-#: ../internal/ui/access.go:288
+-msgid "_Command"
++#: ../internal/ui/secrets.go:326
++msgid "Edit Secret"
+ msgstr ""
+ 
+-#: ../internal/ui/access.go:297
+-msgid "Enter a command first"
++#: ../internal/ui/secrets.go:328
++msgid "_New value, empty keeps the stored one"
+ msgstr ""
+ 
+-#: ../internal/ui/access.go:327
+-msgid "The applications could not be listed"
++#: ../internal/ui/secrets.go:331
++msgid "A value for a machine, stored on this host"
+ msgstr ""
+ 
+-#: ../internal/ui/access.go:338
+-msgid "The guest lists no applications"
++#: ../internal/ui/secrets.go:343
++msgid "A proxied secret needs an upstream URL"
+ msgstr ""
+ 
+-#: ../internal/ui/machines.go:110
+-msgid "Installation"
++#: ../internal/ui/secrets.go:350
++msgid "A value is required"
+ msgstr ""
+ 
+-#: ../internal/ui/machines.go:111
+-msgid ""
+-"Phial writes Fedora to the disk. A machine stays usable while the installer "
+-"runs."
++#: ../internal/ui/secrets.go:370
++msgid "The secret was updated"
+ msgstr ""
+ 
+-#: ../internal/ui/machines.go:117
+-msgid "Overview"
++#: ../internal/ui/secrets.go:373
++msgid "The secret was added"
+ msgstr ""
+ 
+-#: ../internal/ui/machines.go:138
+-msgid "Applications and Desktop"
++#: ../internal/ui/secrets.go:406
++msgid "Delete the secret?"
+ msgstr ""
+ 
+-#: ../internal/ui/machines.go:162
+-msgid "Shared Folders"
++#: ../internal/ui/secrets.go:407
++#, c-format
++msgid "This deletes %s from the keyring and revokes its grants."
+ msgstr ""
+ 
+-#: ../internal/ui/machines.go:163
+-msgid "Mounted in the machine with virtiofs."
++#: ../internal/ui/secrets.go:431
++msgid "The secret was deleted"
+ msgstr ""
+ 
+-#: ../internal/ui/machines.go:173
+-msgid "USB Devices"
++#: ../internal/ui/shares.go:40
++msgid "Stop Sharing"
+ msgstr ""
+ 
+-#: ../internal/ui/machines.go:183
+-msgid "Whole USB Hub"
++#: ../internal/ui/shares.go:53
++msgid "The folder is no longer shared"
+ msgstr ""
+ 
+-#: ../internal/ui/machines.go:184
+-msgid "A second xHCI controller gives the machine its own hub."
++#: ../internal/ui/shares.go:69
++msgid "Read-only"
+ msgstr ""
+ 
+-#: ../internal/ui/machines.go:197
+-msgid "Storage"
++#: ../internal/ui/shares.go:76
++msgid "Share a Folder"
+ msgstr ""
+ 
+-#: ../internal/ui/machines.go:204
+-msgid "Open Containing Folder"
++#: ../internal/ui/shares.go:78
++msgid "_Share"
+ msgstr ""
+ 
+-#: ../internal/ui/machines.go:218
+-msgid "The machine changes state"
++#: ../internal/ui/shares.go:136
++msgid "Host Folder"
+ msgstr ""
+ 
+-#: ../internal/ui/machines.go:231
+-msgid "Machine Settings"
++#: ../internal/ui/shares.go:148
++msgid "Enter a mount point first"
+ msgstr ""
+ 
+-#: ../internal/ui/machines.go:239
+-msgid "_Logs"
++#: ../internal/ui/shares.go:171
++msgid "The folder is shared"
+ msgstr ""
+ 
+-#: ../internal/ui/machines.go:240
+-msgid "_Reprovision the Guest Agent"
++#: ../internal/ui/system.go:37
++msgid "Requirements"
+ msgstr ""
+ 
+-#: ../internal/ui/machines.go:241
+-msgid "_Restart"
++#: ../internal/ui/system.go:38
++msgid ""
++"Phial needs huge pages, memory lock, udev rules, a bridge, and three user "
++"services."
+ msgstr ""
+ 
+-#: ../internal/ui/machines.go:242
+-msgid "_Delete Machine\342\200\246"
++#: ../internal/ui/system.go:41
++msgid "Reading the host state"
+ msgstr ""
+ 
+-#: ../internal/ui/machines.go:246
+-msgid "Machine Menu"
++#: ../internal/ui/system.go:48
++msgid "Phial writes system files and asks for administrator approval."
+ msgstr ""
+ 
+-#: ../internal/ui/machines.go:253
+-msgid "The guest agent of this machine is out of date"
++#: ../internal/ui/system.go:51
++msgid "Huge Pages"
+ msgstr ""
+ 
+-#: ../internal/ui/machines.go:254
+-msgid "_Reprovision"
++#: ../internal/ui/system.go:58
++msgid "Applies"
+ msgstr ""
+ 
+-#: ../internal/ui/machines.go:339
+-msgid "Install the machine?"
++#: ../internal/ui/system.go:59
++msgid "Huge pages, memory lock, USB and vfio udev rules, and the bridge"
+ msgstr ""
+ 
+-#: ../internal/ui/machines.go:341
+-#, c-format
+-msgid ""
+-"Phial downloads the Fedora netinst image and installs %s onto %s. This takes "
+-"about fifteen minutes."
++#: ../internal/ui/system.go:68
++msgid "Host Requirements"
+ msgstr ""
+ 
+-#: ../internal/ui/machines.go:347
+-msgid "_Install"
+-msgstr ""
+-
+-#: ../internal/ui/machines.go:368
+-msgid "The installer runs in the background"
+-msgstr ""
+-
+-#: ../internal/ui/machines.go:398
+-#, c-format
+-msgid ""
+-"This removes the definition of %s. The disk image stays on disk unless you "
+-"ask for its removal."
++#: ../internal/ui/system.go:77 ../internal/ui/util.go:432
++msgid "The host state could not be read"
+ msgstr ""
+ 
+-#: ../internal/ui/machines.go:425
+-msgid "The machine and its disk were deleted"
+-msgstr ""
+-
+-#: ../internal/ui/machines.go:428
+-msgid "The machine was deleted"
++#: ../internal/ui/system.go:134
++msgid "The system setup finished"
+ msgstr ""
+ 
+-#: ../internal/ui/machines.go:498
+-msgid "The usage is unavailable"
++#: ../internal/ui/util.go:76
++msgid "The action failed"
+ msgstr ""
+ 
+-#: ../internal/ui/machines.go:499
+-msgid "Phial could not read the usage of the machine"
++#: ../internal/ui/util.go:77
++msgid "_Copy Error"
+ msgstr ""
+ 
+-#: ../internal/ui/machines.go:501
+-msgid "No live usage"
++#: ../internal/ui/util.go:78
++msgid "_Close"
+ msgstr ""
+ 
+-#: ../internal/ui/machines.go:502
+-msgid "Start the machine to read the usage of the guest"
++#: ../internal/ui/util.go:86
++msgid "Error copied"
+ msgstr ""
+ 
+-#: ../internal/ui/machines.go:657
++#: ../internal/ui/util.go:416
+ #, c-format
+-msgid "%.1f of %d cores"
++msgid "%d d"
+ msgstr ""
+ 
+-#: ../internal/ui/machines.go:659
++#: ../internal/ui/util.go:418
+ #, c-format
+-msgid "%.0f%% of one core"
++msgid "%d h"
+ msgstr ""
+ 
+-#: ../internal/ui/machines.go:662
++#: ../internal/ui/util.go:420
+ #, c-format
+-msgid "%s of %s"
++msgid "%d min"
+ msgstr ""
+ 
+-#: ../internal/ui/machines.go:665
++#: ../internal/ui/util.go:422
+ #, c-format
+-msgid "%s of %s on this host"
++msgid "%d s"
+ msgstr ""
+ 
+-#: ../internal/ui/machines.go:672
+-msgid "The guest agent does not answer"
++#: ../internal/ui/util.go:436
++#, c-format
++msgid "%s free of %s reserved"
+ msgstr ""
+ 
+-#: ../internal/ui/machines.go:674
+-msgid "No traffic"
++#: ../internal/ui/util.go:451
++msgid "too little for this machine"
+ msgstr ""
+ 
+-#: ../internal/ui/machines.go:677
+-#, c-format
+-msgid "%s/s received, %s/s sent"
++#: ../internal/ui/util.go:454
++msgid "enough for this machine"
+ msgstr ""
+ 
+-#: ../internal/ui/app.go:172
+-msgid "Phial keeps the agent channel open so that machines can ask for access."
++#: ../internal/ui/util.go:460
++msgid "Installing"
+ msgstr ""
+ 
+-#: ../internal/ui/app.go:412
+-msgid "translator-credits"
++#: ../internal/ui/util.go:462
++msgid "Starting"
+ msgstr ""
+ 
+-#: ../internal/ui/app.go:440
+-msgid "New machine, provider, or forward"
++#: ../internal/ui/util.go:464
++msgid "Restarting"
+ msgstr ""
+ 
+-#: ../internal/ui/app.go:441
+-msgid "Sync secrets"
++#: ../internal/ui/util.go:466
++msgid "Updating the guest agent"
+ msgstr ""
+ 
+-#: ../internal/ui/app.go:443
+-msgid "Keyboard shortcuts"
++#: ../internal/ui/util.go:468
++msgid "Running"
+ msgstr ""
+ 
+-#: ../internal/ui/app.go:444
+-msgid "Close window"
++#: ../internal/ui/util.go:470
++msgid "Stopping"
+ msgstr ""
+ 
+-#: ../internal/ui/app.go:445
+-msgid "Quit"
++#: ../internal/ui/util.go:472
++msgid "Stopped"
+ msgstr ""
+ 
+-#: ../internal/ui/app.go:449
+-msgid "Select a Machine 1 to 9"
++#: ../internal/ui/util.go:474
++msgid "Not installed"
+ msgstr ""
+ 
+-#: ../internal/ui/app.go:450
+-msgid "Install, start, or stop the machine"
++#: ../internal/ui/window.go:284
++msgid "Get Started"
+ msgstr ""
+ 
+-#: ../internal/ui/app.go:477
+-msgid "Stop the machines and quit?"
++#: ../internal/ui/window.go:353
++#, c-format
++msgid "1 %s"
+ msgstr ""
+ 
+-#: ../internal/ui/app.go:479
++#: ../internal/ui/window.go:355
+ #, c-format
+-msgid "This stops %s. Close the window instead to keep the agent channel open."
+-msgstr ""
+-
+-#: ../internal/ui/app.go:484
+-msgid "_Stop and Quit"
+-msgstr ""
+-
+-#: ../internal/ui/app.go:549
+-msgid "Start the machine first"
+-msgstr ""
+-
+-#: ../internal/ui/app.go:562
+-msgid "The guest agent is up to date"
++msgid "%d %s"
+ msgstr ""
+ 
+ #: ../assets/resources/window.blp:7 ../assets/resources/window.blp:22
+@@ -1057,26 +1136,22 @@ "A machine runs Fedora on this host and only sees the secrets you grant it."
+ msgstr ""
+ 
+ #: ../assets/resources/window.blp:77
+-msgid "_Sync Secrets"
+-msgstr ""
+-
+-#: ../assets/resources/window.blp:81
+ msgid "_System Setup\342\200\246"
+ msgstr ""
+ 
+-#: ../assets/resources/window.blp:87
++#: ../assets/resources/window.blp:83
+ msgid "_Keyboard Shortcuts"
+ msgstr ""
+ 
+-#: ../assets/resources/window.blp:91
++#: ../assets/resources/window.blp:87
+ msgid "_Preferences"
+ msgstr ""
+ 
+-#: ../assets/resources/window.blp:95
++#: ../assets/resources/window.blp:91
+ msgid "_About Phial"
+ msgstr ""
+ 
+-#: ../assets/resources/window.blp:101
++#: ../assets/resources/window.blp:97
+ msgid "_Quit"
+ msgstr ""
+ 
+@@ -1108,7 +1183,9 @@ msgid "Create and run several virtual machines at the same time"
+ msgstr ""
+ 
+ #: ../assets/resources/metainfo.xml:15
+-msgid "Keep secrets in your password store and grant them for a set duration"
++msgid ""
++"Keep secrets in the keyring of the host and grant them for a set duration or "
++"a single use"
+ msgstr ""
+ 
+ #: ../assets/resources/metainfo.xml:16
+@@ -1116,7 +1193,9 @@ msgid "Inject secrets into outbound requests so the machine never sees a value"
+ msgstr ""
+ 
+ #: ../assets/resources/metainfo.xml:17
+-msgid "Forward the SSH and GnuPG agents with a confirmation prompt on the host"
++msgid ""
++"Let a machine sign with your SSH and GnuPG keys, with a confirmation prompt "
++"on the host"
+ msgstr ""
+ 
+ #: ../assets/resources/metainfo.xml:18
+@@ -1152,42 +1231,38 @@ msgid "The machine page with the live usage and the configuration"
+ msgstr ""
+ 
+ #: ../assets/resources/metainfo.xml:77
+-msgid "Forwards with the running agent channel"
++msgid "Secrets and keys of the host with grant controls on each row"
+ msgstr ""
+ 
+ #: ../assets/resources/metainfo.xml:81
+-msgid "Providers with the mode, the source, and the grant time"
++msgid "Grants with the machine and the remaining time"
+ msgstr ""
+ 
+ #: ../assets/resources/metainfo.xml:85
+-msgid "One provider with its grant controls"
+-msgstr ""
+-
+-#: ../assets/resources/metainfo.xml:89
+ msgid "Approving what an agent inside a machine asks for"
+ msgstr ""
+ 
+-#: ../assets/resources/metainfo.xml:93
++#: ../assets/resources/metainfo.xml:89
+ msgid "The empty state creates the first machine"
+ msgstr ""
+ 
+-#: ../assets/resources/metainfo.xml:97
++#: ../assets/resources/metainfo.xml:93
+ msgid "Creating a machine"
+ msgstr ""
+ 
+-#: ../assets/resources/metainfo.xml:101
++#: ../assets/resources/metainfo.xml:97
+ msgid "The host requirements and the system setup"
+ msgstr ""
+ 
+-#: ../assets/resources/metainfo.xml:105
++#: ../assets/resources/metainfo.xml:101
+ msgid "The installer with one row for each step"
+ msgstr ""
+ 
+-#: ../assets/resources/metainfo.xml:112
++#: ../assets/resources/metainfo.xml:108
+ msgid ""
+-"A new desktop application with a sidebar that lists every machine, a "
+-"providers page with time-boxed grants, and a requests page that approves "
+-"what an agent inside a machine asks for."
++"A new desktop application with a sidebar that lists every machine, pages for "
++"the keys and secrets of the host, time-boxed grants per machine, and a "
++"requests page that approves what an agent inside a machine asks for."
+ msgstr ""
+ 
+ #: ../assets/resources/index.gschema.xml:6
+@@ -1242,11 +1317,3 @@
+ #: ../assets/resources/index.gschema.xml:37
+ msgid "The default duration of a grant."
+ msgstr ""
+-
+-#: ../assets/resources/index.gschema.xml:41
+-msgid "Grant kind"
+-msgstr ""
+-
+-#: ../assets/resources/index.gschema.xml:42
+-msgid "The default subject kind of a grant."
+-msgstr ""
+
