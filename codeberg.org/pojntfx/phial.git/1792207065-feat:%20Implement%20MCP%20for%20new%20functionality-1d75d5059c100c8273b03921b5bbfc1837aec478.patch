@@ -1,0 +1,1307 @@
+From 1d75d5059c100c8273b03921b5bbfc1837aec478 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Fri, 16 Oct 2026 20:17:45 -0700
+Subject: [PATCH] feat: Implement MCP for new functionality
+---
+diff --git a/internal/mcp/approvals.go b/internal/mcp/approvals.go
+index f7533fb0768bcffc89713c2a2664add81cfb8f18..03169c33a2c7860aeda23a37842e6952edfd4b33 100644
+--- a/internal/mcp/approvals.go
++++ b/internal/mcp/approvals.go
+@@ -9,11 +9,20 @@ )
+ 
+ const approvalTTL = 5 * time.Minute
+ 
++// The categories of a request: a grant opens access for a time, a change
++// edits the store or the keys of the host.
++const (
++	CategoryGrant  = "grant"
++	CategoryChange = "change"
++)
++
+ type Approval struct {
+-	ID      string    `json:"id"`
+-	Action  string    `json:"action"`
+-	Detail  string    `json:"detail"`
+-	Created time.Time `json:"created"`
++	ID       string    `json:"id"`
++	Action   string    `json:"action"`
++	Detail   string    `json:"detail"`
++	Category string    `json:"category"`
++	VM       string    `json:"vm"`
++	Created  time.Time `json:"created"`
+ 
+ 	execute func() error
+ }
+@@ -32,7 +41,7 @@ 		notify:  notify,
+ 	}
+ }
+ 
+-func (a *Approvals) Create(action, detail string, execute func() error) (string, error) {
++func (a *Approvals) Create(category, action, detail, vm string, execute func() error) (string, error) {
+ 	a.mu.Lock()
+ 	defer a.mu.Unlock()
+ 
+@@ -40,15 +49,22 @@ 	a.nextID++
+ 	id := fmt.Sprintf("req-%d", a.nextID)
+ 
+ 	a.pending[id] = Approval{
+-		ID:      id,
+-		Action:  action,
+-		Detail:  detail,
+-		Created: time.Now(),
+-		execute: execute,
++		ID:       id,
++		Action:   action,
++		Detail:   detail,
++		Category: category,
++		VM:       vm,
++		Created:  time.Now(),
++		execute:  execute,
+ 	}
+ 
+ 	if a.notify != nil {
+-		a.notify("phial agent request", fmt.Sprintf("%s: %s", action, detail))
++		summary := "phial agent request"
++		if category == CategoryGrant {
++			summary = "phial grant request"
++		}
++
++		a.notify(summary, fmt.Sprintf("%s: %s", action, detail))
+ 	}
+ 
+ 	return id, nil
+diff --git a/internal/mcp/register.go b/internal/mcp/register.go
+index bd878f7132f8010211f230b8dd9d531af8d124d6..92301e1d62e785503533dbdc26a2d4248ce682f5 100644
+--- a/internal/mcp/register.go
++++ b/internal/mcp/register.go
+@@ -2,50 +2,80 @@ package mcp
+ 
+ import (
+ 	"context"
+-	"fmt"
+ 
+ 	mcpgo "github.com/modelcontextprotocol/go-sdk/mcp"
+ )
+ 
+ func (s *Service) registerTools(server *mcpgo.Server, guest bool) {
+ 	mcpgo.AddTool(server, SecretsLsTool, s.SecretsLs)
+-	mcpgo.AddTool(server, GrantStatusTool, s.GrantStatus)
+-	mcpgo.AddTool(server, GrantRevokeTool, s.GrantRevoke)
++	mcpgo.AddTool(server, KeysLsTool, s.KeysLs)
++	mcpgo.AddTool(server, GrantsLsTool, s.GrantsLs)
+ 	mcpgo.AddTool(server, VmLsTool, s.VmLs)
+ 	mcpgo.AddTool(server, VmStartTool, s.VmStart)
+ 	mcpgo.AddTool(server, VmUpdateTool, s.VmUpdate)
+ 	mcpgo.AddTool(server, VmMetricsTool, s.VmMetrics)
+ 	mcpgo.AddTool(server, VmStopTool, s.VmStop)
+ 	mcpgo.AddTool(server, VmRestartTool, s.VmRestart)
+-	mcpgo.AddTool(server, ForwardLsTool, s.ForwardLs)
+-	mcpgo.AddTool(server, ForwardStopTool, s.ForwardStop)
+ 	mcpgo.AddTool(server, UsbLsTool, s.UsbLs)
+ 	mcpgo.AddTool(server, UsbNamesTool, s.UsbNames)
+ 	mcpgo.AddTool(server, ShareLsTool, s.ShareLs)
+-	mcpgo.AddTool(server, ShareAddTool, s.ShareAdd)
+-	mcpgo.AddTool(server, ShareRemoveTool, s.ShareRemove)
+ 	mcpgo.AddTool(server, ListXhciTool, s.ListXhci)
++	mcpgo.AddTool(server, ListGuestAppsTool, s.ListGuestApps)
+ 	mcpgo.AddTool(server, DisplaySetModeTool, s.DisplaySetMode)
+ 	mcpgo.AddTool(server, DisplayRunAppTool, s.DisplayRunApp)
+-	mcpgo.AddTool(server, ListGuestAppsTool, s.ListGuestApps)
+ 	mcpgo.AddTool(server, DisplayOpenRdpTool, s.DisplayOpenRdp)
+ 	mcpgo.AddTool(server, DisplayOpenSerialTool, s.DisplayOpenSerial)
+ 	mcpgo.AddTool(server, SystemStatusTool, s.SystemStatus)
+ 	mcpgo.AddTool(server, SystemAcceptanceTool, s.SystemAcceptance)
++	mcpgo.AddTool(server, VmInstallStatusTool, s.VmInstallStatus)
++	mcpgo.AddTool(server, VmProvisionTool, s.VmProvision)
++	mcpgo.AddTool(server, VmCancelInstallTool, s.VmCancelInstall)
+ 
+ 	if !guest {
+ 		mcpgo.AddTool(server, ApprovalsListTool, s.ApprovalsList)
+ 		mcpgo.AddTool(server, ApprovalsAnswerTool, s.ApprovalsAnswer)
++
++		mcpgo.AddTool(server, SecretsSetTool, s.SecretsSet)
++		mcpgo.AddTool(server, SecretsRemoveTool, s.SecretsRemove)
++
++		mcpgo.AddTool(server, KeysAddSSHTool, s.KeysAddSSH)
++		mcpgo.AddTool(server, KeysGenerateSSHTool, s.KeysGenerateSSH)
++		mcpgo.AddTool(server, KeysRemoveSSHTool, s.KeysRemoveSSH)
++		mcpgo.AddTool(server, KeysGenerateGPGTool, s.KeysGenerateGPG)
++		mcpgo.AddTool(server, KeysRemoveGPGTool, s.KeysRemoveGPG)
++
++		mcpgo.AddTool(server, GrantsAllowTool, s.GrantsAllow)
++		mcpgo.AddTool(server, GrantsRevokeTool, s.GrantsRevoke)
++
++		mcpgo.AddTool(server, ShareAddTool, s.ShareAdd)
++		mcpgo.AddTool(server, ShareRemoveTool, s.ShareRemove)
++		mcpgo.AddTool(server, UsbAddDeviceTool, s.UsbAddDevice)
++		mcpgo.AddTool(server, UsbRemoveDeviceTool, s.UsbRemoveDevice)
++		mcpgo.AddTool(server, UsbBindTool, s.UsbBind)
++		mcpgo.AddTool(server, UsbRestoreTool, s.UsbRestore)
++		mcpgo.AddTool(server, VmCreateTool, s.VmCreate)
++		mcpgo.AddTool(server, VmDeleteTool, s.VmDelete)
++		mcpgo.AddTool(server, VmInstallTool, s.VmInstall)
++		mcpgo.AddTool(server, SystemRootSetupTool, s.SystemRootSetup)
++
++		return
+ 	}
+ 
+-	mcpgo.AddTool(server, SecretsRequestGrantTool, s.SecretsRequestGrant)
++	// A guest asks, the host user answers. Every change waits for approval on
++	// the host, and the machine name comes from the vsock address of the
++	// connection.
++	mcpgo.AddTool(server, RequestsGrantTool, s.RequestsGrant)
++	mcpgo.AddTool(server, RequestsSetSecretTool, s.RequestsSetSecret)
++	mcpgo.AddTool(server, RequestsRemoveSecretTool, s.RequestsRemoveSecret)
++	mcpgo.AddTool(server, RequestsGenerateSSHKeyTool, s.RequestsGenerateSSHKey)
++	mcpgo.AddTool(server, RequestsGenerateGPGKeyTool, s.RequestsGenerateGPGKey)
++	mcpgo.AddTool(server, RequestsRemoveSSHKeyTool, s.RequestsRemoveSSHKey)
++	mcpgo.AddTool(server, RequestsRemoveGPGKeyTool, s.RequestsRemoveGPGKey)
+ 
+ 	gate := func(action string, run func() (any, error)) (any, error) {
+-		if !guest {
+-			return run()
+-		}
++		vm, _ := VMFromContext(context.Background())
+ 
+-		id, err := s.approvals.Create(action, action, func() error {
++		id, err := s.approvals.Create(CategoryChange, action, action, vm, func() error {
+ 			_, err := run()
+ 
+ 			return err
+@@ -56,158 +86,87 @@ 		}
+ 
+ 		return map[string]string{"approval": id, "state": "pending"}, nil
+ 	}
++	_ = gate
+ 
+-	mcpgo.AddTool(server, SecretsSyncTool, func(ctx context.Context, req *mcpgo.CallToolRequest, input struct{}) (*mcpgo.CallToolResult, any, error) {
+-		out, err := gate("secrets.sync", func() (any, error) {
+-			_, out, err := s.SecretsSync(ctx, req, input)
++	mcpgo.AddTool(server, ShareAddTool, func(ctx context.Context, req *mcpgo.CallToolRequest, input ShareInput) (*mcpgo.CallToolResult, any, error) {
++		vm, _ := VMFromContext(ctx)
+ 
+-			return out, err
+-		})
++		out, err := s.requestChange(ctx, "share "+input.Path, vm, func() error {
++			_, _, err := s.ShareAdd(ctx, req, input)
+ 
+-		return nil, out, err
+-	})
+-
+-	mcpgo.AddTool(server, SecretsAddProviderTool, func(ctx context.Context, req *mcpgo.CallToolRequest, input ProviderInput) (*mcpgo.CallToolResult, any, error) {
+-		out, err := gate("secrets.addProvider "+input.Name, func() (any, error) {
+-			_, out, err := s.SecretsAddProvider(ctx, req, input)
+-
+-			return out, err
++			return err
+ 		})
+ 
+ 		return nil, out, err
+ 	})
+ 
+-	mcpgo.AddTool(server, SecretsRemoveProviderTool, func(ctx context.Context, req *mcpgo.CallToolRequest, input NameInput) (*mcpgo.CallToolResult, any, error) {
+-		out, err := gate("secrets.removeProvider "+input.Name, func() (any, error) {
+-			_, out, err := s.SecretsRemoveProvider(ctx, req, input)
++	mcpgo.AddTool(server, ShareRemoveTool, func(ctx context.Context, req *mcpgo.CallToolRequest, input ShareInput) (*mcpgo.CallToolResult, any, error) {
++		vm, _ := VMFromContext(ctx)
+ 
+-			return out, err
+-		})
++		out, err := s.requestChange(ctx, "unshare "+input.Path, vm, func() error {
++			_, _, err := s.ShareRemove(ctx, req, input)
+ 
+-		return nil, out, err
+-	})
+-
+-	mcpgo.AddTool(server, GrantAllowTool, func(ctx context.Context, req *mcpgo.CallToolRequest, input GrantInput) (*mcpgo.CallToolResult, any, error) {
+-		out, err := gate(fmt.Sprintf("grant %s (%s) for %s", input.Name, input.Kind, input.Duration), func() (any, error) {
+-			_, out, err := s.GrantAllow(ctx, req, input)
+-
+-			return out, err
++			return err
+ 		})
+ 
+ 		return nil, out, err
+ 	})
+ 
+-	mcpgo.AddTool(server, ForwardStartTool, func(ctx context.Context, req *mcpgo.CallToolRequest, input NameInput) (*mcpgo.CallToolResult, any, error) {
+-		out, err := gate("forward.start "+input.Name, func() (any, error) {
+-			_, out, err := s.ForwardStart(ctx, req, input)
++	mcpgo.AddTool(server, UsbAddDeviceTool, func(ctx context.Context, req *mcpgo.CallToolRequest, input UsbDeviceInput) (*mcpgo.CallToolResult, any, error) {
++		vm, _ := VMFromContext(ctx)
+ 
+-			return out, err
+-		})
++		out, err := s.requestChange(ctx, "pass USB device "+input.Device, vm, func() error {
++			_, _, err := s.UsbAddDevice(ctx, req, input)
+ 
+-		return nil, out, err
+-	})
+-
+-	mcpgo.AddTool(server, ForwardAddTool, func(ctx context.Context, req *mcpgo.CallToolRequest, input ForwardInput) (*mcpgo.CallToolResult, any, error) {
+-		out, err := gate("forward.add "+input.Name, func() (any, error) {
+-			_, out, err := s.ForwardAdd(ctx, req, input)
+-
+-			return out, err
+-		})
+-
+-		return nil, out, err
+-	})
+-
+-	mcpgo.AddTool(server, ForwardRemoveTool, func(ctx context.Context, req *mcpgo.CallToolRequest, input NameInput) (*mcpgo.CallToolResult, any, error) {
+-		out, err := gate("forward.remove "+input.Name, func() (any, error) {
+-			_, out, err := s.ForwardRemove(ctx, req, input)
+-
+-			return out, err
+-		})
+-
+-		return nil, out, err
+-	})
+-
+-	mcpgo.AddTool(server, UsbAddDeviceTool, func(ctx context.Context, req *mcpgo.CallToolRequest, input UsbDeviceInput) (*mcpgo.CallToolResult, any, error) {
+-		out, err := gate("usb.addDevice "+input.Device, func() (any, error) {
+-			_, out, err := s.UsbAddDevice(ctx, req, input)
+-
+-			return out, err
++			return err
+ 		})
+ 
+ 		return nil, out, err
+ 	})
+ 
+ 	mcpgo.AddTool(server, UsbRemoveDeviceTool, func(ctx context.Context, req *mcpgo.CallToolRequest, input UsbDeviceInput) (*mcpgo.CallToolResult, any, error) {
+-		out, err := gate("usb.removeDevice "+input.Device, func() (any, error) {
+-			_, out, err := s.UsbRemoveDevice(ctx, req, input)
++		vm, _ := VMFromContext(ctx)
+ 
+-			return out, err
+-		})
+-
+-		return nil, out, err
+-	})
+-
+-	mcpgo.AddTool(server, UsbBindTool, func(ctx context.Context, req *mcpgo.CallToolRequest, input AddressInput) (*mcpgo.CallToolResult, any, error) {
+-		out, err := gate("usb.bindXhci "+input.Address, func() (any, error) {
+-			_, out, err := s.UsbBind(ctx, req, input)
+-
+-			return out, err
+-		})
+-
+-		return nil, out, err
+-	})
+-
+-	mcpgo.AddTool(server, UsbRestoreTool, func(ctx context.Context, req *mcpgo.CallToolRequest, input AddressInput) (*mcpgo.CallToolResult, any, error) {
+-		out, err := gate("usb.restoreXhci "+input.Address, func() (any, error) {
+-			_, out, err := s.UsbRestore(ctx, req, input)
++		out, err := s.requestChange(ctx, "unpass USB device "+input.Device, vm, func() error {
++			_, _, err := s.UsbRemoveDevice(ctx, req, input)
+ 
+-			return out, err
++			return err
+ 		})
+ 
+ 		return nil, out, err
+ 	})
+ 
+ 	mcpgo.AddTool(server, VmCreateTool, func(ctx context.Context, req *mcpgo.CallToolRequest, input VmCreateInput) (*mcpgo.CallToolResult, any, error) {
+-		out, err := gate("vm.create "+input.Name, func() (any, error) {
+-			_, out, err := s.VmCreate(ctx, req, input)
++		vm, _ := VMFromContext(ctx)
+ 
+-			return out, err
++		out, err := s.requestChange(ctx, "create machine "+input.Name, vm, func() error {
++			_, _, err := s.VmCreate(ctx, req, input)
++
++			return err
+ 		})
+ 
+ 		return nil, out, err
+ 	})
+ 
+ 	mcpgo.AddTool(server, VmDeleteTool, func(ctx context.Context, req *mcpgo.CallToolRequest, input VmDeleteInput) (*mcpgo.CallToolResult, any, error) {
+-		out, err := gate("vm.delete "+input.Name, func() (any, error) {
+-			_, out, err := s.VmDelete(ctx, req, input)
+-
+-			return out, err
+-		})
+-
+-		return nil, out, err
+-	})
++		vm, _ := VMFromContext(ctx)
+ 
+-	mcpgo.AddTool(server, VmInstallTool, func(ctx context.Context, req *mcpgo.CallToolRequest, input NameInput) (*mcpgo.CallToolResult, any, error) {
+-		out, err := gate("vm.install "+input.Name, func() (any, error) {
+-			_, out, err := s.VmInstall(ctx, req, input)
++		out, err := s.requestChange(ctx, "delete machine "+input.Name, vm, func() error {
++			_, _, err := s.VmDelete(ctx, req, input)
+ 
+-			return out, err
++			return err
+ 		})
+ 
+ 		return nil, out, err
+ 	})
++}
+ 
+-	mcpgo.AddTool(server, VmInstallStatusTool, s.VmInstallStatus)
+-	mcpgo.AddTool(server, VmProvisionTool, s.VmProvision)
+-	mcpgo.AddTool(server, VmCancelInstallTool, s.VmCancelInstall)
+-
+-	mcpgo.AddTool(server, SystemRootSetupTool, func(ctx context.Context, req *mcpgo.CallToolRequest, input RootSetupInput) (*mcpgo.CallToolResult, any, error) {
+-		out, err := gate("system.rootSetup", func() (any, error) {
+-			_, out, err := s.SystemRootSetup(ctx, req, input)
++// requestChange asks the host user to approve one change from a guest.
++func (s *Service) requestChange(ctx context.Context, action string, vm string, run func() error) (any, error) {
++	id, err := s.approvals.Create(CategoryChange, action, action, vm, run)
++	if err != nil {
++		return nil, err
++	}
+ 
+-			return out, err
+-		})
+-
+-		return nil, out, err
+-	})
++	return map[string]string{"approval": id, "state": "pending"}, nil
+ }
+diff --git a/internal/mcp/server.go b/internal/mcp/server.go
+index 92bf2647b96d91393e3d719b427a759a24c70831..f06ff970c1e9878f0aafff4cfa2f3280d60dee53 100644
+--- a/internal/mcp/server.go
++++ b/internal/mcp/server.go
+@@ -9,14 +9,21 @@ 	"net/http"
+ 	"os"
+ 	"path/filepath"
+ 
++	"github.com/mdlayher/vsock"
+ 	mcpgo "github.com/modelcontextprotocol/go-sdk/mcp"
+ 
+ 	"codeberg.org/pojntfx/phial-neo/internal/state"
++	"codeberg.org/pojntfx/phial-neo/internal/virt"
+ )
+ 
+ const (
+ 	HostSocketName  = "mcp.sock"
+ 	GuestSocketName = "mcp-guest.sock"
++
++	// GuestVsockPort is the address of the agent channel for machines. The
++	// machine name of a request comes from the vsock address of its
++	// connection, so the address is never spoofed by the guest.
++	GuestVsockPort = 8080
+ )
+ 
+ type Service struct {
+@@ -41,20 +48,33 @@ 		notify:    notify,
+ 	}
+ }
+ 
+-func (s *Service) Serve(socketPath string, guest bool) error {
+-	if err := os.MkdirAll(filepath.Dir(socketPath), 0o700); err != nil {
+-		return err
++// vmContextKey carries the machine of one guest request.
++type vmContextKey struct{}
++
++// VMFromContext states the machine that sent one guest request, or false for
++// a request that arrived without a vsock address.
++func VMFromContext(ctx context.Context) (string, bool) {
++	vm, ok := ctx.Value(vmContextKey{}).(string)
++
++	return vm, ok && vm != ""
++}
++
++func vmForCID(cid uint32) (string, bool) {
++	definitions, err := virt.List()
++	if err != nil {
++		return "", false
+ 	}
+ 
+-	if err := os.Remove(socketPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+-		return err
++	for _, def := range definitions {
++		if def.GuestCIDValue() == cid {
++			return def.Name, true
++		}
+ 	}
+ 
+-	listener, err := net.Listen("unix", socketPath)
+-	if err != nil {
+-		return err
+-	}
++	return "", false
++}
+ 
++func (s *Service) serve(listener net.Listener, guest bool, stampVM bool) error {
+ 	server := mcpgo.NewServer(
+ 		&mcpgo.Implementation{
+ 			Name:        "phial",
+@@ -77,13 +97,48 @@ 		},
+ 		nil,
+ 	)
+ 
+-	s.log.Info("serving MCP", "socket", socketPath, "guest", guest)
++	s.log.Info("serving MCP", "listener", listener.Addr().String(), "guest", guest)
++
++	daemon := &http.Server{Handler: handler}
+ 
+-	return http.Serve(listener, handler)
++	if stampVM {
++		daemon.ConnContext = func(ctx context.Context, conn net.Conn) context.Context {
++			addr, ok := conn.RemoteAddr().(*vsock.Addr)
++			if !ok || addr == nil {
++				return ctx
++			}
++
++			vm, ok := vmForCID(addr.ContextID)
++			if !ok {
++				return ctx
++			}
++
++			return context.WithValue(ctx, vmContextKey{}, vm)
++		}
++	}
++
++	return daemon.Serve(listener)
++}
++
++func (s *Service) Serve(socketPath string, guest bool) error {
++	if err := os.MkdirAll(filepath.Dir(socketPath), 0o700); err != nil {
++		return err
++	}
++
++	if err := os.Remove(socketPath); err != nil && !errors.Is(err, os.ErrNotExist) {
++		return err
++	}
++
++	listener, err := net.Listen("unix", socketPath)
++	if err != nil {
++		return err
++	}
++
++	return s.serve(listener, guest, false)
+ }
+ 
+ func (s *Service) Run(runtimeDir string) error {
+-	errChan := make(chan error, 2)
++	errChan := make(chan error, 3)
+ 
+ 	go func() {
+ 		errChan <- s.Serve(filepath.Join(runtimeDir, "phial", HostSocketName), false)
+@@ -91,6 +146,17 @@ 	}()
+ 
+ 	go func() {
+ 		errChan <- s.Serve(filepath.Join(runtimeDir, "phial", GuestSocketName), true)
++	}()
++
++	go func() {
++		listener, err := vsock.Listen(GuestVsockPort, nil)
++		if err != nil {
++			errChan <- err
++
++			return
++		}
++
++		errChan <- s.serve(listener, true, true)
+ 	}()
+ 
+ 	select {
+diff --git a/internal/mcp/tools_display.go b/internal/mcp/tools_display.go
+index 9556182afddd314b659ea0dfdf94c1aa38bb4fa5..dac942572350edbd847dcf7a726f3e5bc2a0855a 100644
+--- a/internal/mcp/tools_display.go
++++ b/internal/mcp/tools_display.go
+@@ -11,6 +11,7 @@ 	"time"
+ 
+ 	mcpgo "github.com/modelcontextprotocol/go-sdk/mcp"
+ 
++	"codeberg.org/pojntfx/phial-neo/internal/hostcmd"
+ 	"codeberg.org/pojntfx/phial-neo/internal/virt"
+ )
+ 
+@@ -270,7 +271,7 @@ 	if err := s.unitStart(fmt.Sprintf("phial-guest-port@%d.service", def.GuestCIDValue())); err != nil {
+ 		return nil, nil, err
+ 	}
+ 
+-	command := exec.Command("xfreerdp", fmt.Sprintf("/v:[::1]:%d", def.RdpPortValue()), "/u:phial", "/p:"+password, "/cert:ignore", "+clipboard", "/sound", "/dynamic-resolution")
++	command := hostcmd.Command("xfreerdp", fmt.Sprintf("/v:[::1]:%d", def.RdpPortValue()), "/u:phial", "/p:"+password, "/cert:ignore", "+clipboard", "/sound", "/dynamic-resolution")
+ 
+ 	var output strings.Builder
+ 	command.Stdout = &output
+diff --git a/internal/mcp/tools_forwards.go b/internal/mcp/tools_forwards.go
+deleted file mode 100644
+index d2abc8a0eda770fc2c7f47f6d7f837de10662c44..0000000000000000000000000000000000000000
+--- a/internal/mcp/tools_forwards.go
++++ /dev/null
+@@ -1,166 +0,0 @@
+-package mcp
+-
+-import (
+-	"context"
+-	"fmt"
+-	"os"
+-	"path/filepath"
+-	"strings"
+-
+-	mcpgo "github.com/modelcontextprotocol/go-sdk/mcp"
+-)
+-
+-var (
+-	ForwardLsTool = &mcpgo.Tool{
+-		Name:        "forward.ls",
+-		Title:       "List forwards",
+-		Description: "List the forwards between the host and the guest with their state.",
+-		Annotations: &mcpgo.ToolAnnotations{ReadOnlyHint: true},
+-	}
+-
+-	ForwardStartTool = &mcpgo.Tool{
+-		Name:        "forward.start",
+-		Title:       "Start a forward",
+-		Description: "Start one forward, for example an agent socket window.",
+-	}
+-
+-	ForwardStopTool = &mcpgo.Tool{
+-		Name:        "forward.stop",
+-		Title:       "Stop a forward",
+-		Description: "Stop one forward and close the window.",
+-	}
+-
+-	ForwardAddTool = &mcpgo.Tool{
+-		Name:        "forward.add",
+-		Title:       "Add a forward",
+-		Description: "Add one new forward: a TCP port or a unix socket on a vsock port.",
+-	}
+-
+-	ForwardRemoveTool = &mcpgo.Tool{
+-		Name:        "forward.remove",
+-		Title:       "Remove a forward",
+-		Description: "Remove one forward and its configuration.",
+-	}
+-)
+-
+-type ForwardInfo struct {
+-	Name   string `json:"name" jsonschema:"the forward name"`
+-	Listen string `json:"listen" jsonschema:"the listen address"`
+-	Target string `json:"target" jsonschema:"the target address"`
+-	Active bool   `json:"active" jsonschema:"whether the forward runs"`
+-}
+-
+-type ForwardLsOutput struct {
+-	Forwards []ForwardInfo `json:"forwards" jsonschema:"the forward list"`
+-}
+-
+-func (s *Service) forwardConfPath(name string) string {
+-	return filepath.Join(s.state.ConfigDir(), "forward-"+name+".conf")
+-}
+-
+-func (s *Service) ForwardLs(ctx context.Context, req *mcpgo.CallToolRequest, input struct{}) (*mcpgo.CallToolResult, *ForwardLsOutput, error) {
+-	entries, err := os.ReadDir(s.state.ConfigDir())
+-	if err != nil {
+-		return nil, nil, err
+-	}
+-
+-	out := &ForwardLsOutput{}
+-
+-	for _, entry := range entries {
+-		name := entry.Name()
+-
+-		if !strings.HasPrefix(name, "forward-") || !strings.HasSuffix(name, ".conf") {
+-			continue
+-		}
+-
+-		short := strings.TrimSuffix(strings.TrimPrefix(name, "forward-"), ".conf")
+-
+-		data, err := os.ReadFile(s.forwardConfPath(short))
+-		if err != nil {
+-			continue
+-		}
+-
+-		info := ForwardInfo{Name: short}
+-
+-		for _, line := range strings.Split(string(data), "\n") {
+-			if value, ok := strings.CutPrefix(line, "PHIAL_LISTEN="); ok {
+-				info.Listen = value
+-			}
+-
+-			if value, ok := strings.CutPrefix(line, "PHIAL_TARGET="); ok {
+-				info.Target = value
+-			}
+-		}
+-
+-		active, err := s.unitActive("phial-forward@" + short + ".service")
+-		if err == nil {
+-			info.Active = active
+-		}
+-
+-		out.Forwards = append(out.Forwards, info)
+-	}
+-
+-	return nil, out, nil
+-}
+-
+-func (s *Service) ForwardStart(ctx context.Context, req *mcpgo.CallToolRequest, input NameInput) (*mcpgo.CallToolResult, any, error) {
+-	if err := s.unitStart("phial-forward@" + input.Name + ".service"); err != nil {
+-		return nil, nil, err
+-	}
+-
+-	return nil, map[string]string{"state": "started"}, nil
+-}
+-
+-func (s *Service) ForwardStop(ctx context.Context, req *mcpgo.CallToolRequest, input NameInput) (*mcpgo.CallToolResult, any, error) {
+-	if err := s.unitStop("phial-forward@" + input.Name + ".service"); err != nil {
+-		return nil, nil, err
+-	}
+-
+-	return nil, map[string]string{"state": "stopped"}, nil
+-}
+-
+-type ForwardInput struct {
+-	Name string `json:"name" jsonschema:"the forward name"`
+-	Kind string `json:"kind" jsonschema:"tcp or unix"`
+-	Port int    `json:"port" jsonschema:"the vsock port number"`
+-	Path string `json:"path" jsonschema:"the host unix socket path, for unix forwards"`
+-}
+-
+-func (s *Service) ForwardAdd(ctx context.Context, req *mcpgo.CallToolRequest, input ForwardInput) (*mcpgo.CallToolResult, any, error) {
+-	if input.Name == "" || input.Port < 1024 || input.Port > 65535 {
+-		return nil, nil, fmt.Errorf("give a name and a vsock port above 1024")
+-	}
+-
+-	var target string
+-
+-	switch input.Kind {
+-	case "tcp":
+-		target = fmt.Sprintf("TCP:[::1]:%d", input.Port)
+-	case "unix":
+-		if input.Path == "" {
+-			return nil, nil, fmt.Errorf("a unix forward needs a host socket path")
+-		}
+-
+-		target = "UNIX-CONNECT:" + input.Path
+-	default:
+-		return nil, nil, fmt.Errorf("kind must be tcp or unix")
+-	}
+-
+-	content := fmt.Sprintf("PHIAL_LISTEN=VSOCK-LISTEN:%d,fork,reuseaddr\nPHIAL_TARGET=%s\n", input.Port, target)
+-
+-	if err := os.WriteFile(s.forwardConfPath(input.Name), []byte(content), 0o600); err != nil {
+-		return nil, nil, err
+-	}
+-
+-	return nil, map[string]string{"state": "added"}, nil
+-}
+-
+-func (s *Service) ForwardRemove(ctx context.Context, req *mcpgo.CallToolRequest, input NameInput) (*mcpgo.CallToolResult, any, error) {
+-	_ = s.unitStop("phial-forward@" + input.Name + ".service")
+-
+-	if err := os.Remove(s.forwardConfPath(input.Name)); err != nil {
+-		return nil, nil, err
+-	}
+-
+-	return nil, map[string]string{"state": "removed"}, nil
+-}
+diff --git a/internal/mcp/tools_secrets.go b/internal/mcp/tools_secrets.go
+index c12fa76fee7ac6a5568fd8247acba9bc6557a8e3..d9b244ff91e72a4bbdd2d3a5fbcc831124796aad 100644
+--- a/internal/mcp/tools_secrets.go
++++ b/internal/mcp/tools_secrets.go
+@@ -12,57 +12,82 @@
+ var (
+ 	SecretsLsTool = &mcpgo.Tool{
+ 		Name:        "secrets.ls",
+-		Title:       "List secret providers",
+-		Description: "List the provider rows with names, modes, sources, and upstreams, never the values.",
++		Title:       "List secrets",
++		Description: "List the secret rows with names, modes, and upstreams, never the values.",
+ 		Annotations: &mcpgo.ToolAnnotations{ReadOnlyHint: true},
+ 	}
+ 
+-	SecretsSyncTool = &mcpgo.Tool{
+-		Name:        "secrets.sync",
+-		Title:       "Sync the secrets",
+-		Description: "Resolve every mapping row and write every secret file.",
++	SecretsSetTool = &mcpgo.Tool{
++		Name:        "secrets.set",
++		Title:       "Store a secret",
++		Description: "Store one secret in the Secret Service of the host and record its mode and upstream.",
+ 	}
+ 
+-	SecretsAddProviderTool = &mcpgo.Tool{
+-		Name:        "secrets.addProvider",
+-		Title:       "Add a provider",
+-		Description: "Add one provider row to the mapping and sync it.",
++	SecretsRemoveTool = &mcpgo.Tool{
++		Name:        "secrets.remove",
++		Title:       "Remove a secret",
++		Description: "Remove one secret, its stored value, and every grant on it.",
+ 	}
+ 
+-	SecretsRemoveProviderTool = &mcpgo.Tool{
+-		Name:        "secrets.removeProvider",
+-		Title:       "Remove a provider",
+-		Description: "Remove one provider row from the mapping and sync it.",
++	KeysLsTool = &mcpgo.Tool{
++		Name:        "keys.ls",
++		Title:       "List keys",
++		Description: "List the SSH keys of the session agent and the GnuPG keys of the host, never private material.",
++		Annotations: &mcpgo.ToolAnnotations{ReadOnlyHint: true},
++	}
++
++	KeysAddSSHTool = &mcpgo.Tool{
++		Name:        "keys.addSsh",
++		Title:       "Load an SSH key",
++		Description: "Load one private key file into the agent of the session.",
+ 	}
+ 
+-	GrantAllowTool = &mcpgo.Tool{
+-		Name:        "grant.allow",
+-		Title:       "Grant a secret",
+-		Description: "Grant one secret for a set duration, with an expiry timer.",
++	KeysGenerateSSHTool = &mcpgo.Tool{
++		Name:        "keys.generateSsh",
++		Title:       "Generate an SSH key",
++		Description: "Create a new SSH key pair on the host and load it into the agent of the session.",
+ 	}
+ 
+-	GrantRevokeTool = &mcpgo.Tool{
+-		Name:        "grant.revoke",
+-		Title:       "Revoke a grant",
+-		Description: "Revoke one grant and remove both files.",
++	KeysRemoveSSHTool = &mcpgo.Tool{
++		Name:        "keys.removeSsh",
++		Title:       "Unload an SSH key",
++		Description: "Drop one key from the agent of the session. The file on disk stays.",
+ 	}
+ 
+-	GrantStatusTool = &mcpgo.Tool{
+-		Name:        "grant.status",
+-		Title:       "Show grant status",
+-		Description: "Print the remaining time for each grant.",
++	KeysGenerateGPGTool = &mcpgo.Tool{
++		Name:        "keys.generateGpg",
++		Title:       "Generate a GnuPG key",
++		Description: "Create a new GnuPG key on the host. The agent asks for the passphrase.",
++	}
++
++	KeysRemoveGPGTool = &mcpgo.Tool{
++		Name:        "keys.removeGpg",
++		Title:       "Delete a GnuPG key",
++		Description: "Delete the secret part of one GnuPG key. The public part stays.",
++	}
++
++	GrantsLsTool = &mcpgo.Tool{
++		Name:        "grants.ls",
++		Title:       "List grants",
++		Description: "List every grant with its kind, target, machine, and remaining time.",
+ 		Annotations: &mcpgo.ToolAnnotations{ReadOnlyHint: true},
+ 	}
+ 
+-	SecretsRequestGrantTool = &mcpgo.Tool{
+-		Name:        "secrets.requestGrant",
+-		Title:       "Request a grant",
+-		Description: "Ask the host for one grant. The host approves or denies the request.",
++	GrantsAllowTool = &mcpgo.Tool{
++		Name:        "grants.allow",
++		Title:       "Open a grant",
++		Description: "Open one grant for one machine: time-boxed, one use, or until revoked.",
++	}
++
++	GrantsRevokeTool = &mcpgo.Tool{
++		Name:        "grants.revoke",
++		Title:       "Revoke a grant",
++		Description: "Close one grant by its ID.",
+ 	}
+ )
+ 
+ type SecretsLsOutput struct {
+-	Rows []state.Row `json:"rows" jsonschema:"provider rows, never values"`
++	Rows []state.Row `json:"rows" jsonschema:"secret rows, never values"`
+ }
+ 
+ func (s *Service) SecretsLs(ctx context.Context, req *mcpgo.CallToolRequest, input struct{}) (*mcpgo.CallToolResult, *SecretsLsOutput, error) {
+@@ -74,78 +99,369 @@
+ 	return nil, &SecretsLsOutput{Rows: rows}, nil
+ }
+ 
+-func (s *Service) SecretsSync(ctx context.Context, req *mcpgo.CallToolRequest, input struct{}) (*mcpgo.CallToolResult, any, error) {
+-	if err := s.state.Sync(); err != nil {
++type SecretInput struct {
++	Name     string `json:"name" jsonschema:"the secret name, a valid variable name"`
++	Mode     string `json:"mode" jsonschema:"env or proxy"`
++	Value    string `json:"value" jsonschema:"the secret value, stored in the Secret Service of the host"`
++	Upstream string `json:"upstream" jsonschema:"the base URL for proxy rows, or - for env rows"`
++}
++
++func (s *Service) SecretsSet(ctx context.Context, req *mcpgo.CallToolRequest, input SecretInput) (*mcpgo.CallToolResult, any, error) {
++	row := state.Row{
++		Name:     input.Name,
++		Mode:     input.Mode,
++		Source:   "secret://" + input.Name,
++		Upstream: input.Upstream,
++	}
++
++	if err := s.state.SetSecret(row, input.Value); err != nil {
++		return nil, nil, err
++	}
++
++	return nil, map[string]string{"state": "stored"}, nil
++}
++
++type NameInput struct {
++	Name string `json:"name" jsonschema:"the secret or key name"`
++}
++
++func (s *Service) SecretsRemove(ctx context.Context, req *mcpgo.CallToolRequest, input NameInput) (*mcpgo.CallToolResult, any, error) {
++	if err := s.state.RemoveSecret(input.Name); err != nil {
+ 		return nil, nil, err
+ 	}
+ 
+-	return nil, map[string]string{"state": "synced"}, nil
++	return nil, map[string]string{"state": "removed"}, nil
++}
++
++type KeysLsOutput struct {
++	SSH []state.SSHKey `json:"ssh" jsonschema:"the keys of the session agent"`
++	GPG []state.GPGKey `json:"gpg" jsonschema:"the secret keys of the host GnuPG agent"`
++}
++
++func (s *Service) KeysLs(ctx context.Context, req *mcpgo.CallToolRequest, input struct{}) (*mcpgo.CallToolResult, *KeysLsOutput, error) {
++	out := &KeysLsOutput{}
++
++	sshKeys, err := s.state.ListSSHKeys()
++	if err == nil {
++		out.SSH = sshKeys
++	}
++
++	gpgKeys, err := s.state.ListGPGKeys()
++	if err == nil {
++		out.GPG = gpgKeys
++	}
++
++	return nil, out, nil
+ }
+ 
+-type ProviderInput struct {
+-	Name     string `json:"name" jsonschema:"the provider name, a valid variable name"`
+-	Mode     string `json:"mode" jsonschema:"env or proxy"`
+-	Source   string `json:"source" jsonschema:"a keepassxc:// URI"`
+-	Upstream string `json:"upstream" jsonschema:"the base URL for proxy rows, or - for env rows"`
++type PathInput struct {
++	Path string `json:"path" jsonschema:"the private key file on the host"`
+ }
+ 
+-func (s *Service) SecretsAddProvider(ctx context.Context, req *mcpgo.CallToolRequest, input ProviderInput) (*mcpgo.CallToolResult, any, error) {
+-	if err := s.state.AddProvider(state.Row(input)); err != nil {
++func (s *Service) KeysAddSSH(ctx context.Context, req *mcpgo.CallToolRequest, input PathInput) (*mcpgo.CallToolResult, any, error) {
++	if err := s.state.AddSSHKey(input.Path); err != nil {
+ 		return nil, nil, err
+ 	}
+ 
+ 	return nil, map[string]string{"state": "added"}, nil
+ }
+ 
+-type NameInput struct {
+-	Name string `json:"name" jsonschema:"the provider or grant name"`
++type GenerateSSHInput struct {
++	Comment string `json:"comment" jsonschema:"the comment of the new key"`
++}
++
++func (s *Service) KeysGenerateSSH(ctx context.Context, req *mcpgo.CallToolRequest, input GenerateSSHInput) (*mcpgo.CallToolResult, any, error) {
++	if err := s.state.GenerateSSHKey(input.Comment); err != nil {
++		return nil, nil, err
++	}
++
++	return nil, map[string]string{"state": "generated"}, nil
++}
++
++func (s *Service) KeysRemoveSSH(ctx context.Context, req *mcpgo.CallToolRequest, input NameInput) (*mcpgo.CallToolResult, any, error) {
++	if err := s.state.RemoveSSHKey(input.Name); err != nil {
++		return nil, nil, err
++	}
++
++	return nil, map[string]string{"state": "removed"}, nil
++}
++
++type GenerateGPGInput struct {
++	Name  string `json:"name" jsonschema:"the name of the key owner"`
++	Email string `json:"email" jsonschema:"the email of the key owner, optional"`
++}
++
++func (s *Service) KeysGenerateGPG(ctx context.Context, req *mcpgo.CallToolRequest, input GenerateGPGInput) (*mcpgo.CallToolResult, any, error) {
++	if err := s.state.GenerateGPGKey(input.Name, input.Email); err != nil {
++		return nil, nil, err
++	}
++
++	return nil, map[string]string{"state": "generated"}, nil
++}
++
++type FingerprintInput struct {
++	Fingerprint string `json:"fingerprint" jsonschema:"the fingerprint of the key"`
+ }
+ 
+-func (s *Service) SecretsRemoveProvider(ctx context.Context, req *mcpgo.CallToolRequest, input NameInput) (*mcpgo.CallToolResult, any, error) {
+-	if err := s.state.RemoveProvider(input.Name); err != nil {
++func (s *Service) KeysRemoveGPG(ctx context.Context, req *mcpgo.CallToolRequest, input FingerprintInput) (*mcpgo.CallToolResult, any, error) {
++	if err := s.state.RemoveGPGKey(input.Fingerprint); err != nil {
+ 		return nil, nil, err
+ 	}
+ 
+ 	return nil, map[string]string{"state": "removed"}, nil
+ }
+ 
++type GrantsLsOutput struct {
++	Grants []state.Grant `json:"grants" jsonschema:"every grant, expired ones included"`
++}
++
++func (s *Service) GrantsLs(ctx context.Context, req *mcpgo.CallToolRequest, input struct{}) (*mcpgo.CallToolResult, *GrantsLsOutput, error) {
++	return nil, &GrantsLsOutput{Grants: s.state.Grants()}, nil
++}
++
+ type GrantInput struct {
+-	Name     string `json:"name" jsonschema:"the secret or key name"`
+-	Kind     string `json:"kind" jsonschema:"api-key, ssh-key, or gpg-key"`
+-	Duration string `json:"duration" jsonschema:"a systemd timespan such as 30min or 1h"`
++	Target   string `json:"target" jsonschema:"a secret name, agent://<comment>, or gpg-agent://"`
++	VM       string `json:"vm" jsonschema:"the machine that receives the grant"`
++	Duration string `json:"duration" jsonschema:"a systemd timespan such as 30min or 1h, empty with once or forever"`
++	Once     *bool  `json:"once,omitempty" jsonschema:"close the grant after the first use"`
++	Forever  *bool  `json:"forever,omitempty" jsonschema:"no expiry, the grant ends with revoke"`
+ }
+ 
+-func (s *Service) grantAllow(input GrantInput) error {
+-	return s.state.Allow([]string{"--for", input.Duration, "--kind", input.Kind, input.Name})
++func boolOf(value *bool) bool {
++	return value != nil && *value
+ }
+ 
+-func (s *Service) GrantAllow(ctx context.Context, req *mcpgo.CallToolRequest, input GrantInput) (*mcpgo.CallToolResult, any, error) {
+-	if err := s.grantAllow(input); err != nil {
++func (s *Service) grantAllow(input GrantInput) (*state.Grant, error) {
++	return s.state.Grant(state.AllowOptions{
++		Target:   input.Target,
++		VM:       input.VM,
++		Duration: input.Duration,
++		Once:     boolOf(input.Once),
++		Forever:  boolOf(input.Forever),
++	})
++}
++
++func (s *Service) GrantsAllow(ctx context.Context, req *mcpgo.CallToolRequest, input GrantInput) (*mcpgo.CallToolResult, any, error) {
++	grant, err := s.grantAllow(input)
++	if err != nil {
+ 		return nil, nil, err
+ 	}
+ 
+-	return nil, map[string]string{"state": "granted"}, nil
++	return nil, map[string]string{"state": "granted", "id": grant.ID}, nil
+ }
+ 
+-func (s *Service) GrantRevoke(ctx context.Context, req *mcpgo.CallToolRequest, input NameInput) (*mcpgo.CallToolResult, any, error) {
+-	if err := s.state.Revoke([]string{input.Name}); err != nil {
++type GrantIDInput struct {
++	ID string `json:"id" jsonschema:"the grant ID"`
++}
++
++func (s *Service) GrantsRevoke(ctx context.Context, req *mcpgo.CallToolRequest, input GrantIDInput) (*mcpgo.CallToolResult, any, error) {
++	if err := s.state.RevokeGrant(input.ID); err != nil {
+ 		return nil, nil, err
+ 	}
+ 
+ 	return nil, map[string]string{"state": "revoked"}, nil
+ }
+ 
+-func (s *Service) GrantStatus(ctx context.Context, req *mcpgo.CallToolRequest, input struct{}) (*mcpgo.CallToolResult, any, error) {
+-	if err := s.state.Status(); err != nil {
++var (
++	RequestsGrantTool = &mcpgo.Tool{
++		Name:        "requests.grant",
++		Title:       "Request a grant",
++		Description: "Ask the host for one grant. The host user approves or denies the request.",
++	}
++
++	RequestsSetSecretTool = &mcpgo.Tool{
++		Name:        "requests.setSecret",
++		Title:       "Request storing a secret",
++		Description: "Ask the host to store one secret. The host user approves or denies the request.",
++	}
++
++	RequestsRemoveSecretTool = &mcpgo.Tool{
++		Name:        "requests.removeSecret",
++		Title:       "Request removing a secret",
++		Description: "Ask the host to remove one secret. The host user approves or denies the request.",
++	}
++
++	RequestsGenerateSSHKeyTool = &mcpgo.Tool{
++		Name:        "requests.generateSshKey",
++		Title:       "Request a new SSH key",
++		Description: "Ask the host to generate a new SSH key. The host user approves or denies the request.",
++	}
++
++	RequestsGenerateGPGKeyTool = &mcpgo.Tool{
++		Name:        "requests.generateGpgKey",
++		Title:       "Request a new GnuPG key",
++		Description: "Ask the host to generate a new GnuPG key. The host user approves or denies the request.",
++	}
++
++	RequestsRemoveSSHKeyTool = &mcpgo.Tool{
++		Name:        "requests.removeSshKey",
++		Title:       "Request unloading an SSH key",
++		Description: "Ask the host to unload one SSH key from the session agent. The host user approves or denies the request.",
++	}
++
++	RequestsRemoveGPGKeyTool = &mcpgo.Tool{
++		Name:        "requests.removeGpgKey",
++		Title:       "Request deleting a GnuPG key",
++		Description: "Ask the host to delete one GnuPG secret key. The host user approves or denies the request.",
++	}
++)
++
++// The request tools below run on the guest endpoint. Every one of them asks
++// the host user for approval before it changes anything.
++
++type requestGrantInput struct {
++	Target   string `json:"target" jsonschema:"a secret name, agent://<comment>, or gpg-agent://"`
++	Duration string `json:"duration" jsonschema:"a systemd timespan such as 30min or 1h, empty with once"`
++	Once     *bool  `json:"once,omitempty" jsonschema:"close the grant after the first use"`
++	VM       string `json:"vm,omitempty" jsonschema:"the machine, when the connection does not name one"`
++}
++
++func (s *Service) RequestsGrant(ctx context.Context, req *mcpgo.CallToolRequest, input requestGrantInput) (*mcpgo.CallToolResult, any, error) {
++	// The vsock address of the connection names the machine. A connection
++	// without an address, such as the local socket, falls back to the field.
++	vm, ok := VMFromContext(ctx)
++	if !ok {
++		vm = input.VM
++	}
++
++	kind, name := state.TargetKind(input.Target)
++
++	detail := fmt.Sprintf("%s (%s) for %s", name, kind, input.Duration)
++	if boolOf(input.Once) {
++		detail = fmt.Sprintf("%s (%s) for one use", name, kind)
++	}
++
++	id, err := s.approvals.Create(CategoryGrant, "grant", detail, vm, func() error {
++		_, err := s.state.Grant(state.AllowOptions{
++			Target:   input.Target,
++			VM:       vm,
++			Duration: input.Duration,
++			Once:     boolOf(input.Once),
++		})
++
++		return err
++	})
++	if err != nil {
++		return nil, nil, err
++	}
++
++	return nil, map[string]string{"approval": id, "state": "pending"}, nil
++}
++
++func (s *Service) RequestsSetSecret(ctx context.Context, req *mcpgo.CallToolRequest, input SecretInput) (*mcpgo.CallToolResult, any, error) {
++	vm, _ := VMFromContext(ctx)
++
++	id, err := s.approvals.Create(CategoryChange, "store secret", input.Name, vm, func() error {
++		return s.state.SetSecret(state.Row{
++			Name:     input.Name,
++			Mode:     input.Mode,
++			Source:   "secret://" + input.Name,
++			Upstream: input.Upstream,
++		}, input.Value)
++	})
++	if err != nil {
++		return nil, nil, err
++	}
++
++	return nil, map[string]string{"approval": id, "state": "pending"}, nil
++}
++
++func (s *Service) RequestsRemoveSecret(ctx context.Context, req *mcpgo.CallToolRequest, input NameInput) (*mcpgo.CallToolResult, any, error) {
++	vm, _ := VMFromContext(ctx)
++
++	id, err := s.approvals.Create(CategoryChange, "remove secret", input.Name, vm, func() error {
++		return s.state.RemoveSecret(input.Name)
++	})
++	if err != nil {
++		return nil, nil, err
++	}
++
++	return nil, map[string]string{"approval": id, "state": "pending"}, nil
++}
++
++type generateSSHKeyInput struct {
++	Comment string `json:"comment" jsonschema:"the comment of the new key"`
++	Grant   *bool  `json:"grant,omitempty" jsonschema:"grant the new key to this machine for one hour"`
++}
++
++func (s *Service) RequestsGenerateSSHKey(ctx context.Context, req *mcpgo.CallToolRequest, input generateSSHKeyInput) (*mcpgo.CallToolResult, any, error) {
++	vm, _ := VMFromContext(ctx)
++
++	id, err := s.approvals.Create(CategoryChange, "generate SSH key", input.Comment, vm, func() error {
++		if err := s.state.GenerateSSHKey(input.Comment); err != nil {
++			return err
++		}
++
++		if boolOf(input.Grant) {
++			_, err := s.state.Grant(state.AllowOptions{
++				Target:   state.SSHAgentScheme + input.Comment,
++				VM:       vm,
++				Duration: "1h",
++			})
++
++			return err
++		}
++
++		return nil
++	})
++	if err != nil {
++		return nil, nil, err
++	}
++
++	return nil, map[string]string{"approval": id, "state": "pending"}, nil
++}
++
++type generateGPGKeyInput struct {
++	Name  string `json:"name" jsonschema:"the name of the key owner"`
++	Email string `json:"email" jsonschema:"the email of the key owner, optional"`
++	Grant *bool  `json:"grant,omitempty" jsonschema:"grant the host GnuPG agent to this machine for one hour"`
++}
++
++func (s *Service) RequestsGenerateGPGKey(ctx context.Context, req *mcpgo.CallToolRequest, input generateGPGKeyInput) (*mcpgo.CallToolResult, any, error) {
++	vm, _ := VMFromContext(ctx)
++
++	id, err := s.approvals.Create(CategoryChange, "generate GnuPG key", fmt.Sprintf("%s <%s>", input.Name, input.Email), vm, func() error {
++		if err := s.state.GenerateGPGKey(input.Name, input.Email); err != nil {
++			return err
++		}
++
++		if boolOf(input.Grant) {
++			_, err := s.state.Grant(state.AllowOptions{
++				Target:   state.GPGAgentScheme,
++				VM:       vm,
++				Duration: "1h",
++			})
++
++			return err
++		}
++
++		return nil
++	})
++	if err != nil {
+ 		return nil, nil, err
+ 	}
+ 
+-	return nil, map[string]string{"state": "ok"}, nil
++	return nil, map[string]string{"approval": id, "state": "pending"}, nil
++}
++
++func (s *Service) RequestsRemoveSSHKey(ctx context.Context, req *mcpgo.CallToolRequest, input NameInput) (*mcpgo.CallToolResult, any, error) {
++	vm, _ := VMFromContext(ctx)
++
++	id, err := s.approvals.Create(CategoryChange, "unload SSH key", input.Name, vm, func() error {
++		return s.state.RemoveSSHKey(input.Name)
++	})
++	if err != nil {
++		return nil, nil, err
++	}
++
++	return nil, map[string]string{"approval": id, "state": "pending"}, nil
+ }
+ 
+-func (s *Service) SecretsRequestGrant(ctx context.Context, req *mcpgo.CallToolRequest, input GrantInput) (*mcpgo.CallToolResult, any, error) {
+-	id, err := s.approvals.Create("grant", fmt.Sprintf("%s (%s) for %s", input.Name, input.Kind, input.Duration), func() error {
+-		return s.grantAllow(input)
++func (s *Service) RequestsRemoveGPGKey(ctx context.Context, req *mcpgo.CallToolRequest, input FingerprintInput) (*mcpgo.CallToolResult, any, error) {
++	vm, _ := VMFromContext(ctx)
++
++	id, err := s.approvals.Create(CategoryChange, "delete GnuPG key", input.Fingerprint, vm, func() error {
++		return s.state.RemoveGPGKey(input.Fingerprint)
+ 	})
+ 	if err != nil {
+ 		return nil, nil, err
+diff --git a/internal/mcp/tools_system.go b/internal/mcp/tools_system.go
+index abe10caf9d49b9d0c28d13a05eb7c3301ff1f17f..42e68b0d90dc8319d60faed89d25572b181352b3 100644
+--- a/internal/mcp/tools_system.go
++++ b/internal/mcp/tools_system.go
+@@ -4,7 +4,6 @@ import (
+ 	"context"
+ 	"fmt"
+ 	"os"
+-	"os/exec"
+ 	"path/filepath"
+ 	"strconv"
+ 	"strings"
+@@ -12,6 +11,7 @@
+ 	systemdDbus "github.com/coreos/go-systemd/v22/dbus"
+ 	mcpgo "github.com/modelcontextprotocol/go-sdk/mcp"
+ 
++	"codeberg.org/pojntfx/phial-neo/internal/hostcmd"
+ 	"codeberg.org/pojntfx/phial-neo/internal/setup"
+ )
+ 
+@@ -65,7 +65,7 @@ 	add("udev usb rules", fileState("/etc/udev/rules.d/70-phial-usb.rules"))
+ 	add("udev vfio rules", fileState("/etc/udev/rules.d/70-phial-vfio.rules"))
+ 	add("memlock dropin", fileState("/etc/systemd/system/user@.service.d/99-phial-memlock.conf"))
+ 
+-	for _, unit := range []string{"phial-caddy.service", "phial-agent.service", "phial-forward@proxy.service", "phial-forward@mcp.service"} {
++	for _, unit := range []string{"phial-gate.service"} {
+ 		active, err := s.unitActive(unit)
+ 		value := "unknown"
+ 
+@@ -134,11 +134,21 @@ }
+ 
+ func run0(args ...string) (string, error) {
+ 	self, err := os.Executable()
++
++	// The root setup runs on the host, so the Flatpak names the binary that
++	// the host install put in ~/.local/bin.
++	if os.Getenv("FLATPAK_ID") != "" {
++		if home, homeErr := os.UserHomeDir(); homeErr == nil {
++			self = filepath.Join(home, ".local", "bin", "phial")
++			err = nil
++		}
++	}
++
+ 	if err != nil {
+ 		return "", err
+ 	}
+ 
+-	command := exec.Command("run0", append([]string{self}, args...)...)
++	command := hostcmd.Command("run0", append([]string{self}, args...)...)
+ 
+ 	output, err := command.CombinedOutput()
+ 
+diff --git a/internal/mcp/tools_vm.go b/internal/mcp/tools_vm.go
+index af1f8f50ddb191840666b18ab4a9ac93f21d4d8b..8de05036663872f34b559e724d21c9ea59c6cf18 100644
+--- a/internal/mcp/tools_vm.go
++++ b/internal/mcp/tools_vm.go
+@@ -6,7 +6,6 @@ 	"crypto/rand"
+ 	"encoding/hex"
+ 	"fmt"
+ 	"os"
+-	"os/exec"
+ 	"path/filepath"
+ 	"strings"
+ 	"time"
+@@ -15,6 +14,7 @@ 	mcpgo "github.com/modelcontextprotocol/go-sdk/mcp"
+ 	"github.com/pojntfx/go-gettext/pkg/i18n"
+ 
+ 	"codeberg.org/pojntfx/phial-neo/internal/guest"
++	"codeberg.org/pojntfx/phial-neo/internal/hostcmd"
+ 	"codeberg.org/pojntfx/phial-neo/internal/virt"
+ )
+ 
+@@ -447,7 +447,7 @@ 	Description: "Write the unit files, the shares, the secrets and the guest agent of the machine again through the guest agent over the virtio serial channel. This step is idempotent, so run it after the install and after every update.",
+ }
+ 
+ func (s *Service) rdpPassword() (string, error) {
+-	lookup := exec.Command("secret-tool", "lookup", "service", "phial", "kind", "rdp-password")
++	lookup := hostcmd.Command("secret-tool", "lookup", "service", "phial", "kind", "rdp-password")
+ 
+ 	if output, err := lookup.Output(); err == nil {
+ 		if password := strings.TrimSpace(string(output)); password != "" {
+@@ -462,7 +462,7 @@ 	}
+ 
+ 	password := hex.EncodeToString(raw)
+ 
+-	store := exec.Command("secret-tool", "store", "--label="+i18n.L("Phial RDP password"), "service", "phial", "kind", "rdp-password")
++	store := hostcmd.Command("secret-tool", "store", "--label="+i18n.L("Phial RDP password"), "service", "phial", "kind", "rdp-password")
+ 	store.Stdin = strings.NewReader(password)
+ 
+ 	if err := store.Run(); err != nil {
+
