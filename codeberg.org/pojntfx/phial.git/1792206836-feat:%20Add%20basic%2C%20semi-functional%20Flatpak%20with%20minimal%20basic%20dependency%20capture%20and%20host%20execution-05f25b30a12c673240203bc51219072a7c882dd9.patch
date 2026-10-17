@@ -1,0 +1,1316 @@
+From 05f25b30a12c673240203bc51219072a7c882dd9 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Fri, 16 Oct 2026 20:13:56 -0700
+Subject: [PATCH] feat: Add basic, semi-functional Flatpak with minimal basic dependency capture and host execution
+---
+diff --git a/.gitignore b/.gitignore
+index 5eb45373ecc4b9a0a11f213f9eda905e29d32000..b587ca29d23887287504970abcadb946a7636c1d 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -1,2 +1,7 @@
+ /bin/
+ /internal/guest/agent/phial
++/.flatpak-builder/
++/flatpak/build/
++/flatpak/build.log
++/flatpak/repo/
++/flatpak/*.flatpak
+diff --git a/Makefile b/Makefile
+index 7a7375f9f0f2309a6ad089243be25aabad320174..1ea174298a9c60a5c4f60e7fb9b3bd4fd3444519 100644
+--- a/Makefile
++++ b/Makefile
+@@ -36,7 +36,7 @@ flatpak-lint:
+ 	python3 -c "import json; json.load(open('flatpak/com.pojtinger.felicitas.Phial.json')); print('manifest ok')"
+ 
+ flatpak: flatpak-lint
+-	flatpak-builder --force-clean --repo=flatpak/repo flatpak/build flatpak/com.pojtinger.felicitas.Phial.json
++	flatpak-builder --disable-rofiles-fuse --force-clean --repo=flatpak/repo flatpak/build flatpak/com.pojtinger.felicitas.Phial.json
+ 	flatpak build-bundle flatpak/repo flatpak/phial.flatpak com.pojtinger.felicitas.Phial
+ 
+ clean:
+diff --git a/flatpak/README.md b/flatpak/README.md
+index a2a6d11ac3700a85e7d944d4e4d551d6ea732900..d0fd0719a24f097e0fe205474c1538cafae62f72 100644
+--- a/flatpak/README.md
++++ b/flatpak/README.md
+@@ -18,25 +18,69 @@     flatpak install --user flatpak/phial.flatpak
+ 
+ ## Modules
+ 
+-The manifest builds every runtime dependency from source. The list follows.
++The manifest builds only the tools that the sandbox executes. The list follows.
+ 
+-- libtpms and swtpm supply the TPM 2.0 device.
+-- socat carries the vsock forwards.
+-- passt supplies the user space network.
+-- Caddy injects secrets into outbound requests.
+-- virtiofsd supplies the host shares.
+-- QEMU runs the machine.
+-- edk2 supplies the OVMF Secure Boot pair.
+-- waypipe renders machine windows on the host.
+-- FreeRDP supplies the RDP client.
++- waypipe renders the windows of a guest application on the desktop of the host.
++- ovmf supplies the UEFI pair. The source is the Fedora edk2-ovmf RPM, which the
++  build unpacks with bsdtar. extra-data cannot carry this pair, because it
++  fetches single files at install time and cannot unpack an RPM.
+ - Phial itself is the last module.
+ 
++waypipe tracks v0.11.2. The build turns off the optional lz4, zstd, gbm, and
++video wrappers, because their bindgen step needs libclang, which the SDK does
++not carry. No dependency of this app is in the Flathub shared-modules
++repository.
++
++The machine tools stay on the host. The units that the host install writes run
++swtpm, virtiofsd, passt, socat, and QEMU on the host, and QEMU reads the OVMF
++pair from the host. The RDP client also runs on the host: the window starts
++xfreerdp through flatpak-spawn. A bundle copy of these tools cannot serve the
++host QEMU or the host client, because /app exists only inside the sandbox.
++
++## Permissions
++
++The manifest asks for the following and nothing more:
++
++- `--socket=wayland`, `--socket=fallback-x11`, `--share=ipc`, `--device=dri`
++  draw the window.
++- `--share=network` downloads the machine image, reaches the upstreams of
++  proxied secrets, and lists the local packages.
++- `--talk-name=org.freedesktop.secrets` stores and reads the secrets in the
++  keyring of the session.
++- `--talk-name=org.freedesktop.systemd1` starts and stops the user units that
++  run the machine, the gate, and the tools.
++- `--talk-name=org.freedesktop.Flatpak` runs the tools of the host through
++  flatpak-spawn, because ssh-add, gpg, run0, xfreerdp, and pinentry live outside
++  the sandbox.
++- `--filesystem=~/.config/phial`, `--filesystem=~/.local/share/phial`, and
++  `--filesystem=xdg-run/phial` share the state of the host install.
++- `--filesystem=~/.ssh` reads the public keys that the session agent holds.
++
++Notifications, the background request, and the file dialogs go through the
++portals, so the manifest grants no direct access to the notification service.
++The root setup runs run0 on the host through flatpak-spawn, so the sandbox
++needs no PolicyKit talk.
++
++## Host requirements
++
++The host install writes user units that run the host copies of the machine
++tools. The host therefore needs:
++
++- qemu-system-x86_64 and edk2-ovmf for the machine.
++- swtpm, virtiofsd, passt, and socat for the units.
++- ssh-agent from openssh, for the session agent.
++- ssh-add, ssh-keygen, ssh, gpg, and xfreerdp for the tools that flatpak-spawn
++  runs.
++- pinentry-gnome3 and run0 for the gate and the root setup.
++- virt-fw-vars for the Secure Boot enrollment.
++
+ ## Notes
+ 
+ - The manifest pins every archive with a sha256 sum. Run `make flatpak-lint` to
+   validate the JSON alone.
+ - The build needs the golang and rust-stable SDK extensions.
+-- The edk2 build needs network access for its submodules.
+-- A full build takes about one hour on twelve cores. QEMU and edk2 dominate.
++- flatpak-builder keeps the downloads, the git mirrors, and the module checksums
++  in .flatpak-builder, so a rerun skips the modules that already finished.
++  Deleting flatpak/build does not lose them.
+ - The application module compiles the Blueprint files, the settings schema, and the
+   resource bundle before it builds the binary.
+diff --git a/flatpak/cargo-sources.json b/flatpak/cargo-sources.json
+new file mode 100644
+index 0000000000000000000000000000000000000000..66fa8c9392bbf7ecd9b5c2e7798de2f984a3cf70
+--- /dev/null
++++ b/flatpak/cargo-sources.json
+@@ -0,0 +1,463 @@
++[
++    {
++        "type": "archive",
++        "archive-type": "tar-gzip",
++        "url": "https://static.crates.io/crates/anstream/anstream-0.6.18.crate",
++        "sha256": "8acc5369981196006228e28809f761875c0327210a891e941f4c683b3a99529b",
++        "dest": "cargo/vendor/anstream-0.6.18"
++    },
++    {
++        "type": "inline",
++        "contents": "{\"package\": \"8acc5369981196006228e28809f761875c0327210a891e941f4c683b3a99529b\", \"files\": {}}",
++        "dest": "cargo/vendor/anstream-0.6.18",
++        "dest-filename": ".cargo-checksum.json"
++    },
++    {
++        "type": "archive",
++        "archive-type": "tar-gzip",
++        "url": "https://static.crates.io/crates/anstyle/anstyle-1.0.10.crate",
++        "sha256": "55cc3b69f167a1ef2e161439aa98aed94e6028e5f9a59be9a6ffb47aef1651f9",
++        "dest": "cargo/vendor/anstyle-1.0.10"
++    },
++    {
++        "type": "inline",
++        "contents": "{\"package\": \"55cc3b69f167a1ef2e161439aa98aed94e6028e5f9a59be9a6ffb47aef1651f9\", \"files\": {}}",
++        "dest": "cargo/vendor/anstyle-1.0.10",
++        "dest-filename": ".cargo-checksum.json"
++    },
++    {
++        "type": "archive",
++        "archive-type": "tar-gzip",
++        "url": "https://static.crates.io/crates/anstyle-parse/anstyle-parse-0.2.6.crate",
++        "sha256": "3b2d16507662817a6a20a9ea92df6652ee4f94f914589377d69f3b21bc5798a9",
++        "dest": "cargo/vendor/anstyle-parse-0.2.6"
++    },
++    {
++        "type": "inline",
++        "contents": "{\"package\": \"3b2d16507662817a6a20a9ea92df6652ee4f94f914589377d69f3b21bc5798a9\", \"files\": {}}",
++        "dest": "cargo/vendor/anstyle-parse-0.2.6",
++        "dest-filename": ".cargo-checksum.json"
++    },
++    {
++        "type": "archive",
++        "archive-type": "tar-gzip",
++        "url": "https://static.crates.io/crates/anstyle-query/anstyle-query-1.1.2.crate",
++        "sha256": "79947af37f4177cfead1110013d678905c37501914fba0efea834c3fe9a8d60c",
++        "dest": "cargo/vendor/anstyle-query-1.1.2"
++    },
++    {
++        "type": "inline",
++        "contents": "{\"package\": \"79947af37f4177cfead1110013d678905c37501914fba0efea834c3fe9a8d60c\", \"files\": {}}",
++        "dest": "cargo/vendor/anstyle-query-1.1.2",
++        "dest-filename": ".cargo-checksum.json"
++    },
++    {
++        "type": "archive",
++        "archive-type": "tar-gzip",
++        "url": "https://static.crates.io/crates/anstyle-wincon/anstyle-wincon-3.0.6.crate",
++        "sha256": "2109dbce0e72be3ec00bed26e6a7479ca384ad226efdd66db8fa2e3a38c83125",
++        "dest": "cargo/vendor/anstyle-wincon-3.0.6"
++    },
++    {
++        "type": "inline",
++        "contents": "{\"package\": \"2109dbce0e72be3ec00bed26e6a7479ca384ad226efdd66db8fa2e3a38c83125\", \"files\": {}}",
++        "dest": "cargo/vendor/anstyle-wincon-3.0.6",
++        "dest-filename": ".cargo-checksum.json"
++    },
++    {
++        "type": "archive",
++        "archive-type": "tar-gzip",
++        "url": "https://static.crates.io/crates/ash/ash-0.38.0+1.3.281.crate",
++        "sha256": "0bb44936d800fea8f016d7f2311c6a4f97aebd5dc86f09906139ec848cf3a46f",
++        "dest": "cargo/vendor/ash-0.38.0+1.3.281"
++    },
++    {
++        "type": "inline",
++        "contents": "{\"package\": \"0bb44936d800fea8f016d7f2311c6a4f97aebd5dc86f09906139ec848cf3a46f\", \"files\": {}}",
++        "dest": "cargo/vendor/ash-0.38.0+1.3.281",
++        "dest-filename": ".cargo-checksum.json"
++    },
++    {
++        "type": "archive",
++        "archive-type": "tar-gzip",
++        "url": "https://static.crates.io/crates/autocfg/autocfg-1.4.0.crate",
++        "sha256": "ace50bade8e6234aa140d9a2f552bbee1db4d353f69b8217bc503490fc1a9f26",
++        "dest": "cargo/vendor/autocfg-1.4.0"
++    },
++    {
++        "type": "inline",
++        "contents": "{\"package\": \"ace50bade8e6234aa140d9a2f552bbee1db4d353f69b8217bc503490fc1a9f26\", \"files\": {}}",
++        "dest": "cargo/vendor/autocfg-1.4.0",
++        "dest-filename": ".cargo-checksum.json"
++    },
++    {
++        "type": "archive",
++        "archive-type": "tar-gzip",
++        "url": "https://static.crates.io/crates/bitflags/bitflags-2.6.0.crate",
++        "sha256": "b048fb63fd8b5923fc5aa7b340d8e156aec7ec02f0c78fa8a6ddc2613f6f71de",
++        "dest": "cargo/vendor/bitflags-2.6.0"
++    },
++    {
++        "type": "inline",
++        "contents": "{\"package\": \"b048fb63fd8b5923fc5aa7b340d8e156aec7ec02f0c78fa8a6ddc2613f6f71de\", \"files\": {}}",
++        "dest": "cargo/vendor/bitflags-2.6.0",
++        "dest-filename": ".cargo-checksum.json"
++    },
++    {
++        "type": "archive",
++        "archive-type": "tar-gzip",
++        "url": "https://static.crates.io/crates/cfg-if/cfg-if-1.0.0.crate",
++        "sha256": "baf1de4339761588bc0619e3cbc0120ee582ebb74b53b4efbf79117bd2da40fd",
++        "dest": "cargo/vendor/cfg-if-1.0.0"
++    },
++    {
++        "type": "inline",
++        "contents": "{\"package\": \"baf1de4339761588bc0619e3cbc0120ee582ebb74b53b4efbf79117bd2da40fd\", \"files\": {}}",
++        "dest": "cargo/vendor/cfg-if-1.0.0",
++        "dest-filename": ".cargo-checksum.json"
++    },
++    {
++        "type": "archive",
++        "archive-type": "tar-gzip",
++        "url": "https://static.crates.io/crates/cfg_aliases/cfg_aliases-0.2.1.crate",
++        "sha256": "613afe47fcd5fac7ccf1db93babcb082c5994d996f20b8b159f2ad1658eb5724",
++        "dest": "cargo/vendor/cfg_aliases-0.2.1"
++    },
++    {
++        "type": "inline",
++        "contents": "{\"package\": \"613afe47fcd5fac7ccf1db93babcb082c5994d996f20b8b159f2ad1658eb5724\", \"files\": {}}",
++        "dest": "cargo/vendor/cfg_aliases-0.2.1",
++        "dest-filename": ".cargo-checksum.json"
++    },
++    {
++        "type": "archive",
++        "archive-type": "tar-gzip",
++        "url": "https://static.crates.io/crates/clap/clap-4.5.21.crate",
++        "sha256": "fb3b4b9e5a7c7514dfa52869339ee98b3156b0bfb4e8a77c4ff4babb64b1604f",
++        "dest": "cargo/vendor/clap-4.5.21"
++    },
++    {
++        "type": "inline",
++        "contents": "{\"package\": \"fb3b4b9e5a7c7514dfa52869339ee98b3156b0bfb4e8a77c4ff4babb64b1604f\", \"files\": {}}",
++        "dest": "cargo/vendor/clap-4.5.21",
++        "dest-filename": ".cargo-checksum.json"
++    },
++    {
++        "type": "archive",
++        "archive-type": "tar-gzip",
++        "url": "https://static.crates.io/crates/clap_builder/clap_builder-4.5.21.crate",
++        "sha256": "b17a95aa67cc7b5ebd32aa5370189aa0d79069ef1c64ce893bd30fb24bff20ec",
++        "dest": "cargo/vendor/clap_builder-4.5.21"
++    },
++    {
++        "type": "inline",
++        "contents": "{\"package\": \"b17a95aa67cc7b5ebd32aa5370189aa0d79069ef1c64ce893bd30fb24bff20ec\", \"files\": {}}",
++        "dest": "cargo/vendor/clap_builder-4.5.21",
++        "dest-filename": ".cargo-checksum.json"
++    },
++    {
++        "type": "archive",
++        "archive-type": "tar-gzip",
++        "url": "https://static.crates.io/crates/clap_lex/clap_lex-0.7.3.crate",
++        "sha256": "afb84c814227b90d6895e01398aee0d8033c00e7466aca416fb6a8e0eb19d8a7",
++        "dest": "cargo/vendor/clap_lex-0.7.3"
++    },
++    {
++        "type": "inline",
++        "contents": "{\"package\": \"afb84c814227b90d6895e01398aee0d8033c00e7466aca416fb6a8e0eb19d8a7\", \"files\": {}}",
++        "dest": "cargo/vendor/clap_lex-0.7.3",
++        "dest-filename": ".cargo-checksum.json"
++    },
++    {
++        "type": "archive",
++        "archive-type": "tar-gzip",
++        "url": "https://static.crates.io/crates/colorchoice/colorchoice-1.0.3.crate",
++        "sha256": "5b63caa9aa9397e2d9480a9b13673856c78d8ac123288526c37d7839f2a86990",
++        "dest": "cargo/vendor/colorchoice-1.0.3"
++    },
++    {
++        "type": "inline",
++        "contents": "{\"package\": \"5b63caa9aa9397e2d9480a9b13673856c78d8ac123288526c37d7839f2a86990\", \"files\": {}}",
++        "dest": "cargo/vendor/colorchoice-1.0.3",
++        "dest-filename": ".cargo-checksum.json"
++    },
++    {
++        "type": "archive",
++        "archive-type": "tar-gzip",
++        "url": "https://static.crates.io/crates/getrandom/getrandom-0.2.15.crate",
++        "sha256": "c4567c8db10ae91089c99af84c68c38da3ec2f087c3f82960bcdbf3656b6f4d7",
++        "dest": "cargo/vendor/getrandom-0.2.15"
++    },
++    {
++        "type": "inline",
++        "contents": "{\"package\": \"c4567c8db10ae91089c99af84c68c38da3ec2f087c3f82960bcdbf3656b6f4d7\", \"files\": {}}",
++        "dest": "cargo/vendor/getrandom-0.2.15",
++        "dest-filename": ".cargo-checksum.json"
++    },
++    {
++        "type": "archive",
++        "archive-type": "tar-gzip",
++        "url": "https://static.crates.io/crates/is_terminal_polyfill/is_terminal_polyfill-1.70.1.crate",
++        "sha256": "7943c866cc5cd64cbc25b2e01621d07fa8eb2a1a23160ee81ce38704e97b8ecf",
++        "dest": "cargo/vendor/is_terminal_polyfill-1.70.1"
++    },
++    {
++        "type": "inline",
++        "contents": "{\"package\": \"7943c866cc5cd64cbc25b2e01621d07fa8eb2a1a23160ee81ce38704e97b8ecf\", \"files\": {}}",
++        "dest": "cargo/vendor/is_terminal_polyfill-1.70.1",
++        "dest-filename": ".cargo-checksum.json"
++    },
++    {
++        "type": "archive",
++        "archive-type": "tar-gzip",
++        "url": "https://static.crates.io/crates/libc/libc-0.2.177.crate",
++        "sha256": "2874a2af47a2325c2001a6e6fad9b16a53b802102b528163885171cf92b15976",
++        "dest": "cargo/vendor/libc-0.2.177"
++    },
++    {
++        "type": "inline",
++        "contents": "{\"package\": \"2874a2af47a2325c2001a6e6fad9b16a53b802102b528163885171cf92b15976\", \"files\": {}}",
++        "dest": "cargo/vendor/libc-0.2.177",
++        "dest-filename": ".cargo-checksum.json"
++    },
++    {
++        "type": "archive",
++        "archive-type": "tar-gzip",
++        "url": "https://static.crates.io/crates/libloading/libloading-0.8.5.crate",
++        "sha256": "4979f22fdb869068da03c9f7528f8297c6fd2606bc3a4affe42e6a823fdb8da4",
++        "dest": "cargo/vendor/libloading-0.8.5"
++    },
++    {
++        "type": "inline",
++        "contents": "{\"package\": \"4979f22fdb869068da03c9f7528f8297c6fd2606bc3a4affe42e6a823fdb8da4\", \"files\": {}}",
++        "dest": "cargo/vendor/libloading-0.8.5",
++        "dest-filename": ".cargo-checksum.json"
++    },
++    {
++        "type": "archive",
++        "archive-type": "tar-gzip",
++        "url": "https://static.crates.io/crates/log/log-0.4.22.crate",
++        "sha256": "a7a70ba024b9dc04c27ea2f0c0548feb474ec5c54bba33a7f72f873a39d07b24",
++        "dest": "cargo/vendor/log-0.4.22"
++    },
++    {
++        "type": "inline",
++        "contents": "{\"package\": \"a7a70ba024b9dc04c27ea2f0c0548feb474ec5c54bba33a7f72f873a39d07b24\", \"files\": {}}",
++        "dest": "cargo/vendor/log-0.4.22",
++        "dest-filename": ".cargo-checksum.json"
++    },
++    {
++        "type": "archive",
++        "archive-type": "tar-gzip",
++        "url": "https://static.crates.io/crates/memoffset/memoffset-0.9.1.crate",
++        "sha256": "488016bfae457b036d996092f6cb448677611ce4449e970ceaf42695203f218a",
++        "dest": "cargo/vendor/memoffset-0.9.1"
++    },
++    {
++        "type": "inline",
++        "contents": "{\"package\": \"488016bfae457b036d996092f6cb448677611ce4449e970ceaf42695203f218a\", \"files\": {}}",
++        "dest": "cargo/vendor/memoffset-0.9.1",
++        "dest-filename": ".cargo-checksum.json"
++    },
++    {
++        "type": "archive",
++        "archive-type": "tar-gzip",
++        "url": "https://static.crates.io/crates/nix/nix-0.30.1.crate",
++        "sha256": "74523f3a35e05aba87a1d978330aef40f67b0304ac79c1c00b294c9830543db6",
++        "dest": "cargo/vendor/nix-0.30.1"
++    },
++    {
++        "type": "inline",
++        "contents": "{\"package\": \"74523f3a35e05aba87a1d978330aef40f67b0304ac79c1c00b294c9830543db6\", \"files\": {}}",
++        "dest": "cargo/vendor/nix-0.30.1",
++        "dest-filename": ".cargo-checksum.json"
++    },
++    {
++        "type": "archive",
++        "archive-type": "tar-gzip",
++        "url": "https://static.crates.io/crates/pkg-config/pkg-config-0.3.31.crate",
++        "sha256": "953ec861398dccce10c670dfeaf3ec4911ca479e9c02154b3a215178c5f566f2",
++        "dest": "cargo/vendor/pkg-config-0.3.31"
++    },
++    {
++        "type": "inline",
++        "contents": "{\"package\": \"953ec861398dccce10c670dfeaf3ec4911ca479e9c02154b3a215178c5f566f2\", \"files\": {}}",
++        "dest": "cargo/vendor/pkg-config-0.3.31",
++        "dest-filename": ".cargo-checksum.json"
++    },
++    {
++        "type": "archive",
++        "archive-type": "tar-gzip",
++        "url": "https://static.crates.io/crates/strsim/strsim-0.11.1.crate",
++        "sha256": "7da8b5736845d9f2fcb837ea5d9e2628564b3b043a70948a3f0b778838c5fb4f",
++        "dest": "cargo/vendor/strsim-0.11.1"
++    },
++    {
++        "type": "inline",
++        "contents": "{\"package\": \"7da8b5736845d9f2fcb837ea5d9e2628564b3b043a70948a3f0b778838c5fb4f\", \"files\": {}}",
++        "dest": "cargo/vendor/strsim-0.11.1",
++        "dest-filename": ".cargo-checksum.json"
++    },
++    {
++        "type": "archive",
++        "archive-type": "tar-gzip",
++        "url": "https://static.crates.io/crates/utf8parse/utf8parse-0.2.2.crate",
++        "sha256": "06abde3611657adf66d383f00b093d7faecc7fa57071cce2578660c9f1010821",
++        "dest": "cargo/vendor/utf8parse-0.2.2"
++    },
++    {
++        "type": "inline",
++        "contents": "{\"package\": \"06abde3611657adf66d383f00b093d7faecc7fa57071cce2578660c9f1010821\", \"files\": {}}",
++        "dest": "cargo/vendor/utf8parse-0.2.2",
++        "dest-filename": ".cargo-checksum.json"
++    },
++    {
++        "type": "archive",
++        "archive-type": "tar-gzip",
++        "url": "https://static.crates.io/crates/wasi/wasi-0.11.0+wasi-snapshot-preview1.crate",
++        "sha256": "9c8d87e72b64a3b4db28d11ce29237c246188f4f51057d65a7eab63b7987e423",
++        "dest": "cargo/vendor/wasi-0.11.0+wasi-snapshot-preview1"
++    },
++    {
++        "type": "inline",
++        "contents": "{\"package\": \"9c8d87e72b64a3b4db28d11ce29237c246188f4f51057d65a7eab63b7987e423\", \"files\": {}}",
++        "dest": "cargo/vendor/wasi-0.11.0+wasi-snapshot-preview1",
++        "dest-filename": ".cargo-checksum.json"
++    },
++    {
++        "type": "archive",
++        "archive-type": "tar-gzip",
++        "url": "https://static.crates.io/crates/windows-sys/windows-sys-0.59.0.crate",
++        "sha256": "1e38bc4d79ed67fd075bcc251a1c39b32a1776bbe92e5bef1f0bf1f8c531853b",
++        "dest": "cargo/vendor/windows-sys-0.59.0"
++    },
++    {
++        "type": "inline",
++        "contents": "{\"package\": \"1e38bc4d79ed67fd075bcc251a1c39b32a1776bbe92e5bef1f0bf1f8c531853b\", \"files\": {}}",
++        "dest": "cargo/vendor/windows-sys-0.59.0",
++        "dest-filename": ".cargo-checksum.json"
++    },
++    {
++        "type": "archive",
++        "archive-type": "tar-gzip",
++        "url": "https://static.crates.io/crates/windows-targets/windows-targets-0.52.6.crate",
++        "sha256": "9b724f72796e036ab90c1021d4780d4d3d648aca59e491e6b98e725b84e99973",
++        "dest": "cargo/vendor/windows-targets-0.52.6"
++    },
++    {
++        "type": "inline",
++        "contents": "{\"package\": \"9b724f72796e036ab90c1021d4780d4d3d648aca59e491e6b98e725b84e99973\", \"files\": {}}",
++        "dest": "cargo/vendor/windows-targets-0.52.6",
++        "dest-filename": ".cargo-checksum.json"
++    },
++    {
++        "type": "archive",
++        "archive-type": "tar-gzip",
++        "url": "https://static.crates.io/crates/windows_aarch64_gnullvm/windows_aarch64_gnullvm-0.52.6.crate",
++        "sha256": "32a4622180e7a0ec044bb555404c800bc9fd9ec262ec147edd5989ccd0c02cd3",
++        "dest": "cargo/vendor/windows_aarch64_gnullvm-0.52.6"
++    },
++    {
++        "type": "inline",
++        "contents": "{\"package\": \"32a4622180e7a0ec044bb555404c800bc9fd9ec262ec147edd5989ccd0c02cd3\", \"files\": {}}",
++        "dest": "cargo/vendor/windows_aarch64_gnullvm-0.52.6",
++        "dest-filename": ".cargo-checksum.json"
++    },
++    {
++        "type": "archive",
++        "archive-type": "tar-gzip",
++        "url": "https://static.crates.io/crates/windows_aarch64_msvc/windows_aarch64_msvc-0.52.6.crate",
++        "sha256": "09ec2a7bb152e2252b53fa7803150007879548bc709c039df7627cabbd05d469",
++        "dest": "cargo/vendor/windows_aarch64_msvc-0.52.6"
++    },
++    {
++        "type": "inline",
++        "contents": "{\"package\": \"09ec2a7bb152e2252b53fa7803150007879548bc709c039df7627cabbd05d469\", \"files\": {}}",
++        "dest": "cargo/vendor/windows_aarch64_msvc-0.52.6",
++        "dest-filename": ".cargo-checksum.json"
++    },
++    {
++        "type": "archive",
++        "archive-type": "tar-gzip",
++        "url": "https://static.crates.io/crates/windows_i686_gnu/windows_i686_gnu-0.52.6.crate",
++        "sha256": "8e9b5ad5ab802e97eb8e295ac6720e509ee4c243f69d781394014ebfe8bbfa0b",
++        "dest": "cargo/vendor/windows_i686_gnu-0.52.6"
++    },
++    {
++        "type": "inline",
++        "contents": "{\"package\": \"8e9b5ad5ab802e97eb8e295ac6720e509ee4c243f69d781394014ebfe8bbfa0b\", \"files\": {}}",
++        "dest": "cargo/vendor/windows_i686_gnu-0.52.6",
++        "dest-filename": ".cargo-checksum.json"
++    },
++    {
++        "type": "archive",
++        "archive-type": "tar-gzip",
++        "url": "https://static.crates.io/crates/windows_i686_gnullvm/windows_i686_gnullvm-0.52.6.crate",
++        "sha256": "0eee52d38c090b3caa76c563b86c3a4bd71ef1a819287c19d586d7334ae8ed66",
++        "dest": "cargo/vendor/windows_i686_gnullvm-0.52.6"
++    },
++    {
++        "type": "inline",
++        "contents": "{\"package\": \"0eee52d38c090b3caa76c563b86c3a4bd71ef1a819287c19d586d7334ae8ed66\", \"files\": {}}",
++        "dest": "cargo/vendor/windows_i686_gnullvm-0.52.6",
++        "dest-filename": ".cargo-checksum.json"
++    },
++    {
++        "type": "archive",
++        "archive-type": "tar-gzip",
++        "url": "https://static.crates.io/crates/windows_i686_msvc/windows_i686_msvc-0.52.6.crate",
++        "sha256": "240948bc05c5e7c6dabba28bf89d89ffce3e303022809e73deaefe4f6ec56c66",
++        "dest": "cargo/vendor/windows_i686_msvc-0.52.6"
++    },
++    {
++        "type": "inline",
++        "contents": "{\"package\": \"240948bc05c5e7c6dabba28bf89d89ffce3e303022809e73deaefe4f6ec56c66\", \"files\": {}}",
++        "dest": "cargo/vendor/windows_i686_msvc-0.52.6",
++        "dest-filename": ".cargo-checksum.json"
++    },
++    {
++        "type": "archive",
++        "archive-type": "tar-gzip",
++        "url": "https://static.crates.io/crates/windows_x86_64_gnu/windows_x86_64_gnu-0.52.6.crate",
++        "sha256": "147a5c80aabfbf0c7d901cb5895d1de30ef2907eb21fbbab29ca94c5b08b1a78",
++        "dest": "cargo/vendor/windows_x86_64_gnu-0.52.6"
++    },
++    {
++        "type": "inline",
++        "contents": "{\"package\": \"147a5c80aabfbf0c7d901cb5895d1de30ef2907eb21fbbab29ca94c5b08b1a78\", \"files\": {}}",
++        "dest": "cargo/vendor/windows_x86_64_gnu-0.52.6",
++        "dest-filename": ".cargo-checksum.json"
++    },
++    {
++        "type": "archive",
++        "archive-type": "tar-gzip",
++        "url": "https://static.crates.io/crates/windows_x86_64_gnullvm/windows_x86_64_gnullvm-0.52.6.crate",
++        "sha256": "24d5b23dc417412679681396f2b49f3de8c1473deb516bd34410872eff51ed0d",
++        "dest": "cargo/vendor/windows_x86_64_gnullvm-0.52.6"
++    },
++    {
++        "type": "inline",
++        "contents": "{\"package\": \"24d5b23dc417412679681396f2b49f3de8c1473deb516bd34410872eff51ed0d\", \"files\": {}}",
++        "dest": "cargo/vendor/windows_x86_64_gnullvm-0.52.6",
++        "dest-filename": ".cargo-checksum.json"
++    },
++    {
++        "type": "archive",
++        "archive-type": "tar-gzip",
++        "url": "https://static.crates.io/crates/windows_x86_64_msvc/windows_x86_64_msvc-0.52.6.crate",
++        "sha256": "589f6da84c646204747d1270a2a5661ea66ed1cced2631d546fdfb155959f9ec",
++        "dest": "cargo/vendor/windows_x86_64_msvc-0.52.6"
++    },
++    {
++        "type": "inline",
++        "contents": "{\"package\": \"589f6da84c646204747d1270a2a5661ea66ed1cced2631d546fdfb155959f9ec\", \"files\": {}}",
++        "dest": "cargo/vendor/windows_x86_64_msvc-0.52.6",
++        "dest-filename": ".cargo-checksum.json"
++    },
++    {
++        "type": "inline",
++        "contents": "[source.vendored-sources]\ndirectory = \"cargo/vendor\"\n\n[source.crates-io]\nreplace-with = \"vendored-sources\"\n",
++        "dest": "cargo",
++        "dest-filename": "config"
++    }
++]
+\ No newline at end of file
+diff --git a/flatpak/com.pojtinger.felicitas.Phial.json b/flatpak/com.pojtinger.felicitas.Phial.json
+index 78239f90742c05bbbb3a26f81250a80a2d3e5bb4..2f2e041726ba8911ada71475c8143caa8cefab1c 100644
+--- a/flatpak/com.pojtinger.felicitas.Phial.json
++++ b/flatpak/com.pojtinger.felicitas.Phial.json
+@@ -13,20 +13,14 @@     "--socket=wayland",
+     "--socket=fallback-x11",
+     "--share=ipc",
+     "--device=dri",
+-    "--device=kvm",
+-    "--device=all",
+     "--share=network",
+-    "--socket=session-bus",
+-    "--socket=system-bus",
+-    "--talk-name=org.freedesktop.Notifications",
+     "--talk-name=org.freedesktop.secrets",
+     "--talk-name=org.freedesktop.systemd1",
+-    "--talk-name=org.freedesktop.PolicyKit1",
+-    "--talk-name=org.freedesktop.portal.Desktop",
+-    "--filesystem=xdg-data/phial:create",
+-    "--filesystem=xdg-config/phial:create",
+-    "--filesystem=xdg-run/phial:create",
+-    "--talk-name=org.freedesktop.Flatpak"
++    "--talk-name=org.freedesktop.Flatpak",
++    "--filesystem=~/.config/phial:create",
++    "--filesystem=~/.local/share/phial:create",
++    "--filesystem=~/.ssh",
++    "--filesystem=xdg-run/phial:create"
+   ],
+   "cleanup": [
+     "/include",
+@@ -38,177 +32,42 @@     "/share/info"
+   ],
+   "modules": [
+     {
+-      "name": "libtpms",
+-      "buildsystem": "autotools",
+-      "config-opts": [
+-        "--with-tpm2",
+-        "--without-tpm1",
+-        "--disable-tests"
+-      ],
+-      "sources": [
+-        {
+-          "type": "archive",
+-          "url": "https://github.com/stefanberger/libtpms/archive/refs/tags/v0.10.2.tar.gz",
+-          "sha256": "edac03680f8a4a1c5c1d609a10e3f41e1a129e38ff5158f0c8deaedc719fb127"
+-        }
+-      ]
+-    },
+-    {
+-      "name": "swtpm",
+-      "buildsystem": "autotools",
+-      "config-opts": [
+-        "--without-seccomp",
+-        "--without-cuse",
+-        "--disable-tests"
+-      ],
+-      "sources": [
+-        {
+-          "type": "archive",
+-          "url": "https://github.com/stefanberger/swtpm/archive/refs/tags/v0.10.2.tar.gz",
+-          "sha256": "f61cf6f1e9bbcb4cefb30b70cafaf1c4df54c6961e65cfa63830e8ad0e220134"
+-        }
+-      ]
+-    },
+-    {
+-      "name": "socat",
+-      "buildsystem": "autotools",
+-      "sources": [
+-        {
+-          "type": "archive",
+-          "url": "http://www.dest-unreach.org/socat/download/socat-1.8.0.0.tar.gz",
+-          "sha256": "6010f4f311e5ebe0e63c77f78613d264253680006ac8979f52b0711a9a231e82"
+-        }
+-      ]
+-    },
+-    {
+-      "name": "passt",
++      "name": "waypipe",
+       "buildsystem": "simple",
+       "build-commands": [
+-        "make",
+-        "make install prefix=/app"
++        ". /usr/lib/sdk/rust-stable/enable.sh && meson setup _flatpak_build --prefix=/app -Dwith_dmabuf=disabled -Dwith_lz4=disabled -Dwith_zstd=disabled -Dwith_gbm=disabled -Dwith_video=disabled",
++        ". /usr/lib/sdk/rust-stable/enable.sh && meson compile -C _flatpak_build",
++        ". /usr/lib/sdk/rust-stable/enable.sh && meson install -C _flatpak_build"
+       ],
+       "sources": [
+         {
+           "type": "archive",
+-          "url": "https://passt.top/passt/snapshot/passt-2026_10_02.cba3570.tar.gz",
+-          "sha256": "7b81892b1070521ed217de672cdce43d7a37436e6f850cd04f2b63919ac484b6"
+-        }
+-      ]
+-    },
+-    {
+-      "name": "caddy",
+-      "buildsystem": "simple",
+-      "build-commands": [
+-        "bash -c '. /usr/lib/sdk/golang/enable.sh && GOBIN=/app/bin go install -trimpath -ldflags=\"-s -w\" github.com/caddyserver/caddy/v2/cmd/caddy@v2.11.1'"
+-      ],
+-      "sources": [
++          "url": "https://gitlab.freedesktop.org/mstoeckl/waypipe/-/archive/v0.11.2/waypipe-v0.11.2.tar.gz",
++          "sha256": "70914b590b2b9a74a16fe9936bb7dba6b3eb59466ed17aaba2613c9fa09b8dad"
++        },
++        "cargo-sources.json",
+         {
+-          "type": "dir",
+-          "path": "caddy"
+-        }
+-      ],
+-      "build-options": {
+-        "build-args": [
+-          "--share=network"
+-        ]
+-      }
+-    },
+-    {
+-      "name": "libcap-ng",
+-      "buildsystem": "autotools",
+-      "config-opts": [
+-        "--disable-static",
+-        "--disable-python",
+-        "--without-python"
+-      ],
+-      "sources": [
+-        {
+-          "type": "archive",
+-          "url": "https://people.redhat.com/sgrubb/libcap-ng/libcap-ng-0.8.5.tar.gz",
+-          "sha256": "3ba5294d1cbdfa98afaacfbc00b6af9ed2b83e8a21817185dfd844cc8c7ac6ff"
++          "type": "inline",
++          "contents": "[source.crates-io]\nreplace-with = \"vendored-sources\"\n\n[source.vendored-sources]\ndirectory = \"cargo/vendor\"\n",
++          "dest": ".cargo",
++          "dest-filename": "config.toml"
+         }
+       ]
+     },
+     {
+-      "name": "virtiofsd",
++      "name": "ovmf",
+       "buildsystem": "simple",
+       "build-commands": [
+-        ". /usr/lib/sdk/rust-stable/enable.sh && cargo build --release --locked",
+-        "install -D -m 0755 target/release/virtiofsd /app/libexec/virtiofsd"
++        "bsdtar -xf edk2-ovmf.rpm",
++        "install -D -m 0644 ./usr/share/edk2/ovmf/OVMF_CODE.secboot.fd /app/share/edk2/OVMF_CODE.secboot.fd",
++        "install -D -m 0644 ./usr/share/edk2/ovmf/OVMF_VARS.secboot.fd /app/share/edk2/OVMF_VARS.secboot.fd"
+       ],
+       "sources": [
+         {
+-          "type": "archive",
+-          "url": "https://gitlab.com/virtio-fs/virtiofsd/-/archive/v1.13.2/virtiofsd-v1.13.2.tar.gz",
+-          "sha256": "3d611cc8c0ed9d028cd472fa6f31a491dc5623485e469af1a99f02ac6549c7c7"
+-        }
+-      ],
+-      "build-options": {
+-        "build-args": [
+-          "--share=network"
+-        ],
+-        "env": {
+-          "LIBRARY_PATH": "/app/lib",
+-          "PKG_CONFIG_PATH": "/app/lib/pkgconfig:/app/share/pkgconfig",
+-          "RUSTFLAGS": "-C link-arg=-L/app/lib"
+-        }
+-      }
+-    },
+-    {
+-      "name": "edk2",
+-      "buildsystem": "simple",
+-      "build-commands": [
+-        "make -C BaseTools",
+-        ". ./edksetup.sh && build -a X64 -t GCC5 -b RELEASE -p OvmfPkg/OvmfPkgX64.dsc -D SECURE_BOOT_ENABLE -D SMM_REQUIRE -n $(nproc)",
+-        "install -D -m 0644 Build/OvmfX64/RELEASE_GCC5/FV/OVMF_CODE.fd /app/share/edk2/OVMF_CODE.secboot.fd",
+-        "install -D -m 0644 Build/OvmfX64/RELEASE_GCC5/FV/OVMF_VARS.fd /app/share/edk2/OVMF_VARS.secboot.fd"
+-      ],
+-      "build-options": {
+-        "build-args": [
+-          "--share=network"
+-        ]
+-      },
+-      "sources": [
+-        {
+-          "type": "archive",
+-          "url": "https://github.com/tianocore/edk2/archive/refs/tags/edk2-stable202508.tar.gz",
+-          "sha256": "ea373d69f8e2b8c1e63e958e538e4a7b493a71a3680ad709df1733f2780608ec"
+-        }
+-      ]
+-    },
+-    {
+-      "name": "waypipe",
+-      "buildsystem": "meson",
+-      "config-opts": [
+-        "-Dwith_dmabuf=disabled"
+-      ],
+-      "sources": [
+-        {
+-          "type": "archive",
+-          "url": "https://gitlab.freedesktop.org/mstoeckl/waypipe/-/archive/v0.9.1/waypipe-v0.9.1.tar.gz",
+-          "sha256": "7127e253a43f7de1f9a7ef7579166516c777324a214f1fb8477cde984d985bb6"
+-        }
+-      ]
+-    },
+-    {
+-      "name": "freerdp",
+-      "buildsystem": "cmake-ninja",
+-      "config-opts": [
+-        "-DCMAKE_BUILD_TYPE=Release",
+-        "-DWITH_X11=OFF",
+-        "-DWITH_WAYLAND=ON",
+-        "-DWITH_PULSE=OFF",
+-        "-DWITH_ALSA=OFF",
+-        "-DWITH_CUPS=OFF",
+-        "-DWITH_PCSC=OFF",
+-        "-DWITH_SERVER=OFF",
+-        "-DWITH_CLIENT_SDL=OFF"
+-      ],
+-      "sources": [
+-        {
+-          "type": "archive",
+-          "url": "https://pub.freerdp.com/releases/freerdp-3.17.1.tar.gz",
+-          "sha256": "c672040daef43661e5d5f30763dec165b2662965f50202f94584a38d56a9b024"
++          "type": "file",
++          "url": "https://kojipkgs.fedoraproject.org/packages/edk2/20260812/9.fc45/noarch/edk2-ovmf-20260812-9.fc45.noarch.rpm",
++          "sha256": "8fc5199762b8b9059ca41922f561120156fefe56ed8d2c6023897f55ab23eddf",
++          "dest-filename": "edk2-ovmf.rpm"
+         }
+       ]
+     },
+@@ -218,8 +77,10 @@       "buildsystem": "simple",
+       "build-commands": [
+         "bash -c 'cd assets/resources && blueprint-compiler batch-compile . . *.blp'",
+         "bash -c 'cd assets/resources && glib-compile-schemas . && glib-compile-resources index.gresource.xml'",
+-        "bash -c '. /usr/lib/sdk/golang/enable.sh && ([ -f vendor/modules.txt ] || go mod vendor) && cp modules.txt vendor/modules.txt'",
+-        "bash -c '. /usr/lib/sdk/golang/enable.sh && export GOBIN=\"/app/bin\" && go install -v -mod=vendor -ldflags=\"-X main.LocaleDir=/app/share/locale\" .'",
++        "bash -c '. /usr/lib/sdk/golang/enable.sh && ([ -f vendor/modules.txt ] || go mod vendor)'",
++        "bash -c '. /usr/lib/sdk/golang/enable.sh && mkdir -p internal/guest/agent && : > internal/guest/agent/phial'",
++        "bash -c '. /usr/lib/sdk/golang/enable.sh && CGO_ENABLED=0 go build -trimpath -mod=vendor -o internal/guest/agent/phial .'",
++        "bash -c '. /usr/lib/sdk/golang/enable.sh && go build -trimpath -mod=vendor -ldflags=\"-X main.LocaleDir=/app/share/locale\" -o /app/bin/phial .'",
+         "bash -c 'desktop-file-install --dir=/app/share/applications assets/meta/$FLATPAK_ID.desktop'",
+         "bash -c 'install -D -m 0644 assets/resources/metainfo.xml /app/share/metainfo/$FLATPAK_ID.metainfo.xml'",
+         "bash -c 'install -D -m 0644 assets/meta/icon.svg /app/share/icons/hicolor/scalable/apps/$FLATPAK_ID.svg'",
+@@ -232,14 +93,18 @@       ],
+       "sources": [
+         {
+           "type": "dir",
+-          "path": ".."
+-        }
+-      ],
+-      "build-options": {
+-        "build-args": [
+-          "--share=network"
+-        ]
+-      }
++          "path": "..",
++          "skip": [
++            ".flatpak-builder",
++            "flatpak",
++            "bin",
++            "screenshots",
++            "phial",
++            "internal/guest/agent"
++          ]
++        },
++        "../go.mod.json"
++      ]
+     }
+   ]
+-}
+\ No newline at end of file
++}
+diff --git a/go.mod b/go.mod
+index 11bde9f4dce9b88b24bfc0af2c81e5d6193f8992..63868a9633ca03b17dc9b6ab665062a2271df769 100644
+--- a/go.mod
++++ b/go.mod
+@@ -17,15 +17,24 @@
+ require (
+ 	codeberg.org/puregotk/purego v0.0.0-20260224095105-2513c838cb80 // indirect
+ 	codeberg.org/puregotk/puregotk v0.0.0-20261003054014-d92056b0aa41 // indirect
++	github.com/dennwc/flatpak-go-mod v0.1.1-0.20250809093520-ddf8d84264aa // indirect
++	github.com/fatih/color v1.10.0 // indirect
++	github.com/goccy/go-yaml v1.18.0 // indirect
+ 	github.com/google/jsonschema-go v0.4.3 // indirect
++	github.com/mattn/go-colorable v0.1.8 // indirect
++	github.com/mattn/go-isatty v0.0.12 // indirect
+ 	github.com/mdlayher/socket v0.6.0 // indirect
+ 	github.com/rymdport/portal v0.4.2 // indirect
+ 	github.com/segmentio/asm v1.1.3 // indirect
+ 	github.com/segmentio/encoding v0.5.4 // indirect
+ 	github.com/stretchr/testify v1.11.1 // indirect
+ 	github.com/yosida95/uritemplate/v3 v3.0.2 // indirect
++	golang.org/x/mod v0.27.0 // indirect
+ 	golang.org/x/net v0.58.0 // indirect
+ 	golang.org/x/oauth2 v0.35.0 // indirect
+ 	golang.org/x/sync v0.20.0 // indirect
+ 	golang.org/x/time v0.15.0 // indirect
++	golang.org/x/xerrors v0.0.0-20200804184101-5ec99f83aff1 // indirect
+ )
++
++tool github.com/dennwc/flatpak-go-mod
+diff --git a/go.mod.json b/go.mod.json
+new file mode 100644
+index 0000000000000000000000000000000000000000..35d0dfb323611914d7b5bfd03837deacffcd823e
+--- /dev/null
++++ b/go.mod.json
+@@ -0,0 +1,210 @@
++[
++  {
++    "dest": "vendor",
++    "path": "../modules.txt",
++    "type": "file"
++  },
++  {
++    "dest": "vendor/github.com/adrg/xdg",
++    "sha256": "52847b48afcd46cfd312bc857a8df08643cfffc4103d59a40c3ce648e0196c13",
++    "strip-components": 3,
++    "type": "archive",
++    "url": "https://proxy.golang.org/github.com/adrg/xdg/@v/v0.5.3.zip"
++  },
++  {
++    "dest": "vendor/github.com/coreos/go-systemd/v22",
++    "sha256": "25c78b5dae5afa61291a8559328007cc77e60dd6747454af5c83423c26cfdfba",
++    "strip-components": 4,
++    "type": "archive",
++    "url": "https://proxy.golang.org/github.com/coreos/go-systemd/v22/@v/v22.7.0.zip"
++  },
++  {
++    "dest": "vendor/github.com/godbus/dbus/v5",
++    "sha256": "5c6f37c725a481fb0f1e7866ae273429525d8cc6a6cace87da28e53370f5596a",
++    "strip-components": 4,
++    "type": "archive",
++    "url": "https://proxy.golang.org/github.com/godbus/dbus/v5/@v/v5.2.2.zip"
++  },
++  {
++    "dest": "vendor/github.com/google/renameio/v2",
++    "sha256": "4ea1f7ec938cc2206827f129f40ed9a266f4df30198fcff08de07da4b72276cb",
++    "strip-components": 4,
++    "type": "archive",
++    "url": "https://proxy.golang.org/github.com/google/renameio/v2/@v/v2.0.2.zip"
++  },
++  {
++    "dest": "vendor/github.com/mdlayher/vsock",
++    "sha256": "ba913d18b9506ccc9f1f391a499ca31a74c12fb01c9cf3bdbd218e56e27ad97e",
++    "strip-components": 3,
++    "type": "archive",
++    "url": "https://proxy.golang.org/github.com/mdlayher/vsock/@v/v1.3.0.zip"
++  },
++  {
++    "dest": "vendor/github.com/modelcontextprotocol/go-sdk",
++    "sha256": "f18a0f1664a13aa3f77208243f3e7d81c95c93c5714a76ba280c044cc2da0ec9",
++    "strip-components": 3,
++    "type": "archive",
++    "url": "https://proxy.golang.org/github.com/modelcontextprotocol/go-sdk/@v/v1.8.0.zip"
++  },
++  {
++    "dest": "vendor/github.com/pojntfx/go-gettext",
++    "sha256": "df8924f8c5945ac2157739497e85168322b20f2a4337c114315b2c384cb028a0",
++    "strip-components": 3,
++    "type": "archive",
++    "url": "https://proxy.golang.org/github.com/pojntfx/go-gettext/@v/v0.4.2.zip"
++  },
++  {
++    "dest": "vendor/golang.org/x/crypto",
++    "sha256": "856c916b92f1fc5b53983c04f6249f632f56c47ebc003bbcdfc503500dfb58b8",
++    "strip-components": 3,
++    "type": "archive",
++    "url": "https://proxy.golang.org/golang.org/x/crypto/@v/v0.57.0.zip"
++  },
++  {
++    "dest": "vendor/golang.org/x/sys",
++    "sha256": "3a47e06431ba1e24d5b2aca3a7ce31fd13faff34df3e5d8e63f105ff9d0c1786",
++    "strip-components": 3,
++    "type": "archive",
++    "url": "https://proxy.golang.org/golang.org/x/sys/@v/v0.48.0.zip"
++  },
++  {
++    "dest": "vendor/codeberg.org/puregotk/purego",
++    "sha256": "0d5fb9e11934b151ac357a9c0660e4dcd287d2f93db0829356415f6e6a8ef84b",
++    "strip-components": 3,
++    "type": "archive",
++    "url": "https://proxy.golang.org/codeberg.org/puregotk/purego/@v/v0.0.0-20260224095105-2513c838cb80.zip"
++  },
++  {
++    "dest": "vendor/codeberg.org/puregotk/puregotk",
++    "sha256": "e17cbcc2bc03da1670fe3093bb06af4ad06f760851d757baeaa52362971af4b2",
++    "strip-components": 3,
++    "type": "archive",
++    "url": "https://proxy.golang.org/codeberg.org/puregotk/puregotk/@v/v0.0.0-20261003054014-d92056b0aa41.zip"
++  },
++  {
++    "dest": "vendor/github.com/dennwc/flatpak-go-mod",
++    "sha256": "30c89a77609df65ae4c1bfc183935a7df443da219827370c07d0c743f1d76709",
++    "strip-components": 3,
++    "type": "archive",
++    "url": "https://proxy.golang.org/github.com/dennwc/flatpak-go-mod/@v/v0.1.1-0.20250809093520-ddf8d84264aa.zip"
++  },
++  {
++    "dest": "vendor/github.com/fatih/color",
++    "sha256": "e1b2da810ca48a16d9ecd808b7aaae757f1c3c906cf1e8ca1d149b8db7cdb91b",
++    "strip-components": 3,
++    "type": "archive",
++    "url": "https://proxy.golang.org/github.com/fatih/color/@v/v1.10.0.zip"
++  },
++  {
++    "dest": "vendor/github.com/goccy/go-yaml",
++    "sha256": "51bf59a85a7e3e2b8e83e5f376a3229b01b673a39601c99e3a2c05931cc3e339",
++    "strip-components": 3,
++    "type": "archive",
++    "url": "https://proxy.golang.org/github.com/goccy/go-yaml/@v/v1.18.0.zip"
++  },
++  {
++    "dest": "vendor/github.com/google/jsonschema-go",
++    "sha256": "9359ac98ff69ed2f3c51e3b2c9e3ab4cc16ca7d54dfe310fa5d258bd5decdfb5",
++    "strip-components": 3,
++    "type": "archive",
++    "url": "https://proxy.golang.org/github.com/google/jsonschema-go/@v/v0.4.3.zip"
++  },
++  {
++    "dest": "vendor/github.com/mattn/go-colorable",
++    "sha256": "7a488866ca8dbefc2b9e62a9a7ab6de3db4e1b85a9a665908ff03515d365cdc1",
++    "strip-components": 3,
++    "type": "archive",
++    "url": "https://proxy.golang.org/github.com/mattn/go-colorable/@v/v0.1.8.zip"
++  },
++  {
++    "dest": "vendor/github.com/mattn/go-isatty",
++    "sha256": "07941d24e0894c29dc42bcd29d644815cd7b5ee84e3c14bbe6d51ad13efcbf07",
++    "strip-components": 3,
++    "type": "archive",
++    "url": "https://proxy.golang.org/github.com/mattn/go-isatty/@v/v0.0.12.zip"
++  },
++  {
++    "dest": "vendor/github.com/mdlayher/socket",
++    "sha256": "0b6d1f9f64462bcf94a8dc7dc9fc0084f35af3434ab67a724464a95d47bc87af",
++    "strip-components": 3,
++    "type": "archive",
++    "url": "https://proxy.golang.org/github.com/mdlayher/socket/@v/v0.6.0.zip"
++  },
++  {
++    "dest": "vendor/github.com/rymdport/portal",
++    "sha256": "433ccc7d9646ae7f68570052ed06071b0881466f9203705f7cc6b6a6991069fe",
++    "strip-components": 3,
++    "type": "archive",
++    "url": "https://proxy.golang.org/github.com/rymdport/portal/@v/v0.4.2.zip"
++  },
++  {
++    "dest": "vendor/github.com/segmentio/asm",
++    "sha256": "1911909b67b0f86c04fb895434c4072602d7b7523350ab45cb1549425b3a3b1b",
++    "strip-components": 3,
++    "type": "archive",
++    "url": "https://proxy.golang.org/github.com/segmentio/asm/@v/v1.1.3.zip"
++  },
++  {
++    "dest": "vendor/github.com/segmentio/encoding",
++    "sha256": "2189639875fe1153571445dc9b5dcaf221554143fe6701426fba69aa77780681",
++    "strip-components": 3,
++    "type": "archive",
++    "url": "https://proxy.golang.org/github.com/segmentio/encoding/@v/v0.5.4.zip"
++  },
++  {
++    "dest": "vendor/github.com/stretchr/testify",
++    "sha256": "b7325b561ead5304b72b9f32aebc871ff49b3823667d530a49fd6c8f3adfc96e",
++    "strip-components": 3,
++    "type": "archive",
++    "url": "https://proxy.golang.org/github.com/stretchr/testify/@v/v1.11.1.zip"
++  },
++  {
++    "dest": "vendor/github.com/yosida95/uritemplate/v3",
++    "sha256": "65a29b6ab759cd30a1ed496a8a77b144a5683b89d505cfde51f907cb7ab9b8bd",
++    "strip-components": 4,
++    "type": "archive",
++    "url": "https://proxy.golang.org/github.com/yosida95/uritemplate/v3/@v/v3.0.2.zip"
++  },
++  {
++    "dest": "vendor/golang.org/x/mod",
++    "sha256": "19fb241d46e4397d3193b5fa899e2a9d62bb5d1c41f73d09d29c17c3c0d3953c",
++    "strip-components": 3,
++    "type": "archive",
++    "url": "https://proxy.golang.org/golang.org/x/mod/@v/v0.27.0.zip"
++  },
++  {
++    "dest": "vendor/golang.org/x/net",
++    "sha256": "aa78bbf8d55db3e6995630165e2bcd7dce6d0b8831c166fa03b80ac94fb650e7",
++    "strip-components": 3,
++    "type": "archive",
++    "url": "https://proxy.golang.org/golang.org/x/net/@v/v0.58.0.zip"
++  },
++  {
++    "dest": "vendor/golang.org/x/oauth2",
++    "sha256": "0a34abf6ee35593a630bc63ec425da2c1b40d773dd5b55f4fa42e518cfba1016",
++    "strip-components": 3,
++    "type": "archive",
++    "url": "https://proxy.golang.org/golang.org/x/oauth2/@v/v0.35.0.zip"
++  },
++  {
++    "dest": "vendor/golang.org/x/sync",
++    "sha256": "7179d4d68800f6fdcadb9d4bbf11cbb5df9b40360c89305c203fe20723cbd375",
++    "strip-components": 3,
++    "type": "archive",
++    "url": "https://proxy.golang.org/golang.org/x/sync/@v/v0.20.0.zip"
++  },
++  {
++    "dest": "vendor/golang.org/x/time",
++    "sha256": "8cfb20e915fa5d6c3fd264304233f8d71a3385e48a37819239c532ad9da27f84",
++    "strip-components": 3,
++    "type": "archive",
++    "url": "https://proxy.golang.org/golang.org/x/time/@v/v0.15.0.zip"
++  },
++  {
++    "dest": "vendor/golang.org/x/xerrors",
++    "sha256": "380aaa3368ae165628bb487cf4e695a55c1420072b8b7a6f59c122f6a23bb255",
++    "strip-components": 3,
++    "type": "archive",
++    "url": "https://proxy.golang.org/golang.org/x/xerrors/@v/v0.0.0-20200804184101-5ec99f83aff1.zip"
++  }
++]
+diff --git a/go.sum b/go.sum
+index 61af9c047b29639eb49845b6b2b7fc35cecba897..f5b2f22604a85ce1971bbea5886d547b84f925bd 100644
+--- a/go.sum
++++ b/go.sum
+@@ -8,6 +8,16 @@ github.com/coreos/go-systemd/v22 v22.7.0 h1:LAEzFkke61DFROc7zNLX/WA2i5J8gYqe0rSj9KI28KA=
+ github.com/coreos/go-systemd/v22 v22.7.0/go.mod h1:xNUYtjHu2EDXbsxz1i41wouACIwT7Ybq9o0BQhMwD0w=
+ github.com/davecgh/go-spew v1.1.1 h1:vj9j/u1bqnvCEfJOwUhtlOARqs3+rkHYY13jYWTU97c=
+ github.com/davecgh/go-spew v1.1.1/go.mod h1:J7Y8YcW2NihsgmVo/mv3lAwl/skON4iLHjSsI+c5H38=
++github.com/dennwc/flatpak-go-mod v0.1.0 h1:QNP9gDmQpL2Lm6BKvX2DTNBwjr0EyN2YjZTxdHiKQag=
++github.com/dennwc/flatpak-go-mod v0.1.0/go.mod h1:Y5jggk1w7ur/3Dk+fh/eJvuaR5UiGdpGGp6snvEqcSo=
++github.com/dennwc/flatpak-go-mod v0.1.1-0.20250809093520-ddf8d84264aa h1:c5k0CB16zFqMTKviySxusHVRFAnggzX3l6JK3Cw6fiQ=
++github.com/dennwc/flatpak-go-mod v0.1.1-0.20250809093520-ddf8d84264aa/go.mod h1:4akg2uvMr36H/vDzQSPofcff2LBk4u+bTAPy2bxVoOo=
++github.com/fatih/color v1.10.0 h1:s36xzo75JdqLaaWoiEHk767eHiwo0598uUxyfiPkDsg=
++github.com/fatih/color v1.10.0/go.mod h1:ELkj/draVOlAH/xkhN6mQ50Qd0MPOk5AAr3maGEBuJM=
++github.com/goccy/go-yaml v1.12.0 h1:/1WHjnMsI1dlIBQutrvSMGZRQufVO3asrHfTwfACoPM=
++github.com/goccy/go-yaml v1.12.0/go.mod h1:wKnAMd44+9JAAnGQpWVEgBzGt3YuTaQ4uXoHvE4m7WU=
++github.com/goccy/go-yaml v1.18.0 h1:8W7wMFS12Pcas7KU+VVkaiCng+kG8QiFeFwzFb+rwuw=
++github.com/goccy/go-yaml v1.18.0/go.mod h1:XBurs7gK8ATbW4ZPGKgcbrY1Br56PdM69F7LkFRi1kA=
+ github.com/godbus/dbus/v5 v5.2.2 h1:TUR3TgtSVDmjiXOgAAyaZbYmIeP3DPkld3jgKGV8mXQ=
+ github.com/godbus/dbus/v5 v5.2.2/go.mod h1:3AAv2+hPq5rdnr5txxxRwiGjPXamgoIHgz9FPBfOp3c=
+ github.com/golang-jwt/jwt/v5 v5.3.1 h1:kYf81DTWFe7t+1VvL7eS+jKFVWaUnK9cB1qbwn63YCY=
+@@ -18,6 +28,10 @@ github.com/google/jsonschema-go v0.4.3 h1:/DBOLZTfDow7pe2GmaJNhltueGTtDKICi8V8p+DQPd0=
+ github.com/google/jsonschema-go v0.4.3/go.mod h1:r5quNTdLOYEz95Ru18zA0ydNbBuYoo9tgaYcxEYhJVE=
+ github.com/google/renameio/v2 v2.0.2 h1:qKZs+tfn+arruZZhQ7TKC/ergJunuJicWS6gLDt/dGw=
+ github.com/google/renameio/v2 v2.0.2/go.mod h1:OX+G6WHHpHq3NVj7cAOleLOwJfcQ1s3uUJQCrr78SWo=
++github.com/mattn/go-colorable v0.1.8 h1:c1ghPdyEDarC70ftn0y+A/Ee++9zz8ljHG1b13eJ0s8=
++github.com/mattn/go-colorable v0.1.8/go.mod h1:u6P/XSegPjTcexA+o6vUJrdnUu04hMope9wVRipJSqc=
++github.com/mattn/go-isatty v0.0.12 h1:wuysRhFDzyxgEmMf5xjvJ2M9dZoWAXNNr5LSBS7uHXY=
++github.com/mattn/go-isatty v0.0.12/go.mod h1:cbi8OIDigv2wuxKPP5vlRcQ1OAZbq2CE4Kysco4FUpU=
+ github.com/mdlayher/socket v0.6.0 h1:ScZPaAGyO1icQnbFrhPM8mnXyMu9qukC1K4ZoM2IQKU=
+ github.com/mdlayher/socket v0.6.0/go.mod h1:q7vozUAnxSqnjHc12Fik5yUKIzfZ8ITCfMkhOtE9z18=
+ github.com/mdlayher/vsock v1.3.0 h1:bqQfZ1OznI03y6YiXp2sze05RVdzLn/zsfjnjd4+ivI=
+@@ -40,12 +54,18 @@ github.com/yosida95/uritemplate/v3 v3.0.2 h1:Ed3Oyj9yrmi9087+NczuL5BwkIc4wvTb5zIM+UJPGz4=
+ github.com/yosida95/uritemplate/v3 v3.0.2/go.mod h1:ILOh0sOhIJR3+L/8afwt/kE++YT040gmv5BQTMR2HP4=
+ golang.org/x/crypto v0.57.0 h1:3ZVCjf8Ggz7zneR/EHRVx68Ctf+2pmIMP2UFhh9cC6M=
+ golang.org/x/crypto v0.57.0/go.mod h1:Fdz0i5U6CoizGwLda9DttjSk6qlZo25zYNtR+ycvuZA=
++golang.org/x/mod v0.16.0 h1:QX4fJ0Rr5cPQCF7O9lh9Se4pmwfwskqZfq5moyldzic=
++golang.org/x/mod v0.16.0/go.mod h1:hTbmBsO62+eylJbnUtE2MGJUyE7QWk4xUqPFrRgJ+7c=
++golang.org/x/mod v0.27.0 h1:kb+q2PyFnEADO2IEF935ehFUXlWiNjJWtRNgBLSfbxQ=
++golang.org/x/mod v0.27.0/go.mod h1:rWI627Fq0DEoudcK+MBkNkCe0EetEaDSwJJkCcjpazc=
+ golang.org/x/net v0.58.0 h1:ynWG7rqYi4ccpTEuPZ2QGWHktVEM9DMCj9yzDE0Q7To=
+ golang.org/x/net v0.58.0/go.mod h1:YwCddHnFlT7eLQqVprV19OnhLGtc5xOKgE0RyqgfWAU=
+ golang.org/x/oauth2 v0.35.0 h1:Mv2mzuHuZuY2+bkyWXIHMfhNdJAdwW3FuWeCPYN5GVQ=
+ golang.org/x/oauth2 v0.35.0/go.mod h1:lzm5WQJQwKZ3nwavOZ3IS5Aulzxi68dUSgRHujetwEA=
+ golang.org/x/sync v0.20.0 h1:e0PTpb7pjO8GAtTs2dQ6jYa5BWYlMuX047Dco/pItO4=
+ golang.org/x/sync v0.20.0/go.mod h1:9xrNwdLfx4jkKbNva9FpL6vEN7evnE43NNNJQ2LF3+0=
++golang.org/x/sys v0.0.0-20200116001909-b77594299b42/go.mod h1:h1NjWce9XRLGQEsW7wpKNCjG9DtNlClVuFLEZdDNbEs=
++golang.org/x/sys v0.0.0-20200223170610-d5e6a3e2c0ae/go.mod h1:h1NjWce9XRLGQEsW7wpKNCjG9DtNlClVuFLEZdDNbEs=
+ golang.org/x/sys v0.48.0 h1:bbX/i/6MgT9BVLM9RT1thmxL04yeTAhbEz4SyadbXoo=
+ golang.org/x/sys v0.48.0/go.mod h1:hNLxWAXmnKAxqDtdwIYC4bM9oQPEecfsnNMuSxOs3og=
+ golang.org/x/term v0.46.0 h1:3+OXuTbaKDgwk8jTi3aSLHRlmWqHEUDUtxnbFigO4YE=
+@@ -54,5 +74,7 @@ golang.org/x/time v0.15.0 h1:bbrp8t3bGUeFOx08pvsMYRTCVSMk89u4tKbNOZbp88U=
+ golang.org/x/time v0.15.0/go.mod h1:Y4YMaQmXwGQZoFaVFk4YpCt4FLQMYKZe9oeV/f4MSno=
+ golang.org/x/tools v0.42.0 h1:uNgphsn75Tdz5Ji2q36v/nsFSfR/9BRFvqhGBaJGd5k=
+ golang.org/x/tools v0.42.0/go.mod h1:Ma6lCIwGZvHK6XtgbswSoWroEkhugApmsXyrUmBhfr0=
++golang.org/x/xerrors v0.0.0-20200804184101-5ec99f83aff1 h1:go1bK/D/BFZV2I8cIQd1NKEZ+0owSTG1fDTci4IqFcE=
++golang.org/x/xerrors v0.0.0-20200804184101-5ec99f83aff1/go.mod h1:I/5z698sn9Ka8TeJc9MKroUUfqBBauWjQqLJ2OPfmY0=
+ gopkg.in/yaml.v3 v3.0.1 h1:fxVm/GzAzEWqLHuvctI91KS9hhNmmWOoWu0XTYJS7CA=
+ gopkg.in/yaml.v3 v3.0.1/go.mod h1:K4uyk7z7BCEPqu6E+C64Yfv1cQ7kz7rIZviUmN+EgEM=
+diff --git a/modules.txt b/modules.txt
+new file mode 100644
+index 0000000000000000000000000000000000000000..f7f20f4b2b8638f437a34e0ef5f71df5d840dc23
+--- /dev/null
++++ b/modules.txt
+@@ -0,0 +1,149 @@
++# codeberg.org/puregotk/purego v0.0.0-20260224095105-2513c838cb80
++## explicit; go 1.18
++codeberg.org/puregotk/purego
++codeberg.org/puregotk/purego/internal/cgo
++codeberg.org/puregotk/purego/internal/fakecgo
++codeberg.org/puregotk/purego/internal/strings
++codeberg.org/puregotk/purego/internal/xreflect
++# codeberg.org/puregotk/puregotk v0.0.0-20261003054014-d92056b0aa41
++## explicit; go 1.24.0
++codeberg.org/puregotk/puregotk/internal/core
++codeberg.org/puregotk/puregotk/pkg/core
++codeberg.org/puregotk/puregotk/v4/adw
++codeberg.org/puregotk/puregotk/v4/cairo
++codeberg.org/puregotk/puregotk/v4/gdk
++codeberg.org/puregotk/puregotk/v4/gdkpixbuf
++codeberg.org/puregotk/puregotk/v4/gio
++codeberg.org/puregotk/puregotk/v4/glib
++codeberg.org/puregotk/puregotk/v4/gmodule
++codeberg.org/puregotk/puregotk/v4/gobject
++codeberg.org/puregotk/puregotk/v4/gobject/types
++codeberg.org/puregotk/puregotk/v4/graphene
++codeberg.org/puregotk/puregotk/v4/gsk
++codeberg.org/puregotk/puregotk/v4/gtk
++codeberg.org/puregotk/puregotk/v4/pango
++# github.com/adrg/xdg v0.5.3
++## explicit; go 1.19
++github.com/adrg/xdg
++github.com/adrg/xdg/internal/pathutil
++github.com/adrg/xdg/internal/userdirs
++# github.com/coreos/go-systemd/v22 v22.7.0
++## explicit; go 1.23
++github.com/coreos/go-systemd/v22/dbus
++# github.com/dennwc/flatpak-go-mod v0.1.1-0.20250809093520-ddf8d84264aa
++## explicit; go 1.24.4
++github.com/dennwc/flatpak-go-mod
++# github.com/fatih/color v1.10.0
++## explicit; go 1.13
++# github.com/goccy/go-yaml v1.18.0
++## explicit; go 1.21.0
++github.com/goccy/go-yaml
++github.com/goccy/go-yaml/ast
++github.com/goccy/go-yaml/internal/errors
++github.com/goccy/go-yaml/internal/format
++github.com/goccy/go-yaml/lexer
++github.com/goccy/go-yaml/parser
++github.com/goccy/go-yaml/printer
++github.com/goccy/go-yaml/scanner
++github.com/goccy/go-yaml/token
++# github.com/godbus/dbus/v5 v5.2.2
++## explicit; go 1.20
++github.com/godbus/dbus/v5
++# github.com/google/jsonschema-go v0.4.3
++## explicit; go 1.23.0
++github.com/google/jsonschema-go/jsonschema
++# github.com/google/renameio/v2 v2.0.2
++## explicit; go 1.25
++github.com/google/renameio/v2
++# github.com/mattn/go-colorable v0.1.8
++## explicit; go 1.13
++# github.com/mattn/go-isatty v0.0.12
++## explicit; go 1.12
++# github.com/mdlayher/socket v0.6.0
++## explicit; go 1.25.0
++github.com/mdlayher/socket
++# github.com/mdlayher/vsock v1.3.0
++## explicit; go 1.25.0
++github.com/mdlayher/vsock
++# github.com/modelcontextprotocol/go-sdk v1.8.0
++## explicit; go 1.25.0
++github.com/modelcontextprotocol/go-sdk/auth
++github.com/modelcontextprotocol/go-sdk/internal/authutil
++github.com/modelcontextprotocol/go-sdk/internal/json
++github.com/modelcontextprotocol/go-sdk/internal/jsonrpc2
++github.com/modelcontextprotocol/go-sdk/internal/mcpgodebug
++github.com/modelcontextprotocol/go-sdk/internal/util
++github.com/modelcontextprotocol/go-sdk/internal/xcontext
++github.com/modelcontextprotocol/go-sdk/jsonrpc
++github.com/modelcontextprotocol/go-sdk/mcp
++github.com/modelcontextprotocol/go-sdk/oauthex
++# github.com/pojntfx/go-gettext v0.4.2
++## explicit; go 1.25.0
++github.com/pojntfx/go-gettext/pkg/i18n
++# github.com/rymdport/portal v0.4.2
++## explicit; go 1.19
++github.com/rymdport/portal
++github.com/rymdport/portal/background
++github.com/rymdport/portal/filechooser
++github.com/rymdport/portal/internal/apis
++github.com/rymdport/portal/internal/convert
++github.com/rymdport/portal/internal/request
++# github.com/segmentio/asm v1.1.3
++## explicit; go 1.17
++github.com/segmentio/asm/ascii
++github.com/segmentio/asm/base64
++github.com/segmentio/asm/cpu
++github.com/segmentio/asm/cpu/arm
++github.com/segmentio/asm/cpu/arm64
++github.com/segmentio/asm/cpu/cpuid
++github.com/segmentio/asm/cpu/x86
++github.com/segmentio/asm/internal/unsafebytes
++github.com/segmentio/asm/keyset
++# github.com/segmentio/encoding v0.5.4
++## explicit; go 1.23
++github.com/segmentio/encoding/ascii
++github.com/segmentio/encoding/iso8601
++github.com/segmentio/encoding/json
++# github.com/stretchr/testify v1.11.1
++## explicit; go 1.17
++# github.com/yosida95/uritemplate/v3 v3.0.2
++## explicit; go 1.14
++github.com/yosida95/uritemplate/v3
++# golang.org/x/crypto v0.57.0
++## explicit; go 1.26.0
++golang.org/x/crypto/blowfish
++golang.org/x/crypto/chacha20
++golang.org/x/crypto/cryptobyte
++golang.org/x/crypto/cryptobyte/asn1
++golang.org/x/crypto/curve25519
++golang.org/x/crypto/internal/alias
++golang.org/x/crypto/internal/poly1305
++golang.org/x/crypto/ssh
++golang.org/x/crypto/ssh/agent
++golang.org/x/crypto/ssh/internal/bcrypt_pbkdf
++# golang.org/x/mod v0.27.0
++## explicit; go 1.23.0
++golang.org/x/mod/internal/lazyregexp
++golang.org/x/mod/modfile
++golang.org/x/mod/module
++golang.org/x/mod/semver
++# golang.org/x/net v0.58.0
++## explicit; go 1.25.0
++golang.org/x/net/bpf
++# golang.org/x/oauth2 v0.35.0
++## explicit; go 1.24.0
++golang.org/x/oauth2
++golang.org/x/oauth2/internal
++# golang.org/x/sync v0.20.0
++## explicit; go 1.25.0
++golang.org/x/sync/errgroup
++# golang.org/x/sys v0.48.0
++## explicit; go 1.26.0
++golang.org/x/sys/cpu
++golang.org/x/sys/unix
++golang.org/x/sys/windows
++# golang.org/x/time v0.15.0
++## explicit; go 1.25.0
++golang.org/x/time/rate
++# golang.org/x/xerrors v0.0.0-20200804184101-5ec99f83aff1
++## explicit; go 1.11
+
