@@ -1,0 +1,163 @@
+From 42a27bb67e784e111b215cffcc571f4b10bc9298 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Sat, 17 Oct 2026 19:52:15 -0700
+Subject: [PATCH] feat: Add loading page instead of toasts when connecting to host service
+---
+diff --git a/internal/ui/app.go b/internal/ui/app.go
+index 9f3a75035aa0363084a9e8ceedfcaed43614a4fd..2e87929bf3a20dec2625d4e41621d97e843d5ada 100644
+--- a/internal/ui/app.go
++++ b/internal/ui/app.go
+@@ -46,6 +46,9 @@ 	split   *adw.NavigationSplitView
+ 	sidebar *adw.Sidebar
+ 	content *adw.NavigationView
+ 
++	loadingPage  *adw.NavigationPage
++	loadingShown bool
++
+ 	// searchToggle and searchEntry track the open list dialog, so that the
+ 	// screenshot run can open and drive its search.
+ 	searchToggle *gtk.ToggleButton
+@@ -181,12 +184,8 @@ 		}
+ 
+ 		setupRequired := a.prepareLocations()
+ 
+-		a.buildWindow(showWindow)
++		a.buildWindow(showWindow, setupRequired)
+ 
+-		// The first application connection starts the host service through
+-		// socket activation. The worker goroutine connects, so the window
+-		// stays responsive while systemd starts the service.
+-		a.showStartingHostService()
+ 		a.requestHostRefresh()
+ 
+ 		if setupRequired {
+@@ -291,12 +290,6 @@ 	for ; a.held > 0; a.held-- {
+ 		a.app.Release()
+ 	}
+ 	a.app.Quit()
+-}
+-
+-// showStartingHostService states that the host service is starting, while
+-// systemd activates it through the first socket connection.
+-func (a *App) showStartingHostService() {
+-	a.toast(i18n.L("Starting the host service"))
+ }
+ 
+ // notify sends a desktop notification unless the user turned them off.
+diff --git a/internal/ui/hostwatch.go b/internal/ui/hostwatch.go
+index 62d6866e181c89a006068f44495d7c9beb22c0e3..cf6233b892af970f7c25b81b732c6f5453a80ca4 100644
+--- a/internal/ui/hostwatch.go
++++ b/internal/ui/hostwatch.go
+@@ -183,6 +183,10 @@ 	a.refreshInstall()
+ 	a.refreshSetupHostStep()
+ 	a.maybeShowUpdateToast()
+ 
++	if a.loadingShown && a.hostReady() {
++		a.finishLoading()
++	}
++
+ 	if a.content == nil {
+ 		return
+ 	}
+diff --git a/internal/ui/window.go b/internal/ui/window.go
+index f43a88cf382e9bcf5e46d2b7f198ac77221bac15..a51f110de4a4592754b69113d60afc374f483b82 100644
+--- a/internal/ui/window.go
++++ b/internal/ui/window.go
+@@ -24,9 +24,10 @@ 	machineTagPrefix = "machine:"
+ 	secretsTag       = "secrets"
+ 	grantsTag        = "grants"
+ 	noMachinesTag    = "no-machines"
++	loadingTag       = "loading"
+ )
+ 
+-func (a *App) buildWindow(show bool) {
++func (a *App) buildWindow(show bool, setupRequired bool) {
+ 	builder := gtk.NewBuilderFromResource(resources.ResourceWindowUIPath)
+ 	builder.SetTranslationDomain("phial")
+ 
+@@ -108,6 +109,11 @@ 	a.grantsPage = a.buildGrantsPage()
+ 	a.content.Add(a.secretsPage)
+ 	a.content.Add(a.grantsPage)
+ 
++	a.loadingPage = a.buildLoadingPage()
++	a.content.Add(a.loadingPage)
++
++	a.loadingShown = !setupRequired && !a.hostReady()
++
+ 	var onActivated func(adw.Sidebar, uint32)
+ 	onActivated = func(_ adw.Sidebar, index uint32) {
+ 		if int(index) >= len(a.sidebarTags) {
+@@ -141,11 +147,60 @@ 		a.refreshCounts()
+ 		return true
+ 	})
+ 
+-	a.restoreActivePage()
++	if a.loadingShown {
++		a.showLoadingPage()
++	} else {
++		a.restoreActivePage()
++	}
+ 
+ 	if show {
+ 		a.win.Present()
+ 	}
++}
++
++func (a *App) buildLoadingPage() *adw.NavigationPage {
++	status := adw.NewStatusPage()
++	status.SetTitle(i18n.L("Starting the Host Service"))
++	status.SetDescription(i18n.L("Waiting for the host service to answer"))
++
++	spinner := adw.NewSpinner()
++	spinner.SetSizeRequest(48, 48)
++	spinner.SetHalign(gtk.AlignCenterValue)
++	status.SetChild(&spinner.Widget)
++
++	page := adw.NewNavigationPageWithTag(&status.Widget, i18n.L("Starting the Host Service"), loadingTag)
++	page.SetCanPop(false)
++
++	return page
++}
++
++func (a *App) showLoadingPage() {
++	if a.loadingPage == nil {
++		return
++	}
++
++	a.loadingShown = true
++	a.sidebar.AddCssClass("dimmed")
++	a.sidebar.SetSensitive(false)
++	a.newMachineButton.SetSensitive(false)
++	a.sidebar.SetSelected(gMaxUint32)
++	a.content.ReplaceWithTags([]string{loadingTag}, 1)
++
++	if a.split.GetCollapsed() {
++		a.split.SetShowContent(true)
++	}
++}
++
++func (a *App) finishLoading() {
++	if !a.loadingShown {
++		return
++	}
++
++	a.loadingShown = false
++	a.sidebar.RemoveCssClass("dimmed")
++	a.sidebar.SetSensitive(true)
++	a.newMachineButton.SetSensitive(true)
++	a.restoreActivePage()
+ }
+ 
+ func (a *App) buildSidebar() {
+@@ -385,6 +440,10 @@ 	a.content.ReplaceWithTags(tags, int32(len(tags)))
+ }
+ 
+ func (a *App) selectPage(tag string) {
++	if a.loadingShown {
++		return
++	}
++
+ 	switch {
+ 	case tag == secretsTag:
+ 		a.showTags(secretsTag)
+
