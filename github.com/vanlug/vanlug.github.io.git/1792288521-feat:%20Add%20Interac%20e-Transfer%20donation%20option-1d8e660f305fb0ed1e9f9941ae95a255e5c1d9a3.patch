@@ -1,0 +1,217 @@
+From 1d8e660f305fb0ed1e9f9941ae95a255e5c1d9a3 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Sat, 17 Oct 2026 18:55:21 -0700
+Subject: [PATCH] feat: Add Interac e-Transfer donation option
+---
+diff --git a/assets/js/interac-donate-modal.js b/assets/js/interac-donate-modal.js
+new file mode 100644
+index 0000000000000000000000000000000000000000..738746f4bc238a0ac976adb92fb75ad1f78f6bb0
+--- /dev/null
++++ b/assets/js/interac-donate-modal.js
+@@ -0,0 +1,82 @@
++const modalTemplate = document.createElement("template");
++modalTemplate.innerHTML = `
++  <dialog class="pf-v6-c-modal-box pf-m-md" closedby="any"
++          aria-labelledby="interac-donate-title">
++    <form method="dialog" class="pf-v6-c-modal-box__close">
++      <button class="pf-v6-c-button pf-m-plain" type="submit" aria-label="Close" autofocus>
++        <span class="pf-v6-c-button__icon">
++          <i class="fas fa-times" aria-hidden="true"></i>
++        </span>
++      </button>
++    </form>
++    <header class="pf-v6-c-modal-box__header">
++      <div class="pf-v6-c-modal-box__header-main">
++        <h1 class="pf-v6-c-modal-box__title" id="interac-donate-title" data-slot="title"></h1>
++      </div>
++    </header>
++    <div class="pf-v6-c-modal-box__body" data-slot="body"></div>
++    <footer class="pf-v6-c-modal-box__footer">
++      <form method="dialog">
++        <button type="submit" class="pf-v6-c-button pf-m-secondary">Close</button>
++      </form>
++    </footer>
++  </dialog>`;
++
++customElements.define(
++  "interac-donate-modal",
++  class extends HTMLElement {
++    connectedCallback() {
++      const content = [...this.childNodes];
++      this.append(modalTemplate.content.cloneNode(true));
++
++      this._dialog = this.querySelector("dialog");
++      this._$ = (s) => this.querySelector(`[data-slot="${s}"]`);
++
++      this._$("title").textContent = this.getAttribute("title") ?? "";
++      this._$("body").append(...content);
++
++      this._email = this.querySelector("[data-interac-email]");
++      this._copyButton = this.querySelector("[data-interac-copy]");
++      this._copyLabel = this._copyButton.querySelector(
++        ".pf-v6-c-button__text",
++      );
++      this._label = this._copyLabel.textContent;
++      this._copiedLabel = this._copyButton.dataset.interacCopiedLabel;
++      this._status = this.querySelector("[data-interac-status]");
++
++      this._copyButton.addEventListener("click", () => this._copy());
++    }
++
++    open() {
++      clearTimeout(this._timer);
++      this._copyLabel.textContent = this._label;
++      this._status.textContent = "";
++
++      if (!this._dialog.open) this._dialog.showModal();
++    }
++
++    async _copy() {
++      try {
++        await navigator.clipboard.writeText(this._email.textContent.trim());
++        this._copyLabel.textContent = this._copiedLabel;
++        this._status.textContent = "Recipient address copied to the clipboard.";
++        clearTimeout(this._timer);
++        this._timer = setTimeout(() => {
++          this._copyLabel.textContent = this._label;
++          this._status.textContent = "";
++        }, 2000);
++      } catch {
++        this._status.textContent =
++          "Could not copy the address. Select the address and copy it.";
++      }
++    }
++  },
++);
++
++for (const trigger of document.querySelectorAll(
++  "[data-interac-donate-open]",
++)) {
++  trigger.addEventListener("click", () => {
++    document.querySelector("interac-donate-modal").open();
++  });
++}
+diff --git a/assets/js/main.js b/assets/js/main.js
+index cfb4bfdc1f46be583072ebd3000a4f5706a5d962..91ab5127d05ea12644cc8add5fcabc62d8b8614b 100644
+--- a/assets/js/main.js
++++ b/assets/js/main.js
+@@ -1,5 +1,6 @@
+ import "./sidebar.js";
+ import "./event-detail-modal.js";
++import "./interac-donate-modal.js";
+ import "./luma-next-event.js";
+ import "./luma-upcoming-events.js";
+ import "./mastodon-feed.js";
+diff --git a/assets/scss/main.scss b/assets/scss/main.scss
+index 17affea0f5cf1e897488a3b157269bc654e711ac..72f9056cbe40960c3fdeca21600ab0b440a37ea5 100644
+--- a/assets/scss/main.scss
++++ b/assets/scss/main.scss
+@@ -430,6 +430,10 @@ dialog[open].pf-v6-c-modal-box::backdrop {
+   background-color: var(--pf-t--global--background--color--backdrop--default);
+ }
+ 
++interac-donate-modal:not(:defined) {
++  display: none;
++}
++
+ .pf-v6-c-card__body.pf-m-bg-overlay {
+   --bg-overlay-start: 60%;
+   --bg-overlay-mid: 80%;
+diff --git a/data/content.yaml b/data/content.yaml
+index 8bb353cd1060830f52d89993b2d288511591d016..4122502be0ddc4ec9392c0afc87dc552c00fb2ff 100644
+--- a/data/content.yaml
++++ b/data/content.yaml
+@@ -103,6 +103,16 @@ footer:
+   donate:
+     title: Support VanLUG
+     body: "VanLUG is 100% volunteer-run. All Board of Directors and Executives volunteer their time and effort for free. Donations go toward maintaining our website, network infrastructure, and expenses related to our in-person meetings. Any amount helps. Thank you for sharing your resources."
+-    cta: Donate via PayPal
++    cta: Donate
++    cta_paypal: Donate via PayPal
++    interac:
++      title: Donate via Interac e-Transfer
++      recipient_label: Send to
++      email: treasurer@vanlug.ca
++      steps:
++        - "Start a new Interac e-Transfer in your banking app or online banking."
++        - "Paste the address and enter the amount you'd like to donate."
++        - "Send the transfer."
++      alternative: "Prefer PayPal or can't use Interac e-Transfer?"
+   land_acknowledgment: "VanLUG acknowledges that we meet, learn, and collaborate on the shared territories of many Indigenous Peoples, including the q̓ic̓əy̓ (Katzie), q̓ʷɑ:n̓ƛ̓ən̓ (Kwantlen), kʷikʷəƛ̓əm (Kwikwetlem), máthxwi (Matsqui), xʷməθkʷəy̓əm (Musqueam), qiqéyt (Qayqayt), Semiahmoo, Sḵwx̱wú7mesh Úxwumixw (Squamish), scəw̓aθən məsteyəxʷ (Tsawwassen), and səlilwətaɬ (Tsleil-Waututh). We respect the diverse and distinct histories, languages, and cultures of First Nations, Métis, and Inuit."
+   nonprofit: 'VanLUG is a registered non-profit organization with the <a href="https://www2.gov.bc.ca/gov/content/employment-business/business/not-for-profit-organizations" target="_blank" rel="noreferrer noopener">BC Provincial Government<span style="display: inline; white-space: nowrap;">&#8288;<i class="fa-solid fa-arrow-up-right-from-square pf-v6-u-ml-xs" aria-hidden="true"></i></span></a>, incorporated on March 29, 1999. Run entirely by volunteers, we''ve been bringing Linux and open-source enthusiasts together in Vancouver for over 25 years.'
+diff --git a/layouts/_partials/footer.html b/layouts/_partials/footer.html
+index 82cdc6463cc394734a46fb32b8467141a83f8ec2..4c5911f03e0a585d4cadd65c19bc031f03afff30 100644
+--- a/layouts/_partials/footer.html
++++ b/layouts/_partials/footer.html
+@@ -23,15 +23,15 @@           <p>{{ $f.donate.body }}</p>
+         </div>
+       </div>
+       <div class="pf-v6-c-card__footer">
+-        <a
+-          href="{{ hugo.Data.links.donate.url }}"
+-          target="_blank"
+-          rel="noopener"
++        <button
++          type="button"
+           class="pf-v6-c-button pf-m-control"
++          aria-haspopup="dialog"
++          data-interac-donate-open
++          ><span class="pf-v6-c-button__icon pf-m-start"
++            >{{ partial "icon" (dict "icon" "interac" "inButton" true) }}</span
+           ><span class="pf-v6-c-button__text">{{ $f.donate.cta }}</span
+-          ><span class="pf-v6-c-button__icon pf-m-end"
+-            ><i class="fa-brands fa-paypal"></i></span
+-        ></a>
++        ></button>
+       </div>
+     </div>
+     <div class="pf-v6-c-content">
+@@ -76,3 +76,34 @@       </div>
+     </div>
+   </div>
+ </footer>
++
++{{- $interac := $f.donate.interac }}
++<interac-donate-modal title="{{ $interac.title }}">
++  <div class="pf-v6-l-flex pf-m-gap-sm pf-m-align-items-center pf-v6-u-mb-md">
++    <span>{{ $interac.recipient_label }}</span>
++    <span class="pf-v6-u-font-weight-bold" data-interac-email>{{ $interac.email }}</span>
++    <button
++      type="button"
++      class="pf-v6-c-button pf-m-secondary pf-m-small"
++      data-interac-copy
++      data-interac-copied-label="Copied"
++      ><span class="pf-v6-c-button__text">Copy</span
++      ><span class="pf-v6-c-button__icon pf-m-end"
++        >{{ partial "icon" (dict "icon" "copy" "inButton" true) }}</span
++    ></button>
++    <span class="pf-v6-u-screen-reader" role="status" data-interac-status></span>
++  </div>
++  <div class="pf-v6-c-content">
++    <ol>
++      {{- range $interac.steps }}
++      <li>{{ . }}</li>
++      {{- end }}
++    </ol>
++    <p class="pf-v6-u-mt-md">
++      {{ $interac.alternative }}
++      <a href="{{ hugo.Data.links.donate.url }}" target="_blank" rel="noopener"
++        >{{ $f.donate.cta_paypal }}</a
++      >.
++    </p>
++  </div>
++</interac-donate-modal>
+diff --git a/layouts/_partials/icon.html b/layouts/_partials/icon.html
+index a5f688946433a2af89a6b0e6266a9f4bab67197a..63ece37e3247a07dbf094f10d698011a2e6adcce 100644
+--- a/layouts/_partials/icon.html
++++ b/layouts/_partials/icon.html
+@@ -4,6 +4,8 @@   "mastodon" "fa-brands fa-mastodon"
+   "bluesky" "fa-brands fa-bluesky"
+   "linkedin" "fa-brands fa-linkedin"
+   "paypal" "fa-brands fa-paypal"
++  "interac" "fa-solid fa-money-bill-transfer"
++  "copy" "fa-solid fa-copy"
+   "github" "fa-brands fa-github"
+   "globe" "fa-solid fa-globe"
+   "external" "fa-solid fa-arrow-up-right-from-square"
+
