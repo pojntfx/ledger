@@ -1,0 +1,375 @@
+From 7b73050fac26e2dc22339911fd66de6f453d77a5 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Sat, 17 Oct 2026 19:35:04 -0700
+Subject: [PATCH] feat: Display USB device names properly and show them for disconnected devices too
+---
+diff --git a/cmd/phiald/service.go b/cmd/phiald/service.go
+index 11aab4e806104a84457fbdcfb9402d3edb0bba3c..64afd5c99654045d26f8118a0fe0367299aab246 100644
+--- a/cmd/phiald/service.go
++++ b/cmd/phiald/service.go
+@@ -361,6 +361,14 @@
+ 	case "USBList":
+ 		return s.usbList()
+ 
++	case "USBNames":
++		var in host.USBNamesRequest
++		if err := decode(&in); err != nil {
++			return nil, err
++		}
++
++		return s.usbNames(in.IDs)
++
+ 	case "USBAttach":
+ 		var in host.USBDeviceRequest
+ 		if err := decode(&in); err != nil {
+diff --git a/cmd/phiald/usb.go b/cmd/phiald/usb.go
+index ea7f0394967aea4ffeee2f8dfe358008a694c070..891f70306776079b6a9b521cf22c5c12cf2b279a 100644
+--- a/cmd/phiald/usb.go
++++ b/cmd/phiald/usb.go
+@@ -12,6 +12,9 @@ 	"codeberg.org/pojntfx/phial-neo/internal/machine"
+ 	"codeberg.org/pojntfx/phial-neo/internal/varlink"
+ )
+ 
++// usbNameLookup resolves an ID from the USB ID database. A test replaces it.
++var usbNameLookup = virt.USBName
++
+ // usbList answers the USBList call: the USB devices of the host and the
+ // xHCI controllers, with what any machine already forwards.
+ func (s *service) usbList() (*host.USBListResponse, *varlink.Error) {
+@@ -40,9 +43,12 @@ 			continue
+ 		}
+ 
+ 		id := vendor + ":" + product
+-		name := strings.TrimSpace(readSysfs(filepath.Join(filepath.Dir(vendorFile), "manufacturer")) + " " + readSysfs(filepath.Join(filepath.Dir(vendorFile), "product")))
++		name := usbDeviceName(
++			readSysfs(filepath.Join(filepath.Dir(vendorFile), "manufacturer")),
++			readSysfs(filepath.Join(filepath.Dir(vendorFile), "product")),
++		)
+ 		if name == "" {
+-			name = virt.USBName(vendor, product)
++			name = usbNameLookup(vendor, product)
+ 		}
+ 
+ 		entry := host.USBDevice{ID: id, Name: name}
+@@ -87,6 +93,32 @@ 		return ""
+ 	}
+ 
+ 	return string(data)
++}
++
++// usbDeviceName joins the manufacturer and product strings of one device. The
++// sysfs files end in a newline, so the result collapses every whitespace run
++// into one space.
++func usbDeviceName(manufacturer, product string) string {
++	return strings.Join(strings.Fields(manufacturer+" "+product), " ")
++}
++
++// usbNames resolves the human names of the given IDs from the USB ID database,
++// so a configured device keeps its name while it is unplugged.
++func (s *service) usbNames(ids []string) (*host.USBNamesResponse, *varlink.Error) {
++	names := map[string]string{}
++
++	for _, id := range ids {
++		vendor, product, ok := strings.Cut(id, ":")
++		if !ok {
++			continue
++		}
++
++		if name := usbNameLookup(vendor, product); name != "" {
++			names[id] = name
++		}
++	}
++
++	return &host.USBNamesResponse{Names: names}, nil
+ }
+ 
+ // usbAttach passes one USB device to one machine. The service checks that
+diff --git a/cmd/phiald/usb_test.go b/cmd/phiald/usb_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..58dcc6959f0df9e8dc0792aa0860150f7c1d955f
+--- /dev/null
++++ b/cmd/phiald/usb_test.go
+@@ -0,0 +1,24 @@
++package main
++
++import "testing"
++
++// TestUSBDeviceNameCollapsesWhitespace keeps the sysfs newlines out of the
++// device names that the window and the agent show.
++func TestUSBDeviceNameCollapsesWhitespace(t *testing.T) {
++	tests := []struct {
++		manufacturer string
++		product      string
++		want         string
++	}{
++		{"Intel Corporation\n", "USB3 HUB\n", "Intel Corporation USB3 HUB"},
++		{"Realtek\n", "\n", "Realtek"},
++		{"", "", ""},
++		{"  Foo  \n Bar  ", " Baz ", "Foo Bar Baz"},
++	}
++
++	for _, tt := range tests {
++		if got := usbDeviceName(tt.manufacturer, tt.product); got != tt.want {
++			t.Fatalf("usbDeviceName(%q, %q) = %q, want %q", tt.manufacturer, tt.product, got, tt.want)
++		}
++	}
++}
+diff --git a/cmd/phiald/usbnames_test.go b/cmd/phiald/usbnames_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..d21db02fe3d78becdb394f35afb183381ecb8224
+--- /dev/null
++++ b/cmd/phiald/usbnames_test.go
+@@ -0,0 +1,37 @@
++package main
++
++import "testing"
++
++// TestUSBNamesResolvesDetachedIDs verifies that the host answers the names of
++// devices that are not attached, so the window can keep them.
++func TestUSBNamesResolvesDetachedIDs(t *testing.T) {
++	old := usbNameLookup
++	defer func() { usbNameLookup = old }()
++
++	usbNameLookup = func(vendor, product string) string {
++		if vendor == "0403" && product == "6001" {
++			return "FT232 Serial (UART) IC"
++		}
++
++		return ""
++	}
++
++	s := &service{}
++
++	response, callErr := s.usbNames([]string{"0403:6001", "1a86:55d3", "invalid"})
++	if callErr != nil {
++		t.Fatalf("usbNames() failed: %v", callErr)
++	}
++
++	if got := response.Names["0403:6001"]; got != "FT232 Serial (UART) IC" {
++		t.Fatalf("the known ID resolved to %q", got)
++	}
++
++	if _, ok := response.Names["1a86:55d3"]; ok {
++		t.Fatal("the unknown ID received a name")
++	}
++
++	if len(response.Names) != 1 {
++		t.Fatalf("usbNames() returned %d names, want 1", len(response.Names))
++	}
++}
+diff --git a/internal/host/client.go b/internal/host/client.go
+index c229d052bf0cfb623dd3cf7560625a6b8e6846aa..1b3a7484c8e357c4f0e47ecc5fd3b15eebd41bf4 100644
+--- a/internal/host/client.go
++++ b/internal/host/client.go
+@@ -299,6 +299,18 @@
+ 	return &out, nil
+ }
+ 
++// USBNames resolves the human names of USB devices from the host database,
++// including devices that are not attached right now.
++func (c *Client) USBNames(ctx context.Context, ids []string) (*USBNamesResponse, error) {
++	var out USBNamesResponse
++
++	if err := c.call(ctx, "USBNames", USBNamesRequest{IDs: ids}, &out); err != nil {
++		return nil, err
++	}
++
++	return &out, nil
++}
++
+ // USBAttach passes one USB device to one machine.
+ func (c *Client) USBAttach(ctx context.Context, machine, device string) error {
+ 	return c.call(ctx, "USBAttach", USBDeviceRequest{Machine: machine, Device: device}, nil)
+diff --git a/internal/host/types.go b/internal/host/types.go
+index fa2c8c8f88c7ae406fd5f1d6d8a327c1585311e6..532f6a3e71b713bd7f329f135cc016e292528f7b 100644
+--- a/internal/host/types.go
++++ b/internal/host/types.go
+@@ -258,6 +258,16 @@ 	Machine string `json:"machine"`
+ 	Device  string `json:"device"`
+ }
+ 
++// USBNamesRequest names the devices whose IDs need a human name.
++type USBNamesRequest struct {
++	IDs []string `json:"ids"`
++}
++
++// USBNamesResponse answers the USBNames call.
++type USBNamesResponse struct {
++	Names map[string]string `json:"names"`
++}
++
+ // VfioRequest names one PCI address for the vfio-bind and vfio-restore
+ // subcommands.
+ type VfioRequest struct {
+diff --git a/internal/mcp/tools_usb.go b/internal/mcp/tools_usb.go
+index b1a277435202211f261c8d8c2c13777d72fc6d25..33580525ccf833ea97cf6d5b9e82322cdf16135c 100644
+--- a/internal/mcp/tools_usb.go
++++ b/internal/mcp/tools_usb.go
+@@ -191,6 +191,29 @@ 	for _, device := range response.Devices {
+ 		names[device.ID] = device.Name
+ 	}
+ 
++	// A device that is unplugged has no sysfs entry, so its ID is not in the
++	// list. Resolve the missing IDs from the USB ID database of the host, so
++	// that a configured device keeps its name.
++	missing := []string{}
++	for _, id := range input.IDs {
++		if _, ok := names[id]; !ok {
++			missing = append(missing, id)
++		}
++	}
++
++	if len(missing) > 0 {
++		resolved, err := s.host().USBNames(ctx, missing)
++		if err != nil {
++			s.log.Info("could not resolve the USB names", "err", err)
++		} else if resolved != nil {
++			for id, name := range resolved.Names {
++				if name != "" {
++					names[id] = name
++				}
++			}
++		}
++	}
++
+ 	out := &UsbNamesOutput{Names: map[string]string{}}
+ 
+ 	for _, id := range input.IDs {
+diff --git a/internal/ui/devices.go b/internal/ui/devices.go
+index 85209bf7aeb60e57bf2f855a6ba2de5e9f38dc9c..bbd635a967ef1c06e595078feee91b4e54936794 100644
+--- a/internal/ui/devices.go
++++ b/internal/ui/devices.go
+@@ -2,6 +2,7 @@ package ui
+ 
+ import (
+ 	"fmt"
++	"html"
+ 	"strings"
+ 
+ 	"codeberg.org/puregotk/puregotk/v4/adw"
+@@ -342,7 +343,9 @@ 		// The database names fill the gaps for detached devices.
+ 		names := map[string]string{}
+ 		if _, output, err := a.Service.UsbNames(a.Ctx, nil, mcp.UsbNamesInput{IDs: devices}); err == nil && output != nil {
+ 			for id, label := range output.Names {
+-				names[id] = label
++				if label = shortUSBName(label); label != "" {
++					names[id] = label
++				}
+ 			}
+ 		}
+ 
+@@ -429,25 +432,37 @@ 	}
+ 	return device, ""
+ }
+ 
++// dimMarkup wraps one label in a dim span. The row itself stays undimmed, so
++// the remove button keeps its normal colour.
++func dimMarkup(text string) string {
++	return `<span alpha="55%">` + html.EscapeString(text) + `</span>`
++}
++
+ // styleDeviceRow writes the name, the state, and the dimmed look of one device
+-// row. The row stays sensitive, so the user can still remove the device.
++// row. Only the title and the subtitle dim, and the row stays sensitive, so
++// the user can still remove the device.
+ func styleDeviceRow(row *adw.ActionRow, device string, names map[string]string, attached map[string]bool) {
+ 	title, subtitle := deviceText(device, names)
+ 
++	row.RemoveCssClass("dimmed")
++
+ 	if attached[device] {
+-		row.RemoveCssClass("dimmed")
+-	} else {
+-		if subtitle == "" {
+-			subtitle = i18n.L("Disconnected")
+-		} else {
+-			subtitle = subtitle + " · " + i18n.L("Disconnected")
+-		}
++		row.SetUseMarkup(false)
++		row.SetTitle(title)
++		row.SetSubtitle(subtitle)
+ 
+-		row.AddCssClass("dimmed")
++		return
+ 	}
+ 
+-	row.SetTitle(title)
+-	row.SetSubtitle(subtitle)
++	if subtitle == "" {
++		subtitle = i18n.L("Disconnected")
++	} else {
++		subtitle = subtitle + " · " + i18n.L("Disconnected")
++	}
++
++	row.SetUseMarkup(true)
++	row.SetTitle(dimMarkup(title))
++	row.SetSubtitle(dimMarkup(subtitle))
+ }
+ 
+ func (a *App) showAddDeviceDialog(def machine.Definition) {
+@@ -467,7 +482,7 @@ 	group.SetDescription(i18n.L("The device leaves the host while the machine runs."))
+ 
+ 	manualGroup := formGroup("Manual Entry", "Use the identifier when the device is not attached right now.")
+ 
+-	entry := a.entryRow("Vendor and Product ID")
++	entry := a.entryRow("vendorid:productid")
+ 	entry.SetShowApplyButton(false)
+ 	manualGroup.Add(&entry.Widget)
+ 
+diff --git a/internal/ui/usb_test.go b/internal/ui/usb_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..48b3caac8cecb5e571c6f915bcba7c9bb43d49c0
+--- /dev/null
++++ b/internal/ui/usb_test.go
+@@ -0,0 +1,34 @@
++package ui
++
++import "testing"
++
++// TestShortUSBNameCollapsesWhitespace keeps a sysfs newline out of a device
++// row, including rows that an older host service sends.
++func TestShortUSBNameCollapsesWhitespace(t *testing.T) {
++	tests := []struct {
++		name string
++		want string
++	}{
++		{"Intel Corporation\nUSB3 HUB\n", "Intel Corporation USB3 HUB"},
++		{"  Foo  Bar  ", "Foo Bar"},
++		{"Foo Corporation", "Foo"},
++		{"", ""},
++	}
++
++	for _, tt := range tests {
++		if got := shortUSBName(tt.name); got != tt.want {
++			t.Fatalf("shortUSBName(%q) = %q, want %q", tt.name, got, tt.want)
++		}
++	}
++}
++
++// TestDimMarkupEscapesText keeps a device name from injecting markup into the
++// dimmed label.
++func TestDimMarkupEscapesText(t *testing.T) {
++	got := dimMarkup("A & B")
++	want := `<span alpha="55%">A &amp; B</span>`
++
++	if got != want {
++		t.Fatalf("dimMarkup() = %q, want %q", got, want)
++	}
++}
+diff --git a/internal/ui/util.go b/internal/ui/util.go
+index 0dd424c2ca48048bf2132ad1548c0cc7b084c432..84a6197cefabfedce18fec84829076cf8565b054 100644
+--- a/internal/ui/util.go
++++ b/internal/ui/util.go
+@@ -525,8 +525,11 @@ 	c.row.SetSelected(uint32(c.selected))
+ }
+ 
+ func shortUSBName(name string) string {
++	name = strings.Join(strings.Fields(name), " ")
++
+ 	for _, suffix := range []string{" Corporation", " Inc.", " Ltd", " GmbH", " Corp.", " Co., Ltd."} {
+ 		name = strings.TrimSuffix(name, suffix)
+ 	}
++
+ 	return name
+ }
+
