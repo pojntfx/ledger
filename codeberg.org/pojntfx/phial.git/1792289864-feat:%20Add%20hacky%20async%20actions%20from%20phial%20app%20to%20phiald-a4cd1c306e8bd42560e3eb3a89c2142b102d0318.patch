@@ -1,0 +1,1952 @@
+From a4cd1c306e8bd42560e3eb3a89c2142b102d0318 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Sat, 17 Oct 2026 19:17:44 -0700
+Subject: [PATCH] feat: Add hacky async actions from phial app to phiald
+---
+diff --git a/.gitignore b/.gitignore
+index b587ca29d23887287504970abcadb946a7636c1d..610eb2e23dfc2bcbeb4450cc1db2b4dd898e03e4 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -5,3 +5,4 @@ /flatpak/build/
+ /flatpak/build.log
+ /flatpak/repo/
+ /flatpak/*.flatpak
++/cmd/phiald/guest/agent/
+diff --git a/cmd/phiald/service.go b/cmd/phiald/service.go
+index 716a8b5174e614d21e1449e6c53949dc61ec6c68..11aab4e806104a84457fbdcfb9402d3edb0bba3c 100644
+--- a/cmd/phiald/service.go
++++ b/cmd/phiald/service.go
+@@ -16,6 +16,7 @@ 	"codeberg.org/pojntfx/phial-neo/cmd/phiald/virt"
+ 	"codeberg.org/pojntfx/phial-neo/internal/host"
+ 	"codeberg.org/pojntfx/phial-neo/internal/machine"
+ 	"codeberg.org/pojntfx/phial-neo/internal/paths"
++	"codeberg.org/pojntfx/phial-neo/internal/setup"
+ 	"codeberg.org/pojntfx/phial-neo/internal/state"
+ 	"codeberg.org/pojntfx/phial-neo/internal/varlink"
+ 	"codeberg.org/pojntfx/phial-neo/internal/version"
+@@ -38,6 +39,13 @@ // socket, and the machines that the configuration marks.
+ func serve(log *slog.Logger) error {
+ 	if err := loadFolders(); err != nil {
+ 		log.Warn("could not read the locations file", "err", err)
++	}
++
++	// A host install made before the Flatpak split wrote a desktop entry that
++	// runs the old host command and shadows the Flatpak entry. Remove it, so
++	// that the application menu opens the Flatpak application.
++	if err := setup.RemoveLegacyHostExports(); err != nil {
++		log.Warn("could not remove the old desktop entry", "err", err)
+ 	}
+ 
+ 	if err := refreshSSHConfig(); err != nil {
+diff --git a/internal/host/client.go b/internal/host/client.go
+index f741b486c634435bd387c6d0d6584940109adf45..c229d052bf0cfb623dd3cf7560625a6b8e6846aa 100644
+--- a/internal/host/client.go
++++ b/internal/host/client.go
+@@ -4,6 +4,7 @@ import (
+ 	"context"
+ 	"errors"
+ 	"fmt"
++	"net"
+ 	"os"
+ 	"path/filepath"
+ 	"time"
+@@ -16,9 +17,11 @@ // service. The window opens before the application connects, so a call
+ // reports the missing service instead of a panic.
+ var ErrNotConnected = errors.New("the host service is not connected")
+ 
+-// Client is the typed varlink client of the application.
++// Client is the typed varlink client of the application. It keeps the socket
++// path instead of one connection, so every call opens its own connection: a
++// long call, such as a restart, never holds up a status read.
+ type Client struct {
+-	conn *varlink.Client
++	path string
+ }
+ 
+ // SocketPath states the socket of the host service. A test or a development
+@@ -36,14 +39,18 @@
+ 	return filepath.Join(dir, "phial", "control.sock")
+ }
+ 
+-// Dial connects to the host service once.
++// Dial checks that the host service answers. The first connection starts the
++// service through socket activation.
+ func Dial() (*Client, error) {
+-	conn, err := varlink.Dial(SocketPath())
++	path := SocketPath()
++
++	conn, err := net.Dial("unix", path)
+ 	if err != nil {
+ 		return nil, err
+ 	}
++	conn.Close()
+ 
+-	return &Client{conn: conn}, nil
++	return &Client{path: path}, nil
+ }
+ 
+ // DialRetry connects to the host service and retries once, because the first
+@@ -59,23 +66,26 @@
+ 	return Dial()
+ }
+ 
+-// Close ends the connection.
++// Close ends the client. Every call closes its own connection, so there is
++// nothing left to close.
+ func (c *Client) Close() error {
+-	if c == nil || c.conn == nil {
+-		return nil
+-	}
+-
+-	return c.conn.Close()
++	return nil
+ }
+ 
+-// call sends one request to the host service. A nil client, or a client
+-// without a connection, reports ErrNotConnected.
++// call sends one request to the host service over a fresh connection. A nil
++// client, or a client without a path, reports ErrNotConnected.
+ func (c *Client) call(ctx context.Context, method string, in any, out any) error {
+-	if c == nil || c.conn == nil {
++	if c == nil || c.path == "" {
+ 		return ErrNotConnected
+ 	}
+ 
+-	return c.conn.Call(ctx, method, in, out)
++	conn, err := net.Dial("unix", c.path)
++	if err != nil {
++		return err
++	}
++	defer conn.Close()
++
++	return varlink.NewClient(conn).Call(ctx, method, in, out)
+ }
+ 
+ // Info reads the service version, the protocol version, and the feature
+diff --git a/internal/host/client_test.go b/internal/host/client_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..22232e2c77b58cf2de6a83cfcd650d8c678ecc02
+--- /dev/null
++++ b/internal/host/client_test.go
+@@ -0,0 +1,69 @@
++package host
++
++import (
++	"context"
++	"encoding/json"
++	"log/slog"
++	"path/filepath"
++	"testing"
++	"time"
++
++	"codeberg.org/pojntfx/phial-neo/internal/varlink"
++)
++
++// TestCallsDoNotShareOneConnection keeps a slow call from holding up a fast
++// one. The window polls the service while a restart runs, so one shared
++// connection would freeze the poll for the length of the restart.
++func TestCallsDoNotShareOneConnection(t *testing.T) {
++	dir := t.TempDir()
++	socket := filepath.Join(dir, "control.sock")
++
++	listener, err := varlink.ListenUnix(socket)
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer listener.Close()
++
++	handler := func(_ context.Context, method string, _ json.RawMessage) (any, *varlink.Error) {
++		if method == "VMStart" {
++			time.Sleep(600 * time.Millisecond)
++		}
++
++		return &struct{}{}, nil
++	}
++
++	server := varlink.NewServer(slog.Default(), handler, nil)
++	defer server.Close()
++
++	go server.Serve(listener)
++
++	t.Setenv("PHIAL_CONTROL_SOCK", socket)
++
++	client, err := Dial()
++	if err != nil {
++		t.Fatal(err)
++	}
++
++	done := make(chan struct{})
++	go func() {
++		defer close(done)
++
++		if err := client.VMStart(context.Background(), "slow"); err != nil {
++			t.Errorf("the slow call failed: %v", err)
++		}
++	}()
++
++	// Give the slow call time to reach the service.
++	time.Sleep(100 * time.Millisecond)
++
++	start := time.Now()
++	if err := client.VMStop(context.Background(), "fast"); err != nil {
++		t.Fatal(err)
++	}
++
++	if elapsed := time.Since(start); elapsed > 300*time.Millisecond {
++		t.Fatalf("the fast call waited %s for the slow call", elapsed)
++	}
++
++	<-done
++}
+diff --git a/internal/hostsvc/phiald b/internal/hostsvc/phiald
+index 9f215f9157cfc25f3ecc75695da2a8fdeea23c14..e69de29bb2d1d6434b8b29ae775ad8c2e48c5391 100755
+Binary files a/internal/hostsvc/phiald and b/internal/hostsvc/phiald differ
+diff --git a/internal/setup/install.go b/internal/setup/install.go
+index d0c621c3f603b467f5ced1a8652940996a406c8a..9ace125c71ed6ede9347fbf85be7f7666a3b62c1 100644
+--- a/internal/setup/install.go
++++ b/internal/setup/install.go
+@@ -72,6 +72,12 @@ 			return err
+ 		}
+ 	}
+ 
++	// Remove the desktop entry of the old host install, so that the
++	// application menu uses the entry that Flatpak exports.
++	if err := RemoveLegacyHostExports(); err != nil {
++		fmt.Fprintln(os.Stderr, "could not remove the old desktop entry:", err)
++	}
++
+ 	// Extract the embedded phiald. The application embeds the service at build
+ 	// time, so the update command re-extracts the same binary.
+ 	servicePath := filepath.Join(binDir, "phiald")
+diff --git a/internal/setup/legacy.go b/internal/setup/legacy.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..efcfa49921649b15153c730e8644612e1eba952a
+--- /dev/null
++++ b/internal/setup/legacy.go
+@@ -0,0 +1,38 @@
++package setup
++
++import (
++	"errors"
++	"os"
++	"path/filepath"
++
++	"github.com/adrg/xdg"
++)
++
++// appID is the application identifier of Phial.
++const appID = "com.pojtinger.felicitas.Phial"
++
++// RemoveLegacyHostExports removes the desktop entry, the icons, and the
++// settings schema that an older install wrote into the home folder. The
++// Flatpak export owns the desktop entry now. A host entry runs the old phial
++// command, which shadows the Flatpak entry and fails when the host binary is
++// missing or out of date.
++func RemoveLegacyHostExports() error {
++	return removeLegacyHostExports(xdg.DataHome)
++}
++
++func removeLegacyHostExports(dataHome string) error {
++	targets := []string{
++		filepath.Join(dataHome, "applications", appID+".desktop"),
++		filepath.Join(dataHome, "icons", "hicolor", "scalable", "apps", appID+".svg"),
++		filepath.Join(dataHome, "icons", "hicolor", "symbolic", "apps", appID+"-symbolic.svg"),
++		filepath.Join(dataHome, "glib-2.0", "schemas", appID+".gschema.xml"),
++	}
++
++	for _, target := range targets {
++		if err := os.Remove(target); err != nil && !errors.Is(err, os.ErrNotExist) {
++			return err
++		}
++	}
++
++	return nil
++}
+diff --git a/internal/setup/legacy_test.go b/internal/setup/legacy_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..73ecf3a2bb5edd7a37a7581765c3b88a9035b958
+--- /dev/null
++++ b/internal/setup/legacy_test.go
+@@ -0,0 +1,46 @@
++package setup
++
++import (
++	"os"
++	"path/filepath"
++	"testing"
++)
++
++// TestRemoveLegacyHostExports keeps the host desktop entry and its icons out
++// of the way, so that the Flatpak entry of the same application ID is the one
++// that the menu opens.
++func TestRemoveLegacyHostExports(t *testing.T) {
++	dataHome := t.TempDir()
++
++	targets := []string{
++		filepath.Join(dataHome, "applications", appID+".desktop"),
++		filepath.Join(dataHome, "icons", "hicolor", "scalable", "apps", appID+".svg"),
++		filepath.Join(dataHome, "icons", "hicolor", "symbolic", "apps", appID+"-symbolic.svg"),
++		filepath.Join(dataHome, "glib-2.0", "schemas", appID+".gschema.xml"),
++	}
++
++	for _, target := range targets {
++		if err := os.MkdirAll(filepath.Dir(target), 0o700); err != nil {
++			t.Fatal(err)
++		}
++
++		if err := os.WriteFile(target, []byte("legacy\n"), 0o600); err != nil {
++			t.Fatal(err)
++		}
++	}
++
++	if err := removeLegacyHostExports(dataHome); err != nil {
++		t.Fatal(err)
++	}
++
++	for _, target := range targets {
++		if _, err := os.Stat(target); !os.IsNotExist(err) {
++			t.Fatalf("%s still exists after the cleanup", target)
++		}
++	}
++
++	// A second run sees no file and reports no error.
++	if err := removeLegacyHostExports(dataHome); err != nil {
++		t.Fatal(err)
++	}
++}
+diff --git a/internal/state/dirs.go b/internal/state/dirs.go
+index ba024984c3f3036241daf75af664121b39b9a934..25f17e9126926948776f585d86026f915485217a 100644
+--- a/internal/state/dirs.go
++++ b/internal/state/dirs.go
+@@ -3,9 +3,9 @@
+ import "path/filepath"
+ 
+ func (c *Client) ConfigDir() string {
+-	return filepath.Dir(c.mappingFile)
++	return filepath.Dir(c.paths().mappingFile)
+ }
+ 
+ func (c *Client) RuntimeDir() string {
+-	return filepath.Dir(c.secretsDir)
++	return filepath.Dir(c.paths().secretsDir)
+ }
+diff --git a/internal/state/gate.go b/internal/state/gate.go
+index 6726eedd6b620f60198a46db5ea24d94c75e8f8a..18c16f7bd43e9295c4a15877932972f799322718 100644
+--- a/internal/state/gate.go
++++ b/internal/state/gate.go
+@@ -128,19 +128,21 @@
+ // serveSSHGate answers the agent protocol on the local socket and on the
+ // vsock port.
+ func (c *Client) serveSSHGate() error {
+-	_ = os.Remove(c.agentSock)
++	agentSock := c.paths().agentSock
++
++	_ = os.Remove(agentSock)
+ 
+-	listener, err := net.Listen("unix", c.agentSock)
++	listener, err := net.Listen("unix", agentSock)
+ 	if err != nil {
+ 		return err
+ 	}
+ 	defer listener.Close()
+ 
+-	if err := os.Chmod(c.agentSock, 0o600); err != nil {
++	if err := os.Chmod(agentSock, 0o600); err != nil {
+ 		return err
+ 	}
+ 
+-	c.log.Info("serving the gated SSH agent", "socket", c.agentSock, "port", PortSSHAgent)
++	c.log.Info("serving the gated SSH agent", "socket", agentSock, "port", PortSSHAgent)
+ 
+ 	go func() {
+ 		vlistener, err := vsock.Listen(PortSSHAgent, nil)
+diff --git a/internal/state/grants.go b/internal/state/grants.go
+index eac650e9276ceeee5fbc2ab329a6395535773c3f..d85abd2d33865993c51dbcf9a69b57173019c305 100644
+--- a/internal/state/grants.go
++++ b/internal/state/grants.go
+@@ -50,7 +50,7 @@ 	return sanitize(kind) + "-" + sanitize(vm) + "-" + sanitize(name)
+ }
+ 
+ func (c *Client) grantPath(id string) string {
+-	return filepath.Join(c.grantsDir, id+".grant")
++	return filepath.Join(c.paths().grantsDir, id+".grant")
+ }
+ 
+ func (c *Client) readGrantFile(id string) *Grant {
+@@ -113,7 +113,7 @@ }
+ 
+ // Grants lists every grant, expired ones included. Active filters them.
+ func (c *Client) Grants() []Grant {
+-	entries, err := os.ReadDir(c.grantsDir)
++	entries, err := os.ReadDir(c.paths().grantsDir)
+ 	if err != nil {
+ 		return nil
+ 	}
+diff --git a/internal/state/keys.go b/internal/state/keys.go
+index 7ebabc31c90ffdadb03e20c39de0ce65baa1cbe8..aa5d577973d7b95d9a783fc06f005200a889b27d 100644
+--- a/internal/state/keys.go
++++ b/internal/state/keys.go
+@@ -49,7 +49,7 @@
+ // ListSSHKeys lists the keys of the agent of the session. A sandboxed run
+ // asks the host service instead.
+ func (c *Client) ListSSHKeys() ([]SSHKey, error) {
+-	if c.remote != nil {
++	if c.Remote() {
+ 		return c.ListSSHKeysRemote()
+ 	}
+ 
+@@ -118,7 +118,7 @@ // AddSSHKey loads one private key file into the agent of the session. The
+ // passphrase prompt comes from the askpass program of the session. A
+ // sandboxed run sends the key content to the host service, never a file path.
+ func (c *Client) AddSSHKey(path string) error {
+-	if c.remote != nil {
++	if c.Remote() {
+ 		content, err := os.ReadFile(path)
+ 		if err != nil {
+ 			return err
+@@ -143,7 +143,7 @@
+ // RemoveSSHKey drops one key from the agent of the session. The private key
+ // file on disk stays.
+ func (c *Client) RemoveSSHKey(comment string) error {
+-	if c.remote != nil {
++	if c.Remote() {
+ 		return c.removeSSHKeyRemote(comment)
+ 	}
+ 
+@@ -173,7 +173,7 @@
+ // GenerateSSHKey writes a new key pair into the SSH folder and loads it into
+ // the agent of the session.
+ func (c *Client) GenerateSSHKey(comment string) error {
+-	if c.remote != nil {
++	if c.Remote() {
+ 		return c.generateSSHKeyRemote(comment)
+ 	}
+ 
+@@ -208,7 +208,7 @@ }
+ 
+ // ListGPGKeys lists the secret keys of the GnuPG agent of the host.
+ func (c *Client) ListGPGKeys() ([]GPGKey, error) {
+-	if c.remote != nil {
++	if c.Remote() {
+ 		return c.listGPGKeysRemote()
+ 	}
+ 
+@@ -260,7 +260,7 @@ 	if strings.TrimSpace(path) == "" {
+ 		return fmt.Errorf("a key file is required")
+ 	}
+ 
+-	if c.remote != nil {
++	if c.Remote() {
+ 		content, err := os.ReadFile(path)
+ 		if err != nil {
+ 			return err
+@@ -279,7 +279,7 @@
+ // GenerateGPGKey creates a new secret key on the host. The agent of the host
+ // asks for the passphrase through its pinentry.
+ func (c *Client) GenerateGPGKey(name, email string) error {
+-	if c.remote != nil {
++	if c.Remote() {
+ 		return c.generateGPGKeyRemote(name, email)
+ 	}
+ 
+@@ -311,7 +311,7 @@ 	if strings.TrimSpace(fingerprint) == "" {
+ 		return fmt.Errorf("a fingerprint is required")
+ 	}
+ 
+-	if c.remote != nil {
++	if c.Remote() {
+ 		return c.removeGPGKeyRemote(fingerprint)
+ 	}
+ 
+diff --git a/internal/state/phial.go b/internal/state/phial.go
+index 389ca6aca5545f50643fa03d006e93908aae08e0..e9af31b5b60a0f167d5e0482c8aa706d374f9825 100644
+--- a/internal/state/phial.go
++++ b/internal/state/phial.go
+@@ -8,6 +8,7 @@ 	"path/filepath"
+ 	"regexp"
+ 	"strconv"
+ 	"strings"
++	"sync"
+ 
+ 	"github.com/google/renameio/v2"
+ 
+@@ -25,9 +26,23 @@ type Client struct {
+ 	log *slog.Logger
+ 
+ 	// remote reaches the host operations over the varlink socket when the
+-	// process runs in the Flatpak sandbox.
+-	remote *host.Client
++	// process runs in the Flatpak sandbox. The window connects on a worker
++	// goroutine, so the lock keeps the pointer safe for every reader.
++	remoteLock sync.RWMutex
++	remote     *host.Client
++
++	// pathLock guards the folders, because the worker goroutine of the window
++	// reads them while the preferences write new ones.
++	pathLock    sync.RWMutex
++	mappingFile string
++	grantsDir   string
++	secretsDir  string
++	agentSock   string
++	gateSock    string
++}
+ 
++// clientPaths carries the folders of one client in one read.
++type clientPaths struct {
+ 	mappingFile string
+ 	grantsDir   string
+ 	secretsDir  string
+@@ -35,6 +50,19 @@ 	agentSock   string
+ 	gateSock    string
+ }
+ 
++func (c *Client) paths() clientPaths {
++	c.pathLock.RLock()
++	defer c.pathLock.RUnlock()
++
++	return clientPaths{
++		mappingFile: c.mappingFile,
++		grantsDir:   c.grantsDir,
++		secretsDir:  c.secretsDir,
++		agentSock:   c.agentSock,
++		gateSock:    c.gateSock,
++	}
++}
++
+ func NewClient(log *slog.Logger) *Client {
+ 	client := &Client{log: log}
+ 	client.Reload()
+@@ -61,6 +89,9 @@ 	if override := os.Getenv("PHIAL_AGENT_SOCK"); override != "" {
+ 		agentSock = override
+ 	}
+ 
++	c.pathLock.Lock()
++	defer c.pathLock.Unlock()
++
+ 	c.mappingFile = filepath.Join(configDir, "mapping")
+ 	c.grantsDir = filepath.Join(runtimeDir, "grants")
+ 	c.secretsDir = filepath.Join(runtimeDir, "secrets")
+@@ -87,7 +118,9 @@ 	return paths.Runtime().HostPath()
+ }
+ 
+ func (c *Client) ensureDirs() error {
+-	for _, dir := range []string{c.grantsDir, c.secretsDir, filepath.Dir(c.agentSock)} {
++	dirs := c.paths()
++
++	for _, dir := range []string{dirs.grantsDir, dirs.secretsDir, filepath.Dir(dirs.agentSock)} {
+ 		if err := os.MkdirAll(dir, 0o700); err != nil {
+ 			return err
+ 		}
+@@ -103,7 +136,7 @@
+ // secretsDirFor states the share of one machine. Every machine mounts only its
+ // own directory, so a file for one machine never reaches another.
+ func (c *Client) secretsDirFor(vm string) string {
+-	return filepath.Join(c.secretsDir, vm)
++	return filepath.Join(c.paths().secretsDir, vm)
+ }
+ 
+ // Row is one secret: a name, a delivery mode, a source, and the upstream that
+@@ -119,7 +152,9 @@ // readMapping reads every secret row. A row with three columns is the current
+ // form, a row with four columns is the form before the source folded into the
+ // name, and both read the same way.
+ func (c *Client) readMapping() ([]Row, error) {
+-	data, err := os.ReadFile(c.mappingFile)
++	mappingFile := c.paths().mappingFile
++
++	data, err := os.ReadFile(mappingFile)
+ 	if os.IsNotExist(err) {
+ 		return nil, nil
+ 	}
+@@ -150,15 +185,15 @@ 				source = legacyScheme + key
+ 			}
+ 			r = Row{parts[0], parts[1], source, parts[3]}
+ 		default:
+-			return nil, fmt.Errorf("%s:%d: expected 3 or 4 columns: name mode [source] upstream", c.mappingFile, index+1)
++			return nil, fmt.Errorf("%s:%d: expected 3 or 4 columns: name mode [source] upstream", mappingFile, index+1)
+ 		}
+ 
+ 		if r.Mode != "env" && r.Mode != "proxy" {
+-			return nil, fmt.Errorf("%s:%d: unknown mode %q, use env or proxy", c.mappingFile, index+1, r.Mode)
++			return nil, fmt.Errorf("%s:%d: unknown mode %q, use env or proxy", mappingFile, index+1, r.Mode)
+ 		}
+ 
+ 		if !namePattern.MatchString(r.Name) {
+-			return nil, fmt.Errorf("%s:%d: name %q must be a valid variable name", c.mappingFile, index+1, r.Name)
++			return nil, fmt.Errorf("%s:%d: name %q must be a valid variable name", mappingFile, index+1, r.Name)
+ 		}
+ 
+ 		if r.Upstream == "" {
+@@ -211,11 +246,13 @@
+ 		fmt.Fprintf(&out, "%s %s %s %s\n", r.Name, r.Mode, r.Source, upstream)
+ 	}
+ 
+-	if err := os.MkdirAll(filepath.Dir(c.mappingFile), 0o700); err != nil {
++	mappingFile := c.paths().mappingFile
++
++	if err := os.MkdirAll(filepath.Dir(mappingFile), 0o700); err != nil {
+ 		return err
+ 	}
+ 
+-	return renameio.WriteFile(c.mappingFile, []byte(out.String()), 0o600, renameio.WithStaticPermissions(0o600))
++	return renameio.WriteFile(mappingFile, []byte(out.String()), 0o600, renameio.WithStaticPermissions(0o600))
+ }
+ 
+ func (c *Client) Rows() ([]Row, error) {
+diff --git a/internal/state/remote.go b/internal/state/remote.go
+index b0d6a767d361a955b203d9aec909468745d7fca8..2e475a3eb2aadb637aafe4614ada1eb5516ad5cc 100644
+--- a/internal/state/remote.go
++++ b/internal/state/remote.go
+@@ -5,10 +5,16 @@ 	"context"
+ 	"encoding/base64"
+ 	"log/slog"
+ 	"os"
++	"time"
+ 
+ 	"codeberg.org/pojntfx/phial-neo/internal/host"
+ 	"codeberg.org/pojntfx/phial-neo/internal/paths"
+ )
++
++// remoteReadTimeout bounds a list call that the window polls. A call that runs
++// on a worker goroutine cannot freeze the window, and the bound keeps a stuck
++// service from holding the poll forever.
++const remoteReadTimeout = 20 * time.Second
+ 
+ // NewRemoteClient builds a state client that reaches the host operations over
+ // the varlink socket of the host service. The application runs in a Flatpak
+@@ -25,12 +31,15 @@
+ // Remote reports whether the client reaches the host service instead of the
+ // host operations directly.
+ func (c *Client) Remote() bool {
+-	return c.remote != nil
++	return c.Host() != nil
+ }
+ 
+ // Host returns the varlink client of the host service, so that the MCP server
+ // and the window can call the same host actions.
+ func (c *Client) Host() *host.Client {
++	c.remoteLock.RLock()
++	defer c.remoteLock.RUnlock()
++
+ 	return c.remote
+ }
+ 
+@@ -45,8 +54,12 @@ 	return paths.SSH().HostPath()
+ }
+ 
+ // EnsureRemote connects the client to the host service when it is not
+-// already connected. The application calls it once at startup.
++// already connected. The window calls it on a worker goroutine, so that the
++// first connection never blocks the main thread.
+ func (c *Client) EnsureRemote(log *slog.Logger) error {
++	c.remoteLock.Lock()
++	defer c.remoteLock.Unlock()
++
+ 	if c.remote != nil {
+ 		return nil
+ 	}
+@@ -59,12 +72,20 @@
+ 	c.remote = remote
+ 
+ 	return nil
++}
++
++// readContext bounds one list call.
++func readContext() (context.Context, context.CancelFunc) {
++	return context.WithTimeout(context.Background(), remoteReadTimeout)
+ }
+ 
+ // The secret operations delegate to the host service. The application never
+ // reaches the secret service of the session itself.
+ func (c *Client) ListSSHKeysRemote() ([]SSHKey, error) {
+-	response, err := c.remote.SSHKeyList(context.Background())
++	ctx, cancel := readContext()
++	defer cancel()
++
++	response, err := c.Host().SSHKeyList(ctx)
+ 	if err != nil {
+ 		return nil, err
+ 	}
+@@ -82,19 +103,22 @@ 	return keys, nil
+ }
+ 
+ func (c *Client) addSSHKeyRemote(name string, content []byte) error {
+-	return c.remote.SSHKeyImport(context.Background(), name, base64.StdEncoding.EncodeToString(content))
++	return c.Host().SSHKeyImport(context.Background(), name, base64.StdEncoding.EncodeToString(content))
+ }
+ 
+ func (c *Client) generateSSHKeyRemote(comment string) error {
+-	return c.remote.SSHKeyGenerate(context.Background(), comment)
++	return c.Host().SSHKeyGenerate(context.Background(), comment)
+ }
+ 
+ func (c *Client) removeSSHKeyRemote(comment string) error {
+-	return c.remote.SSHKeyRemove(context.Background(), comment)
++	return c.Host().SSHKeyRemove(context.Background(), comment)
+ }
+ 
+ func (c *Client) listGPGKeysRemote() ([]GPGKey, error) {
+-	response, err := c.remote.GPGKeyList(context.Background())
++	ctx, cancel := readContext()
++	defer cancel()
++
++	response, err := c.Host().GPGKeyList(ctx)
+ 	if err != nil {
+ 		return nil, err
+ 	}
+@@ -113,19 +137,22 @@ 	return keys, nil
+ }
+ 
+ func (c *Client) addGPGKeyRemote(content []byte) error {
+-	return c.remote.GPGKeyImport(context.Background(), base64.StdEncoding.EncodeToString(content))
++	return c.Host().GPGKeyImport(context.Background(), base64.StdEncoding.EncodeToString(content))
+ }
+ 
+ func (c *Client) generateGPGKeyRemote(name, email string) error {
+-	return c.remote.GPGKeyGenerate(context.Background(), name, email)
++	return c.Host().GPGKeyGenerate(context.Background(), name, email)
+ }
+ 
+ func (c *Client) removeGPGKeyRemote(fingerprint string) error {
+-	return c.remote.GPGKeyRemove(context.Background(), fingerprint)
++	return c.Host().GPGKeyRemove(context.Background(), fingerprint)
+ }
+ 
+ func (c *Client) storedSecretsRemote() ([]string, error) {
+-	response, err := c.remote.SecretList(context.Background())
++	ctx, cancel := readContext()
++	defer cancel()
++
++	response, err := c.Host().SecretList(ctx)
+ 	if err != nil {
+ 		return nil, err
+ 	}
+@@ -139,7 +166,10 @@ 	return names, nil
+ }
+ 
+ func (c *Client) hasSecretRemote(r Row) bool {
+-	response, err := c.remote.SecretList(context.Background())
++	ctx, cancel := readContext()
++	defer cancel()
++
++	response, err := c.Host().SecretList(ctx)
+ 	if err != nil {
+ 		return false
+ 	}
+@@ -154,11 +184,11 @@ 	return false
+ }
+ 
+ func (c *Client) storeSecretRemote(r Row, value string) error {
+-	return c.remote.SecretSet(context.Background(), r.Name, r.Mode, r.Upstream, value)
++	return c.Host().SecretSet(context.Background(), r.Name, r.Mode, r.Upstream, value)
+ }
+ 
+ func (c *Client) deleteSecretRemote(name string) error {
+-	return c.remote.SecretRemove(context.Background(), name)
++	return c.Host().SecretRemove(context.Background(), name)
+ }
+ 
+ // remoteSSHFolder states the SSH folder of the host install. The application
+diff --git a/internal/state/secrets.go b/internal/state/secrets.go
+index 53f9a9660b0283f6a6836f8afdcd168f1477d371..0a33d71756687f394f5ba060a3040b5440681c90 100644
+--- a/internal/state/secrets.go
++++ b/internal/state/secrets.go
+@@ -182,7 +182,7 @@
+ // StoredSecrets lists the names of the secrets that the Secret Service holds
+ // for Phial.
+ func (c *Client) StoredSecrets() ([]string, error) {
+-	if c.remote != nil {
++	if c.Remote() {
+ 		return c.storedSecretsRemote()
+ 	}
+ 
+@@ -212,7 +212,7 @@ }
+ 
+ // HasSecret states whether the Secret Service holds a value for the row.
+ func (c *Client) HasSecret(r Row) bool {
+-	if c.remote != nil {
++	if c.Remote() {
+ 		return c.hasSecretRemote(r)
+ 	}
+ 
+@@ -242,7 +242,7 @@ 	if !strings.HasPrefix(r.Source, secretScheme) && !strings.HasPrefix(r.Source, legacyScheme) {
+ 		return fmt.Errorf("the source %s lives outside the Secret Service, its value cannot be stored", r.Source)
+ 	}
+ 
+-	if c.remote != nil {
++	if c.Remote() {
+ 		return c.storeSecretRemote(r, value)
+ 	}
+ 
+@@ -303,7 +303,7 @@ }
+ 
+ // DeleteSecret removes the stored value of one name.
+ func (c *Client) DeleteSecret(name string) error {
+-	if c.remote != nil {
++	if c.Remote() {
+ 		return c.deleteSecretRemote(name)
+ 	}
+ 
+diff --git a/internal/ui/access.go b/internal/ui/access.go
+index c8a14995c8be7ec944cb488d2d4d8bf2dfe123fa..31fdb3a5d8f6884de81733bdf2092b4eeb21afd6 100644
+--- a/internal/ui/access.go
++++ b/internal/ui/access.go
+@@ -74,7 +74,7 @@ }
+ 
+ // credentialGroup states the credentials that the guest asks for at its login,
+ // with a copy control for each of them.
+-func (a *App) credentialGroup(user string, password string) *adw.PreferencesGroup {
++func (a *App) credentialGroup(user string, password string) (*adw.PreferencesGroup, *adw.PasswordEntryRow) {
+ 	group := formGroup("Sign In", "The guest asks for these credentials when you sign in.")
+ 
+ 	userRow := a.entryRow("_User")
+@@ -83,7 +83,7 @@ 	userRow.SetText(user)
+ 	userRow.SetEditable(false)
+ 	userRow.SetShowApplyButton(false)
+ 	copyUser := a.iconButton("edit-copy-symbolic", i18n.L("Copy User"), func() {
+-		a.copyText(user, i18n.L("User copied"))
++		a.copyText(userRow.GetText(), i18n.L("User copied"))
+ 	})
+ 	userRow.AddSuffix(&copyUser.Widget)
+ 	group.Add(&userRow.Widget)
+@@ -95,12 +95,12 @@ 	passwordRow.SetText(password)
+ 	passwordRow.SetEditable(false)
+ 	passwordRow.SetShowApplyButton(false)
+ 	copyPassword := a.iconButton("edit-copy-symbolic", i18n.L("Copy Password"), func() {
+-		a.copyText(password, i18n.L("Password copied"))
++		a.copyText(passwordRow.GetText(), i18n.L("Password copied"))
+ 	})
+ 	passwordRow.AddSuffix(&copyPassword.Widget)
+ 	group.Add(&passwordRow.EntryRow.PreferencesRow.ListBoxRow.Widget)
+ 
+-	return group
++	return group, passwordRow
+ }
+ 
+ func (a *App) showSerialDialog(def machine.Definition) {
+@@ -121,7 +121,16 @@ 	group.Add(&a.buttonRow("_Copy the socat Command", "edit-copy-symbolic", func() {
+ 		a.copyText(attach, i18n.L("Command copied"))
+ 	}).Widget)
+ 
+-	content := a.formPage(a.credentialGroup("phial", a.rdpPassword(def.Name)), group)
++	signIn, passwordRow := a.credentialGroup("phial", "")
++	a.rdpPassword(def.Name, func(password string) {
++		if scope.isClosed() {
++			return
++		}
++
++		passwordRow.SetText(password)
++	})
++
++	content := a.formPage(signIn, group)
+ 	dialog := a.dialog(scope, "Serial Console", def.Name, "_Close", content, nil)
+ 
+ 	a.present(dialog, scope)
+@@ -167,9 +176,14 @@
+ func (a *App) showRdpDialog(def machine.Definition) {
+ 	scope := a.newScope()
+ 
+-	password := a.rdpPassword(def.Name)
++	signIn, passwordRow := a.credentialGroup("phial", "")
++	a.rdpPassword(def.Name, func(password string) {
++		if scope.isClosed() {
++			return
++		}
+ 
+-	signIn := a.credentialGroup("phial", password)
++		passwordRow.SetText(password)
++	})
+ 
+ 	remote := formGroup(
+ 		"Remote Desktop",
+@@ -329,6 +343,10 @@ 		go func() {
+ 			_, output, err := a.Service.ListGuestApps(a.Ctx, nil, mcp.ListAppsInput{VM: def.Name})
+ 
+ 			a.idle(func() {
++				if scope.isClosed() {
++					return
++				}
++
+ 				spinner.SetVisible(false)
+ 				refresh.SetSensitive(true)
+ 
+diff --git a/internal/ui/app.go b/internal/ui/app.go
+index b84c77f5ca62f9580f67840085a2c9c0f5a55f84..9f3a75035aa0363084a9e8ceedfcaed43614a4fd 100644
+--- a/internal/ui/app.go
++++ b/internal/ui/app.go
+@@ -21,7 +21,6 @@ 	"codeberg.org/pojntfx/phial-neo/assets/resources"
+ 	"codeberg.org/pojntfx/phial-neo/internal/host"
+ 	"codeberg.org/pojntfx/phial-neo/internal/machine"
+ 	"codeberg.org/pojntfx/phial-neo/internal/mcp"
+-	"codeberg.org/pojntfx/phial-neo/internal/paths"
+ 	"codeberg.org/pojntfx/phial-neo/internal/portals"
+ 	"codeberg.org/pojntfx/phial-neo/internal/setup"
+ 	"codeberg.org/pojntfx/phial-neo/internal/state"
+@@ -34,6 +33,10 @@ 	Log      *slog.Logger
+ 	State    *state.Client
+ 	Service  *mcp.Service
+ 	Settings *gio.Settings
++
++	// host carries the last snapshot of the host service. A worker goroutine
++	// refreshes it, so no GTK callback waits for the socket.
++	host hostCache
+ 
+ 	app *adw.Application
+ 	win *adw.ApplicationWindow
+@@ -138,6 +141,8 @@ 		actions:      map[string]*gio.SimpleAction{},
+ 		keep:         []interface{}{},
+ 	}
+ 
++	a.host.wake = make(chan struct{}, 1)
++
+ 	state.NotifyHook = a.notify
+ 	a.Service = mcp.NewService(ctx, log, a.State, kickstart, a.notify)
+ 
+@@ -153,6 +158,9 @@ 		}()
+ 	}
+ 	a.app.ConnectStartup(&onStartup)
+ 	a.hold(&onStartup)
++
++	// The snapshot worker owns every socket read of the window.
++	go a.watchHost()
+ 
+ 	var onActivate func(gio.Application)
+ 	onActivate = func(gio.Application) {
+@@ -176,17 +184,16 @@
+ 		a.buildWindow(showWindow)
+ 
+ 		// The first application connection starts the host service through
+-		// socket activation, so the window shows that it is starting the
+-		// service and retries the connection once.
++		// socket activation. The worker goroutine connects, so the window
++		// stays responsive while systemd starts the service.
+ 		a.showStartingHostService()
+-
+-		a.connectHost()
++		a.requestHostRefresh()
+ 
+ 		if setupRequired {
+ 			a.showSetupDialog(true)
+ 		}
+ 
+-		a.showUpdateToast()
++		a.maybeShowUpdateToast()
+ 	}
+ 	a.app.ConnectActivate(&onActivate)
+ 	a.hold(&onActivate)
+@@ -290,56 +297,6 @@ // showStartingHostService states that the host service is starting, while
+ // systemd activates it through the first socket connection.
+ func (a *App) showStartingHostService() {
+ 	a.toast(i18n.L("Starting the host service"))
+-}
+-
+-// connectHost reaches the host service over the private socket. The first
+-// connection starts the service through socket activation, so the window
+-// states that it is starting the service and retries the connection once.
+-func (a *App) connectHost() {
+-	a.Log.Info("starting the host service")
+-
+-	if err := a.State.EnsureRemote(a.Log); err != nil {
+-		a.Log.Info("the host service does not answer", "err", err)
+-
+-		return
+-	}
+-
+-	info, err := a.hostClient().Info(a.Ctx)
+-	if err != nil {
+-		a.Log.Info("the host service does not answer Info", "err", err)
+-
+-		return
+-	}
+-
+-	a.Log.Info("the host service answered", "version", info.Version)
+-
+-	// Send the chosen folders to the service, so that it reads the machine
+-	// definitions from the configuration folder.
+-	set := paths.Current()
+-	if err := a.hostClient().Folders(a.Ctx, set.Config.HostPath(), set.Data.HostPath(), set.SSH.HostPath()); err != nil {
+-		a.Log.Info("could not send the folders to the host service", "err", err)
+-	}
+-}
+-
+-// showUpdateToast compares the embedded phiald version with the one that the
+-// host service reports. A version mismatch shows a toast with a Copy Command
+-// action, because the application never runs the update command itself.
+-func (a *App) showUpdateToast() {
+-	info, err := a.hostClient().Info(a.Ctx)
+-	if err != nil {
+-		return
+-	}
+-
+-	if !host.NeedsUpdate(info) {
+-		return
+-	}
+-
+-	a.idle(func() {
+-		toast := adw.NewToast(i18n.L("The host service is out of date"))
+-		toast.SetButtonLabel(i18n.L("Copy Command"))
+-		toast.SetActionName("app.copy-update-command")
+-		a.toasts.AddToast(toast)
+-	})
+ }
+ 
+ // notify sends a desktop notification unless the user turned them off.
+diff --git a/internal/ui/devices.go b/internal/ui/devices.go
+index f519d6d0eee815f72ec47f9ab5a0eae010023d46..85209bf7aeb60e57bf2f855a6ba2de5e9f38dc9c 100644
+--- a/internal/ui/devices.go
++++ b/internal/ui/devices.go
+@@ -12,19 +12,44 @@ 	"codeberg.org/pojntfx/phial-neo/internal/machine"
+ 	"codeberg.org/pojntfx/phial-neo/internal/mcp"
+ )
+ 
+-// refreshHubControllers reconciles the controller rows of the hub group
+-// with the definition. The names come from the same listing that the chooser
+-// uses, so a controller keeps its name when it joins the list.
++// refreshHubControllers reconciles the controller rows of the hub group with
++// the definition and asks a worker goroutine for the controller names. The
++// rows appear at once, so the page never waits for the host.
+ func (a *App) refreshHubControllers(page *machinePage) {
+-	names := map[string]string{}
+-	if _, output, err := a.Service.ListXhci(a.Ctx, nil, struct{}{}); err == nil && output != nil {
+-		for _, controller := range output.Controllers {
+-			if name := shortUSBName(controller.Name); name != "" {
+-				names[controller.Address] = name
++	a.renderHubControllers(page, map[string]string{})
++
++	addresses := append([]string{}, page.def.USBXHCIs...)
++	if len(addresses) == 0 {
++		return
++	}
++
++	name := page.def.Name
++
++	go func() {
++		names := map[string]string{}
++
++		if _, output, err := a.Service.ListXhci(a.Ctx, nil, struct{}{}); err == nil && output != nil {
++			for _, controller := range output.Controllers {
++				if label := shortUSBName(controller.Name); label != "" {
++					names[controller.Address] = label
++				}
+ 			}
+ 		}
+-	}
+ 
++		a.idle(func() {
++			if a.machinePages[name] != page || !sameStrings(page.def.USBXHCIs, addresses) {
++				return
++			}
++
++			a.renderHubControllers(page, names)
++		})
++	}()
++}
++
++// renderHubControllers writes the controller rows with the names that the
++// caller knows. An empty name list leaves the generic label in place until the
++// worker answers.
++func (a *App) renderHubControllers(page *machinePage, names map[string]string) {
+ 	if sameStrings(page.hubNames, page.def.USBXHCIs) {
+ 		for index, row := range page.hubRows {
+ 			address := page.def.USBXHCIs[index]
+@@ -86,6 +111,10 @@ 			return "", err
+ 		}
+ 
+ 		a.idle(func() {
++			if a.machinePages[def.Name] != page {
++				return
++			}
++
+ 			page.def = def
+ 			a.refreshHubControllers(page)
+ 		})
+@@ -118,6 +147,10 @@ 			return "", err
+ 		}
+ 
+ 		a.idle(func() {
++			if a.machinePages[def.Name] != page {
++				return
++			}
++
+ 			page.def = def
+ 			a.refreshHubControllers(page)
+ 		})
+@@ -212,6 +245,10 @@ 		go func() {
+ 			_, output, err := a.Service.ListXhci(a.Ctx, nil, struct{}{})
+ 
+ 			a.idle(func() {
++				if scope.isClosed() {
++					return
++				}
++
+ 				spinner.SetVisible(false)
+ 				refresh.SetSensitive(true)
+ 
+@@ -285,32 +322,55 @@
+ 	a.present(dialog, scope)
+ }
+ 
+-// refreshDevices reconciles the device rows with the definition. A device
+-// that the definition forwards but that is not attached right now shows as
+-// disconnected, so that the list matches the desk of the user.
++// refreshDevices reconciles the device rows with the definition and asks a
++// worker goroutine for the attached devices. The rows appear at once, so the
++// page never waits for the host.
+ func (a *App) refreshDevices(page *machinePage) {
+-	// The names of attached devices come from sysfs, the same source that the
+-	// chooser uses, so a device keeps its name when it joins the list. The
+-	// database names fill the gaps for detached devices.
+-	names := map[string]string{}
+-	if _, output, err := a.Service.UsbNames(a.Ctx, nil, mcp.UsbNamesInput{IDs: page.def.USBDevices}); err == nil && output != nil {
+-		for id, name := range output.Names {
+-			names[id] = name
+-		}
++	a.renderDevices(page, map[string]string{}, map[string]bool{})
++
++	devices := append([]string{}, page.def.USBDevices...)
++	if len(devices) == 0 {
++		return
+ 	}
+ 
+-	attached := map[string]bool{}
+-	if _, output, err := a.Service.UsbLs(a.Ctx, nil, mcp.NameInput{Name: page.def.Name}); err == nil && output != nil {
+-		for _, device := range output.Devices {
+-			id := fmt.Sprintf("%s:%s", device.Vendor, device.Product)
+-			attached[id] = true
++	name := page.def.Name
+ 
+-			if name := shortUSBName(device.Name); name != "" {
+-				names[id] = name
++	go func() {
++		// The names of attached devices come from sysfs, the same source that
++		// the chooser uses, so a device keeps its name when it joins the list.
++		// The database names fill the gaps for detached devices.
++		names := map[string]string{}
++		if _, output, err := a.Service.UsbNames(a.Ctx, nil, mcp.UsbNamesInput{IDs: devices}); err == nil && output != nil {
++			for id, label := range output.Names {
++				names[id] = label
+ 			}
+ 		}
+-	}
+ 
++		attached := map[string]bool{}
++		if _, output, err := a.Service.UsbLs(a.Ctx, nil, mcp.NameInput{Name: name}); err == nil && output != nil {
++			for _, device := range output.Devices {
++				id := fmt.Sprintf("%s:%s", device.Vendor, device.Product)
++				attached[id] = true
++
++				if label := shortUSBName(device.Name); label != "" {
++					names[id] = label
++				}
++			}
++		}
++
++		a.idle(func() {
++			if a.machinePages[name] != page || !sameStrings(page.def.USBDevices, devices) {
++				return
++			}
++
++			a.renderDevices(page, names, attached)
++		})
++	}()
++}
++
++// renderDevices writes the device rows with the names and the attachment state
++// that the caller knows.
++func (a *App) renderDevices(page *machinePage, names map[string]string, attached map[string]bool) {
+ 	if sameStrings(page.deviceNames, page.def.USBDevices) {
+ 		for index, row := range page.deviceRows {
+ 			styleDeviceRow(row, page.def.USBDevices[index], names, attached)
+@@ -338,6 +398,10 @@ 					return "", err
+ 				}
+ 
+ 				a.idle(func() {
++					if a.machinePages[page.def.Name] != page {
++						return
++					}
++
+ 					def, err := machine.Load(page.def.Name)
+ 					if err == nil {
+ 						page.def = def
+@@ -506,6 +570,10 @@ 		go func() {
+ 			_, output, err := a.Service.UsbLs(a.Ctx, nil, mcp.NameInput{Name: def.Name})
+ 
+ 			a.idle(func() {
++				if scope.isClosed() {
++					return
++				}
++
+ 				spinner.SetVisible(false)
+ 				refresh.SetSensitive(true)
+ 
+diff --git a/internal/ui/dialogs.go b/internal/ui/dialogs.go
+index 35f11678671687b8ae351108c8340976c863f42d..e406d50c9ed772956de7a11f270a97b1ad8a7cfb 100644
+--- a/internal/ui/dialogs.go
++++ b/internal/ui/dialogs.go
+@@ -16,6 +16,7 @@ type callbackScope struct {
+ 	app     *App
+ 	cbs     []interface{}
+ 	confirm *gtk.Button
++	closed  bool
+ }
+ 
+ func (a *App) newScope() *callbackScope {
+@@ -27,6 +28,8 @@ 	s.cbs = append(s.cbs, cb)
+ }
+ 
+ func (s *callbackScope) release() {
++	s.closed = true
++
+ 	for _, cb := range s.cbs {
+ 		if err := glib.UnrefCallback(cb); err != nil {
+ 			s.app.Log.Debug("could not release a callback", "err", err)
+@@ -239,7 +242,12 @@
+ 	return dialog, searchEntry
+ }
+ 
+-// formPage wraps rows into a scrollable preferences page.
++// isClosed reports whether the dialog of the scope is gone, so that an
++// asynchronous answer never writes into a destroyed widget.
++func (s *callbackScope) isClosed() bool {
++	return s == nil || s.closed
++}
++
+ // setValid turns the affirmative control of a dialog on or off.
+ func (s *callbackScope) setValid(valid bool) {
+ 	if s.confirm == nil {
+@@ -248,6 +256,7 @@ 	}
+ 	s.confirm.SetSensitive(valid)
+ }
+ 
++// formPage wraps rows into a scrollable preferences page.
+ func (a *App) formPage(groups ...*adw.PreferencesGroup) *gtk.Widget {
+ 	page := adw.NewPreferencesPage()
+ 	for _, group := range groups {
+diff --git a/internal/ui/grants.go b/internal/ui/grants.go
+index d4d0631511f860d954bf23a222b1096556ede3f4..0de83b59716cc502b7b6167b719e32dbba54780f 100644
+--- a/internal/ui/grants.go
++++ b/internal/ui/grants.go
+@@ -91,7 +91,9 @@
+ // refreshGrantsPage reconciles the grant rows with the grant store and the
+ // pending grant requests.
+ func (a *App) refreshGrantsPage() {
+-	grants := a.State.ActiveGrants()
++	view := a.hostView()
++
++	grants := view.grants
+ 
+ 	pending := a.Service.Pending()
+ 
+diff --git a/internal/ui/hostops.go b/internal/ui/hostops.go
+index 4a33bbfad82b85ccb4dac10642f72421696bb361..b9b6701607521323ad53d0138262f4607fe450eb 100644
+--- a/internal/ui/hostops.go
++++ b/internal/ui/hostops.go
+@@ -11,20 +11,21 @@ )
+ 
+ // hostClient returns the varlink client of the host service. The window runs
+ // in the Flatpak sandbox, so every host resource comes through the service.
++// The window never calls it on the main thread.
+ func (a *App) hostClient() *host.Client {
+ 	return a.State.Host()
+ }
+ 
+-// machineActive reports whether one machine runs right now.
++// machineActive reports whether one machine runs right now. It reads the
++// snapshot, so a callback never waits for the host service.
+ func (a *App) machineActive(name string) bool {
+-	states, err := a.hostClient().Status(a.Ctx)
+-	if err != nil {
+-		a.Log.Info("could not read the machine states", "err", err)
++	view := a.hostView()
+ 
++	if view.status == nil {
+ 		return false
+ 	}
+ 
+-	for _, m := range states.Machines {
++	for _, m := range view.status.Machines {
+ 		if m.Name == name {
+ 			return m.State == "active"
+ 		}
+@@ -35,14 +36,15 @@ }
+ 
+ // runningMachines lists the machines that run right now.
+ func (a *App) runningMachines() []string {
+-	states, err := a.hostClient().Status(a.Ctx)
+-	if err != nil {
++	view := a.hostView()
++
++	if view.status == nil {
+ 		return nil
+ 	}
+ 
+ 	names := []string{}
+ 
+-	for _, m := range states.Machines {
++	for _, m := range view.status.Machines {
+ 		if m.State == "active" || m.State == "deactivating" {
+ 			names = append(names, m.Name)
+ 		}
+@@ -51,30 +53,43 @@
+ 	return names
+ }
+ 
+-// stopMachine stops one machine through the host service.
++// stopMachine stops one machine through the host service. A caller runs it on
++// a worker goroutine.
+ func (a *App) stopMachine(ctx context.Context, name string) error {
+ 	return a.hostClient().VMStop(ctx, name)
+ }
+ 
+-// startMachine starts one machine through the host service.
++// startMachine starts one machine through the host service. A caller runs it
++// on a worker goroutine.
+ func (a *App) startMachine(ctx context.Context, name string) error {
+ 	return a.hostClient().VMStart(ctx, name)
+ }
+ 
+-// machineStates returns the full machine state list from the host service.
++// machineStates returns the last machine state list of the host service.
+ func (a *App) machineStates() (*host.StatusResponse, error) {
+-	return a.hostClient().Status(a.Ctx)
++	view := a.hostView()
++
++	if view.status == nil {
++		if view.statusErr != nil {
++			return nil, view.statusErr
++		}
++
++		return nil, host.ErrNotConnected
++	}
++
++	return view.status, nil
+ }
+ 
+ // installStatus returns the install progress of one machine, or nil when no
+ // install runs for it.
+ func (a *App) installStatus(name string) *host.InstallState {
+-	states, err := a.hostClient().Status(a.Ctx)
+-	if err != nil {
++	view := a.hostView()
++
++	if view.status == nil {
+ 		return nil
+ 	}
+ 
+-	for _, m := range states.Machines {
++	for _, m := range view.status.Machines {
+ 		if m.Name == name && m.Install != nil {
+ 			return m.Install
+ 		}
+@@ -86,25 +101,29 @@
+ // hugePages reports the bytes that the host can still back with huge pages
+ // and the bytes that it has reserved in total.
+ func (a *App) hugePages() (int64, int64, bool) {
+-	states, err := a.hostClient().Status(a.Ctx)
+-	if err != nil {
++	view := a.hostView()
++
++	if view.status == nil {
+ 		return 0, 0, false
+ 	}
+ 
+-	return states.HugePagesFree, states.HugePagesTotal, true
++	return view.status.HugePagesFree, view.status.HugePagesTotal, true
+ }
+ 
+-// rdpPassword reads the RDP password from the host service, for display and
+-// copy.
+-func (a *App) rdpPassword(name string) string {
+-	display, err := a.hostClient().VMDisplay(a.Ctx, name)
+-	if err != nil {
+-		a.Log.Info("could not read the display details", "err", err)
++// rdpPassword reads the RDP password from the host service on a worker
++// goroutine and hands it to apply on the main thread, so the dialog opens
++// without waiting for the socket.
++func (a *App) rdpPassword(name string, apply func(string)) {
++	go func() {
++		display, err := a.hostClient().VMDisplay(a.Ctx, name)
++		if err != nil {
++			a.Log.Info("could not read the display details", "err", err)
+ 
+-		return ""
+-	}
++			return
++		}
+ 
+-	return display.RdpPassword
++		a.idle(func() { apply(display.RdpPassword) })
++	}()
+ }
+ 
+ // unlockAgent loads the key of the user into the agent of the session. The
+diff --git a/internal/ui/hostwatch.go b/internal/ui/hostwatch.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..62d6866e181c89a006068f44495d7c9beb22c0e3
+--- /dev/null
++++ b/internal/ui/hostwatch.go
+@@ -0,0 +1,237 @@
++package ui
++
++import (
++	"context"
++	"strings"
++	"sync"
++	"time"
++
++	"codeberg.org/puregotk/puregotk/v4/adw"
++	"github.com/pojntfx/go-gettext/pkg/i18n"
++
++	"codeberg.org/pojntfx/phial-neo/internal/host"
++	"codeberg.org/pojntfx/phial-neo/internal/paths"
++	"codeberg.org/pojntfx/phial-neo/internal/state"
++)
++
++// The window reads the host state from this snapshot. A worker goroutine
++// refreshes it over the varlink socket, so the GTK main thread never waits for
++// the host service. A long call, such as a restart, therefore cannot freeze
++// the window.
++type hostView struct {
++	info      *host.InfoResponse
++	infoErr   error
++	status    *host.StatusResponse
++	statusErr error
++
++	rows      []state.Row
++	rowsErr   error
++	grants    []state.Grant
++	grantsErr error
++
++	sshKeys []state.SSHKey
++	sshErr  error
++
++	gpgKeys []state.GPGKey
++	gpgErr  error
++}
++
++// hostCache guards the snapshot and the one-time flags of the worker.
++type hostCache struct {
++	mu          sync.RWMutex
++	view        hostView
++	updateShown bool
++	foldersKey  string
++	wake        chan struct{}
++}
++
++// hostHubPoll is the interval between two snapshots.
++const hostHubPoll = 2 * time.Second
++
++// hostView returns the last snapshot. The caller never waits for the host.
++func (a *App) hostView() hostView {
++	a.host.mu.RLock()
++	defer a.host.mu.RUnlock()
++
++	return a.host.view
++}
++
++// hostReady reports whether the host service answered the last Info call.
++func (a *App) hostReady() bool {
++	view := a.hostView()
++
++	return view.info != nil && view.infoErr == nil
++}
++
++// requestHostRefresh asks the worker for a fresh snapshot now, so that an
++// action shows its result without waiting for the next poll.
++func (a *App) requestHostRefresh() {
++	if a.host.wake == nil {
++		return
++	}
++
++	select {
++	case a.host.wake <- struct{}{}:
++	default:
++	}
++}
++
++// watchHost refreshes the snapshot until the application quits.
++func (a *App) watchHost() {
++	ticker := time.NewTicker(hostHubPoll)
++	defer ticker.Stop()
++
++	for {
++		a.refreshHost()
++
++		select {
++		case <-a.Ctx.Done():
++			return
++		case <-ticker.C:
++		case <-a.host.wake:
++		}
++	}
++}
++
++// refreshHost reads the host state on the worker goroutine and applies it on
++// the main thread.
++func (a *App) refreshHost() {
++	view := hostView{}
++
++	// The first connection starts the host service through socket
++	// activation, so it retries once.
++	if err := a.State.EnsureRemote(a.Log); err != nil {
++		view.infoErr = err
++		view.statusErr = err
++		view.sshErr = err
++		view.gpgErr = err
++		view.rows, view.rowsErr = a.State.Rows()
++		view.grants = a.State.ActiveGrants()
++
++		a.storeHostView(view)
++		a.idle(a.applyHostView)
++
++		return
++	}
++
++	ctx, cancel := context.WithTimeout(a.Ctx, 15*time.Second)
++	defer cancel()
++
++	info, err := a.hostClient().Info(ctx)
++	view.info, view.infoErr = info, err
++
++	if err == nil {
++		// The host service reads the machine definitions from the chosen
++		// folder, so the window sends the folders whenever they change.
++		set := paths.Current()
++		key := set.Config.HostPath() + "|" + set.Data.HostPath() + "|" + set.SSH.HostPath()
++
++		if key != a.hostFoldersKey() {
++			if folderErr := a.hostClient().Folders(ctx, set.Config.HostPath(), set.Data.HostPath(), set.SSH.HostPath()); folderErr != nil {
++				a.Log.Info("could not send the folders to the host service", "err", folderErr)
++			} else {
++				a.setHostFoldersKey(key)
++			}
++		}
++	}
++
++	status, statusErr := a.hostClient().Status(ctx)
++	view.status, view.statusErr = status, statusErr
++
++	view.rows, view.rowsErr = a.State.Rows()
++	view.sshKeys, view.sshErr = a.State.ListSSHKeys()
++	view.gpgKeys, view.gpgErr = a.State.ListGPGKeys()
++	view.grants = a.State.ActiveGrants()
++
++	a.storeHostView(view)
++	a.idle(a.applyHostView)
++}
++
++func (a *App) storeHostView(view hostView) {
++	a.host.mu.Lock()
++	defer a.host.mu.Unlock()
++
++	a.host.view = view
++}
++
++func (a *App) hostFoldersKey() string {
++	a.host.mu.RLock()
++	defer a.host.mu.RUnlock()
++
++	return a.host.foldersKey
++}
++
++func (a *App) setHostFoldersKey(key string) {
++	a.host.mu.Lock()
++	defer a.host.mu.Unlock()
++
++	a.host.foldersKey = key
++}
++
++// applyHostView redraws the window from the snapshot. It runs on the main
++// thread, and every call that it makes only reads the snapshot or local files.
++func (a *App) applyHostView() {
++	if a.win == nil {
++		return
++	}
++
++	a.refreshSidebar()
++	a.refreshSecretsPage()
++	a.refreshGrantsPage()
++	a.refreshCounts()
++	a.refreshInstall()
++	a.refreshSetupHostStep()
++	a.maybeShowUpdateToast()
++
++	if a.content == nil {
++		return
++	}
++
++	tag := a.content.GetVisiblePageTag()
++	if !strings.HasPrefix(tag, machineTagPrefix) {
++		return
++	}
++
++	if page := a.machinePages[strings.TrimPrefix(tag, machineTagPrefix)]; page != nil {
++		page.refresh()
++	}
++}
++
++// refreshSetupHostStep turns the Continue control of the wizard on as soon as
++// the host service answers, without blocking the step on a socket read.
++func (a *App) refreshSetupHostStep() {
++	if a.setupNavigation == nil || a.setupSteps == nil {
++		return
++	}
++
++	if step := a.setupSteps[wizardHostTag]; step != nil {
++		step.update()
++	}
++}
++
++// maybeShowUpdateToast compares the embedded service with the running one and
++// shows the copyable update command once.
++func (a *App) maybeShowUpdateToast() {
++	view := a.hostView()
++	if view.info == nil || !host.NeedsUpdate(view.info) {
++		return
++	}
++
++	if a.toasts == nil {
++		return
++	}
++
++	a.host.mu.Lock()
++	if a.host.updateShown {
++		a.host.mu.Unlock()
++
++		return
++	}
++	a.host.updateShown = true
++	a.host.mu.Unlock()
++
++	toast := adw.NewToast(i18n.L("The host service is out of date"))
++	toast.SetButtonLabel(i18n.L("Copy Command"))
++	toast.SetActionName("app.copy-update-command")
++	a.toasts.AddToast(toast)
++}
+diff --git a/internal/ui/locations.go b/internal/ui/locations.go
+index 7f3b0e1164431f03ac5107c40ffee83bca8b4446..c97f1a499df75a51175f28026ceedb6dd1715b3b 100644
+--- a/internal/ui/locations.go
++++ b/internal/ui/locations.go
+@@ -112,6 +112,10 @@ 	a.Settings.SetString(resources.SettingSSHDirKey, set.SSH.HostPath())
+ 	a.Settings.SetString(resources.SettingSSHPathKey, set.SSH.AccessPath())
+ 	a.Settings.Apply()
+ 
++	// The host service reads the machine definitions from the new folder, so
++	// the worker sends the folders on its next pass.
++	a.requestHostRefresh()
++
+ 	return nil
+ }
+ 
+diff --git a/internal/ui/logs.go b/internal/ui/logs.go
+index 5e55b107d7148d08894d72b3869e11680ce550f3..19583937163403c084e84e37948e9cbdd7d0b63c 100644
+--- a/internal/ui/logs.go
++++ b/internal/ui/logs.go
+@@ -13,38 +13,44 @@
+ // openLogs opens the log of one machine in the text editor: the console of the
+ // machine when it keeps one, else its service log written out for reading. The
+ // log comes from the host service, so the application never reads the journal.
++// The read runs on a worker goroutine, because the window never waits for the
++// socket.
+ func (a *App) openLogs(name string) {
+-	path := machine.ConsoleLogPath(name)
++	go func() {
++		path := machine.ConsoleLogPath(name)
+ 
+-	if info, err := os.Stat(path); err != nil || info.Size() == 0 {
+-		log, err := a.hostClient().VMLog(a.Ctx, name)
+-		if err != nil {
+-			a.toast(err.Error())
++		if info, err := os.Stat(path); err != nil || info.Size() == 0 {
++			log, err := a.hostClient().VMLog(a.Ctx, name)
++			if err != nil {
++				a.idle(func() { a.toast(err.Error()) })
+ 
+-			return
+-		}
++				return
++			}
+ 
+-		path = filepath.Join(filepath.Dir(path), "unit.log")
++			path = filepath.Join(filepath.Dir(path), "unit.log")
+ 
+-		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+-			a.toast(err.Error())
++			if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
++				a.idle(func() { a.toast(err.Error()) })
+ 
+-			return
+-		}
++				return
++			}
+ 
+-		content := log.Log
+-		if content == "" {
+-			content = i18n.L("This machine has no log yet")
+-		}
++			content := log.Log
++			if content == "" {
++				content = i18n.L("This machine has no log yet")
++			}
+ 
+-		if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+-			a.toast(err.Error())
++			if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
++				a.idle(func() { a.toast(err.Error()) })
+ 
+-			return
++				return
++			}
+ 		}
+-	}
+ 
+-	if _, err := gio.AppInfoLaunchDefaultForUri("file://"+filepath.Clean(path), nil); err != nil {
+-		a.toast(err.Error())
+-	}
++		a.idle(func() {
++			if _, err := gio.AppInfoLaunchDefaultForUri("file://"+filepath.Clean(path), nil); err != nil {
++				a.toast(err.Error())
++			}
++		})
++	}()
+ }
+diff --git a/internal/ui/machines.go b/internal/ui/machines.go
+index cbdb56679e064fcbb8688fe775a6c75d17681432..1dbc038cd18ef84c63a7c74570b025a62ae8b296 100644
+--- a/internal/ui/machines.go
++++ b/internal/ui/machines.go
+@@ -311,6 +311,8 @@ 		case "restart":
+ 			err = a.hostClient().VMRestart(a.Ctx, name)
+ 		}
+ 
++		a.requestHostRefresh()
++
+ 		a.idle(func() {
+ 			if err != nil {
+ 				if page := a.machinePages[name]; page != nil {
+@@ -580,7 +582,7 @@ 	p.refreshAgent()
+ }
+ 
+ // refreshAgent states whether the guest carries an agent that is as new as the
+-// binary of the host.
++// binary of the host. It reads the snapshot, so the render never waits.
+ func (p *machinePage) refreshAgent() {
+ 	if !p.active() || !p.ready {
+ 		p.banner.SetRevealed(false)
+@@ -588,27 +590,17 @@
+ 		return
+ 	}
+ 
+-	name := p.def.Name
++	outdated := false
+ 
+-	go func() {
+-		outdated := false
+-
+-		if states, err := p.app.machineStates(); err == nil {
+-			for _, m := range states.Machines {
+-				if m.Name == name {
+-					outdated = m.AgentOutdated
+-				}
++	if states, err := p.app.machineStates(); err == nil {
++		for _, m := range states.Machines {
++			if m.Name == p.def.Name {
++				outdated = m.AgentOutdated
+ 			}
+ 		}
++	}
+ 
+-		p.app.idle(func() {
+-			if p.def.Name != name {
+-				return
+-			}
+-
+-			p.banner.SetRevealed(outdated)
+-		})
+-	}()
++	p.banner.SetRevealed(outdated)
+ }
+ 
+ // refreshAccess turns the controls on that need a reachable guest.
+@@ -659,6 +651,10 @@ 	go func() {
+ 		metrics, err := a.hostClient().VMMetrics(a.Ctx, name)
+ 
+ 		a.idle(func() {
++			if a.machinePages[name] != page {
++				return
++			}
++
+ 			page.metricsRunning = false
+ 
+ 			if err != nil {
+diff --git a/internal/ui/secrets.go b/internal/ui/secrets.go
+index 1ee0c24e80d3871a078e51363925be4c85a14895..9f8ffb4a3d74fbb6f3b4cf4e5bd491210e884291 100644
+--- a/internal/ui/secrets.go
++++ b/internal/ui/secrets.go
+@@ -77,15 +77,18 @@
+ // refreshSecretsPage reconciles the rows with the mapping file and the agents
+ // of the host.
+ func (a *App) refreshSecretsPage() {
+-	rows, err := a.State.Rows()
+-	if err != nil {
+-		a.Log.Error("could not read the secrets", "err", err)
++	view := a.hostView()
++
++	rows := view.rows
++	if view.rowsErr != nil {
++		a.Log.Error("could not read the secrets", "err", view.rowsErr)
++
+ 		return
+ 	}
+ 
+-	sshKeys, sshErr := a.State.ListSSHKeys()
+-	gpgKeys, gpgErr := a.State.ListGPGKeys()
+-	grants := a.State.ActiveGrants()
++	sshKeys, sshErr := view.sshKeys, view.sshErr
++	gpgKeys, gpgErr := view.gpgKeys, view.gpgErr
++	grants := view.grants
+ 
+ 	signature := fmt.Sprintf("%v|%v;", sshErr, gpgErr)
+ 	for _, row := range rows {
+diff --git a/internal/ui/setup.go b/internal/ui/setup.go
+index ea5eed7b2b2bee30b778f6ae4898b5be6567af53..48b3c73d367b0bd4c82fed82a96084866981330d 100644
+--- a/internal/ui/setup.go
++++ b/internal/ui/setup.go
+@@ -11,6 +11,7 @@ 	"codeberg.org/puregotk/puregotk/v4/pango"
+ 	"github.com/pojntfx/go-gettext/pkg/i18n"
+ 
+ 	"codeberg.org/pojntfx/phial-neo/assets/resources"
++	"codeberg.org/pojntfx/phial-neo/internal/host"
+ 	"codeberg.org/pojntfx/phial-neo/internal/paths"
+ 	"codeberg.org/pojntfx/phial-neo/internal/setup"
+ )
+@@ -361,16 +362,7 @@ // hostServiceReady reports whether the host service answers Info. The
+ // Continue button appears once the service responds, so the wizard never
+ // continues before the service runs.
+ func (a *App) hostServiceReady() bool {
+-	info, err := a.hostClient().Info(a.Ctx)
+-	if err != nil {
+-		a.Log.Info("the host service does not answer yet", "err", err)
+-
+-		return false
+-	}
+-
+-	a.Log.Info("the host service answered Info", "version", info.Version)
+-
+-	return true
++	return a.hostReady()
+ }
+ 
+ // buildSystemStep builds the step that prepares the host.
+@@ -471,22 +463,12 @@ // command names the host-install subcommand of the application, and carries
+ // the chosen folders, because the host process cannot read the settings of the
+ // sandbox.
+ func (a *App) installCommand() string {
+-	binary := "phial"
+-
+-	if !paths.Sandboxed() {
+-		if self, err := os.Executable(); err == nil {
+-			binary = shellQuote(self)
+-		}
+-	}
+-
+ 	set := paths.Current()
+ 
+-	return strings.Join([]string{
+-		binary, "host-install",
+-		"--config", shellQuote(set.Config.HostPath()),
+-		"--data", shellQuote(set.Data.HostPath()),
+-		"--ssh", shellQuote(set.SSH.HostPath()),
+-	}, " ")
++	// The command runs the deployment binary of the Flatpak, because the host
++	// does not reach the binary inside the sandbox and the old host install
++	// may carry an incompatible copy.
++	return host.InstallCommand(set.Config.HostPath(), set.Data.HostPath(), set.SSH.HostPath())
+ }
+ 
+ // rootSetupCommand states the command that prepares the host. It names the
+@@ -600,6 +582,8 @@ 	a.refreshSecretsPage()
+ 	a.refreshGrantsPage()
+ 	a.refreshCounts()
+ 	a.restoreActivePage()
++
++	a.requestHostRefresh()
+ 
+ 	a.win.Present()
+ }
+diff --git a/internal/ui/shares.go b/internal/ui/shares.go
+index e9c8a65582ad1e6ed2eae1279e3316543105938e..781b3bc3628d9411cd024c74f7bba3c63c183805 100644
+--- a/internal/ui/shares.go
++++ b/internal/ui/shares.go
+@@ -43,6 +43,10 @@ 					return "", err
+ 				}
+ 
+ 				a.idle(func() {
++					if a.machinePages[page.def.Name] != page {
++						return
++					}
++
+ 					if def, err := machine.Load(page.def.Name); err == nil {
+ 						page.def = def
+ 						a.refreshShares(page)
+diff --git a/internal/ui/util.go b/internal/ui/util.go
+index 3eae60d1bb503067b10a6d84046f1cc1e7cbc6df..0dd424c2ca48048bf2132ad1548c0cc7b084c432 100644
+--- a/internal/ui/util.go
++++ b/internal/ui/util.go
+@@ -65,6 +65,11 @@
+ func (a *App) goAsync(work func() (string, error)) {
+ 	go func() {
+ 		message, err := work()
++
++		// The action changed the host state, so the snapshot follows at once
++		// instead of at the next poll.
++		a.requestHostRefresh()
++
+ 		a.idle(func() {
+ 			if err != nil {
+ 				a.showError(err)
+diff --git a/internal/ui/window.go b/internal/ui/window.go
+index e8b8913ef7ccc1b79bf5edce189d2f770ee153b1..f43a88cf382e9bcf5e46d2b7f198ac77221bac15 100644
+--- a/internal/ui/window.go
++++ b/internal/ui/window.go
+@@ -130,11 +130,6 @@ 	a.every(1, func() bool {
+ 		a.refreshInstall()
+ 		return true
+ 	})
+-	a.every(2, func() bool {
+-		a.refreshSidebar()
+-		a.refreshSecretsPage()
+-		return true
+-	})
+ 	a.every(3, func() bool {
+ 		a.refreshMetrics()
+ 		return true
+@@ -335,21 +330,20 @@ 	}
+ }
+ 
+ func (a *App) refreshCounts() {
+-	count := 0
+-	if rows, err := a.State.Rows(); err == nil {
+-		count += len(rows)
++	view := a.hostView()
++
++	count := len(view.rows)
++	if view.sshErr == nil {
++		count += len(view.sshKeys)
+ 	}
+-	if sshKeys, err := a.State.ListSSHKeys(); err == nil {
+-		count += len(sshKeys)
+-	}
+-	if gpgKeys, err := a.State.ListGPGKeys(); err == nil {
+-		count += len(gpgKeys)
++	if view.gpgErr == nil {
++		count += len(view.gpgKeys)
+ 	}
+ 
+ 	a.secretsBadge.SetText(fmt.Sprintf("%d", count))
+ 	a.secretsBadge.SetVisible(count > 0)
+ 
+-	grants := a.State.ActiveGrants()
++	grants := view.grants
+ 	a.grantsCount.SetText(fmt.Sprintf("%d", len(grants)))
+ 	a.grantsCount.SetVisible(len(grants) > 0)
+ 
+
