@@ -1,0 +1,356 @@
+From 1afdd6841c27e318797af589ebbca19fac27efa2 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Mon, 19 Oct 2026 22:57:37 -0700
+Subject: [PATCH] fix: Get USB sharing to work again with new daemon/client split
+---
+diff --git a/cmd/phiald/usb.go b/cmd/phiald/usb.go
+index 891f70306776079b6a9b521cf22c5c12cf2b279a..0b012c786a2324187bf7217b615bf4c4067c5025 100644
+--- a/cmd/phiald/usb.go
++++ b/cmd/phiald/usb.go
+@@ -51,7 +51,11 @@ 		if name == "" {
+ 			name = usbNameLookup(vendor, product)
+ 		}
+ 
+-		entry := host.USBDevice{ID: id, Name: name}
++		entry := host.USBDevice{
++			ID:      id,
++			Address: filepath.Base(filepath.Dir(vendorFile)),
++			Name:    name,
++		}
+ 		if machineName, ok := attached[id]; ok {
+ 			entry.Attached = true
+ 			entry.AttachedTo = machineName
+@@ -141,6 +145,23 @@
+ 	for _, existing := range def.USBDevices {
+ 		if existing == device {
+ 			return fmt.Errorf("the device %s is already in the list", device)
++		}
++	}
++
++	defs, err := machine.List()
++	if err != nil {
++		return err
++	}
++
++	for _, other := range defs {
++		if other.Name == def.Name {
++			continue
++		}
++
++		for _, existing := range other.USBDevices {
++			if existing == device {
++				return fmt.Errorf("the device %s already belongs to the machine %s", device, other.Name)
++			}
+ 		}
+ 	}
+ 
+diff --git a/internal/host/types.go b/internal/host/types.go
+index c4ea76dcbdb4a9d123f35e17c825dbbd9cea1920..95fbf01e3440cca3cbedb3e2d8c1a24861a4759b 100644
+--- a/internal/host/types.go
++++ b/internal/host/types.go
+@@ -234,6 +234,7 @@
+ // USBDevice is one USB device of the host.
+ type USBDevice struct {
+ 	ID         string `json:"id"`
++	Address    string `json:"address,omitempty"`
+ 	Name       string `json:"name"`
+ 	Attached   bool   `json:"attached"`
+ 	AttachedTo string `json:"attached_to,omitempty"`
+diff --git a/internal/mcp/register.go b/internal/mcp/register.go
+index 2b27dc1967c4f7ea0d5fff3cb29ae96f02947f7b..9cb82b800cf60a4dd40f3de6952787b7a5017726 100644
+--- a/internal/mcp/register.go
++++ b/internal/mcp/register.go
+@@ -120,6 +120,9 @@ 	})
+ 
+ 	mcpgo.AddTool(server, UsbAddDeviceTool, func(ctx context.Context, req *mcpgo.CallToolRequest, input UsbDeviceInput) (*mcpgo.CallToolResult, any, error) {
+ 		vm, _ := VMFromContext(ctx)
++		if input.VM == "" {
++			input.VM = vm
++		}
+ 
+ 		out, err := s.requestChange(ctx, "pass USB device "+input.Device, vm, func() error {
+ 			_, _, err := s.UsbAddDevice(ctx, req, input)
+@@ -132,6 +135,9 @@ 	})
+ 
+ 	mcpgo.AddTool(server, UsbRemoveDeviceTool, func(ctx context.Context, req *mcpgo.CallToolRequest, input UsbDeviceInput) (*mcpgo.CallToolResult, any, error) {
+ 		vm, _ := VMFromContext(ctx)
++		if input.VM == "" {
++			input.VM = vm
++		}
+ 
+ 		out, err := s.requestChange(ctx, "unpass USB device "+input.Device, vm, func() error {
+ 			_, _, err := s.UsbRemoveDevice(ctx, req, input)
+diff --git a/internal/mcp/tools_usb.go b/internal/mcp/tools_usb.go
+index 33580525ccf833ea97cf6d5b9e82322cdf16135c..e126abe612f9f282bcf76818792e31f502796426 100644
+--- a/internal/mcp/tools_usb.go
++++ b/internal/mcp/tools_usb.go
+@@ -4,6 +4,7 @@ import (
+ 	"context"
+ 	"fmt"
+ 	"path/filepath"
++	"slices"
+ 	"strings"
+ 
+ 	mcpgo "github.com/modelcontextprotocol/go-sdk/mcp"
+@@ -46,10 +47,12 @@ 	}
+ )
+ 
+ type UsbDeviceInfo struct {
+-	Address string `json:"address" jsonschema:"the sysfs address, for example 3-5.2.3"`
+-	Vendor  string `json:"vendor" jsonschema:"the vendor ID in hex"`
+-	Product string `json:"product" jsonschema:"the product ID in hex"`
+-	Name    string `json:"name" jsonschema:"manufacturer and product strings"`
++	Address    string `json:"address,omitempty" jsonschema:"the sysfs address, for example 3-5.2.3"`
++	Vendor     string `json:"vendor" jsonschema:"the vendor ID in hex"`
++	Product    string `json:"product" jsonschema:"the product ID in hex"`
++	Name       string `json:"name" jsonschema:"manufacturer and product strings"`
++	Attached   bool   `json:"attached" jsonschema:"whether a machine already claims the device"`
++	AttachedTo string `json:"attached_to,omitempty" jsonschema:"the machine that claims the device, if any"`
+ }
+ 
+ type UsbLsOutput struct {
+@@ -58,28 +61,35 @@ 	Passthru   []string        `json:"passthru" jsonschema:"the devices configured for the VM"`
+ 	Controller []string        `json:"controller" jsonschema:"the xHCI controllers bound to the VM, if any"`
+ }
+ 
+-func (s *Service) UsbLs(ctx context.Context, req *mcpgo.CallToolRequest, input NameInput) (*mcpgo.CallToolResult, *UsbLsOutput, error) {
++type UsbLsInput struct {
++	Name string `json:"name,omitempty" jsonschema:"the VM name, optional"`
++}
++
++func (s *Service) UsbLs(ctx context.Context, req *mcpgo.CallToolRequest, input UsbLsInput) (*mcpgo.CallToolResult, *UsbLsOutput, error) {
+ 	response, err := s.host().USBList(ctx)
+ 	if err != nil {
+ 		return nil, nil, err
+ 	}
+ 
+-	out := &UsbLsOutput{}
++	out := &UsbLsOutput{Devices: []UsbDeviceInfo{}, Passthru: []string{}, Controller: []string{}}
+ 
+ 	for _, device := range response.Devices {
+ 		vendor, product, _ := strings.Cut(device.ID, ":")
+ 
+ 		out.Devices = append(out.Devices, UsbDeviceInfo{
+-			Vendor:  vendor,
+-			Product: product,
+-			Name:    device.Name,
++			Address:    device.Address,
++			Vendor:     vendor,
++			Product:    product,
++			Name:       device.Name,
++			Attached:   device.Attached,
++			AttachedTo: device.AttachedTo,
+ 		})
+ 	}
+ 
+ 	if input.Name != "" {
+ 		if def, err := machine.Load(input.Name); err == nil {
+-			out.Passthru = def.USBDevices
+-			out.Controller = def.USBXHCIs
++			out.Passthru = append(out.Passthru, def.USBDevices...)
++			out.Controller = append(out.Controller, def.USBXHCIs...)
+ 		}
+ 	}
+ 
+@@ -109,21 +119,85 @@ }
+ 
+ type AddressInput struct {
+ 	Address string `json:"address" jsonschema:"the PCI address of the controller, for example 0000:00:14.0"`
++	VM      string `json:"vm,omitempty" jsonschema:"the VM that receives the controller, optional"`
+ }
+ 
+ func (s *Service) UsbBind(ctx context.Context, req *mcpgo.CallToolRequest, input AddressInput) (*mcpgo.CallToolResult, any, error) {
++	var def *machine.Definition
++
++	if input.VM != "" {
++		loaded, err := machine.Load(input.VM)
++		if err != nil {
++			return nil, nil, err
++		}
++
++		defs, err := machine.List()
++		if err != nil {
++			return nil, nil, err
++		}
++
++		for _, other := range defs {
++			if other.Name != input.VM && slices.Contains(other.USBXHCIs, input.Address) {
++				return nil, nil, fmt.Errorf("the xHCI controller %s already belongs to the machine %s", input.Address, other.Name)
++			}
++		}
++
++		def = &loaded
++	}
++
+ 	if err := s.host().USBVfioBind(ctx, input.Address); err != nil {
+ 		return nil, nil, err
+ 	}
+ 
++	if def != nil && !slices.Contains(def.USBXHCIs, input.Address) {
++		def.USBXHCIs = append(def.USBXHCIs, input.Address)
++
++		if err := def.Save(); err != nil {
++			return nil, nil, err
++		}
++	}
++
+ 	return nil, map[string]string{"state": "bound"}, nil
+ }
+ 
+ func (s *Service) UsbRestore(ctx context.Context, req *mcpgo.CallToolRequest, input AddressInput) (*mcpgo.CallToolResult, any, error) {
++	defs := []machine.Definition{}
++	if input.VM != "" {
++		def, err := machine.Load(input.VM)
++		if err != nil {
++			return nil, nil, err
++		}
++
++		defs = append(defs, def)
++	} else {
++		listed, err := machine.List()
++		if err != nil {
++			return nil, nil, err
++		}
++
++		defs = listed
++	}
++
+ 	if err := s.host().USBVfioRestore(ctx, input.Address); err != nil {
+ 		return nil, nil, err
+ 	}
+ 
++	for _, def := range defs {
++		kept := slices.DeleteFunc(append([]string{}, def.USBXHCIs...), func(existing string) bool {
++			return existing == input.Address
++		})
++
++		if len(kept) == len(def.USBXHCIs) {
++			continue
++		}
++
++		def.USBXHCIs = kept
++
++		if err := def.Save(); err != nil {
++			return nil, nil, err
++		}
++	}
++
+ 	return nil, map[string]string{"state": "restored"}, nil
+ }
+ 
+@@ -137,12 +211,12 @@
+ type XhciController struct {
+ 	Address string `json:"address" jsonschema:"the PCI address"`
+ 	Name    string `json:"name" jsonschema:"the controller name"`
+-	Count   int    `json:"count" jsonschema:"the number of xHCI controllers"`
++	InUse   bool   `json:"in_use" jsonschema:"whether a machine already binds the controller"`
+ }
+ 
+ type ListXhciOutput struct {
+-	Controllers []XhciController
+-	Count       int `json:"controllers" jsonschema:"available xHCI controllers"`
++	Controllers []XhciController `json:"controllers" jsonschema:"the available xHCI controllers"`
++	Count       int              `json:"count" jsonschema:"the number of available xHCI controllers"`
+ }
+ 
+ func (s *Service) ListXhci(ctx context.Context, req *mcpgo.CallToolRequest, input struct{}) (*mcpgo.CallToolResult, *ListXhciOutput, error) {
+@@ -157,6 +231,7 @@ 	for _, hub := range response.Hubs {
+ 		out.Controllers = append(out.Controllers, XhciController{
+ 			Address: hub.Address,
+ 			Name:    hub.Name,
++			InUse:   hub.InUse,
+ 		})
+ 	}
+ 
+diff --git a/internal/mcp/tools_usb_test.go b/internal/mcp/tools_usb_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..94e0f6bee143dbcd9462459c724efdfdb3c8c839
+--- /dev/null
++++ b/internal/mcp/tools_usb_test.go
+@@ -0,0 +1,63 @@
++package mcp
++
++import (
++	"context"
++	"encoding/json"
++	"testing"
++
++	mcpgo "github.com/modelcontextprotocol/go-sdk/mcp"
++)
++
++func TestUsbLsNameIsOptional(t *testing.T) {
++	ctx := context.Background()
++	server := mcpgo.NewServer(&mcpgo.Implementation{Name: "phial", Version: "test"}, nil)
++	mcpgo.AddTool(server, UsbLsTool, (&Service{}).UsbLs)
++
++	client := mcpgo.NewClient(&mcpgo.Implementation{Name: "test", Version: "test"}, nil)
++	serverTransport, clientTransport := mcpgo.NewInMemoryTransports()
++
++	serverSession, err := server.Connect(ctx, serverTransport, nil)
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer serverSession.Close()
++
++	clientSession, err := client.Connect(ctx, clientTransport, nil)
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer clientSession.Close()
++
++	result, err := clientSession.ListTools(ctx, nil)
++	if err != nil {
++		t.Fatal(err)
++	}
++
++	for _, tool := range result.Tools {
++		if tool.Name != UsbLsTool.Name {
++			continue
++		}
++
++		data, err := json.Marshal(tool.InputSchema)
++		if err != nil {
++			t.Fatal(err)
++		}
++
++		var schema struct {
++			Required []string `json:"required"`
++		}
++		if err := json.Unmarshal(data, &schema); err != nil {
++			t.Fatal(err)
++		}
++
++		for _, name := range schema.Required {
++			if name == "name" {
++				t.Fatalf("usb.ls still requires a name: %s", data)
++			}
++		}
++
++		return
++	}
++
++	t.Fatal("usb.ls is not registered")
++}
+diff --git a/internal/ui/devices.go b/internal/ui/devices.go
+index bbd635a967ef1c06e595078feee91b4e54936794..7081373558eeb847a76cc89b34b684f44c4dbdad 100644
+--- a/internal/ui/devices.go
++++ b/internal/ui/devices.go
+@@ -350,7 +350,7 @@ 			}
+ 		}
+ 
+ 		attached := map[string]bool{}
+-		if _, output, err := a.Service.UsbLs(a.Ctx, nil, mcp.NameInput{Name: name}); err == nil && output != nil {
++		if _, output, err := a.Service.UsbLs(a.Ctx, nil, mcp.UsbLsInput{Name: name}); err == nil && output != nil {
+ 			for _, device := range output.Devices {
+ 				id := fmt.Sprintf("%s:%s", device.Vendor, device.Product)
+ 				attached[id] = true
+@@ -582,7 +582,7 @@ 			}
+ 		}
+ 
+ 		go func() {
+-			_, output, err := a.Service.UsbLs(a.Ctx, nil, mcp.NameInput{Name: def.Name})
++			_, output, err := a.Service.UsbLs(a.Ctx, nil, mcp.UsbLsInput{Name: def.Name})
+ 
+ 			a.idle(func() {
+ 				if scope.isClosed() {
+
