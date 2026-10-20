@@ -1,0 +1,686 @@
+From a12535deec33496c8185ad7c26900e2d3755bba6 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Mon, 19 Oct 2026 23:13:02 -0700
+Subject: [PATCH] feat: Add update protocol for the host service
+---
+diff --git a/assets/resources/index.gresource b/assets/resources/index.gresource
+index 48f975102acf8826736c2dccc15d2f3b851a6abc..35032f9b19676de0f31b81195d9c81e2cb97c432 100644
+Binary files a/assets/resources/index.gresource and b/assets/resources/index.gresource differ
+diff --git a/assets/resources/window.blp b/assets/resources/window.blp
+index c989277f5ca608a2b31a5477b3403f0d5b48ff2d..1acf1ba7bd868c76a4a56c6acede52a433343fb3 100644
+--- a/assets/resources/window.blp
++++ b/assets/resources/window.blp
+@@ -40,7 +40,17 @@               primary: true;
+               menu-model: main_menu;
+             }
+           }
+-          content: Adw.Sidebar sidebar {};
++          content: Box {
++            orientation: vertical;
++            Adw.Banner host_update_banner {
++              title: _("The host service is out of date");
++              button-label: _("_Update");
++              revealed: false;
++            }
++            Adw.Sidebar sidebar {
++              vexpand: true;
++            }
++          };
+         };
+       };
+ 
+diff --git a/assets/resources/window.ui b/assets/resources/window.ui
+index b7edeeb0c1283de691480ba2eb604b2aee53de03..741b2b30d449b2752a653ba13c18bf7a9e5598f0 100644
+--- a/assets/resources/window.ui
++++ b/assets/resources/window.ui
+@@ -54,7 +54,21 @@                         </child>
+                       </object>
+                     </child>
+                     <property name="content">
+-                      <object class="AdwSidebar" id="sidebar"></object>
++                      <object class="GtkBox">
++                        <property name="orientation">1</property>
++                        <child>
++                          <object class="AdwBanner" id="host_update_banner">
++                            <property name="title" translatable="yes">The host service is out of date</property>
++                            <property name="button-label" translatable="yes">_Update</property>
++                            <property name="revealed">false</property>
++                          </object>
++                        </child>
++                        <child>
++                          <object class="AdwSidebar" id="sidebar">
++                            <property name="vexpand">true</property>
++                          </object>
++                        </child>
++                      </object>
+                     </property>
+                   </object>
+                 </property>
+diff --git a/cmd/phiald/service.go b/cmd/phiald/service.go
+index a5f2ee471d9dbb163250a821ccc5e8fff8ba4eba..8aaaf62b987c5910728f3c612f31708fee24beeb 100644
+--- a/cmd/phiald/service.go
++++ b/cmd/phiald/service.go
+@@ -444,6 +444,14 @@ 		}
+ 
+ 		return response, nil
+ 
++	case "HostUpdate":
++		response, err := hostUpdate()
++		if err != nil {
++			return nil, invalid(err)
++		}
++
++		return response, nil
++
+ 	case "RootSetup":
+ 		output, err := run0("root-setup")
+ 		if err != nil {
+diff --git a/cmd/phiald/update.go b/cmd/phiald/update.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..a98f0b81e6722a7037d0a5b384f9aa1987293db0
+--- /dev/null
++++ b/cmd/phiald/update.go
+@@ -0,0 +1,129 @@
++package main
++
++import (
++	"fmt"
++	"os"
++	"os/exec"
++	"path/filepath"
++	"strings"
++	"time"
++
++	"codeberg.org/pojntfx/phial-neo/internal/host"
++	"codeberg.org/pojntfx/phial-neo/internal/setup"
++	"codeberg.org/pojntfx/phial-neo/internal/version"
++)
++
++func hostUpdate() (*host.StateResponse, error) {
++	source, err := installedFlatpakService()
++	if err != nil {
++		return nil, err
++	}
++
++	build, err := binaryBuild(source)
++	if err != nil {
++		return nil, err
++	}
++
++	if build == version.Build() {
++		return &host.StateResponse{State: "current"}, nil
++	}
++
++	if err := installService(source); err != nil {
++		return nil, err
++	}
++
++	if err := scheduleServiceRestart(); err != nil {
++		return nil, err
++	}
++
++	return &host.StateResponse{State: "updating"}, nil
++}
++
++func installedFlatpakService() (string, error) {
++	attempts := [][]string{
++		{"info", "--user", "--show-location", version.AppID},
++		{"info", "--show-location", version.AppID},
++	}
++
++	for _, args := range attempts {
++		output, err := exec.Command("flatpak", args...).Output()
++		if err != nil {
++			continue
++		}
++
++		candidate := filepath.Join(strings.TrimSpace(string(output)), "files", "bin", "phiald")
++
++		info, err := os.Lstat(candidate)
++		if err == nil && info.Mode().IsRegular() {
++			return candidate, nil
++		}
++	}
++
++	return "", fmt.Errorf("could not find the installed Phial host service")
++}
++
++func binaryBuild(path string) (string, error) {
++	output, err := exec.Command(path, "--version").Output()
++	if err != nil {
++		return "", fmt.Errorf("read the build of %s: %w", path, err)
++	}
++
++	value := strings.TrimSpace(string(output))
++
++	open := strings.LastIndex(value, "(")
++	close := strings.LastIndex(value, ")")
++	if open < 0 || close <= open {
++		return "", fmt.Errorf("the build of %s is missing", path)
++	}
++
++	return value[open+1 : close], nil
++}
++
++func installService(source string) error {
++	data, err := os.ReadFile(source)
++	if err != nil {
++		return err
++	}
++
++	target := setup.HostCLI()
++	if target == "" {
++		return fmt.Errorf("could not resolve the host service path")
++	}
++
++	if err := os.MkdirAll(filepath.Dir(target), 0o700); err != nil {
++		return err
++	}
++
++	temporary := target + ".new"
++
++	if err := os.WriteFile(temporary, data, 0o755); err != nil {
++		return err
++	}
++
++	if err := os.Chmod(temporary, 0o755); err != nil {
++		return err
++	}
++
++	return os.Rename(temporary, target)
++}
++
++func scheduleServiceRestart() error {
++	unit := fmt.Sprintf("phiald-update-%d", time.Now().UnixNano())
++
++	output, err := exec.Command(
++		"systemd-run",
++		"--user",
++		"--collect",
++		"--on-active=2",
++		"--unit="+unit,
++		"systemctl",
++		"--user",
++		"restart",
++		"phiald.service",
++	).CombinedOutput()
++	if err != nil {
++		return fmt.Errorf("schedule the host service restart: %w: %s", err, strings.TrimSpace(string(output)))
++	}
++
++	return nil
++}
+diff --git a/internal/host/client.go b/internal/host/client.go
+index dc63bbdcb64eb01e5a1a5f3d8f0056276c68cfae..7fed800c77a6bd8eb1a2750537eb11be3b89af1a 100644
+--- a/internal/host/client.go
++++ b/internal/host/client.go
+@@ -356,3 +356,13 @@ 	}
+ 
+ 	return &out, nil
+ }
++
++func (c *Client) HostUpdate(ctx context.Context) (*StateResponse, error) {
++	var out StateResponse
++
++	if err := c.call(ctx, "HostUpdate", nil, &out); err != nil {
++		return nil, err
++	}
++
++	return &out, nil
++}
+diff --git a/internal/host/update.go b/internal/host/update.go
+index 35a17d44af121686563f4fadf7d1ad439e74f25d..5682bfaa84a557c5abacaaa3a7fbfd8e0f859d1e 100644
+--- a/internal/host/update.go
++++ b/internal/host/update.go
+@@ -54,11 +54,10 @@ 	return info.Build != embedded
+ }
+ 
+ // UpdateCommand states the host command that re-installs the embedded service
+-// and restarts it. The update command is the install command without the
+-// folder arguments, and the application never runs it; the toast carries a
+-// Copy Command action.
+-func UpdateCommand() string {
+-	return InstallCommand("", "", "")
++// and restarts it. The update command is the install command with the chosen
++// folders, and the sidebar banner copies it for the user to run on the host.
++func UpdateCommand(config, data, ssh string) string {
++	return InstallCommand(config, data, ssh) + " --skip-root-setup"
+ }
+ 
+ // InstallCommand states the host install command. With folders it is the
+diff --git a/internal/host/update_test.go b/internal/host/update_test.go
+index 511fca887042edb0c3386602a4f1ae4cdce22498..0367944f9d1e108e31227f3a50a5219bfbf30007 100644
+--- a/internal/host/update_test.go
++++ b/internal/host/update_test.go
+@@ -67,15 +67,13 @@ 		t.Fatal("a service without a build identity did not ask for an update")
+ 	}
+ }
+ 
+-func TestUpdateCommandHasNoFolders(t *testing.T) {
+-	command := UpdateCommand()
+-
+-	if strings.Contains(command, "--config") || strings.Contains(command, "--data") || strings.Contains(command, "--ssh") {
+-		t.Fatalf("the update command %q carries folders", command)
+-	}
++func TestUpdateCommandCarriesFolders(t *testing.T) {
++	command := UpdateCommand("/a", "/b", "/c")
+ 
+-	if !strings.Contains(command, "host-install") {
+-		t.Fatalf("the update command %q does not run host-install", command)
++	for _, want := range []string{"host-install", "--config /a", "--data /b", "--ssh /c", "--skip-root-setup"} {
++		if !strings.Contains(command, want) {
++			t.Fatalf("the update command %q does not carry %q", command, want)
++		}
+ 	}
+ }
+ 
+diff --git a/internal/setup/install.go b/internal/setup/install.go
+index 9ace125c71ed6ede9347fbf85be7f7666a3b62c1..a1e1c8e0c21267a1e32fba7fe16871af53c1beb7 100644
+--- a/internal/setup/install.go
++++ b/internal/setup/install.go
+@@ -16,10 +16,11 @@
+ // InstallOptions states the folders that the install records. The update
+ // command runs the same install without the folder arguments.
+ type InstallOptions struct {
+-	Config  string
+-	Data    string
+-	SSH     string
+-	RepoDir string
++	Config        string
++	Data          string
++	SSH           string
++	RepoDir       string
++	SkipRootSetup bool
+ }
+ 
+ // HostCLI states the command that the host install writes.
+@@ -160,17 +161,22 @@ 	if err := appendBlock(gpgAgent, gpgBlock, "# phial"); err != nil {
+ 		return err
+ 	}
+ 
+-	// The root setup runs once. The user approves the run0 call with polkit.
+-	if err := rootSetupOnce(servicePath); err != nil {
+-		return err
++	if !options.SkipRootSetup {
++		if err := rootSetupOnce(servicePath); err != nil {
++			return err
++		}
+ 	}
+ 
+ 	// The service starts on the first socket connection. The command enables
+ 	// phiald.socket and starts it. It does not enable linger.
+ 	_ = exec.Command("systemctl", "--user", "daemon-reload").Run()
+ 
+-	if out, err := exec.Command("systemctl", "--user", "enable", "--now", "phiald.socket").CombinedOutput(); err != nil {
++	if out, err := exec.Command("systemctl", "--user", "enable", "phiald.socket").CombinedOutput(); err != nil {
+ 		return fmt.Errorf("could not enable the control socket: %w: %s", err, strings.TrimSpace(string(out)))
++	}
++
++	if out, err := exec.Command("systemctl", "--user", "restart", "phiald.service").CombinedOutput(); err != nil {
++		return fmt.Errorf("could not restart the host service: %w: %s", err, strings.TrimSpace(string(out)))
+ 	}
+ 
+ 	fmt.Println("phial installed")
+diff --git a/internal/ui/app.go b/internal/ui/app.go
+index cf9f36c81f86d7cb5a2e02bbd5ba8cebf3dba7c6..044447a90c612d02ba246a36d595f74d5231b0b4 100644
+--- a/internal/ui/app.go
++++ b/internal/ui/app.go
+@@ -21,6 +21,7 @@ 	"codeberg.org/pojntfx/phial-neo/assets/resources"
+ 	"codeberg.org/pojntfx/phial-neo/internal/host"
+ 	"codeberg.org/pojntfx/phial-neo/internal/machine"
+ 	"codeberg.org/pojntfx/phial-neo/internal/mcp"
++	"codeberg.org/pojntfx/phial-neo/internal/paths"
+ 	"codeberg.org/pojntfx/phial-neo/internal/portals"
+ 	"codeberg.org/pojntfx/phial-neo/internal/setup"
+ 	"codeberg.org/pojntfx/phial-neo/internal/state"
+@@ -56,6 +57,9 @@ 	searchToggle *gtk.ToggleButton
+ 	searchEntry  *gtk.SearchEntry
+ 
+ 	sidebarTitle     *adw.WindowTitle
++	hostBanner       *adw.Banner
++	hostUpdating     bool
++	hostUpdateError  string
+ 	newMachineButton *gtk.Button
+ 	mainMenuButton   *gtk.MenuButton
+ 	noMachinesPage   *adw.NavigationPage
+@@ -193,7 +197,7 @@ 		if setupRequired {
+ 			a.showSetupDialog(true)
+ 		}
+ 
+-		a.maybeShowUpdateToast()
++		a.refreshHostBanner()
+ 	}
+ 	a.app.ConnectActivate(&onActivate)
+ 	a.hold(&onActivate)
+@@ -365,8 +369,10 @@ 		a.app.AddAction(action)
+ 	}
+ 
+ 	simple("new-machine", func() { a.showNewMachineDialog() })
++	simple("update-host", func() { a.updateHostService() })
+ 	simple("copy-update-command", func() {
+-		a.copyText(host.UpdateCommand(), i18n.L("Command copied"))
++		set := paths.Current()
++		a.copyText(host.UpdateCommand(set.Config.HostPath(), set.Data.HostPath(), set.SSH.HostPath()), i18n.L("Command copied"))
+ 	})
+ 	simple("system-setup", func() { a.showSetupDialogAt(false, wizardSystemTag) })
+ 	simple("shortcuts", func() { a.showShortcuts() })
+diff --git a/internal/ui/hostupdate.go b/internal/ui/hostupdate.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..8c84d3c0be54da26eb4a318bb33f6e12e9feb96d
+--- /dev/null
++++ b/internal/ui/hostupdate.go
+@@ -0,0 +1,105 @@
++package ui
++
++import (
++	"context"
++	"fmt"
++	"strings"
++	"time"
++
++	"codeberg.org/puregotk/puregotk/v4/adw"
++	"github.com/pojntfx/go-gettext/pkg/i18n"
++
++	"codeberg.org/pojntfx/phial-neo/internal/host"
++)
++
++func (a *App) updateHostService() {
++	if a.hostUpdating {
++		return
++	}
++
++	if !host.Embedded() {
++		a.toast(i18n.L("This build carries no host service"))
++		return
++	}
++
++	running := a.runningMachines()
++	if len(running) == 0 {
++		a.runHostUpdate()
++		return
++	}
++
++	dialog := adw.NewAlertDialog(
++		i18n.L("Update the Host Service?"),
++		fmt.Sprintf(i18n.L("The update restarts the host service and stops %s."), strings.Join(running, ", ")),
++	)
++	dialog.AddResponse("cancel", i18n.L("_Cancel"))
++	dialog.AddResponse("update", i18n.L("_Update"))
++	dialog.SetResponseAppearance("update", adw.ResponseSuggestedValue)
++	dialog.SetCloseResponse("cancel")
++
++	var cb func(adw.AlertDialog, string)
++	cb = func(_ adw.AlertDialog, response string) {
++		if response == "update" {
++			a.runHostUpdate()
++		}
++	}
++	dialog.ConnectResponse(&cb)
++	a.hold(&cb)
++
++	dialog.Present(&a.win.Widget)
++}
++
++func (a *App) runHostUpdate() {
++	client := a.hostClient()
++	if client == nil {
++		a.toast(i18n.L("The host service is not connected"))
++		return
++	}
++
++	a.hostUpdating = true
++	a.hostUpdateError = ""
++	a.refreshHostBanner()
++
++	go func() {
++		if _, err := client.HostUpdate(a.Ctx); err != nil {
++			a.Log.Info("could not update the host service", "err", err)
++
++			a.idle(func() {
++				a.hostUpdating = false
++				a.hostUpdateError = err.Error()
++				a.refreshHostBanner()
++				a.toast(i18n.L("The host service update failed"))
++			})
++
++			return
++		}
++
++		deadline := time.Now().Add(45 * time.Second)
++
++		for time.Now().Before(deadline) {
++			ctx, cancel := context.WithTimeout(a.Ctx, 5*time.Second)
++			info, infoErr := client.Info(ctx)
++			cancel()
++
++			if infoErr == nil && !host.NeedsUpdate(info) {
++				a.idle(func() {
++					a.hostUpdating = false
++					a.hostUpdateError = ""
++					a.requestHostRefresh()
++					a.refreshHostBanner()
++					a.toast(i18n.L("The host service is up to date"))
++				})
++
++				return
++			}
++
++			time.Sleep(500 * time.Millisecond)
++		}
++
++		a.idle(func() {
++			a.hostUpdating = false
++			a.hostUpdateError = i18n.L("The host service did not answer after the update")
++			a.refreshHostBanner()
++		})
++	}()
++}
+diff --git a/internal/ui/hostwatch.go b/internal/ui/hostwatch.go
+index cf6233b892af970f7c25b81b732c6f5453a80ca4..a4bcb915ad956d813101fdf73e44099bbeefe61b 100644
+--- a/internal/ui/hostwatch.go
++++ b/internal/ui/hostwatch.go
+@@ -6,7 +6,6 @@ 	"strings"
+ 	"sync"
+ 	"time"
+ 
+-	"codeberg.org/puregotk/puregotk/v4/adw"
+ 	"github.com/pojntfx/go-gettext/pkg/i18n"
+ 
+ 	"codeberg.org/pojntfx/phial-neo/internal/host"
+@@ -38,11 +37,10 @@ }
+ 
+ // hostCache guards the snapshot and the one-time flags of the worker.
+ type hostCache struct {
+-	mu          sync.RWMutex
+-	view        hostView
+-	updateShown bool
+-	foldersKey  string
+-	wake        chan struct{}
++	mu         sync.RWMutex
++	view       hostView
++	foldersKey string
++	wake       chan struct{}
+ }
+ 
+ // hostHubPoll is the interval between two snapshots.
+@@ -181,7 +179,7 @@ 	a.refreshGrantsPage()
+ 	a.refreshCounts()
+ 	a.refreshInstall()
+ 	a.refreshSetupHostStep()
+-	a.maybeShowUpdateToast()
++	a.refreshHostBanner()
+ 
+ 	if a.loadingShown && a.hostReady() {
+ 		a.finishLoading()
+@@ -213,29 +211,40 @@ 		step.update()
+ 	}
+ }
+ 
+-// maybeShowUpdateToast compares the embedded service with the running one and
+-// shows the copyable update command once.
+-func (a *App) maybeShowUpdateToast() {
+-	view := a.hostView()
+-	if view.info == nil || !host.NeedsUpdate(view.info) {
++func (a *App) refreshHostBanner() {
++	if a.hostBanner == nil {
+ 		return
+ 	}
+ 
+-	if a.toasts == nil {
++	if a.hostUpdating {
++		a.hostBanner.SetTitle(i18n.L("Updating the Host Service…"))
++		a.hostBanner.SetButtonLabel(i18n.L("_Updating"))
++		a.hostBanner.SetRevealed(true)
++
+ 		return
+ 	}
+ 
+-	a.host.mu.Lock()
+-	if a.host.updateShown {
+-		a.host.mu.Unlock()
++	view := a.hostView()
++
++	if a.hostUpdateError != "" {
++		if view.info != nil && !host.NeedsUpdate(view.info) {
++			a.hostUpdateError = ""
++		} else {
++			a.hostBanner.SetTitle(i18n.L("The host service update failed"))
++			a.hostBanner.SetButtonLabel(i18n.L("_Retry"))
++			a.hostBanner.SetRevealed(true)
++
++			return
++		}
++	}
++
++	if view.info == nil || view.infoErr != nil || !host.NeedsUpdate(view.info) {
++		a.hostBanner.SetRevealed(false)
+ 
+ 		return
+ 	}
+-	a.host.updateShown = true
+-	a.host.mu.Unlock()
+ 
+-	toast := adw.NewToast(i18n.L("The host service is out of date"))
+-	toast.SetButtonLabel(i18n.L("Copy Command"))
+-	toast.SetActionName("app.copy-update-command")
+-	a.toasts.AddToast(toast)
++	a.hostBanner.SetTitle(i18n.L("The host service is out of date"))
++	a.hostBanner.SetButtonLabel(i18n.L("_Update"))
++	a.hostBanner.SetRevealed(true)
+ }
+diff --git a/internal/ui/machines.go b/internal/ui/machines.go
+index 1dbc038cd18ef84c63a7c74570b025a62ae8b296..6ef7a60f0403ea381288ff52e7f635a0b2415c06 100644
+--- a/internal/ui/machines.go
++++ b/internal/ui/machines.go
+@@ -470,6 +470,7 @@ func (p *machinePage) setPending(action string) {
+ 	p.pending = action
+ 	p.pendingSince = time.Now()
+ 	p.render()
++	p.refreshAgent()
+ }
+ 
+ // stateText names the state of the machine, including the transition.
+@@ -584,6 +585,17 @@
+ // refreshAgent states whether the guest carries an agent that is as new as the
+ // binary of the host. It reads the snapshot, so the render never waits.
+ func (p *machinePage) refreshAgent() {
++	if p.pending == "provision" {
++		p.banner.SetTitle(i18n.L("Updating the Guest Agent…"))
++		p.banner.SetButtonLabel(i18n.L("_Updating"))
++		p.banner.SetRevealed(true)
++
++		return
++	}
++
++	p.banner.SetTitle(i18n.L("The guest agent is out of date"))
++	p.banner.SetButtonLabel(i18n.L("_Reprovision"))
++
+ 	if !p.active() || !p.ready {
+ 		p.banner.SetRevealed(false)
+ 
+diff --git a/internal/ui/window.go b/internal/ui/window.go
+index a51f110de4a4592754b69113d60afc374f483b82..566c17873efcfe8885fa8a0f2779c9fc29676c87 100644
+--- a/internal/ui/window.go
++++ b/internal/ui/window.go
+@@ -40,6 +40,7 @@ 	var (
+ 		toasts     adw.ToastOverlay
+ 		split      adw.NavigationSplitView
+ 		sidebar    adw.Sidebar
++		hostBanner adw.Banner
+ 		content    adw.NavigationView
+ 		title      adw.WindowTitle
+ 		menuButton gtk.MenuButton
+@@ -50,6 +51,7 @@ 	)
+ 	builder.GetObject("toast_overlay").Cast(&toasts)
+ 	builder.GetObject("split_view").Cast(&split)
+ 	builder.GetObject("sidebar").Cast(&sidebar)
++	builder.GetObject("host_update_banner").Cast(&hostBanner)
+ 	builder.GetObject("content_view").Cast(&content)
+ 	builder.GetObject("sidebar_title").Cast(&title)
+ 	builder.GetObject("main_menu_button").Cast(&menuButton)
+@@ -60,6 +62,7 @@
+ 	a.toasts = &toasts
+ 	a.split = &split
+ 	a.sidebar = &sidebar
++	a.hostBanner = &hostBanner
+ 	a.content = &content
+ 	a.sidebarTitle = &title
+ 	a.mainMenuButton = &menuButton
+@@ -103,6 +106,13 @@ 	a.win.ConnectCloseRequest(&onCloseRequest)
+ 	a.hold(&onCloseRequest)
+ 
+ 	a.buildSidebar()
++
++	var onHostBanner func(adw.Banner)
++	onHostBanner = func(adw.Banner) { a.activate("update-host") }
++	a.hostBanner.ConnectButtonClicked(&onHostBanner)
++	a.hold(&onHostBanner)
++
++	a.refreshHostBanner()
+ 
+ 	a.secretsPage = a.buildSecretsPage()
+ 	a.grantsPage = a.buildGrantsPage()
+diff --git a/main.go b/main.go
+index edc34edc842979cef24e29d42d362ef055b2c6a1..03b83fd7e49ba0580e9a2f21a536a675946653da 100644
+--- a/main.go
++++ b/main.go
+@@ -29,6 +29,7 @@   phial                       open the window (also serves the agent channel)
+   phial --background          start in the background, for autostart
+   phial --version             print the version and the build identity
+   phial host-install [--config <path>] [--data <path>] [--ssh <path>]
++                              [--skip-root-setup]
+                               install the embedded host service, the install
+                               command that the wizard shows
+   phial acceptance            run the host acceptance checks
+@@ -221,6 +222,7 @@ func runHostInstall(args []string) error {
+ 	configPath := ""
+ 	dataPath := ""
+ 	sshPath := ""
++	skipRootSetup := false
+ 
+ 	for index := 0; index < len(args); index++ {
+ 		arg := args[index]
+@@ -248,6 +250,8 @@ 		case arg == "--ssh":
+ 			sshPath = value()
+ 		case strings.HasPrefix(arg, "--ssh="):
+ 			sshPath = strings.TrimPrefix(arg, "--ssh=")
++		case arg == "--skip-root-setup":
++			skipRootSetup = true
+ 		}
+ 	}
+ 
+@@ -268,9 +272,10 @@ 		paths.SetCurrent(set)
+ 	}
+ 
+ 	return setup.HostInstall(setup.InstallOptions{
+-		Config: configPath,
+-		Data:   dataPath,
+-		SSH:    sshPath,
++		Config:        configPath,
++		Data:          dataPath,
++		SSH:           sshPath,
++		SkipRootSetup: skipRootSetup,
+ 	})
+ }
+ 
+
