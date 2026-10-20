@@ -1,0 +1,717 @@
+From 16276691a15c958e6b56be1d9d231003709f364b Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Mon, 19 Oct 2026 23:44:48 -0700
+Subject: [PATCH] refactor: Redo all the commands with host command copy widgets standardized
+---
+diff --git a/assets/resources/index.gresource b/assets/resources/index.gresource
+index 35032f9b19676de0f31b81195d9c81e2cb97c432..e556bd706d19c3be1bce730a609ea889921f1863 100644
+Binary files a/assets/resources/index.gresource and b/assets/resources/index.gresource differ
+diff --git a/assets/resources/style.css b/assets/resources/style.css
+index 88079d2b87343dbae64e039ef280570e9e8fcaab..e568a7648239975f2cc59d7c67ad9d7f8cd32b82 100644
+--- a/assets/resources/style.css
++++ b/assets/resources/style.css
+@@ -1,3 +1,8 @@
++/* A value that reads as code: commands, paths, identifiers, and links. */
++.monospace {
++  font-family: monospace;
++}
++
+ /* A count next to a sidebar item. */
+ .phial-badge {
+   background-color: var(--accent-bg-color);
+diff --git a/internal/ui/access.go b/internal/ui/access.go
+index 31fdb3a5d8f6884de81733bdf2092b4eeb21afd6..d244e85c06e44ee208ffea84a63af3ddbad13138 100644
+--- a/internal/ui/access.go
++++ b/internal/ui/access.go
+@@ -1,8 +1,6 @@
+ package ui
+ 
+ import (
+-	"os"
+-	"os/exec"
+ 	"strings"
+ 
+ 	"codeberg.org/puregotk/puregotk/v4/adw"
+@@ -14,48 +12,6 @@ 	"codeberg.org/pojntfx/phial-neo/internal/mcp"
+ 	"codeberg.org/pojntfx/phial-neo/internal/portals"
+ )
+ 
+-func (a *App) serialSocket(def machine.Definition) string {
+-	return def.RuntimePathValue() + "/console.sock"
+-}
+-
+-// openTerminal starts the first terminal emulator that is installed.
+-func (a *App) openTerminal(args ...string) bool {
+-	candidates := [][]string{
+-		{"kgx", "--"},
+-		{"ptyxis", "--"},
+-		{"gnome-terminal", "--"},
+-		{"foot"},
+-		{"alacritty", "-e"},
+-		{"tilix", "-e"},
+-		{"konsole", "-e"},
+-		{"xterm", "-e"},
+-	}
+-
+-	if os.Getenv("FLATPAK_ID") != "" {
+-		candidates = [][]string{
+-			{"host-spawn", "kgx", "--"},
+-			{"host-spawn", "ptyxis", "--"},
+-			{"host-spawn", "gnome-terminal", "--"},
+-		}
+-	}
+-
+-	for _, candidate := range candidates {
+-		if _, err := exec.LookPath(candidate[0]); err != nil {
+-			continue
+-		}
+-
+-		command := exec.Command(candidate[0], append(candidate[1:], args...)...)
+-		if err := command.Start(); err != nil {
+-			continue
+-		}
+-
+-		return true
+-	}
+-
+-	a.toast(i18n.L("No terminal emulator was found"))
+-	return false
+-}
+-
+ // unlockAgentRow states whether the agent of the session holds the key of the
+ // user, and loads that key when the agent needs it.
+ func (a *App) unlockAgentRow() *gtk.Widget {
+@@ -72,20 +28,14 @@
+ 	return &row.Widget
+ }
+ 
+-// credentialGroup states the credentials that the guest asks for at its login,
+-// with a copy control for each of them.
+-func (a *App) credentialGroup(user string, password string) (*adw.PreferencesGroup, *adw.PasswordEntryRow) {
+-	group := formGroup("Sign In", "The guest asks for these credentials when you sign in.")
++// signInGroup states the user and the password that the guest asks for at its
++// login, with a copy control for each of them. Every dialog that signs in to a
++// machine carries the same group.
++func (a *App) signInGroup(description string, user string, password string) (*adw.PreferencesGroup, *adw.PasswordEntryRow) {
++	group := formGroup("Sign In", description)
+ 
+-	userRow := a.entryRow("_User")
+-	userRow.SetUseUnderline(true)
+-	userRow.SetText(user)
+-	userRow.SetEditable(false)
+-	userRow.SetShowApplyButton(false)
+-	copyUser := a.iconButton("edit-copy-symbolic", i18n.L("Copy User"), func() {
+-		a.copyText(userRow.GetText(), i18n.L("User copied"))
+-	})
+-	userRow.AddSuffix(&copyUser.Widget)
++	userRow := a.valueRow("User", user)
++	a.copySuffix(userRow, "Copy the User", "User copied")
+ 	group.Add(&userRow.Widget)
+ 
+ 	passwordRow := adw.NewPasswordEntryRow()
+@@ -94,7 +44,8 @@ 	passwordRow.SetUseUnderline(true)
+ 	passwordRow.SetText(password)
+ 	passwordRow.SetEditable(false)
+ 	passwordRow.SetShowApplyButton(false)
+-	copyPassword := a.iconButton("edit-copy-symbolic", i18n.L("Copy Password"), func() {
++
++	copyPassword := a.iconButton("edit-copy-symbolic", i18n.L("Copy the Password"), func() {
+ 		a.copyText(passwordRow.GetText(), i18n.L("Password copied"))
+ 	})
+ 	passwordRow.AddSuffix(&copyPassword.Widget)
+@@ -103,25 +54,26 @@
+ 	return group, passwordRow
+ }
+ 
++// serialSocket states the socket of the serial console of a machine.
++func (a *App) serialSocket(def machine.Definition) string {
++	return def.RuntimePathValue() + "/console.sock"
++}
++
++// showSerialDialog opens the serial console. The dialog hands out the
++// connection first, then the sign-in, and keeps the socket path last for
++// reference.
+ func (a *App) showSerialDialog(def machine.Definition) {
+ 	scope := a.newScope()
+ 
+-	socket := a.serialSocket(def)
+-	attach := "socat - UNIX-CONNECT:" + socket
++	attach := "socat - UNIX-CONNECT:" + a.serialSocket(def)
+ 
+-	address := adw.NewActionRow()
+-	address.SetTitle(i18n.L("Socket on this host"))
+-	address.SetSubtitle(socket)
+-	address.SetSubtitleSelectable(true)
+-	address.AddCssClass("property")
++	console := a.commandGroup(
++		"Run this command on this host to open the console of the machine in a terminal.",
++		attach,
++		"Copy the Command",
++	)
+ 
+-	group := formGroup("Console", "The guest writes its kernel log to this socket.", &address.Widget)
+-
+-	group.Add(&a.buttonRow("_Copy the socat Command", "edit-copy-symbolic", func() {
+-		a.copyText(attach, i18n.L("Command copied"))
+-	}).Widget)
+-
+-	signIn, passwordRow := a.credentialGroup("phial", "")
++	signIn, passwordRow := a.signInGroup("The console asks for this user and password.", "phial", "")
+ 	a.rdpPassword(def.Name, func(password string) {
+ 		if scope.isClosed() {
+ 			return
+@@ -130,77 +82,61 @@
+ 		passwordRow.SetText(password)
+ 	})
+ 
+-	content := a.formPage(signIn, group)
++	socket := a.valueRow("Socket on this host", a.serialSocket(def))
++	a.copySuffix(socket, "Copy the Socket Path", "Socket path copied")
++
++	content := a.formPage(console, signIn, formGroup("Reference", "", &socket.Widget))
+ 	dialog := a.dialog(scope, "Serial Console", def.Name, "_Close", content, nil)
+ 
+ 	a.present(dialog, scope)
+ }
+ 
++// showTerminalDialog opens the SSH access of one machine. The dialog hands out
++// the command first, and states the host alias that the command uses below.
+ func (a *App) showTerminalDialog(def machine.Definition) {
+ 	scope := a.newScope()
+ 
+-	group := formGroup(
+-		"Connection",
+-		"The host alias reaches the machine over vsock, so no network device is needed.",
++	connection := a.commandGroup(
++		"Run this command in a terminal to open a shell in the machine over vsock.",
++		"ssh "+def.Name,
++		"Copy the Command",
+ 	)
+ 
+-	command := a.entryRow("A host alias that Phial keeps in your SSH configuration")
+-	command.SetText(def.Name)
+-	command.SetEditable(false)
+-	command.SetShowApplyButton(false)
+-
+-	copyAlias := a.iconButton("edit-copy-symbolic", i18n.L("Copy the Alias"), func() {
+-		a.copyText(def.Name, i18n.L("Alias copied"))
+-	})
+-	command.AddSuffix(&copyAlias.Widget)
+-	group.Add(&command.Widget)
++	aliasInfo := formGroup("Host Alias", "Phial keeps this alias in your SSH configuration.")
+ 
+-	group.Add(&a.buttonRow("_Copy the Command", "edit-copy-symbolic", func() {
+-		a.copyText("ssh "+def.Name, i18n.L("Command copied"))
+-	}).Widget)
++	aliasRow := a.valueRow("Host alias in your SSH configuration", def.Name)
++	a.copySuffix(aliasRow, "Copy the Alias", "Alias copied")
++	aliasInfo.Add(&aliasRow.Widget)
+ 
+-	group.Add(&a.buttonRow("_Open the File Manager", "folder-remote-symbolic", func() {
++	aliasInfo.Add(&a.buttonRow("_Open the File Manager", "folder-remote-symbolic", func() {
+ 		if err := portals.OpenURI("sftp://" + def.Name + "/"); err != nil {
+ 			a.showError(err)
+ 		}
+ 	}).Widget)
+ 
+-	group.Add(a.unlockAgentRow())
++	agent := formGroup("Agent", "")
++	agent.Add(a.unlockAgentRow())
+ 
+-	content := a.formPage(group)
++	content := a.formPage(connection, aliasInfo, agent)
+ 	dialog := a.dialog(scope, "SSH", def.Name, "_Close", content, nil)
+ 
+ 	a.present(dialog, scope)
+ }
+ 
++// showRdpDialog opens the remote desktop of one machine. The dialog hands out
++// the link, then the sign-in, and keeps the address that the link uses last.
+ func (a *App) showRdpDialog(def machine.Definition) {
+ 	scope := a.newScope()
+ 
+-	signIn, passwordRow := a.credentialGroup("phial", "")
+-	a.rdpPassword(def.Name, func(password string) {
+-		if scope.isClosed() {
+-			return
+-		}
+-
+-		passwordRow.SetText(password)
+-	})
++	linkRow := a.valueRow("Open this link in a Remote Desktop client", def.RdpURI())
++	a.copySuffix(linkRow, "Copy the Link", "Link copied")
+ 
+ 	remote := formGroup(
+ 		"Remote Desktop",
+ 		"The handler of the desktop for rdp:// links opens this link.",
++		&linkRow.Widget,
+ 	)
+ 
+-	linkRow := a.entryRow("RDP link")
+-	linkRow.SetText(def.RdpURI())
+-	linkRow.SetEditable(false)
+-	linkRow.SetShowApplyButton(false)
+-
+-	copyLink := a.iconButton("edit-copy-symbolic", i18n.L("Copy the Link"), func() {
+-		a.copyText(def.RdpURI(), i18n.L("Link copied"))
+-	})
+-	linkRow.AddSuffix(&copyLink.Widget)
+-	remote.Add(&linkRow.Widget)
+-
+ 	remote.Add(&a.buttonRow("_Open the Remote Desktop", "video-display-symbolic", func() {
+ 		a.goAsync(func() (string, error) {
+ 			if _, _, err := a.Service.DisplayOpenRdp(a.Ctx, nil, mcp.RdpInput{VM: def.Name}); err != nil {
+@@ -210,19 +146,25 @@ 			return i18n.L("The remote desktop opens in a moment"), nil
+ 		})
+ 	}).Widget)
+ 
+-	address := formGroup("Address", "The port is forwarded to the IPv6 loopback of this host. The link uses localhost, which resolves to ::1 first.")
+-	addressRow := a.entryRow("Local to this host")
+-	addressRow.SetText(def.RdpAddress())
+-	addressRow.SetEditable(false)
+-	addressRow.SetShowApplyButton(false)
++	signIn, passwordRow := a.signInGroup("The desktop asks for this user and password.", "phial", "")
++	a.rdpPassword(def.Name, func(password string) {
++		if scope.isClosed() {
++			return
++		}
+ 
+-	copyAddress := a.iconButton("edit-copy-symbolic", i18n.L("Copy the Address"), func() {
+-		a.copyText(def.RdpAddress(), i18n.L("Address copied"))
++		passwordRow.SetText(password)
+ 	})
+-	addressRow.AddSuffix(&copyAddress.Widget)
+-	address.Add(&addressRow.Widget)
+ 
+-	content := a.formPage(remote, address, signIn)
++	addressRow := a.valueRow("Local to this host", def.RdpAddress())
++	a.copySuffix(addressRow, "Copy the Address", "Address copied")
++
++	address := formGroup(
++		"Address",
++		"The port is forwarded to the IPv6 loopback of this host. The link uses localhost, which resolves to ::1 first.",
++		&addressRow.Widget,
++	)
++
++	content := a.formPage(remote, signIn, address)
+ 	dialog := a.dialog(scope, "Remote Desktop", def.Name, "_Close", content, nil)
+ 
+ 	a.present(dialog, scope)
+@@ -309,6 +251,7 @@
+ 	command := a.entryRow("_Command")
+ 	command.SetUseUnderline(true)
+ 	command.SetShowApplyButton(false)
++	command.SetActivatesDefault(true)
+ 
+ 	commandGroup := formGroup("Custom Command", "Run a program by name when it does not appear in the list above.")
+ 	commandGroup.Add(&command.Widget)
+diff --git a/internal/ui/app.go b/internal/ui/app.go
+index 044447a90c612d02ba246a36d595f74d5231b0b4..4da6ff61919bc946eaf4867d9aa72fc1a7daa69b 100644
+--- a/internal/ui/app.go
++++ b/internal/ui/app.go
+@@ -370,6 +370,13 @@ 	}
+ 
+ 	simple("new-machine", func() { a.showNewMachineDialog() })
+ 	simple("update-host", func() { a.updateHostService() })
++
++	// The actions below exist for the screenshot run in tests/. They keep the
++	// run away from a real machine and from a real host.
++	stringParameter("screenshot-create-machine", func(string) { a.ensureScreenshotMachine() })
++	simple("screenshot-remove-machine", func() { a.removeScreenshotMachine() })
++	stringParameter("screenshot-dialog", func(name string) { a.showScreenshotDialog(name) })
++	simple("screenshot-connections", func() { a.screenshotConnections() })
+ 	simple("copy-update-command", func() {
+ 		set := paths.Current()
+ 		a.copyText(host.UpdateCommand(set.Config.HostPath(), set.Data.HostPath(), set.SSH.HostPath()), i18n.L("Command copied"))
+diff --git a/internal/ui/clipboard.go b/internal/ui/clipboard.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..f715ceb65ab2bd39e669c51013502f8d23dd9710
+--- /dev/null
++++ b/internal/ui/clipboard.go
+@@ -0,0 +1,66 @@
++package ui
++
++import (
++	"codeberg.org/puregotk/puregotk/v4/adw"
++	"codeberg.org/puregotk/puregotk/v4/gtk"
++	"github.com/pojntfx/go-gettext/pkg/i18n"
++)
++
++// Every control that copies a value works the same way: the button carries
++// the copy icon and a tooltip that names the value, the press copies the whole
++// value, and a toast states what was copied. A command is shown in a read-only
++// value row in the monospace font, so the dialog displays what the button
++// copies. The setup wizard keeps the full width row, because there the copy is
++// the step of the wizard rather than one value among many.
++
++// codeStyle marks the value of a row that reads as code: a command, a path, an
++// identifier, or a link. The class goes on the text widget alone, so the title
++// of the row keeps the normal font.
++func codeStyle(row *adw.EntryRow) {
++	var walk func(widget *gtk.Widget)
++	walk = func(widget *gtk.Widget) {
++		if widget == nil {
++			return
++		}
++
++		switch widget.GetCssName() {
++		case "text", "entry":
++			widget.AddCssClass("monospace")
++		}
++
++		for child := widget.GetFirstChild(); child != nil; child = child.GetNextSibling() {
++			walk(child)
++		}
++	}
++	walk(&row.Widget)
++}
++
++// valueRow states one value that the window offers to copy. The value row is
++// read-only and uses the monospace font, so it reads as something to copy
++// rather than as a setting.
++func (a *App) valueRow(title string, value string) *adw.EntryRow {
++	row := a.entryRow(title)
++	row.SetText(value)
++	row.SetEditable(false)
++	row.SetShowApplyButton(false)
++	codeStyle(row)
++
++	return row
++}
++
++// copySuffix adds the copy control that pairs with a value row.
++func (a *App) copySuffix(row *adw.EntryRow, tooltip string, copied string) {
++	copy := a.iconButton("edit-copy-symbolic", i18n.L(tooltip), func() {
++		a.copyText(row.GetText(), i18n.L(copied))
++	})
++	row.AddSuffix(&copy.Widget)
++}
++
++// commandGroup states one command with its copy control. The group title names
++// the command, and the description states what the command does.
++func (a *App) commandGroup(description string, command string, tooltip string) *adw.PreferencesGroup {
++	row := a.valueRow("Run this command", command)
++	a.copySuffix(row, tooltip, "Command copied")
++
++	return formGroup("Command", description, &row.Widget)
++}
+diff --git a/internal/ui/devices.go b/internal/ui/devices.go
+index 7081373558eeb847a76cc89b34b684f44c4dbdad..f120f957c5adc8bea9032f8b489ab125ccfdd05a 100644
+--- a/internal/ui/devices.go
++++ b/internal/ui/devices.go
+@@ -484,6 +484,8 @@ 	manualGroup := formGroup("Manual Entry", "Use the identifier when the device is not attached right now.")
+ 
+ 	entry := a.entryRow("vendorid:productid")
+ 	entry.SetShowApplyButton(false)
++	entry.SetActivatesDefault(true)
++	codeStyle(entry)
+ 	manualGroup.Add(&entry.Widget)
+ 
+ 	var add func(device string)
+diff --git a/internal/ui/grants.go b/internal/ui/grants.go
+index 0de83b59716cc502b7b6167b719e32dbba54780f..b671c7d1592dffed13d679ba2723727a0c12b1c4 100644
+--- a/internal/ui/grants.go
++++ b/internal/ui/grants.go
+@@ -282,7 +282,7 @@ 			}
+ 		}
+ 	}
+ 
+-	group := formGroup("Grant", description, &machineRow.row.Widget, &durationRow.row.Widget)
++	group := formGroup("", description, &machineRow.row.Widget, &durationRow.row.Widget)
+ 
+ 	content := a.formPage(group)
+ 
+diff --git a/internal/ui/keys.go b/internal/ui/keys.go
+index 1da0980fafda816e895ccdbc6e3b8ef37a0b495e..fc11997fe73708867c38f356860535247edbc400 100644
+--- a/internal/ui/keys.go
++++ b/internal/ui/keys.go
+@@ -137,6 +137,7 @@ 	if kind == "ssh" {
+ 		commentRow = a.entryRow("_Comment")
+ 		commentRow.SetUseUnderline(true)
+ 		commentRow.SetShowApplyButton(false)
++		commentRow.SetActivatesDefault(true)
+ 		commentRow.GrabFocus()
+ 
+ 		group.Add(&commentRow.Widget)
+@@ -144,6 +145,7 @@ 	} else {
+ 		nameRow = a.entryRow("_Name")
+ 		nameRow.SetUseUnderline(true)
+ 		nameRow.SetShowApplyButton(false)
++		nameRow.SetActivatesDefault(true)
+ 		nameRow.GrabFocus()
+ 
+ 		emailRow = a.entryRow("_Email")
+diff --git a/internal/ui/screenshot.go b/internal/ui/screenshot.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..36a6ce2b80929ebd806f3db1a45af51c6465f865
+--- /dev/null
++++ b/internal/ui/screenshot.go
+@@ -0,0 +1,146 @@
++package ui
++
++import (
++	"errors"
++	"io/fs"
++	"os"
++	"path/filepath"
++
++	"codeberg.org/puregotk/puregotk/v4/adw"
++	"codeberg.org/puregotk/puregotk/v4/gtk"
++
++	"codeberg.org/pojntfx/phial-neo/internal/machine"
++	"codeberg.org/pojntfx/phial-neo/internal/state"
++)
++
++// The screenshot run in tests/ui-states.sh cannot change a machine definition,
++// so it presents the dialogs of a machine that belongs only to the pictures.
++// The machine never runs. Its name starts with phial- so that the definition
++// passes Definition.Validate.
++const screenshotMachineName = "phial-screenshots"
++
++// screenshotMachinePath states where the definition of the screenshot machine
++// lives.
++func screenshotMachinePath() string {
++	return filepath.Join(machine.ConfigDir(), "vms", screenshotMachineName+".json")
++}
++
++// screenshotMachine states the definition that the screenshots show.
++func screenshotMachine() machine.Definition {
++	def := machine.Defaults(screenshotMachineName)
++	def.VCPUs = 4
++	def.Memory = "8G"
++	def.DiskSize = "64G"
++
++	return def
++}
++
++// ensureScreenshotMachine creates the screenshot machine once. A definition
++// that the run needs for the photos outlives the process, so the run removes it
++// at its end.
++func (a *App) ensureScreenshotMachine() machine.Definition {
++	def := screenshotMachine()
++
++	if _, err := os.Stat(screenshotMachinePath()); err == nil {
++		return def
++	}
++
++	if err := def.Save(); err != nil {
++		a.Log.Warn("could not write the screenshot machine", "err", err)
++	}
++
++	return def
++}
++
++// removeScreenshotMachine removes the screenshot machine again.
++func (a *App) removeScreenshotMachine() {
++	if err := os.Remove(screenshotMachinePath()); err != nil && !errors.Is(err, fs.ErrNotExist) {
++		a.Log.Warn("could not remove the screenshot machine", "err", err)
++	}
++
++	a.refreshSidebar()
++}
++
++// screenshotTargetMachine states the machine of the open machine page. Every
++// dialog of a machine shows the same screenshot machine, so a page that shows
++// a machine of the person who runs the screenshots stays out of the pictures.
++func (a *App) screenshotTargetMachine() machine.Definition {
++	return a.ensureScreenshotMachine()
++}
++
++// screenshotConnections lists the connection dialogs as a row each, so that the
++// run reaches every dialog of a machine from the Secrets page too. The people
++// who run the screenshots find the states of the dialogs in one place.
++func (a *App) screenshotConnections() {
++	group := formGroup("Connections", "Every connection of a machine starts in the same place.")
++
++	for _, entry := range []struct {
++		title    string
++		subtitle string
++		dialog   string
++	}{
++		{"SSH", "Open a shell over vsock", "ssh"},
++		{"Serial Console", "Attach to the guest console", "serial"},
++		{"Remote Desktop", "Show the desktop of the machine", "rdp"},
++	} {
++		entry := entry
++
++		row := a.actionRow(entry.title, entry.subtitle, func() {
++			a.showScreenshotDialog(entry.dialog)
++		})
++		next := gtk.NewImageFromIconName("go-next-symbolic")
++		next.SetValign(gtk.AlignCenterValue)
++		row.AddSuffix(&next.Widget)
++
++		group.Add(&row.Widget)
++	}
++
++	a.screenshotDialogGroup("Connections", group)
++}
++
++// screenshotDialogGroup presents one group of the screenshot run in a dialog
++// that closes without an action.
++func (a *App) screenshotDialogGroup(subtitle string, group *adw.PreferencesGroup) {
++	scope := a.newScope()
++
++	content := a.formPage(group)
++	dialog := a.dialog(scope, "Screenshots", subtitle, "_Close", content, nil)
++
++	a.present(dialog, scope)
++}
++
++// screenshotDialog presents one dialog of a machine for the screenshot run.
++// The run cannot open the dialog from a machine page, so every connection
++// dialog is reachable here.
++func (a *App) showScreenshotDialog(name string) {
++	def := a.screenshotTargetMachine()
++
++	switch name {
++	case "ssh":
++		a.showTerminalDialog(def)
++	case "serial":
++		a.showSerialDialog(def)
++	case "rdp":
++		a.showRdpDialog(def)
++	case "share":
++		a.showShareTargetDialog(def, "/home/phial/shots", "/home/phial/shots")
++	case "grant":
++		a.showGrantDialog(state.KindSecret, "github")
++	case "token":
++		a.showSecretDialog("")
++	case "generate-ssh-key":
++		a.showGenerateKeyDialog("ssh")
++	case "generate-gpg-key":
++		a.showGenerateKeyDialog("gpg")
++	case "machine-settings":
++		a.showMachineSettingsDialog(def)
++	case "new-machine":
++		a.showNewMachineDialog()
++	case "guests":
++		a.showGuestAppsDialog(def)
++	case "devices":
++		a.showAddDeviceDialog(def)
++	case "hubs":
++		a.showAddHubDialog(def)
++	}
++}
+diff --git a/internal/ui/secrets.go b/internal/ui/secrets.go
+index 9f8ffb4a3d74fbb6f3b4cf4e5bd491210e884291..4721810b8937d3d00926b9d78e0a5b465d7cf0ad 100644
+--- a/internal/ui/secrets.go
++++ b/internal/ui/secrets.go
+@@ -304,6 +304,7 @@ 	mode := "env"
+ 	upstreamRow := a.entryRow("_Upstream URL")
+ 	upstreamRow.SetUseUnderline(true)
+ 	upstreamRow.SetShowApplyButton(false)
++	codeStyle(upstreamRow)
+ 
+ 	modeRow := a.comboRow(
+ 		"Delivery",
+@@ -317,7 +318,9 @@ 		},
+ 	)
+ 	upstreamRow.SetVisible(false)
+ 
+-	group := formGroup("Token", "The value lives in the keyring of this host and never appears again.", &nameRow.Widget)
++	// The name comes first, then the value, then the delivery. The upstream URL
++	// belongs to the delivery, so it stays in the same group.
++	group := formGroup("", "The value lives in the keyring of this host and never appears again.", &nameRow.Widget)
+ 	group.Add(&valueRow.EntryRow.PreferencesRow.ListBoxRow.Widget)
+ 	group.Add(&modeRow.row.Widget)
+ 	group.Add(&upstreamRow.Widget)
+@@ -350,7 +353,7 @@ 	verb := "_Add"
+ 	if existing {
+ 		title = i18n.L("Edit Token")
+ 		verb = "_Save"
+-		valueRow.SetTitle(i18n.L("_New value, empty keeps the stored one"))
++		valueRow.SetTitle(i18n.L("_Value, empty keeps the stored one"))
+ 	}
+ 
+ 	dialog := a.dialog(scope, title, "", verb, content, func() bool {
+diff --git a/internal/ui/setup.go b/internal/ui/setup.go
+index 48b3c73d367b0bd4c82fed82a96084866981330d..558338bcb7a7e3ea4493f84f34fb028d9ff6c3e0 100644
+--- a/internal/ui/setup.go
++++ b/internal/ui/setup.go
+@@ -194,13 +194,12 @@ 	step.banner.SetRevealed(false)
+ 
+ 	content := append([]*adw.PreferencesGroup{}, groups...)
+ 
+-	// A step that shows a command offers the copy control. The host service
+-	// step also offers the check, because the window cannot read the host
+-	// state from the sandbox.
++	// A step that shows a command offers the copy control as a full width row,
++	// because the copy is the step of the wizard. The host service step also
++	// offers the check, because the window cannot read the host state from the
++	// sandbox.
+ 	if step.commandFunc != nil {
+-		step.copyRow = a.buttonRow("_Copy Command", "edit-copy-symbolic", func() {
+-			step.copyCommand()
+-		})
++		step.copyRow = a.buttonRow("_Copy Command", "edit-copy-symbolic", step.copyCommand)
+ 	}
+ 
+ 	if step.validate != nil {
+diff --git a/internal/ui/shares.go b/internal/ui/shares.go
+index 1511b126dffc1dc495f30e06a8d6a4d2aeee46ba..acb855778feec7be43d16f8e981730edcc1ebae1 100644
+--- a/internal/ui/shares.go
++++ b/internal/ui/shares.go
+@@ -111,8 +111,9 @@
+ 	target := a.entryRow("_Mount Point in the Machine")
+ 	target.SetUseUnderline(true)
+ 	target.SetShowApplyButton(false)
++	target.SetActivatesDefault(true)
+ 	target.SetText("/mnt/" + machine.ShareTag(hostPath))
+-	target.AddCssClass("monospace")
++	codeStyle(target)
+ 
+ 	readOnly := false
+ 
+@@ -123,15 +124,24 @@ 		readOnly = value
+ 	})
+ 	group.Add(&readOnlyRow.Widget)
+ 
++	// A host folder belongs to the host, so the row offers the folder of the
++	// host rather than a value to copy, the same way that the disk image row of
++	// the machine page does.
+ 	detail := adw.NewActionRow()
+ 	detail.SetTitle(i18n.L("Host Folder"))
+ 	detail.SetSubtitle(hostPath)
+ 	detail.SetSubtitleSelectable(true)
+ 	detail.AddCssClass("property")
++	detail.SetActivatable(false)
+ 
+-	detailGroup := formGroup("Host Folder", "", &detail.Widget)
++	openFolder := a.iconButton("folder-open-symbolic", i18n.L("Open Containing Folder"), func() {
++		a.openContainingFolder(hostPath)
++	})
++	detail.AddSuffix(&openFolder.Widget)
+ 
+-	content := a.formPage(detailGroup, group)
++	detailGroup := formGroup("Source", "The folder on this host that the machine mounts.", &detail.Widget)
++
++	content := a.formPage(group, detailGroup)
+ 
+ 	dialog := a.dialog(scope, "Share a Folder", def.Name, "_Share", content, func() bool {
+ 		mount := strings.TrimSpace(target.GetText())
+diff --git a/tests/ui-states.sh b/tests/ui-states.sh
+index 108104f68d22080d43e655f188b8a2d471ef27ab..a6eae02b2e459ce77cae2566d5f9ca2c70ec04b2 100755
+--- a/tests/ui-states.sh
++++ b/tests/ui-states.sh
+@@ -383,6 +383,19 @@   sleep 3
+   capture 40-serial-console
+   close_dialog
+ 
++  # The connection dialogs of a machine belong to the screenshot machine, so
++  # the run reaches every one of them without a machine of this host.
++  act_string screenshot-create-machine
++  sleep 2
++  for dialog in ssh serial rdp; do
++    act_string screenshot-dialog "$dialog"
++    sleep 3
++    capture "44-$dialog"
++    close_dialog
++  done
++  act screenshot-remove-machine
++  sleep 2
++
+   stop
+ 
+   # The install question and the delete question need their own run.
+
