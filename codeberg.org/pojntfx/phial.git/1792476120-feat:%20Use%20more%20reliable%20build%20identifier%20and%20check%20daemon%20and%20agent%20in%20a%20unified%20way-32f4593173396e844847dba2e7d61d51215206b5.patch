@@ -1,0 +1,446 @@
+From 32f4593173396e844847dba2e7d61d51215206b5 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Mon, 19 Oct 2026 23:02:00 -0700
+Subject: [PATCH] feat: Use more reliable build identifier and check daemon and agent in a unified way
+---
+diff --git a/Makefile b/Makefile
+index 14e6243ccc5441b566aae4a7c5025096bdcbd25c..68112f6f58ae6f2c69cc6a0ee0051c6ee27a6130 100644
+--- a/Makefile
++++ b/Makefile
+@@ -6,15 +6,18 @@ GUEST_AGENT := cmd/phiald/guest/agent/phial
+ PHIALD := internal/hostsvc/phiald
+ PHIALD_BINARY := bin/phiald
+ 
++BUILD_ID := $(shell { git rev-parse HEAD 2>/dev/null || echo dev; git diff --binary HEAD 2>/dev/null || true; git ls-files --others --exclude-standard -z 2>/dev/null | xargs -0 -r sha256sum; } | sha256sum | cut -c1-16)
++GO_LDFLAGS := -s -w -X codeberg.org/pojntfx/phial-neo/internal/version.BuildID=$(BUILD_ID)
++
+ build:
+ 	: > $(GUEST_AGENT)
+-	CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o $(GUEST_AGENT) .
+-	CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o $(PHIALD) ./cmd/phiald
+-	CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o bin/phial .
+-	CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o $(PHIALD_BINARY) ./cmd/phiald
++	CGO_ENABLED=0 go build -trimpath -ldflags="$(GO_LDFLAGS)" -o $(GUEST_AGENT) .
++	CGO_ENABLED=0 go build -trimpath -ldflags="$(GO_LDFLAGS)" -o $(PHIALD) ./cmd/phiald
++	CGO_ENABLED=0 go build -trimpath -ldflags="$(GO_LDFLAGS)" -o bin/phial .
++	CGO_ENABLED=0 go build -trimpath -ldflags="$(GO_LDFLAGS)" -o $(PHIALD_BINARY) ./cmd/phiald
+ 
+ guest-agent:
+-	CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o $(GUEST_AGENT) .
++	CGO_ENABLED=0 go build -trimpath -ldflags="$(GO_LDFLAGS)" -o $(GUEST_AGENT) .
+ 
+ generate:
+ 	cd assets/resources && blueprint-compiler batch-compile . . *.blp
+diff --git a/cmd/phiald/guest/fingerprint.go b/cmd/phiald/guest/fingerprint.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..c0d7f2f34976809288b21a56a86652d0a04084cb
+--- /dev/null
++++ b/cmd/phiald/guest/fingerprint.go
+@@ -0,0 +1,7 @@
++package guest
++
++import "codeberg.org/pojntfx/phial-neo/internal/version"
++
++func AgentFingerprint() string {
++	return version.Build()
++}
+diff --git a/cmd/phiald/guest/provision.go b/cmd/phiald/guest/provision.go
+index 11aea5b966a9f20ef68a10b3a3be064ff716c076..718743818185012214654f3fb9e8229b87187713 100644
+--- a/cmd/phiald/guest/provision.go
++++ b/cmd/phiald/guest/provision.go
+@@ -8,7 +8,6 @@ 	"errors"
+ 	"fmt"
+ 	"os"
+ 	"path"
+-	"strconv"
+ 	"strings"
+ 	"time"
+ 
+@@ -152,11 +151,10 @@ 	payload.WriteString("\nif [ -f /run/phial/phial ]; then\n")
+ 	payload.WriteString("\tinstall -m 0755 -o " + guestUser + " -g " + guestUser + " /run/phial/phial " + guestHome + "/.local/bin/phial\n")
+ 	payload.WriteString("\trestorecon " + guestHome + "/.local/bin/phial > /dev/null 2>&1 || true\n")
+ 
+-	// The version check of the agent reads the build time of the host from
+-	// /etc, because the confined domain of the agent reads nothing of the home
+-	// of the user.
+-	if hostTime, err := virt.HostBuildTime(); err == nil {
+-		payload.WriteString("\tprintf '%s\\n' '" + strconv.FormatInt(hostTime, 10) + "' > " + virt.GuestAgentBuildTimePath + "\n")
++	payload.WriteString("\trm -f /etc/phial-agent-build-time\n")
++
++	if fingerprint := AgentFingerprint(); fingerprint != "" {
++		payload.WriteString("\tprintf '%s\\n' '" + fingerprint + "' > " + virt.GuestAgentFingerprintPath + "\n")
+ 	}
+ 
+ 	payload.WriteString("fi\n")
+diff --git a/cmd/phiald/main.go b/cmd/phiald/main.go
+index d278b4f4390894891de0da6dd8323ba56bb9a052..16a1281c007048e0cff79548482ee6ed7ea6501f 100644
+--- a/cmd/phiald/main.go
++++ b/cmd/phiald/main.go
+@@ -43,7 +43,7 @@ 	switch args[0] {
+ 	case "--help", "-help", "-h", "help":
+ 		fmt.Print(usage)
+ 	case "--version", "-version", "version":
+-		fmt.Println(version.App)
++		fmt.Println(version.App + " (" + version.Build() + ")")
+ 	case "root-setup":
+ 		fail(rootSetup(args[1:]))
+ 	case "vfio-bind":
+diff --git a/cmd/phiald/service.go b/cmd/phiald/service.go
+index c306ae0b36102d7bc564df771f62a94b2d9d2111..a5f2ee471d9dbb163250a821ccc5e8fff8ba4eba 100644
+--- a/cmd/phiald/service.go
++++ b/cmd/phiald/service.go
+@@ -125,6 +125,7 @@ 	switch method {
+ 	case "Info":
+ 		return &host.InfoResponse{
+ 			Version:  version.App,
++			Build:    version.Build(),
+ 			Protocol: varlink.ProtocolVersion,
+ 			Features: []string{"machines", "secrets", "keys", "usb", "shares", "display", "root-setup"},
+ 		}, nil
+@@ -417,7 +418,6 @@ 		}
+ 
+ 		return &host.StateResponse{State: "restored"}, nil
+ 
+-	case "RootSetup":
+ 	case "VMShareAdd":
+ 		var in host.ShareRequest
+ 		if err := decode(&in); err != nil {
+@@ -444,6 +444,7 @@ 		}
+ 
+ 		return response, nil
+ 
++	case "RootSetup":
+ 		output, err := run0("root-setup")
+ 		if err != nil {
+ 			return nil, failure(fmt.Errorf("root setup: %s: %w", output, err))
+diff --git a/cmd/phiald/status.go b/cmd/phiald/status.go
+index ef2251e928ca2b97209afbbc317767d75c46f0b6..cc7a227a836d2df36d7834fbca5fc9398eb6158e 100644
+--- a/cmd/phiald/status.go
++++ b/cmd/phiald/status.go
+@@ -93,7 +93,7 @@ 		}
+ 	}
+ 
+ 	if machineState.Ready {
+-		if outdated, err := virt.GuestOutdated(def); err == nil {
++		if outdated, err := virt.GuestOutdated(def, guest.AgentFingerprint()); err == nil {
+ 			machineState.AgentOutdated = outdated
+ 		}
+ 	}
+@@ -193,7 +193,7 @@ 		GPUBusyPercent: collected.GPUBusyPercent,
+ 	}
+ 
+ 	if s.sup.stateOf(name) == stateActive && virt.Ready(def) {
+-		if outdated, err := virt.GuestOutdated(def); err == nil {
++		if outdated, err := virt.GuestOutdated(def, guest.AgentFingerprint()); err == nil {
+ 			response.AgentOutdated = outdated
+ 		}
+ 	}
+diff --git a/cmd/phiald/virt/agent_version.go b/cmd/phiald/virt/agent_version.go
+index 50d2fb78cb7bc14943a0d764ba3a1927ec1cfb2a..b0e490b3a8568fb553e4e3ba0f38efa4cb3c9de1 100644
+--- a/cmd/phiald/virt/agent_version.go
++++ b/cmd/phiald/virt/agent_version.go
+@@ -1,59 +1,29 @@
+ package virt
+ 
+-import (
+-	"os"
+-	"strconv"
+-	"strings"
+-)
++import "strings"
+ 
+-// GuestAgentPath states where the provisioning copies the agent into a guest.
+ const GuestAgentPath = "/home/phial/.local/bin/phial"
+ 
+-// HostBuildTime states the build time of the binary of the host, which is the
+-// time that the file of that binary changed.
+-func HostBuildTime() (int64, error) {
+-	executable, err := os.Executable()
+-	if err != nil {
+-		return 0, err
+-	}
+-
+-	info, err := os.Stat(executable)
+-	if err != nil {
+-		return 0, err
+-	}
+-
+-	return info.ModTime().Unix(), nil
+-}
+-
+-// GuestAgentBuildTimePath states where the provisioning writes the build time
+-// of the host. It lives in /etc, because the confined domain of the agent
+-// reads nothing of the home of the user.
+-const GuestAgentBuildTimePath = "/etc/phial-agent-build-time"
++const GuestAgentFingerprintPath = "/etc/phial-agent-fingerprint"
+ 
+-// GuestBuildTime states the build time of the agent inside one guest, or zero
+-// when the guest carries no agent yet. It reads over the guest agent protocol,
+-// so the check works without SSH and without a login.
+-func GuestBuildTime(def Definition) (int64, error) {
+-	output, err := QgaExec(def, "cat "+GuestAgentBuildTimePath+" 2>/dev/null || echo 0")
++func GuestFingerprint(def Definition) (string, error) {
++	output, err := QgaExec(def, "cat "+GuestAgentFingerprintPath+" 2>/dev/null || true")
+ 	if err != nil {
+-		return 0, err
++		return "", err
+ 	}
+ 
+-	return strconv.ParseInt(strings.TrimSpace(output), 10, 64)
++	return strings.TrimSpace(output), nil
+ }
+ 
+-// GuestOutdated states whether the agent of a guest is older than the binary of
+-// the host, so that the guest needs the update step.
+-func GuestOutdated(def Definition) (bool, error) {
+-	host, err := HostBuildTime()
+-	if err != nil {
+-		return false, err
++func GuestOutdated(def Definition, expected string) (bool, error) {
++	if expected == "" {
++		return false, nil
+ 	}
+ 
+-	guest, err := GuestBuildTime(def)
++	guest, err := GuestFingerprint(def)
+ 	if err != nil {
+ 		return false, err
+ 	}
+ 
+-	return guest < host, nil
++	return guest != expected, nil
+ }
+diff --git a/flatpak/com.pojtinger.felicitas.Phial.json b/flatpak/com.pojtinger.felicitas.Phial.json
+index 4369cb48d94c4897ccf33a527b25fe26db5d4f5d..0e9cb62f1acedc8933a1b1b443cc19b4d7e2ba67 100644
+--- a/flatpak/com.pojtinger.felicitas.Phial.json
++++ b/flatpak/com.pojtinger.felicitas.Phial.json
+@@ -71,11 +71,12 @@       "build-commands": [
+         "bash -c 'cd assets/resources && blueprint-compiler batch-compile . . *.blp'",
+         "bash -c 'cd assets/resources && glib-compile-schemas . && glib-compile-resources index.gresource.xml'",
+         "bash -c '. /usr/lib/sdk/golang/enable.sh && ([ -f vendor/modules.txt ] || go mod vendor)'",
++        "bash -c 'id=$( { git rev-parse HEAD 2>/dev/null || echo dev; git diff --binary HEAD 2>/dev/null || true; git ls-files --others --exclude-standard -z 2>/dev/null | xargs -0 -r sha256sum 2>/dev/null; } | sha256sum | cut -c1-16 ); printf %s \"$id\" > .phial-build-id'",
+         "bash -c '. /usr/lib/sdk/golang/enable.sh && mkdir -p cmd/phiald/guest/agent internal/hostsvc && : > cmd/phiald/guest/agent/phial && : > internal/hostsvc/phiald'",
+-        "bash -c '. /usr/lib/sdk/golang/enable.sh && CGO_ENABLED=0 go build -trimpath -mod=vendor -o cmd/phiald/guest/agent/phial .'",
+-        "bash -c '. /usr/lib/sdk/golang/enable.sh && CGO_ENABLED=0 go build -trimpath -mod=vendor -o internal/hostsvc/phiald ./cmd/phiald'",
+-        "bash -c '. /usr/lib/sdk/golang/enable.sh && go build -trimpath -mod=vendor -ldflags=\"-X main.LocaleDir=/app/share/locale\" -o /app/bin/phial .'",
+-        "bash -c '. /usr/lib/sdk/golang/enable.sh && CGO_ENABLED=0 go build -trimpath -mod=vendor -o /app/bin/phiald ./cmd/phiald'",
++        "bash -c '. /usr/lib/sdk/golang/enable.sh && CGO_ENABLED=0 go build -trimpath -mod=vendor -ldflags=\"-X codeberg.org/pojntfx/phial-neo/internal/version.BuildID=$(cat .phial-build-id)\" -o cmd/phiald/guest/agent/phial .'",
++        "bash -c '. /usr/lib/sdk/golang/enable.sh && CGO_ENABLED=0 go build -trimpath -mod=vendor -ldflags=\"-X codeberg.org/pojntfx/phial-neo/internal/version.BuildID=$(cat .phial-build-id)\" -o internal/hostsvc/phiald ./cmd/phiald'",
++        "bash -c '. /usr/lib/sdk/golang/enable.sh && go build -trimpath -mod=vendor -ldflags=\"-X main.LocaleDir=/app/share/locale -X codeberg.org/pojntfx/phial-neo/internal/version.BuildID=$(cat .phial-build-id)\" -o /app/bin/phial .'",
++        "bash -c '. /usr/lib/sdk/golang/enable.sh && CGO_ENABLED=0 go build -trimpath -mod=vendor -ldflags=\"-X codeberg.org/pojntfx/phial-neo/internal/version.BuildID=$(cat .phial-build-id)\" -o /app/bin/phiald ./cmd/phiald'",
+         "bash -c 'desktop-file-install --dir=/app/share/applications assets/meta/$FLATPAK_ID.desktop'",
+         "bash -c 'install -D -m 0644 assets/resources/metainfo.xml /app/share/metainfo/$FLATPAK_ID.metainfo.xml'",
+         "bash -c 'install -D -m 0644 assets/meta/icon.svg /app/share/icons/hicolor/scalable/apps/$FLATPAK_ID.svg'",
+diff --git a/internal/host/types.go b/internal/host/types.go
+index 95fbf01e3440cca3cbedb3e2d8c1a24861a4759b..403c34c82240579105b53577bfea0a7a1197e031 100644
+--- a/internal/host/types.go
++++ b/internal/host/types.go
+@@ -6,6 +6,7 @@
+ // InfoResponse answers the Info call.
+ type InfoResponse struct {
+ 	Version  string   `json:"version"`
++	Build    string   `json:"build"`
+ 	Protocol int      `json:"protocol"`
+ 	Features []string `json:"features"`
+ }
+diff --git a/internal/host/update.go b/internal/host/update.go
+index 382d2ebd434fc4dc0799b6237e7aae5c5b28f38e..35a17d44af121686563f4fadf7d1ad439e74f25d 100644
+--- a/internal/host/update.go
++++ b/internal/host/update.go
+@@ -21,14 +21,36 @@ func Embedded() bool {
+ 	return len(hostsvc.Binary) > 0
+ }
+ 
+-// NeedsUpdate reports whether the running service is older than the embedded
+-// one, so that the application shows the update toast.
++// EmbeddedFingerprint states the content identity of the embedded service.
++func EmbeddedFingerprint() string {
++	return version.Build()
++}
++
++// NeedsUpdate reports whether the running service differs from the embedded
++// one, so that the application shows the update banner.
+ func NeedsUpdate(info *InfoResponse) bool {
+ 	if info == nil || info.Version == "" {
+ 		return false
+ 	}
+ 
+-	return info.Version != EmbeddedVersion() || info.Protocol != varlink.ProtocolVersion
++	if info.Protocol != varlink.ProtocolVersion {
++		return true
++	}
++
++	if info.Version != EmbeddedVersion() {
++		return true
++	}
++
++	if !Embedded() {
++		return false
++	}
++
++	embedded := EmbeddedFingerprint()
++	if embedded == "" {
++		return false
++	}
++
++	return info.Build != embedded
+ }
+ 
+ // UpdateCommand states the host command that re-installs the embedded service
+diff --git a/internal/host/update_test.go b/internal/host/update_test.go
+index ab4062c2981bfde2d72b213b7a31dddb74a04192..511fca887042edb0c3386602a4f1ae4cdce22498 100644
+--- a/internal/host/update_test.go
++++ b/internal/host/update_test.go
+@@ -4,31 +4,66 @@ import (
+ 	"strings"
+ 	"testing"
+ 
++	"codeberg.org/pojntfx/phial-neo/internal/hostsvc"
+ 	"codeberg.org/pojntfx/phial-neo/internal/varlink"
++	"codeberg.org/pojntfx/phial-neo/internal/version"
+ )
+ 
+ func TestNeedsUpdateComparesVersions(t *testing.T) {
+-	// A matching version and protocol needs no update.
+-	info := &InfoResponse{Version: EmbeddedVersion(), Protocol: varlink.ProtocolVersion}
++	build := EmbeddedFingerprint()
++
++	info := &InfoResponse{Version: EmbeddedVersion(), Build: build, Protocol: varlink.ProtocolVersion}
+ 	if NeedsUpdate(info) {
+ 		t.Fatal("a matching version asked for an update")
+ 	}
+ 
+-	// A different version needs an update.
+-	info = &InfoResponse{Version: "0.0.1", Protocol: varlink.ProtocolVersion}
++	info = &InfoResponse{Version: "0.0.1", Build: build, Protocol: varlink.ProtocolVersion}
+ 	if !NeedsUpdate(info) {
+ 		t.Fatal("an old version did not ask for an update")
+ 	}
+ 
+-	// A different protocol needs an update.
+-	info = &InfoResponse{Version: EmbeddedVersion(), Protocol: varlink.ProtocolVersion + 1}
++	info = &InfoResponse{Version: EmbeddedVersion(), Build: build, Protocol: varlink.ProtocolVersion + 1}
+ 	if !NeedsUpdate(info) {
+ 		t.Fatal("an old protocol did not ask for an update")
+ 	}
+ 
+-	// No service means no update.
++	if Embedded() {
++		info = &InfoResponse{Version: EmbeddedVersion(), Build: "other", Protocol: varlink.ProtocolVersion}
++		if !NeedsUpdate(info) {
++			t.Fatal("another build did not ask for an update")
++		}
++	}
++
+ 	if NeedsUpdate(nil) {
+ 		t.Fatal("no service asked for an update")
++	}
++}
++
++func TestNeedsUpdateComparesTheBuildIdentity(t *testing.T) {
++	previousBinary := hostsvc.Binary
++	previousBuild := version.BuildID
++
++	hostsvc.Binary = []byte("service")
++	version.BuildID = "new-build"
++
++	defer func() {
++		hostsvc.Binary = previousBinary
++		version.BuildID = previousBuild
++	}()
++
++	info := &InfoResponse{Version: EmbeddedVersion(), Build: "new-build", Protocol: varlink.ProtocolVersion}
++	if NeedsUpdate(info) {
++		t.Fatal("the same build asked for an update")
++	}
++
++	info = &InfoResponse{Version: EmbeddedVersion(), Build: "old-build", Protocol: varlink.ProtocolVersion}
++	if !NeedsUpdate(info) {
++		t.Fatal("another build did not ask for an update")
++	}
++
++	info = &InfoResponse{Version: EmbeddedVersion(), Protocol: varlink.ProtocolVersion}
++	if !NeedsUpdate(info) {
++		t.Fatal("a service without a build identity did not ask for an update")
+ 	}
+ }
+ 
+diff --git a/internal/ui/app.go b/internal/ui/app.go
+index 08c80b0cfff03877a79df617acfe74783a76bb0a..cf9f36c81f86d7cb5a2e02bbd5ba8cebf3dba7c6 100644
+--- a/internal/ui/app.go
++++ b/internal/ui/app.go
+@@ -24,6 +24,7 @@ 	"codeberg.org/pojntfx/phial-neo/internal/mcp"
+ 	"codeberg.org/pojntfx/phial-neo/internal/portals"
+ 	"codeberg.org/pojntfx/phial-neo/internal/setup"
+ 	"codeberg.org/pojntfx/phial-neo/internal/state"
++	"codeberg.org/pojntfx/phial-neo/internal/version"
+ )
+ 
+ // App holds the window, the state, and the agent channel.
+@@ -681,7 +682,13 @@ 	a.Settings.SetString(resources.SettingActivePageKey, a.selected)
+ }
+ 
+ func (a *App) showAbout() {
++	versionLabel := resources.AppVersion
++	if build := version.Build(); build != resources.AppVersion {
++		versionLabel += " (" + build + ")"
++	}
++
+ 	about := adw.NewAboutDialogFromAppdata(resources.ResourceMetainfoPath, resources.AppVersion)
++	about.SetVersion(versionLabel)
+ 	about.SetDevelopers(resources.AppDevelopers)
+ 	about.SetArtists(resources.AppArtists)
+ 	about.SetCopyright(resources.AppCopyright)
+diff --git a/internal/version/version.go b/internal/version/version.go
+index 35f162dc6399b7950f9fe0590f1d56d58ddb6608..c794ae47fac7e66ee9824e0ab8022ced05a71566 100644
+--- a/internal/version/version.go
++++ b/internal/version/version.go
+@@ -8,3 +8,18 @@ const App = "2.0.0"
+ 
+ // AppID is the Flatpak application identifier of Phial.
+ const AppID = "com.pojtinger.felicitas.Phial"
++
++// BuildID states the content identity of this build. The build scripts set it
++// from the commit and the working tree, so two builds of one tree agree even
++// when the version stays the same.
++var BuildID = ""
++
++// Build states the content identity, or the version when the build scripts
++// carry none.
++func Build() string {
++	if BuildID != "" {
++		return BuildID
++	}
++
++	return App
++}
+diff --git a/main.go b/main.go
+index 252130fc968f6344ab629fff0bd00f9c4dc3a839..edc34edc842979cef24e29d42d362ef055b2c6a1 100644
+--- a/main.go
++++ b/main.go
+@@ -19,6 +19,7 @@ 	"codeberg.org/pojntfx/phial-neo/internal/paths"
+ 	"codeberg.org/pojntfx/phial-neo/internal/setup"
+ 	"codeberg.org/pojntfx/phial-neo/internal/state"
+ 	"codeberg.org/pojntfx/phial-neo/internal/ui"
++	"codeberg.org/pojntfx/phial-neo/internal/version"
+ )
+ 
+ const usage = `phial: virtual machines, secrets, and agents under host control
+@@ -26,6 +27,7 @@
+ Usage:
+   phial                       open the window (also serves the agent channel)
+   phial --background          start in the background, for autostart
++  phial --version             print the version and the build identity
+   phial host-install [--config <path>] [--data <path>] [--ssh <path>]
+                               install the embedded host service, the install
+                               command that the wizard shows
+@@ -127,6 +129,8 @@ 	case "--background", "-background":
+ 		os.Exit(runApp(log, false))
+ 	case "--help", "-help", "-h", "help":
+ 		fmt.Print(usage)
++	case "--version", "-version", "version":
++		fmt.Println(version.App + " (" + version.Build() + ")")
+ 	case "host-install":
+ 		fail(runHostInstall(args[1:]))
+ 	case "acceptance":
+
