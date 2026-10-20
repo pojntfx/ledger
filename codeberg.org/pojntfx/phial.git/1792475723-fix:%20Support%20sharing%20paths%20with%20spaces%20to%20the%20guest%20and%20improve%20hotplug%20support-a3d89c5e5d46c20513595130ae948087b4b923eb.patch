@@ -1,0 +1,1403 @@
+From a3d89c5e5d46c20513595130ae948087b4b923eb Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Mon, 19 Oct 2026 22:55:23 -0700
+Subject: [PATCH] fix: Support sharing paths with spaces to the guest and improve hotplug support
+---
+diff --git a/cmd/phiald/guest/provision.go b/cmd/phiald/guest/provision.go
+index 9c26d256d270e27ff424f0c5b72d822f0e1700ab..11aea5b966a9f20ef68a10b3a3be064ff716c076 100644
+--- a/cmd/phiald/guest/provision.go
++++ b/cmd/phiald/guest/provision.go
+@@ -91,12 +91,12 @@ 		// The installer creates parts of the home directory as root, so the
+ 		// labels are repaired before the session of the user writes units.
+ 		"sudo restorecon -R $HOME > /dev/null 2>&1 || true",
+ 		// The secrets mount is read-only, so an existing directory stays as it is.
+-		"[ -d "+hostshareMount+" ] || sudo install -d -m 0755 "+hostshareMount,
+-		"[ -d "+secretsMount+" ] || sudo install -d -m 0755 "+secretsMount,
+-		"grep -q ' "+hostshareMount+" ' /etc/fstab || echo 'hostshare "+hostshareMount+" virtiofs defaults,nofail 0 0' | sudo tee -a /etc/fstab > /dev/null",
+-		"grep -q ' "+secretsMount+" ' /etc/fstab || echo 'phial-secrets "+secretsMount+" virtiofs ro,nosuid,nodev,noexec,nofail 0 0' | sudo tee -a /etc/fstab > /dev/null",
+-		"sudo mountpoint -q "+hostshareMount+" || sudo mount "+hostshareMount+" || true",
+-		"sudo mountpoint -q "+secretsMount+" || sudo mount "+secretsMount+" || true",
++		"[ -d "+shellQuote(hostshareMount)+" ] || sudo install -d -m 0755 "+shellQuote(hostshareMount),
++		"[ -d "+shellQuote(secretsMount)+" ] || sudo install -d -m 0755 "+shellQuote(secretsMount),
++		"grep -q "+shellQuote(" "+fstabField(hostshareMount)+" ")+" /etc/fstab || printf '%s\n' "+shellQuote("hostshare "+fstabField(hostshareMount)+" virtiofs defaults,nofail 0 0")+" | sudo tee -a /etc/fstab > /dev/null",
++		"grep -q "+shellQuote(" "+fstabField(secretsMount)+" ")+" /etc/fstab || printf '%s\n' "+shellQuote("phial-secrets "+fstabField(secretsMount)+" virtiofs ro,nosuid,nodev,noexec,nofail 0 0")+" | sudo tee -a /etc/fstab > /dev/null",
++		"sudo mountpoint -q "+shellQuote(hostshareMount)+" || sudo mount "+shellQuote(hostshareMount)+" || true",
++		"sudo mountpoint -q "+shellQuote(secretsMount)+" || sudo mount "+shellQuote(secretsMount)+" || true",
+ 		shareMountScript(def),
+ 		"printf 'export SSH_AUTH_SOCK=$XDG_RUNTIME_DIR/phial/ssh-agent.sock\n' | sudo tee /etc/profile.d/phial-agent.sh > /dev/null",
+ 		"sudo sed -i '/# BEGIN phial/,/# END phial/d' /etc/hosts",
+@@ -223,13 +223,53 @@ 		if def.ShareReadOnly(share) {
+ 			options = "ro,nosuid,nodev,nofail"
+ 		}
+ 
+-		fmt.Fprintf(&builder, "sudo install -d -m 0755 %s\n", target)
+-		fmt.Fprintf(&builder, "sudo sed -i '\\| %s |d' /etc/fstab\n", target)
+-		fmt.Fprintf(&builder, "echo '%s %s virtiofs %s 0 0' | sudo tee -a /etc/fstab > /dev/null\n", tag, target, options)
+-		fmt.Fprintf(&builder, "sudo mountpoint -q %s || sudo mount %s || true\n", target, target)
++		quoted := shellQuote(target)
++
++		fmt.Fprintf(&builder, "sudo install -d -m 0755 %s\n", quoted)
++		fmt.Fprintf(&builder, "sudo sed -i %s /etc/fstab\n", shellQuote("\\| "+fstabField(target)+" |d"))
++		fmt.Fprintf(&builder, "printf '%%s\\n' %s | sudo tee -a /etc/fstab > /dev/null\n", shellQuote(tag+" "+fstabField(target)+" virtiofs "+options+" 0 0"))
++		fmt.Fprintf(&builder, "sudo mountpoint -q %s || sudo mount %s || true\n", quoted, quoted)
+ 	}
+ 
+ 	return builder.String()
++}
++
++func MountShare(def virt.Definition, share string) error {
++	single := def
++	single.Shares = []string{share}
++
++	_, err := virt.QgaExec(def, shareMountScript(single))
++
++	return err
++}
++
++func RemoveShare(def virt.Definition, share, target string) error {
++	quoted := shellQuote(target)
++
++	script := fmt.Sprintf(
++		"sudo umount %s 2>/dev/null || true\nsudo sed -i %s /etc/fstab\nsudo rmdir %s 2>/dev/null || true\n",
++		quoted,
++		shellQuote("\\| "+fstabField(target)+" |d"),
++		quoted,
++	)
++
++	_, err := virt.QgaExec(def, script)
++
++	return err
++}
++
++func shellQuote(value string) string {
++	return "'" + strings.ReplaceAll(value, "'", "'\\''") + "'"
++}
++
++func fstabField(value string) string {
++	replacer := strings.NewReplacer(
++		"\\", "\\\\",
++		" ", "\\040",
++		"\t", "\\011",
++	)
++
++	return replacer.Replace(value)
+ }
+ 
+ func installNetworkScript(mac string) string {
+diff --git a/cmd/phiald/guest/provision_test.go b/cmd/phiald/guest/provision_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..09d01d9a37aa15bd249aac0aee368604340d5449
+--- /dev/null
++++ b/cmd/phiald/guest/provision_test.go
+@@ -0,0 +1,46 @@
++package guest
++
++import (
++	"strings"
++	"testing"
++
++	"codeberg.org/pojntfx/phial-neo/cmd/phiald/virt"
++)
++
++func TestShareMountScriptQuotesPaths(t *testing.T) {
++	def := virt.Definition{
++		Name: "test",
++		Shares: []string{
++			"/home/phial/My Documents",
++		},
++		ShareTargets: map[string]string{
++			"/home/phial/My Documents": "/mnt/My Documents",
++		},
++	}
++
++	script := shareMountScript(def)
++
++	for _, want := range []string{
++		"sudo install -d -m 0755 '/mnt/My Documents'",
++		"sudo mount '/mnt/My Documents'",
++		"my-documents /mnt/My\\040Documents virtiofs",
++	} {
++		if !strings.Contains(script, want) {
++			t.Fatalf("shareMountScript() = %q, want it to contain %q", script, want)
++		}
++	}
++}
++
++func TestShellQuoteHandlesQuotes(t *testing.T) {
++	got := shellQuote("/mnt/it's here")
++
++	if got != `'/mnt/it'\''s here'` {
++		t.Fatalf("shellQuote() = %q", got)
++	}
++}
++
++func TestFstabFieldEscapesSpaces(t *testing.T) {
++	if got := fstabField("/mnt/My Documents"); got != `/mnt/My\040Documents` {
++		t.Fatalf("fstabField() = %q", got)
++	}
++}
+diff --git a/cmd/phiald/main.go b/cmd/phiald/main.go
+index f84f612723738ccc8912bd04c1fe83ca4a6f3b38..d278b4f4390894891de0da6dd8323ba56bb9a052 100644
+--- a/cmd/phiald/main.go
++++ b/cmd/phiald/main.go
+@@ -13,6 +13,11 @@ 	"codeberg.org/pojntfx/phial-neo/internal/paths"
+ 	"codeberg.org/pojntfx/phial-neo/internal/version"
+ )
+ 
++func init() {
++	virt.StartShareTool = startShareTool
++	virt.StopShareTool = stopShareTool
++}
++
+ const usage = `phiald: the host service of Phial
+ 
+ Usage:
+diff --git a/cmd/phiald/service.go b/cmd/phiald/service.go
+index 64afd5c99654045d26f8118a0fe0367299aab246..c306ae0b36102d7bc564df771f62a94b2d9d2111 100644
+--- a/cmd/phiald/service.go
++++ b/cmd/phiald/service.go
+@@ -126,7 +126,7 @@ 	case "Info":
+ 		return &host.InfoResponse{
+ 			Version:  version.App,
+ 			Protocol: varlink.ProtocolVersion,
+-			Features: []string{"machines", "secrets", "keys", "usb", "display", "root-setup"},
++			Features: []string{"machines", "secrets", "keys", "usb", "shares", "display", "root-setup"},
+ 		}, nil
+ 
+ 	case "Status":
+@@ -418,6 +418,32 @@
+ 		return &host.StateResponse{State: "restored"}, nil
+ 
+ 	case "RootSetup":
++	case "VMShareAdd":
++		var in host.ShareRequest
++		if err := decode(&in); err != nil {
++			return nil, err
++		}
++
++		response, err := s.shareAdd(ctx, in)
++		if err != nil {
++			return nil, invalid(err)
++		}
++
++		return response, nil
++
++	case "VMShareRemove":
++		var in host.ShareRequest
++		if err := decode(&in); err != nil {
++			return nil, err
++		}
++
++		response, err := s.shareRemove(ctx, in)
++		if err != nil {
++			return nil, invalid(err)
++		}
++
++		return response, nil
++
+ 		output, err := run0("root-setup")
+ 		if err != nil {
+ 			return nil, failure(fmt.Errorf("root setup: %s: %w", output, err))
+diff --git a/cmd/phiald/share_service_test.go b/cmd/phiald/share_service_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..f11fe25e102256586dd7812c41c737becb8fd375
+--- /dev/null
++++ b/cmd/phiald/share_service_test.go
+@@ -0,0 +1,101 @@
++package main
++
++import (
++	"context"
++	"io"
++	"log/slog"
++	"os"
++	"path/filepath"
++	"testing"
++
++	"codeberg.org/pojntfx/phial-neo/internal/host"
++	"codeberg.org/pojntfx/phial-neo/internal/machine"
++	"codeberg.org/pojntfx/phial-neo/internal/paths"
++)
++
++func TestShareAddAndRemoveKeepPathsWithSpaces(t *testing.T) {
++	root := t.TempDir()
++
++	previous := paths.Current()
++	paths.SetCurrent(paths.Set{
++		Config:  paths.Location{Host: filepath.Join(root, "config"), Access: filepath.Join(root, "config")},
++		Data:    paths.Location{Host: filepath.Join(root, "data"), Access: filepath.Join(root, "data")},
++		SSH:     paths.Location{Host: filepath.Join(root, "ssh"), Access: filepath.Join(root, "ssh")},
++		Runtime: paths.Location{Host: filepath.Join(root, "runtime"), Access: filepath.Join(root, "runtime")},
++	})
++	t.Cleanup(func() { paths.SetCurrent(previous) })
++
++	for _, dir := range []string{paths.Config().Path(), paths.Data().Path(), paths.SSH().Path(), paths.Runtime().Path()} {
++		if err := os.MkdirAll(dir, 0o700); err != nil {
++			t.Fatal(err)
++		}
++	}
++
++	def := machine.Defaults("test")
++	if err := def.Save(); err != nil {
++		t.Fatal(err)
++	}
++
++	share := filepath.Join(root, "My Documents")
++	if err := os.MkdirAll(share, 0o700); err != nil {
++		t.Fatal(err)
++	}
++
++	service := &service{
++		log: slog.New(slog.NewTextHandler(io.Discard, nil)),
++		sup: newSupervisor(slog.New(slog.NewTextHandler(io.Discard, nil))),
++	}
++
++	response, err := service.shareAdd(context.Background(), host.ShareRequest{
++		Machine:  "test",
++		Path:     share,
++		Target:   "/mnt/My Documents",
++		ReadOnly: true,
++	})
++	if err != nil {
++		t.Fatal(err)
++	}
++
++	if response.Path != share || response.Target != "/mnt/My Documents" || !response.ReadOnly {
++		t.Fatalf("shareAdd returned %#v", response)
++	}
++
++	loaded, err := machine.Load("test")
++	if err != nil {
++		t.Fatal(err)
++	}
++
++	if len(loaded.Shares) != 1 || loaded.Shares[0] != share {
++		t.Fatalf("the definition carries %#v", loaded.Shares)
++	}
++
++	if loaded.ShareTarget(share) != "/mnt/My Documents" {
++		t.Fatalf("the definition carries the target %q", loaded.ShareTarget(share))
++	}
++
++	if !loaded.ShareReadOnly(share) {
++		t.Fatal("the definition does not mark the share read-only")
++	}
++
++	if err := os.RemoveAll(share); err != nil {
++		t.Fatal(err)
++	}
++
++	removed, err := service.shareRemove(context.Background(), host.ShareRequest{Machine: "test", Path: share})
++	if err != nil {
++		t.Fatal(err)
++	}
++
++	if removed.State != "removed" || removed.Target != "/mnt/My Documents" {
++		t.Fatalf("shareRemove returned %#v", removed)
++	}
++
++	loaded, err = machine.Load("test")
++	if err != nil {
++		t.Fatal(err)
++	}
++
++	if len(loaded.Shares) != 0 {
++		t.Fatalf("the definition still carries %#v", loaded.Shares)
++	}
++}
+diff --git a/cmd/phiald/shares.go b/cmd/phiald/shares.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..6641d29d5991226ece3fb99864a1f4b9795aff1b
+--- /dev/null
++++ b/cmd/phiald/shares.go
+@@ -0,0 +1,300 @@
++package main
++
++import (
++	"context"
++	"fmt"
++	"os"
++	"path"
++	"path/filepath"
++	"slices"
++	"strconv"
++	"strings"
++	"sync"
++
++	"codeberg.org/pojntfx/phial-neo/cmd/phiald/guest"
++	"codeberg.org/pojntfx/phial-neo/cmd/phiald/virt"
++	"codeberg.org/pojntfx/phial-neo/internal/host"
++	"codeberg.org/pojntfx/phial-neo/internal/machine"
++)
++
++var shareProcesses = struct {
++	sync.Mutex
++	byTag map[string]*os.Process
++}{byTag: map[string]*os.Process{}}
++
++func sharePIDPath(tag string) string {
++	return filepath.Join(machine.RuntimeDir(), "vm", "virtiofsd-"+tag+".pid")
++}
++
++func cleanSharePath(value string) (string, error) {
++	value = strings.TrimRight(strings.TrimSpace(value), "\x00")
++
++	if value == "" {
++		return "", fmt.Errorf("give a host directory to share")
++	}
++
++	if !filepath.IsAbs(value) {
++		return "", fmt.Errorf("the folder %q is not an absolute path", value)
++	}
++
++	return checkFolder(filepath.Clean(value))
++}
++
++func cleanSharePathValue(value string) (string, error) {
++	value = strings.TrimRight(strings.TrimSpace(value), "\x00")
++
++	if value == "" {
++		return "", fmt.Errorf("give a host directory to share")
++	}
++
++	if !filepath.IsAbs(value) {
++		return "", fmt.Errorf("the folder %q is not an absolute path", value)
++	}
++
++	return filepath.Clean(value), nil
++}
++
++func cleanShareTarget(value string) (string, error) {
++	value = strings.TrimSpace(value)
++
++	if value == "" {
++		return "", nil
++	}
++
++	if !strings.HasPrefix(value, "/") {
++		return "", fmt.Errorf("the mount point %q must be absolute", value)
++	}
++
++	if strings.ContainsAny(value, "\x00\n\r") {
++		return "", fmt.Errorf("the mount point must not contain a newline or a NUL byte")
++	}
++
++	return path.Clean(value), nil
++}
++
++func (s *service) shareAdd(ctx context.Context, in host.ShareRequest) (*host.ShareResponse, error) {
++	if err := checkMachineName(in.Machine); err != nil {
++		return nil, err
++	}
++
++	share, err := cleanSharePath(in.Path)
++	if err != nil {
++		return nil, err
++	}
++
++	target, err := cleanShareTarget(in.Target)
++	if err != nil {
++		return nil, err
++	}
++
++	def, err := machine.Load(in.Machine)
++	if err != nil {
++		return nil, err
++	}
++
++	if target == "" {
++		target = def.ShareTarget(share)
++	}
++
++	alreadyShared := slices.Contains(def.Shares, share)
++	previousTarget := def.ShareTarget(share)
++	previousReadOnly := def.ShareReadOnly(share)
++
++	if !alreadyShared {
++		def.Shares = append(def.Shares, share)
++	}
++
++	if def.ShareTargets == nil {
++		def.ShareTargets = map[string]string{}
++	}
++	def.ShareTargets[share] = target
++
++	if in.ReadOnly {
++		if !slices.Contains(def.ReadOnlyShares, share) {
++			def.ReadOnlyShares = append(def.ReadOnlyShares, share)
++		}
++	} else {
++		def.ReadOnlyShares = slices.DeleteFunc(def.ReadOnlyShares, func(existing string) bool {
++			return existing == share
++		})
++	}
++
++	if err := def.Save(); err != nil {
++		return nil, err
++	}
++
++	response := &host.ShareResponse{
++		State:    "shared",
++		Path:     share,
++		Target:   target,
++		ReadOnly: in.ReadOnly,
++	}
++
++	if s.sup.stateOf(def.Name) != stateActive {
++		return response, nil
++	}
++
++	if alreadyShared && (previousTarget != target || previousReadOnly != in.ReadOnly) {
++		if err := guest.RemoveShare(def, share, previousTarget); err != nil {
++			s.log.Warn("could not unmount the changed share in the guest", "machine", def.Name, "share", share, "err", err)
++		}
++	}
++
++	if err := virt.HotplugShare(def, share); err != nil {
++		return nil, fmt.Errorf("attach %s: %w", share, err)
++	}
++
++	if err := guest.MountShare(def, share); err != nil {
++		s.log.Warn("could not mount the new share in the guest", "machine", def.Name, "share", share, "err", err)
++	}
++
++	response.Applied = true
++
++	return response, nil
++}
++
++func (s *service) shareRemove(ctx context.Context, in host.ShareRequest) (*host.ShareResponse, error) {
++	if err := checkMachineName(in.Machine); err != nil {
++		return nil, err
++	}
++
++	share, err := cleanSharePathValue(in.Path)
++	if err != nil {
++		return nil, err
++	}
++
++	if resolved, err := cleanSharePath(in.Path); err == nil {
++		share = resolved
++	}
++
++	def, err := machine.Load(in.Machine)
++	if err != nil {
++		return nil, err
++	}
++
++	previous := def
++	target := def.ShareTarget(share)
++
++	def.Shares = slices.DeleteFunc(def.Shares, func(existing string) bool {
++		return existing == share
++	})
++
++	for existing := range def.ShareTargets {
++		if existing == share {
++			delete(def.ShareTargets, existing)
++		}
++	}
++
++	def.ReadOnlyShares = slices.DeleteFunc(def.ReadOnlyShares, func(existing string) bool {
++		return existing == share
++	})
++
++	if err := def.Save(); err != nil {
++		return nil, err
++	}
++
++	response := &host.ShareResponse{State: "removed", Path: share, Target: target}
++
++	if s.sup.stateOf(def.Name) != stateActive {
++		return response, nil
++	}
++
++	if err := guest.RemoveShare(previous, share, target); err != nil {
++		s.log.Warn("could not unmount the share in the guest", "machine", def.Name, "share", share, "err", err)
++	}
++
++	if err := virt.UnplugShare(previous, share); err != nil {
++		return nil, fmt.Errorf("detach %s: %w", share, err)
++	}
++
++	response.Applied = true
++
++	return response, nil
++}
++
++func startShareTool(tag, share string) error {
++	if err := stopShareTool(tag); err != nil {
++		return err
++	}
++
++	socket := virt.ShareSocket(tag)
++
++	if err := os.MkdirAll(filepath.Dir(socket), 0o700); err != nil {
++		return err
++	}
++
++	_ = os.Remove(socket)
++
++	command := toolCommand("virtiofsd",
++		"--socket-path="+socket,
++		"--shared-dir="+share,
++		"--xattr",
++		"--announce-submounts",
++		"--uid-map=:1000:1000:1:",
++		"--gid-map=:1000:1000:1:",
++	)
++	command.Stdout = os.Stdout
++	command.Stderr = os.Stderr
++
++	if err := command.Start(); err != nil {
++		return err
++	}
++
++	if err := os.WriteFile(sharePIDPath(tag), []byte(strconv.Itoa(command.Process.Pid)), 0o600); err != nil {
++		_ = command.Process.Kill()
++
++		return err
++	}
++
++	shareProcesses.Lock()
++	shareProcesses.byTag[tag] = command.Process
++	shareProcesses.Unlock()
++
++	go func() {
++		_ = command.Wait()
++
++		shareProcesses.Lock()
++		if shareProcesses.byTag[tag] == command.Process {
++			delete(shareProcesses.byTag, tag)
++		}
++		shareProcesses.Unlock()
++	}()
++
++	return nil
++}
++
++func stopShareTool(tag string) error {
++	shareProcesses.Lock()
++	process := shareProcesses.byTag[tag]
++	delete(shareProcesses.byTag, tag)
++	shareProcesses.Unlock()
++
++	if process == nil {
++		data, err := os.ReadFile(sharePIDPath(tag))
++		if err != nil {
++			if os.IsNotExist(err) {
++				return nil
++			}
++
++			return err
++		}
++
++		pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
++		if err != nil {
++			_ = os.Remove(sharePIDPath(tag))
++
++			return nil
++		}
++
++		process, err = os.FindProcess(pid)
++		if err != nil {
++			return err
++		}
++	}
++
++	_ = process.Kill()
++	_ = os.Remove(sharePIDPath(tag))
++	_ = os.Remove(virt.ShareSocket(tag))
++
++	return nil
++}
+diff --git a/cmd/phiald/shares_test.go b/cmd/phiald/shares_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..cfad63ec236c7071052623e0e7af4cd414b49571
+--- /dev/null
++++ b/cmd/phiald/shares_test.go
+@@ -0,0 +1,43 @@
++package main
++
++import (
++	"os"
++	"path/filepath"
++	"testing"
++)
++
++func TestCleanShareTargetAcceptsSpaces(t *testing.T) {
++	target, err := cleanShareTarget("/mnt/My Documents/")
++	if err != nil {
++		t.Fatal(err)
++	}
++
++	if target != "/mnt/My Documents" {
++		t.Fatalf("cleanShareTarget returned %q", target)
++	}
++
++	if _, err := cleanShareTarget("relative"); err == nil {
++		t.Fatal("a relative mount point passed")
++	}
++
++	bad := "/mnt/bad" + string(rune(10)) + "name"
++	if _, err := cleanShareTarget(bad); err == nil {
++		t.Fatal("a mount point with a newline passed")
++	}
++}
++
++func TestCleanSharePathAcceptsSpaces(t *testing.T) {
++	dir := filepath.Join(t.TempDir(), "My Documents")
++	if err := os.MkdirAll(dir, 0o700); err != nil {
++		t.Fatal(err)
++	}
++
++	path, err := cleanSharePath(dir)
++	if err != nil {
++		t.Fatal(err)
++	}
++
++	if path != dir {
++		t.Fatalf("cleanSharePath returned %q, want %q", path, dir)
++	}
++}
+diff --git a/cmd/phiald/supervisor.go b/cmd/phiald/supervisor.go
+index ecb7f0c0c11fce9ee6681d2851c87c66542214ed..bbfefa9a5161c8b04a7156d76d4d5f85957ab81a 100644
+--- a/cmd/phiald/supervisor.go
++++ b/cmd/phiald/supervisor.go
+@@ -244,12 +244,12 @@ 	if err := os.MkdirAll(run, 0o700); err != nil {
+ 		return err
+ 	}
+ 
+-	spawn := func(command *exec.Cmd) error {
++	spawn := func(command *exec.Cmd) (*exec.Cmd, error) {
+ 		command.Stdout = os.Stdout
+ 		command.Stderr = os.Stderr
+ 
+ 		if err := command.Start(); err != nil {
+-			return err
++			return nil, err
+ 		}
+ 
+ 		proc.procs = append(proc.procs, command)
+@@ -258,14 +258,14 @@ 		go func() {
+ 			_ = command.Wait()
+ 		}()
+ 
+-		return nil
++		return command, nil
+ 	}
+ 
+ 	// The TPM emulator carries the TPM state of the machine.
+ 	_ = os.MkdirAll(filepath.Join(run, "swtpm"), 0o700)
+ 	_ = os.Remove(filepath.Join(run, "swtpm.sock"))
+ 
+-	if err := spawn(toolCommand("swtpm",
++	if _, err := spawn(toolCommand("swtpm",
+ 		"socket",
+ 		"--tpmstate", "dir="+filepath.Join(run, "swtpm"),
+ 		"--ctrl", "type=unixio,path="+filepath.Join(run, "swtpm.sock"),
+@@ -297,6 +297,10 @@ 		if err := os.MkdirAll(share, 0o700); err != nil {
+ 			return err
+ 		}
+ 
++		if err := stopShareTool(tag); err != nil {
++			return err
++		}
++
+ 		socket := filepath.Join(machine.RuntimeDir(), "vm", "virtiofsd-"+tag+".sock")
+ 
+ 		if err := os.MkdirAll(filepath.Dir(socket), 0o700); err != nil {
+@@ -304,29 +308,34 @@ 			return err
+ 		}
+ 		_ = os.Remove(socket)
+ 
+-		if err := spawn(toolCommand("virtiofsd",
++		command, err := spawn(toolCommand("virtiofsd",
+ 			"--socket-path="+socket,
+ 			"--shared-dir="+share,
+ 			"--xattr",
+ 			"--announce-submounts",
+ 			"--uid-map=:1000:1000:1:",
+ 			"--gid-map=:1000:1000:1:",
+-		)); err != nil {
++		))
++		if err != nil {
+ 			return fmt.Errorf("start virtiofsd for %s: %w", share, err)
+ 		}
++
++		if err := os.WriteFile(sharePIDPath(tag), []byte(fmt.Sprint(command.Process.Pid)), 0o600); err != nil {
++			return err
++		}
+ 	}
+ 
+ 	// The fallback network path serves DHCP and the traffic of the guest.
+ 	if def.NetFallback != "off" {
+ 		_ = os.Remove(filepath.Join(run, "passt.sock"))
+ 
+-		if err := spawn(passtCommand(filepath.Join(run, "passt.sock"))); err != nil {
++		if _, err := spawn(passtCommand(filepath.Join(run, "passt.sock"))); err != nil {
+ 			return fmt.Errorf("start passt: %w", err)
+ 		}
+ 	}
+ 
+ 	for _, listen := range desktopForwardListens(def.RdpPortValue()) {
+-		if err := spawn(toolCommand("socat",
++		if _, err := spawn(toolCommand("socat",
+ 			listen,
+ 			fmt.Sprintf("VSOCK-CONNECT:%d:3389", def.GuestCIDValue()),
+ 		)); err != nil {
+@@ -430,6 +439,13 @@ 		if command.Process != nil {
+ 			_ = command.Process.Kill()
+ 		}
+ 	}
++
++	for _, share := range proc.def.Shares {
++		_ = stopShareTool(machine.ShareTag(share))
++	}
++
++	_ = stopShareTool("hostshare")
++	_ = stopShareTool("phial-secrets-" + proc.def.Name)
+ }
+ 
+ // passtCommand builds the passt call of one machine. passt forwards the
+diff --git a/cmd/phiald/virt/hooks.go b/cmd/phiald/virt/hooks.go
+index bab41a787e9b9957b08ea8fc2254891b52ce6ccb..c79c0b77410f6971aa0199de692e5709ab0990de 100644
+--- a/cmd/phiald/virt/hooks.go
++++ b/cmd/phiald/virt/hooks.go
+@@ -21,9 +21,7 @@ var StopMachineTools = func(d Definition) error {
+ 	return nil
+ }
+ 
+-// StartShareTool runs the virtiofsd of one share tag for a hotplug. The host
+-// service sets it.
+-var StartShareTool = func(tag string) error {
++var StartShareTool = func(tag, share string) error {
+ 	return fmt.Errorf("the host service does not run the share tool")
+ }
+ 
+diff --git a/cmd/phiald/virt/hotplug.go b/cmd/phiald/virt/hotplug.go
+index 6cec1008859896502a5103240c00b58d43ed1c22..dcc689afacd341d88d0b0c19a8aa30fdce030eb1 100644
+--- a/cmd/phiald/virt/hotplug.go
++++ b/cmd/phiald/virt/hotplug.go
+@@ -115,12 +115,12 @@
+ 	return conn, reader, nil
+ }
+ 
+-func shareSocket(tag string) string {
++func ShareSocket(tag string) string {
+ 	return filepath.Join(paths.Runtime().Path(), "vm", "virtiofsd-"+tag+".sock")
+ }
+ 
+ func releaseShare(conn net.Conn, reader *bufio.Reader, tag string) {
+-	socketPath := shareSocket(tag)
++	socketPath := ShareSocket(tag)
+ 
+ 	_ = qmpCall(conn, reader, qmpCommand{Execute: "device_del", Arguments: map[string]string{"id": "fs-" + tag}})
+ 
+@@ -148,7 +148,7 @@
+ func HotplugShare(def Definition, share string) error {
+ 	tag := machine.ShareTag(share)
+ 	chardev := "fs-hotplug-" + tag
+-	socketPath := shareSocket(tag)
++	socketPath := ShareSocket(tag)
+ 
+ 	conn, reader, err := qmpConnect(def)
+ 	if err != nil {
+@@ -158,7 +158,7 @@ 	defer conn.Close()
+ 
+ 	releaseShare(conn, reader, tag)
+ 
+-	if err := StartShareTool(tag); err != nil {
++	if err := StartShareTool(tag, share); err != nil {
+ 		return err
+ 	}
+ 
+diff --git a/internal/host/client.go b/internal/host/client.go
+index 1b3a7484c8e357c4f0e47ecc5fd3b15eebd41bf4..dc63bbdcb64eb01e5a1a5f3d8f0056276c68cfae 100644
+--- a/internal/host/client.go
++++ b/internal/host/client.go
+@@ -336,3 +336,23 @@ // RootSetup runs the fixed one-time host setup through run0.
+ func (c *Client) RootSetup(ctx context.Context) error {
+ 	return c.call(ctx, "RootSetup", nil, nil)
+ }
++
++func (c *Client) VMShareAdd(ctx context.Context, machine, path, target string, readOnly bool) (*ShareResponse, error) {
++	var out ShareResponse
++
++	if err := c.call(ctx, "VMShareAdd", ShareRequest{Machine: machine, Path: path, Target: target, ReadOnly: readOnly}, &out); err != nil {
++		return nil, err
++	}
++
++	return &out, nil
++}
++
++func (c *Client) VMShareRemove(ctx context.Context, machine, path string) (*ShareResponse, error) {
++	var out ShareResponse
++
++	if err := c.call(ctx, "VMShareRemove", ShareRequest{Machine: machine, Path: path}, &out); err != nil {
++		return nil, err
++	}
++
++	return &out, nil
++}
+diff --git a/internal/host/types.go b/internal/host/types.go
+index 532f6a3e71b713bd7f329f135cc016e292528f7b..c4ea76dcbdb4a9d123f35e17c825dbbd9cea1920 100644
+--- a/internal/host/types.go
++++ b/internal/host/types.go
+@@ -273,3 +273,18 @@ // subcommands.
+ type VfioRequest struct {
+ 	Address string `json:"address"`
+ }
++
++type ShareRequest struct {
++	Machine  string `json:"machine"`
++	Path     string `json:"path"`
++	Target   string `json:"target,omitempty"`
++	ReadOnly bool   `json:"read_only,omitempty"`
++}
++
++type ShareResponse struct {
++	State    string `json:"state"`
++	Path     string `json:"path"`
++	Target   string `json:"target"`
++	ReadOnly bool   `json:"read_only"`
++	Applied  bool   `json:"applied"`
++}
+diff --git a/internal/machine/accessors.go b/internal/machine/accessors.go
+index 1d3d78c0969731ad01c77dbfc8d1d1b6cfc4a30a..7d1e5fb97f2e3da992f2fe5e5a5aeccd62ac3163 100644
+--- a/internal/machine/accessors.go
++++ b/internal/machine/accessors.go
+@@ -1,6 +1,8 @@
+ package machine
+ 
+ import (
++	"crypto/sha256"
++	"encoding/hex"
+ 	"fmt"
+ 	"os"
+ 	"path/filepath"
+@@ -51,6 +53,14 @@ 	if result == "" {
+ 		return "share"
+ 	}
+ 
++	if len(result) > 36 {
++		sum := sha256.Sum256([]byte(filepath.Clean(path)))
++		suffix := hex.EncodeToString(sum[:4])
++		prefix := strings.TrimRight(result[:27], "-")
++
++		return prefix + "-" + suffix
++	}
++
+ 	return result
+ }
+ 
+@@ -86,7 +96,7 @@ 		// The configuration names no agent, so ssh uses the agent of the
+ 		// session, which is the agent of the user, and that agent asks for the
+ 		// passphrase of the key on the first signature.
+ 		fmt.Fprintf(&builder,
+-			"Host %s\n    User phial\n    ProxyCommand socat - VSOCK-CONNECT:%d:2222\n    IdentityFile %s\n    IdentitiesOnly yes\n    StrictHostKeyChecking accept-new\n    ServerAliveInterval 5\n    ServerAliveCountMax 3\n\n",
++			"Host %s\n    User phial\n    ProxyCommand socat - VSOCK-CONNECT:%d:2222\n    IdentityFile %q\n    IdentitiesOnly yes\n    StrictHostKeyChecking accept-new\n    ServerAliveInterval 5\n    ServerAliveCountMax 3\n\n",
+ 			def.Name, def.GuestCIDValue(), filepath.Join(paths.SSH().HostPath(), sshKeyName))
+ 	}
+ 
+@@ -115,7 +125,7 @@ 	sshIncludeEnd   = "# <<< phial <<<"
+ )
+ 
+ func SSHIncludeText() string {
+-	return "\n" + sshIncludeStart + "\nInclude " + filepath.Join(paths.Config().HostPath(), "ssh_config") + "\n" + sshIncludeEnd + "\n"
++	return "\n" + sshIncludeStart + "\nInclude " + fmt.Sprintf("%q", filepath.Join(paths.Config().HostPath(), "ssh_config")) + "\n" + sshIncludeEnd + "\n"
+ }
+ 
+ func EnsureSSHInclude() error {
+diff --git a/internal/machine/accessors_test.go b/internal/machine/accessors_test.go
+index ea41ae368e0d945d0a95a45bfcbd0a9b7257d2f9..a99b72964dadc20f064b2a8ccc7cbe4ee2bf3fa6 100644
+--- a/internal/machine/accessors_test.go
++++ b/internal/machine/accessors_test.go
+@@ -1,6 +1,7 @@
+ package machine
+ 
+ import (
++	"fmt"
+ 	"os"
+ 	"path/filepath"
+ 	"strings"
+@@ -8,6 +9,24 @@ 	"testing"
+ 
+ 	"codeberg.org/pojntfx/phial-neo/internal/paths"
+ )
++
++func TestShareTagFitsTheVirtiofsLimit(t *testing.T) {
++	long := "/home/phial/Kimi_Agent_Publish the New Hosting Version"
++	tag := ShareTag(long)
++
++	if len(tag) > 36 {
++		t.Fatalf("ShareTag(%q) = %q, which is %d bytes", long, tag, len(tag))
++	}
++
++	if tag != ShareTag(long) {
++		t.Fatal("ShareTag is not stable")
++	}
++
++	other := ShareTag("/home/phial/Kimi_Agent_Publish the New Hosting Version 2")
++	if other == tag {
++		t.Fatalf("two long folders share the tag %q", tag)
++	}
++}
+ 
+ func TestRdpEndpoint(t *testing.T) {
+ 	def := Defaults("phial")
+@@ -154,7 +173,7 @@ 	if err != nil {
+ 		t.Fatal(err)
+ 	}
+ 
+-	if !strings.Contains(string(data), "Include "+include) {
++	if !strings.Contains(string(data), "Include "+include) && !strings.Contains(string(data), fmt.Sprintf("Include %q", include)) {
+ 		t.Fatalf("the SSH configuration does not include %q: %q", include, string(data))
+ 	}
+ }
+diff --git a/internal/mcp/register.go b/internal/mcp/register.go
+index 92301e1d62e785503533dbdc26a2d4248ce682f5..2b27dc1967c4f7ea0d5fff3cb29ae96f02947f7b 100644
+--- a/internal/mcp/register.go
++++ b/internal/mcp/register.go
+@@ -90,6 +90,9 @@ 	_ = gate
+ 
+ 	mcpgo.AddTool(server, ShareAddTool, func(ctx context.Context, req *mcpgo.CallToolRequest, input ShareInput) (*mcpgo.CallToolResult, any, error) {
+ 		vm, _ := VMFromContext(ctx)
++		if input.Name == "" {
++			input.Name = vm
++		}
+ 
+ 		out, err := s.requestChange(ctx, "share "+input.Path, vm, func() error {
+ 			_, _, err := s.ShareAdd(ctx, req, input)
+@@ -102,6 +105,9 @@ 	})
+ 
+ 	mcpgo.AddTool(server, ShareRemoveTool, func(ctx context.Context, req *mcpgo.CallToolRequest, input ShareInput) (*mcpgo.CallToolResult, any, error) {
+ 		vm, _ := VMFromContext(ctx)
++		if input.Name == "" {
++			input.Name = vm
++		}
+ 
+ 		out, err := s.requestChange(ctx, "unshare "+input.Path, vm, func() error {
+ 			_, _, err := s.ShareRemove(ctx, req, input)
+diff --git a/internal/mcp/tools_share.go b/internal/mcp/tools_share.go
+index cf953632c115bf220227ae6add01df818dc984de..c89c76a01cd4519fbbc9556f3cb38c89034e2073 100644
+--- a/internal/mcp/tools_share.go
++++ b/internal/mcp/tools_share.go
+@@ -3,13 +3,13 @@
+ import (
+ 	"context"
+ 	"fmt"
+-	"os"
+-	"slices"
+-	"strconv"
++	"path/filepath"
++	"strings"
+ 
+ 	mcpgo "github.com/modelcontextprotocol/go-sdk/mcp"
+ 
+ 	"codeberg.org/pojntfx/phial-neo/internal/machine"
++	"codeberg.org/pojntfx/phial-neo/internal/portals"
+ )
+ 
+ var (
+@@ -23,7 +23,7 @@
+ 	ShareAddTool = &mcpgo.Tool{
+ 		Name:        "share.add",
+ 		Title:       "Share a folder",
+-		Description: "Share one host directory with a machine over virtiofs.",
++		Description: "Share one host directory with a machine over virtiofs. The host service resolves host paths and document portal paths.",
+ 	}
+ 
+ 	ShareRemoveTool = &mcpgo.Tool{
+@@ -35,13 +35,20 @@ )
+ 
+ type ShareInput struct {
+ 	Name     string `json:"name" jsonschema:"the VM name"`
+-	Path     string `json:"path" jsonschema:"the host directory to share"`
++	Path     string `json:"path" jsonschema:"the host directory to share, as a host path or a document portal path"`
+ 	Target   string `json:"target,omitempty" jsonschema:"the mount point in the guest, optional"`
+ 	ReadOnly bool   `json:"read_only,omitempty" jsonschema:"mount the share read-only, optional"`
+ }
+ 
++type ShareEntry struct {
++	Path     string `json:"path" jsonschema:"the host directory"`
++	Target   string `json:"target" jsonschema:"the mount point in the guest"`
++	ReadOnly bool   `json:"read_only" jsonschema:"whether the machine mounts the folder read-only"`
++}
++
+ type ShareLsOutput struct {
+-	Shares []string `json:"shares" jsonschema:"the shared host directories"`
++	Shares  []string     `json:"shares" jsonschema:"the shared host directories"`
++	Entries []ShareEntry `json:"entries" jsonschema:"the shared folders with their mount points"`
+ }
+ 
+ func (s *Service) ShareLs(ctx context.Context, req *mcpgo.CallToolRequest, input NameInput) (*mcpgo.CallToolResult, *ShareLsOutput, error) {
+@@ -50,103 +57,90 @@ 	if err != nil {
+ 		return nil, nil, err
+ 	}
+ 
+-	return nil, &ShareLsOutput{Shares: def.Shares}, nil
++	out := &ShareLsOutput{Shares: []string{}, Entries: []ShareEntry{}}
++
++	for _, share := range def.Shares {
++		out.Shares = append(out.Shares, share)
++		out.Entries = append(out.Entries, ShareEntry{
++			Path:     share,
++			Target:   def.ShareTarget(share),
++			ReadOnly: def.ShareReadOnly(share),
++		})
++	}
++
++	return nil, out, nil
+ }
+ 
+-func (s *Service) ShareAdd(ctx context.Context, req *mcpgo.CallToolRequest, input ShareInput) (*mcpgo.CallToolResult, any, error) {
+-	if input.Path == "" {
+-		return nil, nil, fmt.Errorf("give a host directory to share")
+-	}
++func shareHostPath(value string) (string, error) {
++	value = strings.TrimSpace(value)
+ 
+-	info, err := os.Stat(input.Path)
+-	if err != nil {
+-		return nil, nil, err
++	if value == "" {
++		return "", fmt.Errorf("give a host directory to share")
+ 	}
+ 
+-	if !info.IsDir() {
+-		return nil, nil, fmt.Errorf("%s is not a directory", input.Path)
++	if !filepath.IsAbs(value) {
++		return "", fmt.Errorf("the folder %q is not an absolute path", value)
+ 	}
+ 
+-	def, err := machine.Load(input.Name)
++	host, err := portals.HostPath(filepath.Clean(value))
+ 	if err != nil {
+-		return nil, nil, err
++		return "", err
+ 	}
+ 
+-	for _, existing := range def.Shares {
+-		if existing == input.Path {
+-			return nil, map[string]string{"state": "present"}, nil
+-		}
++	if strings.TrimSpace(host) == "" {
++		return "", fmt.Errorf("the folder %q has no host path", value)
+ 	}
+ 
+-	def.Shares = append(def.Shares, input.Path)
+-
+-	if input.Target != "" {
+-		if def.ShareTargets == nil {
+-			def.ShareTargets = map[string]string{}
+-		}
+-
+-		def.ShareTargets[input.Path] = input.Target
+-	}
++	return filepath.Clean(host), nil
++}
+ 
+-	if input.ReadOnly {
+-		def.ReadOnlyShares = append(def.ReadOnlyShares, input.Path)
+-	}
++type ShareOutput struct {
++	State    string `json:"state"`
++	Path     string `json:"path"`
++	Target   string `json:"target"`
++	ReadOnly bool   `json:"read_only"`
++	Tag      string `json:"tag"`
++	Applied  bool   `json:"applied"`
++}
+ 
+-	if err := def.Save(); err != nil {
++func (s *Service) ShareAdd(ctx context.Context, req *mcpgo.CallToolRequest, input ShareInput) (*mcpgo.CallToolResult, any, error) {
++	path, err := shareHostPath(input.Path)
++	if err != nil {
+ 		return nil, nil, err
+ 	}
+ 
+-	tag := machine.ShareTag(input.Path)
+-
+-	// A running machine reprovisions to mount the new share.
+-	if active, _ := s.machineActive(ctx, def.Name); active {
+-		if _, err := s.host().VMProvision(ctx, def.Name); err != nil {
+-			return nil, map[string]string{"state": "shared", "tag": tag, "attaches": "next start", "reason": err.Error()}, nil
+-		}
++	response, err := s.host().VMShareAdd(ctx, input.Name, path, input.Target, input.ReadOnly)
++	if err != nil {
++		return nil, nil, err
+ 	}
+ 
+-	target := def.ShareTarget(input.Path)
+-
+-	return nil, map[string]string{"state": "shared", "tag": tag, "target": target, "read_only": strconv.FormatBool(input.ReadOnly)}, nil
++	return nil, &ShareOutput{
++		State:    response.State,
++		Path:     response.Path,
++		Target:   response.Target,
++		ReadOnly: response.ReadOnly,
++		Tag:      machine.ShareTag(response.Path),
++		Applied:  response.Applied,
++	}, nil
+ }
+ 
+ func (s *Service) ShareRemove(ctx context.Context, req *mcpgo.CallToolRequest, input ShareInput) (*mcpgo.CallToolResult, any, error) {
+-	def, err := machine.Load(input.Name)
++	path, err := shareHostPath(input.Path)
+ 	if err != nil {
+ 		return nil, nil, err
+ 	}
+ 
+-	target := def.ShareTarget(input.Path)
+-
+-	kept := []string{}
+-
+-	for _, existing := range def.Shares {
+-		if existing != input.Path {
+-			kept = append(kept, existing)
+-		}
+-	}
+-
+-	def.Shares = kept
+-
+-	for path := range def.ShareTargets {
+-		if !slices.Contains(kept, path) {
+-			delete(def.ShareTargets, path)
+-		}
+-	}
+-
+-	def.ReadOnlyShares = slices.DeleteFunc(def.ReadOnlyShares, func(existing string) bool {
+-		return !slices.Contains(kept, existing)
+-	})
+-
+-	if err := def.Save(); err != nil {
++	response, err := s.host().VMShareRemove(ctx, input.Name, path)
++	if err != nil {
+ 		return nil, nil, err
+ 	}
+ 
+-	if active, _ := s.machineActive(ctx, def.Name); active {
+-		if _, err := s.host().VMProvision(ctx, def.Name); err != nil {
+-			return nil, map[string]string{"state": "removed", "target": target, "detach": err.Error()}, nil
+-		}
+-	}
+-
+-	return nil, map[string]string{"state": "removed", "target": target}, nil
++	return nil, &ShareOutput{
++		State:    response.State,
++		Path:     response.Path,
++		Target:   response.Target,
++		ReadOnly: response.ReadOnly,
++		Tag:      machine.ShareTag(response.Path),
++		Applied:  response.Applied,
++	}, nil
+ }
+diff --git a/internal/mcp/tools_share_test.go b/internal/mcp/tools_share_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..e8c7f20581440d9dcddca98cb8733fbe503ddb85
+--- /dev/null
++++ b/internal/mcp/tools_share_test.go
+@@ -0,0 +1,25 @@
++package mcp
++
++import (
++	"strings"
++	"testing"
++)
++
++func TestShareHostPathRejectsRelativePaths(t *testing.T) {
++	if _, err := shareHostPath("relative/folder"); err == nil {
++		t.Fatal("a relative path passed")
++	}
++
++	if _, err := shareHostPath("  "); err == nil {
++		t.Fatal("an empty path passed")
++	}
++
++	path, err := shareHostPath("/tmp/phial share")
++	if err != nil {
++		t.Fatal(err)
++	}
++
++	if !strings.HasSuffix(path, "phial share") {
++		t.Fatalf("shareHostPath returned %q", path)
++	}
++}
+diff --git a/internal/portals/portals.go b/internal/portals/portals.go
+index 596a1b5ee0bcac7cee6e12cac7368f4ee70d377c..78d40ff00faf6f05a11f7ce82d902e28978b810b 100644
+--- a/internal/portals/portals.go
++++ b/internal/portals/portals.go
+@@ -165,7 +165,11 @@ 	if !ok {
+ 		return "", fmt.Errorf("the document portal holds no path for %s", path)
+ 	}
+ 
+-	return string(host), nil
++	return hostPathValue(host), nil
++}
++
++func hostPathValue(data []byte) string {
++	return strings.TrimRight(string(data), "\x00")
+ }
+ 
+ // documentID states the identifier of one document portal path.
+diff --git a/internal/portals/portals_test.go b/internal/portals/portals_test.go
+index c897739a29c98d0092c23ff9c95c31d077736cb7..6f18d4f831a054ecdfe4f484a9204c894966d228 100644
+--- a/internal/portals/portals_test.go
++++ b/internal/portals/portals_test.go
+@@ -21,3 +21,9 @@ 			t.Fatal("autostart succeeded without the Background portal")
+ 		}
+ 	}
+ }
++
++func TestHostPathValueTrimsTheNulByte(t *testing.T) {
++	if got := hostPathValue([]byte("/home/user/My Folder\x00")); got != "/home/user/My Folder" {
++		t.Fatalf("hostPathValue() = %q", got)
++	}
++}
+diff --git a/internal/ui/app.go b/internal/ui/app.go
+index 2e87929bf3a20dec2625d4e41621d97e843d5ada..08c80b0cfff03877a79df617acfe74783a76bb0a 100644
+--- a/internal/ui/app.go
++++ b/internal/ui/app.go
+@@ -400,7 +400,9 @@ 	})
+ 	simple("add-device", func() { a.withMachine(func(def machine.Definition) { a.showAddDeviceDialog(def) }) })
+ 	simple("add-hub", func() { a.withMachine(func(def machine.Definition) { a.showAddHubDialog(def) }) })
+ 	simple("share-folder", func() { a.withMachine(func(def machine.Definition) { a.showShareDialog(def) }) })
+-	stringParameter("share-path", func(path string) { a.withMachine(func(def machine.Definition) { a.showShareTargetDialog(def, path) }) })
++	stringParameter("share-path", func(path string) {
++		a.withMachine(func(def machine.Definition) { a.showShareTargetDialog(def, path, path) })
++	})
+ 	simple("show-apps", func() { a.withMachine(func(def machine.Definition) { a.showGuestAppsDialog(def) }) })
+ 	simple("show-rdp", func() { a.withMachine(func(def machine.Definition) { a.showRdpDialog(def) }) })
+ 	simple("show-terminal", func() { a.withMachine(func(def machine.Definition) { a.showTerminalDialog(def) }) })
+diff --git a/internal/ui/shares.go b/internal/ui/shares.go
+index 781b3bc3628d9411cd024c74f7bba3c63c183805..1511b126dffc1dc495f30e06a8d6a4d2aeee46ba 100644
+--- a/internal/ui/shares.go
++++ b/internal/ui/shares.go
+@@ -4,6 +4,8 @@ import (
+ 	"strings"
+ 
+ 	"codeberg.org/puregotk/puregotk/v4/adw"
++	"codeberg.org/puregotk/puregotk/v4/gio"
++	"codeberg.org/puregotk/puregotk/v4/gtk"
+ 	"github.com/pojntfx/go-gettext/pkg/i18n"
+ 
+ 	"codeberg.org/pojntfx/phial-neo/internal/machine"
+@@ -75,28 +77,41 @@ 	return target
+ }
+ 
+ func (a *App) showShareDialog(def machine.Definition) {
+-	go func() {
+-		folder, err := portals.ChooseFolder(i18n.L("Share a Folder"), i18n.L("_Share"), "")
++	dialog := gtk.NewFileDialog()
++	dialog.SetTitle(i18n.L("Share a Folder"))
++	dialog.SetAcceptLabel(i18n.L("_Share"))
++	dialog.SetModal(true)
++
++	var cb gio.AsyncReadyCallback
++	cb = func(_ uintptr, resultPtr uintptr, _ uintptr) {
++		result := gio.AsyncResultBase{Ptr: resultPtr}
++		file, err := dialog.SelectFolderFinish(&result)
++		if err != nil || file == nil {
++			return
++		}
++
++		access := file.GetPath()
++		host, err := portals.HostPath(access)
+ 		if err != nil {
+ 			a.idle(func() { a.showError(err) })
++
+ 			return
+ 		}
+ 
+-		if !folder.IsSet() {
+-			return
+-		}
++		a.idle(func() { a.showShareTargetDialog(def, access, host) })
++	}
++	a.hold(&cb)
+ 
+-		a.idle(func() { a.showShareTargetDialog(def, folder.Host) })
+-	}()
++	dialog.SelectFolder(&a.win.Window, nil, &cb, 0)
+ }
+ 
+-func (a *App) showShareTargetDialog(def machine.Definition, path string) {
++func (a *App) showShareTargetDialog(def machine.Definition, accessPath, hostPath string) {
+ 	scope := a.newScope()
+ 
+ 	target := a.entryRow("_Mount Point in the Machine")
+ 	target.SetUseUnderline(true)
+ 	target.SetShowApplyButton(false)
+-	target.SetText("/mnt/" + machine.ShareTag(path))
++	target.SetText("/mnt/" + machine.ShareTag(hostPath))
+ 	target.AddCssClass("monospace")
+ 
+ 	readOnly := false
+@@ -110,7 +125,7 @@ 	group.Add(&readOnlyRow.Widget)
+ 
+ 	detail := adw.NewActionRow()
+ 	detail.SetTitle(i18n.L("Host Folder"))
+-	detail.SetSubtitle(path)
++	detail.SetSubtitle(hostPath)
+ 	detail.SetSubtitleSelectable(true)
+ 	detail.AddCssClass("property")
+ 
+@@ -128,7 +143,7 @@
+ 		a.goAsync(func() (string, error) {
+ 			if _, _, err := a.Service.ShareAdd(a.Ctx, nil, mcp.ShareInput{
+ 				Name:     def.Name,
+-				Path:     path,
++				Path:     accessPath,
+ 				Target:   mount,
+ 				ReadOnly: readOnly,
+ 			}); err != nil {
+diff --git a/tests/ui-states.sh b/tests/ui-states.sh
+index 67dbff9ea017fd1a2cf68bdaa1b20ca535c0068a..108104f68d22080d43e655f188b8a2d471ef27ab 100755
+--- a/tests/ui-states.sh
++++ b/tests/ui-states.sh
+@@ -29,6 +29,7 @@ APP_ID="com.pojtinger.felicitas.Phial"
+ APP_PATH="/com/pojtinger/felicitas/Phial"
+ BIN="${BIN:-/tmp/phial-states-app}"
+ WORLD="${WORLD:-/tmp/phial-states/world}"
++SHARE="$WORLD/Shared Folder"
+ DEMO="${DEMO:-phial-ui-demo}"
+ SECOND="${SECOND:-phial-ui-second}"
+ REAL="${REAL:-test-vm}"
+@@ -203,7 +204,7 @@   export XDG_CONFIG_HOME="$WORLD/config"
+   export XDG_DATA_HOME="$WORLD/data"
+ 
+   rm -rf "$WORLD"
+-  mkdir -p "$XDG_CONFIG_HOME" "$XDG_DATA_HOME" "$WORLD/gnupg"
++  mkdir -p "$XDG_CONFIG_HOME" "$XDG_DATA_HOME" "$WORLD/gnupg" "$SHARE"
+ 
+   export SSH_AUTH_SOCK="$WORLD/ssh-agent.sock"
+   export GNUPGHOME="$WORLD/gnupg"
+@@ -348,7 +349,7 @@   sleep 2
+   capture 32-add-hub-empty
+   close_dialog
+ 
+-  act_string share-path "/home/pojntfx/Documents"
++  act_string share-path "$SHARE"
+   sleep 3
+   capture 33-share-folder
+   close_dialog
+@@ -412,7 +413,7 @@   mkdir -p "$XDG_DATA_HOME/phial/vms"
+   truncate -s 2G "$XDG_DATA_HOME/phial/vms/$SECOND.raw"
+ 
+   mcp usb.addDevice "{\"vm\":\"$SECOND\",\"device\":\"0846:9072\"}" >/dev/null
+-  mcp share.add "{\"name\":\"$SECOND\",\"path\":\"/home/pojntfx/Documents\"}" >/dev/null
++  mcp share.add "{\"name\":\"$SECOND\",\"path\":\"$SHARE\"}" >/dev/null
+   mcp vm.update "{\"name\":\"$SECOND\",\"usb_xhci\":[\"0000:00:0d.0\"]}" >/dev/null
+   ssh-keygen -t ed25519 -N "" -C "demo@phial" -f "$WORLD/demo-key" >/dev/null 2>&1
+   ssh-add "$WORLD/demo-key" >/dev/null 2>&1
+@@ -540,7 +541,7 @@   sleep 3
+   capture 88-mobile-remote-desktop
+   close_dialog
+ 
+-  act_string share-path "/home/pojntfx/Documents"
++  act_string share-path "$SHARE"
+   sleep 3
+   capture 89-mobile-share-folder
+   close_dialog
+
