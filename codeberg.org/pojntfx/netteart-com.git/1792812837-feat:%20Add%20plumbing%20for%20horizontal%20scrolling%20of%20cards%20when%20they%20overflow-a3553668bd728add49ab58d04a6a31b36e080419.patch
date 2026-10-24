@@ -1,0 +1,88 @@
+From a3553668bd728add49ab58d04a6a31b36e080419 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Fri, 23 Oct 2026 20:33:57 -0700
+Subject: [PATCH] feat: Add plumbing for horizontal scrolling of cards when they overflow
+---
+diff --git a/assets/js/body.js b/assets/js/body.js
+index 641522defbab9e0c968ab9a7bf8382085e33ae28..0e153e3492805b2715e2ba14e9d76cebddc155cf 100644
+--- a/assets/js/body.js
++++ b/assets/js/body.js
+@@ -140,6 +140,77 @@       syncStuck();
+     });
+   })();
+ 
++  // Collection rails
++  (() => {
++    document.querySelectorAll(".na-collection--rail").forEach((rail) => {
++      const track = rail.querySelector(".na-portfolio__shelf");
++      const previousButton = rail.querySelector(".na-rail__prev");
++      const nextButton = rail.querySelector(".na-rail__next");
++
++      if (!track || !previousButton || !nextButton) {
++        return;
++      }
++
++      let pendingTarget = null;
++
++      const maxScroll = () => Math.max(0, track.scrollWidth - track.clientWidth);
++
++      const syncButtons = (position) => {
++        const max = maxScroll();
++
++        previousButton.hidden = position <= 1;
++        nextButton.hidden = position >= max - 1;
++      };
++
++      const scrollByPage = (direction) => {
++        const max = maxScroll();
++        const target = Math.max(
++          0,
++          Math.min(max, track.scrollLeft + direction * track.clientWidth * 0.8),
++        );
++
++        pendingTarget = target;
++        syncButtons(target);
++
++        track.scrollTo({ left: target, behavior: "smooth" });
++      };
++
++      const update = () => {
++        if (pendingTarget !== null) {
++          if (Math.abs(track.scrollLeft - pendingTarget) > 1) {
++            return;
++          }
++
++          pendingTarget = null;
++        }
++
++        syncButtons(track.scrollLeft);
++      };
++
++      const cancelPending = () => {
++        if (pendingTarget === null) {
++          return;
++        }
++
++        pendingTarget = null;
++        syncButtons(track.scrollLeft);
++      };
++
++      previousButton.addEventListener("click", () => scrollByPage(-1));
++      nextButton.addEventListener("click", () => scrollByPage(1));
++      track.addEventListener("scroll", update, { passive: true });
++      track.addEventListener("pointerdown", cancelPending, { passive: true });
++      track.addEventListener("wheel", cancelPending, { passive: true });
++
++      if ("ResizeObserver" in window) {
++        new ResizeObserver(update).observe(track);
++      }
++
++      addEventListener("resize", update);
++      syncButtons(track.scrollLeft);
++    });
++  })();
++
+   // Modals
+   (() => {
+     const body = document.body;
+
