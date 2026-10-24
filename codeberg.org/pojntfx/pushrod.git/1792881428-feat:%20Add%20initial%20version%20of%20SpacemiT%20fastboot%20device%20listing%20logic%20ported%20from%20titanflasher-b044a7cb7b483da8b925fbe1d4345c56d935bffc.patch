@@ -1,0 +1,226 @@
+From b044a7cb7b483da8b925fbe1d4345c56d935bffc Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Sat, 24 Oct 2026 15:37:08 -0700
+Subject: [PATCH] feat: Add initial version of SpacemiT fastboot device listing logic ported from titanflasher
+---
+diff --git a/go.mod b/go.mod
+index 875ed4d06f851d70f0f1c3afbc834bc1ae1ab083..789ad67befc7662907101493321d5742aa00d762 100644
+--- a/go.mod
++++ b/go.mod
+@@ -6,6 +6,7 @@ require (
+ 	al.essio.dev/pkg/shellescape v1.6.1
+ 	github.com/adrg/xdg v0.5.3
+ 	github.com/blackjack/webcam v0.6.1
++	github.com/google/gousb v1.1.3
+ 	github.com/google/jsonschema-go v0.4.3
+ 	github.com/google/renameio/v2 v2.0.2
+ 	github.com/modelcontextprotocol/go-sdk v1.8.0
+diff --git a/go.sum b/go.sum
+index e5f697c4c2fcaee6a41e33aa480c067ebddfd792..a8f0315f4c867024360ec0ed7410b8d99e72c34c 100644
+--- a/go.sum
++++ b/go.sum
+@@ -12,6 +12,8 @@ github.com/golang-jwt/jwt/v5 v5.3.1 h1:kYf81DTWFe7t+1VvL7eS+jKFVWaUnK9cB1qbwn63YCY=
+ github.com/golang-jwt/jwt/v5 v5.3.1/go.mod h1:fxCRLWMO43lRc8nhHWY6LGqRcf+1gQWArsqaEUEa5bE=
+ github.com/google/go-cmp v0.7.0 h1:wk8382ETsv4JYUZwIsn6YpYiWiBsYLSJiTsyBybVuN8=
+ github.com/google/go-cmp v0.7.0/go.mod h1:pXiqmnSA92OHEEa9HXL2W4E7lf9JzCmGVUdgjX3N/iU=
++github.com/google/gousb v1.1.3 h1:xt6M5TDsGSZ+rlomz5Si5Hmd/Fvbmo2YCJHN+yGaK4o=
++github.com/google/gousb v1.1.3/go.mod h1:GGWUkK0gAXDzxhwrzetW592aOmkkqSGcj5KLEgmCVUg=
+ github.com/google/jsonschema-go v0.4.3 h1:/DBOLZTfDow7pe2GmaJNhltueGTtDKICi8V8p+DQPd0=
+ github.com/google/jsonschema-go v0.4.3/go.mod h1:r5quNTdLOYEz95Ru18zA0ydNbBuYoo9tgaYcxEYhJVE=
+ github.com/google/renameio/v2 v2.0.2 h1:qKZs+tfn+arruZZhQ7TKC/ergJunuJicWS6gLDt/dGw=
+diff --git a/main.go b/main.go
+index 7ab615bc4577dc27ebad0ef98b61c35758746517..a49d4e0b164e8cd4a3983938350860a51fd7740e 100644
+--- a/main.go
++++ b/main.go
+@@ -77,6 +77,7 @@ 	mcp.AddTool(handler, svc.ReadFromTool, service.ReadFrom)
+ 	mcp.AddTool(handler, svc.WriteToTool, service.WriteTo)
+ 	mcp.AddTool(handler, svc.GetFilesTool, service.GetFiles)
+ 	mcp.AddTool(handler, svc.DeleteFileTool, service.DeleteFile)
++	mcp.AddTool(handler, svc.GetFlashDevicesTool, service.GetFlashDevices)
+ 
+ 	log.Println("Listening on", *laddr)
+ 
+diff --git a/pkg/svc/flash_get_devices.go b/pkg/svc/flash_get_devices.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..dea11ba40f9d7b20b52a747d2c2f1918b786c17f
+--- /dev/null
++++ b/pkg/svc/flash_get_devices.go
+@@ -0,0 +1,53 @@
++package svc
++
++import (
++	"context"
++
++	"codeberg.org/pojntfx/pushrod/pkg/titanflasher"
++	"github.com/modelcontextprotocol/go-sdk/mcp"
++)
++
++var (
++	GetFlashDevicesTool = &mcp.Tool{
++		Name:        "flash.getDevices",
++		Title:       "Get flash devices",
++		Description: "Get all currently connected SpacemiT devices that are in fastboot mode",
++		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true},
++	}
++)
++
++type FlashDevice struct {
++	Path string `json:"path" jsonschema:"path that uniquely identifies the fastboot device until it gets unplugged, in BUS-PORT form like 1-2-3"`
++	USBIdentity
++	SuperSpeed bool `json:"superSpeed" jsonschema:"whether the device is connected at USB 3.0 or faster"`
++}
++
++type GetFlashDevicesOutput struct {
++	FlashDevices []FlashDevice `json:"flashDevices" jsonschema:"connected devices in fastboot mode"`
++}
++
++func (s *Service) GetFlashDevices(ctx context.Context, req *mcp.CallToolRequest, input struct{}) (*mcp.CallToolResult, *GetFlashDevicesOutput, error) {
++	devices, err := titanflasher.GetDevices()
++	if err != nil {
++		return nil, nil, err
++	}
++
++	flashDevices := make([]FlashDevice, 0, len(devices))
++	for _, device := range devices {
++		flashDevices = append(flashDevices, FlashDevice{
++			Path: device.Path,
++			USBIdentity: USBIdentity{
++				VendorID:     formatUSBID(device.VendorID),
++				ProductID:    formatUSBID(device.ProductID),
++				Manufacturer: device.Manufacturer,
++				Product:      device.Product,
++				SerialNumber: device.SerialNumber,
++			},
++			SuperSpeed: device.SuperSpeed,
++		})
++	}
++
++	return nil, &GetFlashDevicesOutput{
++		FlashDevices: flashDevices,
++	}, nil
++}
+diff --git a/pkg/titanflasher/devices.go b/pkg/titanflasher/devices.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..e2802cb437d3ac0733a41b4930095f6aca190535
+--- /dev/null
++++ b/pkg/titanflasher/devices.go
+@@ -0,0 +1,61 @@
++package titanflasher
++
++import "github.com/google/gousb"
++
++type Device struct {
++	Path         string
++	VendorID     uint16
++	ProductID    uint16
++	Manufacturer string
++	Product      string
++	SerialNumber string
++	SuperSpeed   bool
++}
++
++func isSuperSpeed(speed int) bool {
++	return speed >= 4
++}
++
++func GetDevices() ([]Device, error) {
++	usbContext := gousb.NewContext()
++	defer usbContext.Close()
++
++	devs, err := usbContext.OpenDevices(func(desc *gousb.DeviceDesc) bool {
++		return isFastboot(desc)
++	})
++	if err != nil {
++		return nil, err
++	}
++
++	devices := make([]Device, 0, len(devs))
++	for _, dev := range devs {
++		manufacturer, err := dev.Manufacturer()
++		if err != nil {
++			return nil, err
++		}
++
++		product, err := dev.Product()
++		if err != nil {
++			return nil, err
++		}
++
++		serial, err := dev.SerialNumber()
++		if err != nil {
++			return nil, err
++		}
++
++		devices = append(devices, Device{
++			Path:         formatPortPath(append([]int{dev.Desc.Bus}, dev.Desc.Path...)),
++			VendorID:     uint16(dev.Desc.Vendor),
++			ProductID:    uint16(dev.Desc.Product),
++			Manufacturer: manufacturer,
++			Product:      product,
++			SerialNumber: serial,
++			SuperSpeed:   isSuperSpeed(int(dev.Desc.Speed)),
++		})
++
++		dev.Close()
++	}
++
++	return devices, nil
++}
+diff --git a/pkg/titanflasher/portpath.go b/pkg/titanflasher/portpath.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..f2932415beb187f0f3fbfd8075a5dff940a60af9
+--- /dev/null
++++ b/pkg/titanflasher/portpath.go
+@@ -0,0 +1,15 @@
++package titanflasher
++
++import (
++	"strconv"
++	"strings"
++)
++
++func formatPortPath(portPath []int) string {
++	parts := make([]string, len(portPath))
++	for i, p := range portPath {
++		parts[i] = strconv.Itoa(p)
++	}
++
++	return strings.Join(parts, "-")
++}
+diff --git a/pkg/titanflasher/settings.go b/pkg/titanflasher/settings.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..27d92ca9aafe4d883f6e56502ebb080906839d74
+--- /dev/null
++++ b/pkg/titanflasher/settings.go
+@@ -0,0 +1,30 @@
++package titanflasher
++
++import (
++	"slices"
++
++	"github.com/google/gousb"
++)
++
++const (
++	// See https://github.com/u-boot/u-boot/blob/master/drivers/usb/gadget/f_fastboot.c#L26-L28
++	interfaceClass    = 255
++	interfaceSubclass = 66
++	interfaceProtocol = 3
++)
++
++func isFastboot(desc *gousb.DeviceDesc) bool {
++	for _, cfg := range desc.Configs {
++		for _, ifc := range cfg.Interfaces {
++			if slices.ContainsFunc(ifc.AltSettings, isFastbootInterface) {
++				return true
++			}
++		}
++	}
++
++	return false
++}
++
++func isFastbootInterface(setting gousb.InterfaceSetting) bool {
++	return setting.Class == interfaceClass && setting.SubClass == interfaceSubclass && setting.Protocol == interfaceProtocol
++}
+
