@@ -1,0 +1,83 @@
+From f67f0c590bc8f2f129f8d1c2e5073b7fb2735a68 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Mon, 26 Oct 2026 23:24:32 -0700
+Subject: [PATCH] refactor: Decompose file name validation into single reusable utility
+---
+diff --git a/pkg/svc/files.go b/pkg/svc/files.go
+index 9a79e28f2f6721f83835d58b7bdce69f23cbb4bc..d8c50affec0da39a0aa604a14833383948023d12 100644
+--- a/pkg/svc/files.go
++++ b/pkg/svc/files.go
+@@ -18,7 +18,21 @@ const FilesUploadPath = "/files/"
+ 
+ var (
+ 	ErrInvalidFileName = errors.New("invalid file name")
+-)
++
++func isHiddenFileName(name string) bool {
++	return strings.HasPrefix(name, ".")
++}
++
++func validateFileName(name string) error {
++	// Path traversal etc. is handled by `os.OpenRoot` at the call sites, this is
++	// just to prevent some additional patterns we'd like to avoid.
++	// Also see `files.getFiles` tool where we hide hidden files
++	if strings.Contains(name, "/") || isHiddenFileName(name) {
++		return ErrInvalidFileName
++	}
++
++	return nil
++}
+ 
+ type baseURLContextKey struct{}
+ 
+@@ -46,11 +60,8 @@ }
+ 
+ func (s *Service) HandleUpload(w http.ResponseWriter, r *http.Request) {
+ 	name := r.PathValue("name")
+-	// Path traversal etc. is handled by `os.OpenRoot` below, this is
+-	// just to prevent some additional patterns we'd like to avoid.
+-	// Also see `files.getFiles` tool where we hide hidden files
+-	if strings.Contains(name, "/") || strings.HasPrefix(name, ".") {
+-		http.Error(w, ErrInvalidFileName.Error(), http.StatusBadRequest)
++	if err := validateFileName(name); err != nil {
++		http.Error(w, err.Error(), http.StatusBadRequest)
+ 
+ 		return
+ 	}
+diff --git a/pkg/svc/files_delete_file.go b/pkg/svc/files_delete_file.go
+index 745043b09e7cc300765331052233777b4e8a2b5b..03b2cb7cf95011b3ad30a8e6f1ad2702236851fd 100644
+--- a/pkg/svc/files_delete_file.go
++++ b/pkg/svc/files_delete_file.go
+@@ -21,6 +21,10 @@ 	Name string `json:"name" jsonschema:"name of the file to delete"`
+ }
+ 
+ func (s *Service) DeleteFile(ctx context.Context, req *mcp.CallToolRequest, input DeleteFileInput) (*mcp.CallToolResult, *GetFilesOutput, error) {
++	if err := validateFileName(input.Name); err != nil {
++		return nil, nil, err
++	}
++
+ 	root, err := os.OpenRoot(s.filesDir)
+ 	if err != nil {
+ 		return nil, nil, err
+diff --git a/pkg/svc/files_get_files.go b/pkg/svc/files_get_files.go
+index 1ef86d916a4a13b65378ac6e657ddb1c366da2ab..81e68eb868f18d743bbd596552519de48865c63d 100644
+--- a/pkg/svc/files_get_files.go
++++ b/pkg/svc/files_get_files.go
+@@ -3,7 +3,6 @@
+ import (
+ 	"context"
+ 	"os"
+-	"strings"
+ 
+ 	"github.com/modelcontextprotocol/go-sdk/mcp"
+ )
+@@ -31,7 +30,7 @@
+ 	files := []string{}
+ 	for _, entry := range entries {
+ 		// Skip hidden files, also in upload path
+-		if strings.HasPrefix(entry.Name(), ".") {
++		if isHiddenFileName(entry.Name()) {
+ 			continue
+ 		}
+ 
+
