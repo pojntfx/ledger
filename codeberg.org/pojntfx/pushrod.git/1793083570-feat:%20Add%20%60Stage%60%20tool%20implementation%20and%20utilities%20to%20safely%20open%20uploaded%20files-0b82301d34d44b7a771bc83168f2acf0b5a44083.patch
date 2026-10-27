@@ -1,0 +1,437 @@
+From 0b82301d34d44b7a771bc83168f2acf0b5a44083 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Mon, 26 Oct 2026 23:46:10 -0700
+Subject: [PATCH] feat: Add `Stage` tool implementation and utilities to safely open uploaded files
+---
+diff --git a/main.go b/main.go
+index ea4138ea537cef5318b1b4c42412e7501d432112..ab1ad6554328c5af63fb919f6b7bff461ccd948f 100644
+--- a/main.go
++++ b/main.go
+@@ -79,6 +79,7 @@ 	mcp.AddTool(handler, svc.GetFilesTool, service.GetFiles)
+ 	mcp.AddTool(handler, svc.DeleteFileTool, service.DeleteFile)
+ 	mcp.AddTool(handler, svc.GetFlashDevicesTool, service.GetFlashDevices)
+ 	mcp.AddTool(handler, svc.GetVarTool, service.GetVar)
++	mcp.AddTool(handler, svc.StageTool, service.Stage)
+ 
+ 	log.Println("Listening on", *laddr)
+ 
+diff --git a/pkg/fastboot/commands.go b/pkg/fastboot/commands.go
+index 384a83be8afef3e0a276f4b7953834544e4e7190..842fc1832e6f192c8825e9b429ed33f8bd8b50c6 100644
+--- a/pkg/fastboot/commands.go
++++ b/pkg/fastboot/commands.go
+@@ -2,10 +2,17 @@ package fastboot
+ 
+ import (
+ 	"context"
++	"io"
++	"math"
+ 	"time"
+ )
+ 
+-const commandTimeout = 10 * time.Second
++const (
++	commandTimeout  = 10 * time.Second
++	downloadTimeout = time.Minute
++)
++
++type ProgressCallback func(sent int64)
+ 
+ func (s *Session) GetVar(ctx context.Context, variable string) (string, error) {
+ 	if s.protocol == nil {
+@@ -15,13 +22,13 @@
+ 	ctx, cancel := context.WithTimeout(ctx, commandTimeout)
+ 	defer cancel()
+ 
+-	if err := s.protocol.writeCommand(ctx, "getvar:"+variable); err != nil {
++	if err := s.protocol.writeCommand(ctx, "getvar:"+variable, commandTimeout); err != nil {
+ 		return "", err
+ 	}
+ 
+ 	value := ""
+ 	for {
+-		r, err := s.protocol.readResponse(ctx)
++		r, err := s.protocol.readResponse(ctx, commandTimeout)
+ 		if err != nil {
+ 			return "", err
+ 		}
+@@ -47,3 +54,15 @@ 			return "", errUnexpectedResponse
+ 		}
+ 	}
+ }
++
++func (s *Session) Download(ctx context.Context, source io.Reader, size int64, progress ProgressCallback) error {
++	if s.protocol == nil {
++		return ErrSessionClosed
++	}
++
++	if size < 0 || size > math.MaxUint32 {
++		return ErrInvalidDownloadSize
++	}
++
++	return s.protocol.download(ctx, source, size, downloadTimeout, progress)
++}
+diff --git a/pkg/fastboot/devices.go b/pkg/fastboot/devices.go
+index e553ca0ec8e1ce36c12519c1fd29a08fc7c16df8..a61b6977a8b3cc10044d978c25e03839dd60dbdc 100644
+--- a/pkg/fastboot/devices.go
++++ b/pkg/fastboot/devices.go
+@@ -12,8 +12,8 @@ 	SerialNumber string
+ 	SuperSpeed   bool
+ }
+ 
+-func isSuperSpeed(speed int) bool {
+-	return speed >= 4
++func isSuperSpeed(speed gousb.Speed) bool {
++	return speed >= gousb.SpeedSuper
+ }
+ 
+ func GetDevices() ([]Device, error) {
+@@ -54,7 +54,7 @@ 			ProductID:    uint16(dev.Desc.Product),
+ 			Manufacturer: manufacturer,
+ 			Product:      product,
+ 			SerialNumber: serial,
+-			SuperSpeed:   isSuperSpeed(int(dev.Desc.Speed)),
++			SuperSpeed:   isSuperSpeed(dev.Desc.Speed),
+ 		})
+ 	}
+ 
+diff --git a/pkg/fastboot/protocol.go b/pkg/fastboot/protocol.go
+index 71ece2bd3c0a6fb28be5dfa0cd2282d18b03fe6c..451c3c26e025a2c39138b80577dcd65c23fc0dfb 100644
+--- a/pkg/fastboot/protocol.go
++++ b/pkg/fastboot/protocol.go
+@@ -3,8 +3,11 @@
+ import (
+ 	"context"
+ 	"errors"
++	"fmt"
+ 	"io"
++	"strconv"
+ 	"strings"
++	"time"
+ )
+ 
+ const (
+@@ -13,12 +16,19 @@ 	responsePacketSize = 64
+ 
+ 	// See https://android.googlesource.com/platform/system/core/+/refs/heads/main/fastboot/README.md#transport-and-framing
+ 	responseStatusSize = 4
++
++	// See https://android.googlesource.com/platform/system/core/+/refs/heads/main/fastboot/README.md#transport-and-framing
++	downloadSizeLength = 8
++
++	// SpacemiT's `flashserver` uses this too
++	downloadChunkSize = 1 << 20
+ )
+ 
+ var (
+-	errInvalidResponse    = errors.New("invalid fastboot response")
+-	errUnexpectedResponse = errors.New("unexpected fastboot response")
+-	errCommandFailed      = errors.New("fastboot command failed")
++	errInvalidResponse      = errors.New("invalid fastboot response")
++	errUnexpectedResponse   = errors.New("unexpected fastboot response")
++	errCommandFailed        = errors.New("fastboot command failed")
++	errDownloadSizeMismatch = errors.New("fastboot download size mismatch")
+ )
+ 
+ type responseStatus string
+@@ -45,16 +55,22 @@ type protocol struct {
+ 	transport transport
+ }
+ 
+-func (p *protocol) command(ctx context.Context, command string, expected responseStatus) (response, error) {
+-	if err := p.writeCommand(ctx, command); err != nil {
++func (p *protocol) command(ctx context.Context, command string, expected responseStatus, timeout time.Duration) (response, error) {
++	if err := p.writeCommand(ctx, command, timeout); err != nil {
+ 		return response{}, err
+ 	}
+ 
+-	return p.accept(ctx, expected)
++	return p.accept(ctx, expected, timeout)
+ }
+ 
+-func (p *protocol) writeCommand(ctx context.Context, command string) error {
+-	data := []byte(command)
++func (p *protocol) writeCommand(ctx context.Context, command string, timeout time.Duration) error {
++	return p.write(ctx, []byte(command), timeout)
++}
++
++func (p *protocol) write(ctx context.Context, data []byte, timeout time.Duration) error {
++	ctx, cancel := context.WithTimeout(ctx, timeout)
++	defer cancel()
++
+ 	n, err := p.transport.WriteContext(ctx, data)
+ 	if err != nil {
+ 		return err
+@@ -67,9 +83,9 @@
+ 	return nil
+ }
+ 
+-func (p *protocol) accept(ctx context.Context, expected responseStatus) (response, error) {
++func (p *protocol) accept(ctx context.Context, expected responseStatus, timeout time.Duration) (response, error) {
+ 	for {
+-		r, err := p.readResponse(ctx)
++		r, err := p.readResponse(ctx, timeout)
+ 		if err != nil {
+ 			return response{}, err
+ 		}
+@@ -90,7 +106,10 @@ 		}
+ 	}
+ }
+ 
+-func (p *protocol) readResponse(ctx context.Context) (response, error) {
++func (p *protocol) readResponse(ctx context.Context, timeout time.Duration) (response, error) {
++	ctx, cancel := context.WithTimeout(ctx, timeout)
++	defer cancel()
++
+ 	data := make([]byte, responsePacketSize)
+ 	n, err := p.transport.ReadContext(ctx, data)
+ 	if err != nil {
+@@ -113,3 +132,54 @@ 		status:  status,
+ 		payload: strings.TrimRight(string(data[responseStatusSize:n]), "\x00"),
+ 	}, nil
+ }
++
++func (p *protocol) download(ctx context.Context, source io.Reader, size int64, timeout time.Duration, progress ProgressCallback) error {
++	r, err := p.command(ctx, fmt.Sprintf("download:%08x", size), statusData, commandTimeout)
++	if err != nil {
++		return err
++	}
++
++	// See https://android.googlesource.com/platform/system/core/+/refs/heads/main/fastboot/README.md#transport-and-framing
++	acceptedSize, err := strconv.ParseUint(r.payload, 16, 32)
++	if len(r.payload) != downloadSizeLength || err != nil {
++		return errInvalidResponse
++	}
++
++	if int64(acceptedSize) != size {
++		return errDownloadSizeMismatch
++	}
++
++	if err := p.writeData(ctx, source, size, timeout, progress); err != nil {
++		return err
++	}
++
++	_, err = p.accept(ctx, statusOKAY, commandTimeout)
++
++	return err
++}
++
++func (p *protocol) writeData(ctx context.Context, source io.Reader, size int64, timeout time.Duration, progress ProgressCallback) error {
++	buffer := make([]byte, downloadChunkSize)
++
++	for sent := int64(0); sent < size; {
++		if err := ctx.Err(); err != nil {
++			return err
++		}
++
++		chunkSize := min(int64(len(buffer)), size-sent)
++		if _, err := io.ReadFull(source, buffer[:chunkSize]); err != nil {
++			return err
++		}
++
++		if err := p.write(ctx, buffer[:chunkSize], timeout); err != nil {
++			return err
++		}
++
++		sent += chunkSize
++		if progress != nil {
++			progress(sent)
++		}
++	}
++
++	return nil
++}
+diff --git a/pkg/fastboot/session.go b/pkg/fastboot/session.go
+index e84222cd327a48eda164d9f5b466a4c6447609fc..0f7808f7942cdf5f13ab80a378d88c80be63a605 100644
+--- a/pkg/fastboot/session.go
++++ b/pkg/fastboot/session.go
+@@ -8,8 +8,9 @@ 	"github.com/google/gousb"
+ )
+ 
+ var (
+-	ErrDeviceNotFound = errors.New("fastboot device not found")
+-	ErrSessionClosed  = errors.New("fastboot session is closed")
++	ErrDeviceNotFound      = errors.New("fastboot device not found")
++	ErrSessionClosed       = errors.New("fastboot session is closed")
++	ErrInvalidDownloadSize = errors.New("invalid fastboot download size")
+ )
+ 
+ type Session struct {
+diff --git a/pkg/fastboot/settings.go b/pkg/fastboot/settings.go
+index cf6fad8c7ef8f1659d9428625ce85e8f7586f1d9..220bf0ce7e56fac9a0f7cfac8462e99cc55afcf9 100644
+--- a/pkg/fastboot/settings.go
++++ b/pkg/fastboot/settings.go
+@@ -8,7 +8,7 @@ )
+ 
+ const (
+ 	// See https://github.com/u-boot/u-boot/blob/master/drivers/usb/gadget/f_fastboot.c#L26-L28
+-	interfaceClass    = 255
++	interfaceClass    = gousb.ClassVendorSpec
+ 	interfaceSubclass = 66
+ 	interfaceProtocol = 3
+ )
+diff --git a/pkg/svc/files.go b/pkg/svc/files.go
+index d8c50affec0da39a0aa604a14833383948023d12..904459c8687d0bfbf7d111c2ae0f0cd911cbafd7 100644
+--- a/pkg/svc/files.go
++++ b/pkg/svc/files.go
+@@ -18,6 +18,8 @@ const FilesUploadPath = "/files/"
+ 
+ var (
+ 	ErrInvalidFileName = errors.New("invalid file name")
++	ErrNotRegularFile  = errors.New("not a regular file")
++)
+ 
+ func isHiddenFileName(name string) bool {
+ 	return strings.HasPrefix(name, ".")
+@@ -73,6 +75,38 @@ 		return
+ 	}
+ 
+ 	w.WriteHeader(http.StatusNoContent)
++}
++
++func (s *Service) openUploadedFile(name string) (*os.File, error) {
++	if err := validateFileName(name); err != nil {
++		return nil, err
++	}
++
++	root, err := os.OpenRoot(s.filesDir)
++	if err != nil {
++		return nil, err
++	}
++	defer root.Close()
++
++	file, err := root.Open(name)
++	if err != nil {
++		return nil, err
++	}
++
++	info, err := file.Stat()
++	if err != nil {
++		file.Close()
++
++		return nil, err
++	}
++
++	if !info.Mode().IsRegular() {
++		file.Close()
++
++		return nil, ErrNotRegularFile
++	}
++
++	return file, nil
+ }
+ 
+ func (s *Service) storeUpload(name string, body io.Reader) error {
+diff --git a/pkg/svc/flash.go b/pkg/svc/flash.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..a1765bf93cbf3a2fe0c1403678a35ec11359971b
+--- /dev/null
++++ b/pkg/svc/flash.go
+@@ -0,0 +1,42 @@
++package svc
++
++import (
++	"context"
++	"fmt"
++	"time"
++
++	"github.com/modelcontextprotocol/go-sdk/mcp"
++)
++
++const progressNotificationTimeout = 5 * time.Second // So that we don't hang forever if the remote disconnects
++
++func notifyProgress(ctx context.Context, req *mcp.CallToolRequest, total int64) func(int64) {
++	progressToken := req.Params.GetProgressToken()
++	if progressToken == nil || total <= 0 {
++		return nil
++	}
++
++	lastPercent := -1
++
++	return func(sent int64) {
++		if ctx.Err() != nil {
++			return
++		}
++
++		percent := int(sent * 100 / total)
++		if percent == lastPercent {
++			return
++		}
++		lastPercent = percent
++
++		notifyCtx, cancel := context.WithTimeout(ctx, progressNotificationTimeout)
++		defer cancel()
++
++		_ = req.Session.NotifyProgress(notifyCtx, &mcp.ProgressNotificationParams{
++			ProgressToken: progressToken,
++			Progress:      float64(sent),
++			Total:         float64(total),
++			Message:       fmt.Sprintf("%d%%", percent),
++		})
++	}
++}
+diff --git a/pkg/svc/flash_stage.go b/pkg/svc/flash_stage.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..0beefc2a53ca615301ee447f6691df7c50a5e9f7
+--- /dev/null
++++ b/pkg/svc/flash_stage.go
+@@ -0,0 +1,59 @@
++package svc
++
++import (
++	"context"
++
++	"codeberg.org/pojntfx/pushrod/pkg/fastboot"
++	"github.com/modelcontextprotocol/go-sdk/mcp"
++)
++
++var (
++	StageTool = &mcp.Tool{
++		Name:        "flash.stage",
++		Title:       "Stage file",
++		Description: "Download an uploaded file into a device's memory without flashing it",
++		Annotations: &mcp.ToolAnnotations{DestructiveHint: new(false)},
++	}
++)
++
++type StageInput struct {
++	Path string `json:"path" jsonschema:"path that uniquely identifies the fastboot device until it gets unplugged, in BUS-PORT form like 1-2-3"`
++	File string `json:"file" jsonschema:"name of the file to stage"`
++}
++
++type StageOutput struct {
++	File string `json:"file" jsonschema:"name of the file that was staged"`
++}
++
++func (s *Service) Stage(ctx context.Context, req *mcp.CallToolRequest, input StageInput) (*mcp.CallToolResult, *StageOutput, error) {
++	// Validation happens inside of openUploadedFile
++	file, err := s.openUploadedFile(input.File)
++	if err != nil {
++		return nil, nil, err
++	}
++	defer file.Close()
++
++	info, err := file.Stat()
++	if err != nil {
++		return nil, nil, err
++	}
++
++	if err := s.flashLock.Acquire(ctx, 1); err != nil {
++		return nil, nil, err
++	}
++	defer s.flashLock.Release(1)
++
++	session, err := fastboot.OpenSession(input.Path)
++	if err != nil {
++		return nil, nil, err
++	}
++	defer session.Close()
++
++	if err := session.Download(ctx, file, info.Size(), notifyProgress(ctx, req, info.Size())); err != nil {
++		return nil, nil, err
++	}
++
++	return nil, &StageOutput{
++		File: input.File,
++	}, nil
++}
+
