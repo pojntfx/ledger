@@ -1,0 +1,583 @@
+From 70b25cbed2acaaa900839d0223523974efbe8533 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Tue, 27 Oct 2026 22:45:42 -0700
+Subject: [PATCH] feat: Add async flash etc. job manager and add background options to single and multi-file flash options
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/go.mod b/go.mod
+index a10d21d22b07dc67feeb043b5add61e0347b2e81..5908fddf9435130240b310bef2654b0133ace258 100644
+--- a/go.mod
++++ b/go.mod
+@@ -1,6 +1,6 @@
+ module codeberg.org/pojntfx/pushrod
+ 
+-go 1.26.4
++go 1.27.3
+ 
+ require (
+ 	al.essio.dev/pkg/shellescape v1.6.1
+diff --git a/main.go b/main.go
+index 18cba3bcde9100d315047e326bd6ab9d4a4fda4f..9815e98eb029bd42c4e98181e0fb14f949f16bd9 100644
+--- a/main.go
++++ b/main.go
+@@ -85,6 +85,7 @@ 	mcp.AddTool(handler, svc.RebootTool, service.Reboot)
+ 	mcp.AddTool(handler, svc.OEMTool, service.OEM)
+ 	mcp.AddTool(handler, svc.FlashFileTool, service.FlashFile)
+ 	mcp.AddTool(handler, svc.MultiFlashTool, service.MultiFlash)
++	mcp.AddTool(handler, svc.GetFlashJobsTool, service.GetFlashJobs)
+ 
+ 	log.Println("Listening on", *laddr)
+ 
+diff --git a/pkg/svc/flash_flash_file.go b/pkg/svc/flash_flash_file.go
+index 5bb630bd67d5e548a05023ada95a909e770c3d25..1c3539f87d5f464e488e6123a22689511f008081 100644
+--- a/pkg/svc/flash_flash_file.go
++++ b/pkg/svc/flash_flash_file.go
+@@ -35,18 +35,20 @@ 	return schema
+ }
+ 
+ type FlashFileInput struct {
+-	Path      string                   `json:"path" jsonschema:"path that uniquely identifies the fastboot device until it gets unplugged, in BUS-PORT form like 1-2-3"`
+-	File      string                   `json:"file" jsonschema:"name of the file to flash"`
+-	Partition string                   `json:"partition" jsonschema:"partition to flash the file to, like boot or rootfs"`
+-	Compress  titanflasher.Compression `json:"compress,omitempty" jsonschema:"SpacemiT-specific compression to use for the transfer"`
+-	Reboot    bool                     `json:"reboot" jsonschema:"whether to reboot the device after flashing"`
++	Path       string                   `json:"path" jsonschema:"path that uniquely identifies the fastboot device until it gets unplugged, in BUS-PORT form like 1-2-3"`
++	File       string                   `json:"file" jsonschema:"name of the file to flash"`
++	Partition  string                   `json:"partition" jsonschema:"partition to flash the file to, like boot or rootfs"`
++	Compress   titanflasher.Compression `json:"compress,omitempty" jsonschema:"SpacemiT-specific compression to use for the transfer"`
++	Reboot     bool                     `json:"reboot" jsonschema:"whether to reboot the device after flashing"`
++	Background bool                     `json:"background,omitempty" jsonschema:"whether to run the flash in the background and return a job ID"`
+ }
+ 
+ type FlashFileOutput struct {
+-	File       string `json:"file" jsonschema:"name of the file that was flashed"`
+-	Partition  string `json:"partition" jsonschema:"partition the file was flashed to"`
+-	Rebooted   bool   `json:"rebooted" jsonschema:"whether the device was rebooted afterwards"`
+-	DurationMs int64  `json:"durationMs" jsonschema:"how long the flash took, in milliseconds"`
++	JobID      string `json:"jobId,omitempty" jsonschema:"ID of the background job, if requested"`
++	File       string `json:"file,omitempty" jsonschema:"name of the file that was flashed"`
++	Partition  string `json:"partition,omitempty" jsonschema:"partition the file was flashed to"`
++	Rebooted   bool   `json:"rebooted,omitempty" jsonschema:"whether the device was rebooted afterwards"`
++	DurationMs int64  `json:"durationMs,omitempty" jsonschema:"how long the flash took, in milliseconds"`
+ }
+ 
+ func (s *Service) FlashFile(ctx context.Context, req *mcp.CallToolRequest, input FlashFileInput) (*mcp.CallToolResult, *FlashFileOutput, error) {
+@@ -59,40 +61,65 @@ 	file, err := s.openUploadedFile(input.File)
+ 	if err != nil {
+ 		return nil, nil, err
+ 	}
+-	defer file.Close()
+ 
+ 	info, err := file.Stat()
+ 	if err != nil {
++		file.Close()
++
+ 		return nil, nil, err
+ 	}
+ 
++	run := func(ctx context.Context, progress fastboot.ProgressCallback) (*FlashFileOutput, error) {
++		defer file.Close()
++
++		session, err := fastboot.OpenSession(input.Path)
++		if err != nil {
++			return nil, err
++		}
++		defer session.Close()
++
++		start := time.Now()
++		if err := flashWithCompression(ctx, session, input.Partition, file, info.Size(), input.Compress, gzipLevel, progress); err != nil {
++			return nil, err
++		}
++
++		if input.Reboot {
++			if _, err := session.Reboot(ctx); err != nil {
++				return nil, err
++			}
++		}
++
++		return &FlashFileOutput{
++			File:       input.File,
++			Partition:  input.Partition,
++			Rebooted:   input.Reboot,
++			DurationMs: time.Since(start).Milliseconds(),
++		}, nil
++	}
++
++	if input.Background {
++		jobID := s.startFlashJob(FlashFileTool.Name, input, info.Size(), func(ctx context.Context, progress func(string, int64)) (any, error) {
++			return run(ctx, func(sent int64) {
++				progress(input.Partition, sent)
++			})
++		}, func() {
++			file.Close()
++		})
++
++		return nil, &FlashFileOutput{JobID: jobID}, nil
++	}
++
+ 	if err := s.flashLock.Acquire(ctx, 1); err != nil {
++		file.Close()
++
+ 		return nil, nil, err
+ 	}
+ 	defer s.flashLock.Release(1)
+ 
+-	session, err := fastboot.OpenSession(input.Path)
++	output, err := run(ctx, notifyProgress(ctx, req, info.Size()))
+ 	if err != nil {
+ 		return nil, nil, err
+ 	}
+-	defer session.Close()
+ 
+-	start := time.Now()
+-	progress := notifyProgress(ctx, req, info.Size())
+-	if err := flashWithCompression(ctx, session, input.Partition, file, info.Size(), input.Compress, gzipLevel, progress); err != nil {
+-		return nil, nil, err
+-	}
+-
+-	if input.Reboot {
+-		if _, err := session.Reboot(ctx); err != nil {
+-			return nil, nil, err
+-		}
+-	}
+-
+-	return nil, &FlashFileOutput{
+-		File:       input.File,
+-		Partition:  input.Partition,
+-		Rebooted:   input.Reboot,
+-		DurationMs: time.Since(start).Milliseconds(),
+-	}, nil
++	return nil, output, nil
+ }
+diff --git a/pkg/svc/flash_jobs.go b/pkg/svc/flash_jobs.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..48cf9152c11e07d5b6cf6c18f860ea1f7507a97f
+--- /dev/null
++++ b/pkg/svc/flash_jobs.go
+@@ -0,0 +1,176 @@
++package svc
++
++import (
++	"context"
++	"slices"
++	"time"
++
++	"uuid"
++
++	"github.com/modelcontextprotocol/go-sdk/mcp"
++)
++
++const flashJobHistorySize = 16
++
++type flashJobState string
++
++const (
++	flashJobQueued    flashJobState = "queued"
++	flashJobRunning   flashJobState = "running"
++	flashJobSucceeded flashJobState = "succeeded"
++	flashJobFailed    flashJobState = "failed"
++)
++
++type flashJob struct {
++	id         string
++	kind       string
++	input      any
++	status     flashJobState
++	err        string
++	partition  string
++	sent       int64
++	totalBytes int64
++	result     any
++	created    time.Time
++	ended      time.Time
++}
++
++type FlashJobStatus struct {
++	ID         string `json:"id" jsonschema:"ID of the job"`
++	Kind       string `json:"kind" jsonschema:"operation that started the job, like flash.flashFile or flash.multiFlash"`
++	Input      any    `json:"input" jsonschema:"original input that started the job"`
++	Status     string `json:"status" jsonschema:"queued, running, succeeded or failed"`
++	Error      string `json:"error,omitempty" jsonschema:"why the job failed, if it did"`
++	Partition  string `json:"partition,omitempty" jsonschema:"partition currently being flashed"`
++	SentBytes  int64  `json:"sentBytes" jsonschema:"uncompressed bytes flashed so far, across the whole job"`
++	TotalBytes int64  `json:"totalBytes" jsonschema:"total uncompressed bytes the job will flash"`
++	Result     any    `json:"result,omitempty" jsonschema:"operation result after success, with the same fields as the synchronous call"`
++	CreatedAt  int64  `json:"createdAt" jsonschema:"when the job was created, in milliseconds since the epoch"`
++	DurationMs int64  `json:"durationMs" jsonschema:"how long the job has existed, in milliseconds"`
++}
++
++type GetFlashJobsOutput struct {
++	Jobs []FlashJobStatus `json:"jobs" jsonschema:"background flash jobs, oldest first"`
++}
++
++var (
++	GetFlashJobsTool = &mcp.Tool{
++		Name:        "flash.getJobs",
++		Title:       "Get flash jobs",
++		Description: "Get background flashing jobs and their progress and results",
++		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true},
++	}
++)
++
++type flashJobRun func(context.Context, func(string, int64)) (any, error)
++
++func (s *Service) startFlashJob(kind string, input any, totalBytes int64, run flashJobRun, cleanup func()) string {
++	job := &flashJob{
++		id:         uuid.New().String(),
++		kind:       kind,
++		input:      input,
++		status:     flashJobQueued,
++		totalBytes: totalBytes,
++		created:    time.Now(),
++	}
++
++	s.flashJobsLock.Lock()
++	s.flashJobs = append(s.flashJobs, job)
++	s.pruneFlashJobsLocked()
++	s.flashJobsLock.Unlock()
++
++	s.wg.Go(func() {
++		if err := s.flashLock.Acquire(s.baseCtx, 1); err != nil {
++			s.finishFlashJob(job, nil, err)
++			cleanup()
++
++			return
++		}
++		defer s.flashLock.Release(1)
++
++		s.flashJobsLock.Lock()
++		job.status = flashJobRunning
++		s.flashJobsLock.Unlock()
++
++		result, err := run(s.baseCtx, func(partition string, sent int64) {
++			s.flashJobsLock.Lock()
++			defer s.flashJobsLock.Unlock()
++
++			job.partition = partition
++			job.sent = sent
++		})
++		s.finishFlashJob(job, result, err)
++	})
++
++	return job.id
++}
++
++func (s *Service) finishFlashJob(job *flashJob, result any, err error) {
++	s.flashJobsLock.Lock()
++	defer s.flashJobsLock.Unlock()
++
++	job.ended = time.Now()
++	if err != nil {
++		job.status = flashJobFailed
++		job.err = err.Error()
++
++		return
++	}
++
++	job.status = flashJobSucceeded
++	job.result = result
++}
++
++func (s *Service) pruneFlashJobsLocked() {
++	finished := 0
++	for _, job := range s.flashJobs {
++		if flashJobFinished(job.status) {
++			finished++
++		}
++	}
++
++	for finished > flashJobHistorySize {
++		for i, job := range s.flashJobs {
++			if flashJobFinished(job.status) {
++				s.flashJobs = slices.Delete(s.flashJobs, i, i+1)
++				finished--
++
++				break
++			}
++		}
++	}
++}
++
++func flashJobFinished(status flashJobState) bool {
++	return status == flashJobSucceeded || status == flashJobFailed
++}
++
++func (s *Service) GetFlashJobs(ctx context.Context, req *mcp.CallToolRequest, input struct{}) (*mcp.CallToolResult, *GetFlashJobsOutput, error) {
++	s.flashJobsLock.Lock()
++	defer s.flashJobsLock.Unlock()
++
++	now := time.Now()
++	jobs := make([]FlashJobStatus, 0, len(s.flashJobs))
++	for _, job := range s.flashJobs {
++		end := job.ended
++		if end.IsZero() {
++			end = now
++		}
++
++		jobs = append(jobs, FlashJobStatus{
++			ID:         job.id,
++			Kind:       job.kind,
++			Input:      job.input,
++			Status:     string(job.status),
++			Error:      job.err,
++			Partition:  job.partition,
++			SentBytes:  job.sent,
++			TotalBytes: job.totalBytes,
++			Result:     job.result,
++			CreatedAt:  job.created.UnixMilli(),
++			DurationMs: end.Sub(job.created).Milliseconds(),
++		})
++	}
++
++	return nil, &GetFlashJobsOutput{Jobs: jobs}, nil
++}
+diff --git a/pkg/svc/flash_multi_flash.go b/pkg/svc/flash_multi_flash.go
+index 07ae440d147fc2d94bbb2cb58e2d4aaaf91a417a..891ceead0c8ea56dbbf6694f72b04d215b5b9bcd 100644
+--- a/pkg/svc/flash_multi_flash.go
++++ b/pkg/svc/flash_multi_flash.go
+@@ -5,7 +5,6 @@ 	"bytes"
+ 	"context"
+ 	"encoding/json"
+ 	"errors"
+-	"io"
+ 	"os"
+ 	"path"
+ 	"time"
+@@ -45,6 +44,7 @@ type MultiFlashInput struct {
+ 	Path            string                        `json:"path" jsonschema:"path that uniquely identifies the fastboot device until it gets unplugged, in BUS-PORT form like 1-2-3"`
+ 	PartitionTables []titanflasher.PartitionTable `json:"partitionTables" jsonschema:"partition tables to apply in order"`
+ 	Reboot          bool                          `json:"reboot" jsonschema:"whether to reboot the device after flashing"`
++	Background      bool                          `json:"background,omitempty" jsonschema:"whether to run the flash in the background and return a job ID"`
+ }
+ 
+ type FlashedPartition struct {
+@@ -54,10 +54,11 @@ 	DurationMs int64  `json:"durationMs" jsonschema:"how long the partition took to flash, in milliseconds"`
+ }
+ 
+ type MultiFlashOutput struct {
+-	FormatPartitions  []string           `json:"formatPartitions" jsonschema:"partitions that the tables were written to, in the same order"`
+-	FlashedPartitions []FlashedPartition `json:"flashedPartitions" jsonschema:"partitions that were flashed, in the order the tables list them"`
+-	Rebooted          bool               `json:"rebooted" jsonschema:"whether the device was rebooted afterwards"`
+-	DurationMs        int64              `json:"durationMs" jsonschema:"how long the whole flash took, in milliseconds"`
++	JobID             string             `json:"jobId,omitempty" jsonschema:"ID of the background job, if requested"`
++	FormatPartitions  []string           `json:"formatPartitions,omitempty" jsonschema:"partitions that the tables were written to, in the same order"`
++	FlashedPartitions []FlashedPartition `json:"flashedPartitions,omitempty" jsonschema:"partitions that were flashed, in the order the tables list them"`
++	Rebooted          bool               `json:"rebooted,omitempty" jsonschema:"whether the device was rebooted afterwards"`
++	DurationMs        int64              `json:"durationMs,omitempty" jsonschema:"how long the whole flash took, in milliseconds"`
+ }
+ 
+ type preparedPartitionImage struct {
+@@ -87,6 +88,12 @@ 	for _, image := range t.images {
+ 		if image.file != nil {
+ 			image.file.Close()
+ 		}
++	}
++}
++
++func closePartitionTables(partitionTables []*parsedPartitionTable) {
++	for _, partitionTable := range partitionTables {
++		partitionTable.close()
+ 	}
+ }
+ 
+@@ -156,91 +163,118 @@ 		return nil, nil, ErrNoPartitionTables
+ 	}
+ 
+ 	partitionTables := make([]*parsedPartitionTable, 0, len(input.PartitionTables))
+-	defer func() {
+-		for _, table := range partitionTables {
+-			table.close()
+-		}
+-	}()
+-
+ 	missing := []string{}
+ 	var totalBytes int64
+ 	for _, definition := range input.PartitionTables {
+-		table, missingImages, err := s.preparePartitionTable(definition)
++		partitionTable, missingImages, err := s.preparePartitionTable(definition)
+ 		if err != nil {
++			closePartitionTables(partitionTables)
++
+ 			return nil, nil, err
+ 		}
+ 
+-		partitionTables = append(partitionTables, table)
++		partitionTables = append(partitionTables, partitionTable)
+ 		missing = append(missing, missingImages...)
+-		totalBytes += int64(len(table.data))
+-		for _, image := range table.images {
++		totalBytes += int64(len(partitionTable.data))
++		for _, image := range partitionTable.images {
+ 			totalBytes += image.size
+ 		}
+ 	}
+ 
+ 	if len(missing) > 0 {
++		closePartitionTables(partitionTables)
++
+ 		return nil, nil, ErrImagesNotUploaded
+ 	}
+ 
+-	if err := s.flashLock.Acquire(ctx, 1); err != nil {
+-		return nil, nil, err
+-	}
+-	defer s.flashLock.Release(1)
++	run := func(ctx context.Context, progress func(string, int64)) (*MultiFlashOutput, error) {
++		defer closePartitionTables(partitionTables)
+ 
+-	session, err := fastboot.OpenSession(input.Path)
+-	if err != nil {
+-		return nil, nil, err
+-	}
+-	defer session.Close()
+-
+-	start := time.Now()
+-	progress := notifyProgress(ctx, req, totalBytes)
+-	var sentBase int64
+-	flash := func(partition string, source io.Reader, size int64, compression titanflasher.Compression, gzipLevel titanflasher.GzipLevel) error {
+-		if progress == nil {
+-			return flashWithCompression(ctx, session, partition, source, size, compression, gzipLevel, nil)
++		session, err := fastboot.OpenSession(input.Path)
++		if err != nil {
++			return nil, err
+ 		}
++		defer session.Close()
+ 
+-		return flashWithCompression(ctx, session, partition, source, size, compression, gzipLevel, func(sent int64) {
+-			progress(sentBase + sent)
+-		})
+-	}
++		start := time.Now()
++		var sentBase int64
++		progressFor := func(partition string) fastboot.ProgressCallback {
++			if progress == nil {
++				return nil
++			}
+ 
+-	formatPartitions := make([]string, 0, len(partitionTables))
+-	flashedPartitions := []FlashedPartition{}
+-	for _, table := range partitionTables {
+-		tableSize := int64(len(table.data))
+-		if err := flash(table.format, bytes.NewReader(table.data), tableSize, titanflasher.CompressionRaw, titanflasher.GzipLevel0); err != nil {
+-			return nil, nil, err
++			return func(sent int64) {
++				progress(partition, sentBase+sent)
++			}
+ 		}
+-		sentBase += tableSize
+-		formatPartitions = append(formatPartitions, table.format)
+ 
+-		for _, image := range table.images {
+-			partitionStart := time.Now()
+-			if err := flash(image.partition, image.file, image.size, image.compress, image.gzipLevel); err != nil {
+-				return nil, nil, err
++		formatPartitions := make([]string, 0, len(partitionTables))
++		flashedPartitions := []FlashedPartition{}
++		for _, partitionTable := range partitionTables {
++			partitionTableSize := int64(len(partitionTable.data))
++			if err := flashWithCompression(ctx, session, partitionTable.format, bytes.NewReader(partitionTable.data), partitionTableSize, titanflasher.CompressionRaw, titanflasher.GzipLevel0, progressFor(partitionTable.format)); err != nil {
++				return nil, err
+ 			}
+-			sentBase += image.size
++			sentBase += partitionTableSize
++			formatPartitions = append(formatPartitions, partitionTable.format)
+ 
+-			flashedPartitions = append(flashedPartitions, FlashedPartition{
+-				Partition:  image.partition,
+-				File:       image.name,
+-				DurationMs: time.Since(partitionStart).Milliseconds(),
+-			})
++			for _, image := range partitionTable.images {
++				partitionStart := time.Now()
++				if err := flashWithCompression(ctx, session, image.partition, image.file, image.size, image.compress, image.gzipLevel, progressFor(image.partition)); err != nil {
++					return nil, err
++				}
++				sentBase += image.size
++
++				flashedPartitions = append(flashedPartitions, FlashedPartition{
++					Partition:  image.partition,
++					File:       image.name,
++					DurationMs: time.Since(partitionStart).Milliseconds(),
++				})
++			}
+ 		}
++
++		if input.Reboot {
++			if _, err := session.Reboot(ctx); err != nil {
++				return nil, err
++			}
++		}
++
++		return &MultiFlashOutput{
++			FormatPartitions:  formatPartitions,
++			FlashedPartitions: flashedPartitions,
++			Rebooted:          input.Reboot,
++			DurationMs:        time.Since(start).Milliseconds(),
++		}, nil
+ 	}
+ 
+-	if input.Reboot {
+-		if _, err := session.Reboot(ctx); err != nil {
+-			return nil, nil, err
++	if input.Background {
++		jobID := s.startFlashJob(MultiFlashTool.Name, input, totalBytes, func(ctx context.Context, progress func(string, int64)) (any, error) {
++			return run(ctx, progress)
++		}, func() {
++			closePartitionTables(partitionTables)
++		})
++
++		return nil, &MultiFlashOutput{JobID: jobID}, nil
++	}
++
++	var progress func(string, int64)
++	if notify := notifyProgress(ctx, req, totalBytes); notify != nil {
++		progress = func(_ string, sent int64) {
++			notify(sent)
+ 		}
+ 	}
+ 
+-	return nil, &MultiFlashOutput{
+-		FormatPartitions:  formatPartitions,
+-		FlashedPartitions: flashedPartitions,
+-		Rebooted:          input.Reboot,
+-		DurationMs:        time.Since(start).Milliseconds(),
+-	}, nil
++	if err := s.flashLock.Acquire(ctx, 1); err != nil {
++		closePartitionTables(partitionTables)
++
++		return nil, nil, err
++	}
++	defer s.flashLock.Release(1)
++
++	output, err := run(ctx, progress)
++	if err != nil {
++		return nil, nil, err
++	}
++
++	return nil, output, nil
+ }
+diff --git a/pkg/svc/root.go b/pkg/svc/root.go
+index b1bc9e302ad86ab297026cf91fbadac098d17051..f0b317b7ea5cc492e8688fe4e5e05b90cd02da5d 100644
+--- a/pkg/svc/root.go
++++ b/pkg/svc/root.go
+@@ -52,6 +52,9 @@ 	consolesLock *sync.Mutex
+ 	consoles     map[string]*serialConsole
+ 
+ 	flashLock *semaphore.Weighted
++
++	flashJobsLock *sync.Mutex
++	flashJobs     []*flashJob
+ }
+ 
+ func NewService(baseCtx context.Context, log *slog.Logger, shutdownTimeout, totalRelayCycleDuration, onRelayCycleDuration time.Duration, filesDir string, publicURL *url.URL) *Service {
+@@ -89,6 +92,8 @@ 		consolesLock: &sync.Mutex{},
+ 		consoles:     map[string]*serialConsole{},
+ 
+ 		flashLock: semaphore.NewWeighted(1),
++
++		flashJobsLock: &sync.Mutex{},
+ 
+ 		relayCycles: [4]*relayCycle{
+ 			{
+
