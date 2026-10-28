@@ -1,0 +1,100 @@
+From 568abd0d70331b1f62e935e56367592a3fa35039 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Tue, 27 Oct 2026 18:13:06 -0700
+Subject: [PATCH] feat: Add `OEM` tool implementation and utilities to safely open uploaded files
+---
+diff --git a/main.go b/main.go
+index 853c71a33f9b4567802ab9bbd1303c07a7c9a087..557151caedd27c04748397a69de49db640aa3ee7 100644
+--- a/main.go
++++ b/main.go
+@@ -82,6 +82,7 @@ 	mcp.AddTool(handler, svc.GetVarTool, service.GetVar)
+ 	mcp.AddTool(handler, svc.StageTool, service.Stage)
+ 	mcp.AddTool(handler, svc.ContinueTool, service.Continue)
+ 	mcp.AddTool(handler, svc.RebootTool, service.Reboot)
++	mcp.AddTool(handler, svc.OEMTool, service.OEM)
+ 
+ 	log.Println("Listening on", *laddr)
+ 
+diff --git a/pkg/fastboot/commands.go b/pkg/fastboot/commands.go
+index cb3c3855bf5931484ad5163d87382d56f36d438f..8806d9a18c72d62175887f4a10423e20a95cc15e 100644
+--- a/pkg/fastboot/commands.go
++++ b/pkg/fastboot/commands.go
+@@ -9,7 +9,11 @@ 	"time"
+ )
+ 
+ const (
+-	commandTimeout  = 10 * time.Second
++	// Regular commands finish quickly
++	commandTimeout = 10 * time.Second
++	// OEM commands (e.g. flash) can take quite long
++	oemTimeout = 10 * time.Minute
++	// Downloads can also take a bit longer
+ 	downloadTimeout = time.Minute
+ )
+ 
+@@ -54,6 +58,10 @@ }
+ 
+ func (s *Session) Reboot(ctx context.Context) (string, error) {
+ 	return s.commandText(ctx, "reboot", commandTimeout)
++}
++
++func (s *Session) OEM(ctx context.Context, command string) (string, error) {
++	return s.commandText(ctx, "oem "+command, oemTimeout)
+ }
+ 
+ func (s *Session) Download(ctx context.Context, source io.Reader, size int64, progress ProgressCallback) error {
+diff --git a/pkg/svc/flash_oem.go b/pkg/svc/flash_oem.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..35baae9ef5198ff96ce1c33b67a4da51ede07dd9
+--- /dev/null
++++ b/pkg/svc/flash_oem.go
+@@ -0,0 +1,48 @@
++package svc
++
++import (
++	"context"
++
++	"codeberg.org/pojntfx/pushrod/pkg/fastboot"
++	"github.com/modelcontextprotocol/go-sdk/mcp"
++)
++
++var (
++	OEMTool = &mcp.Tool{
++		Name:        "flash.oem",
++		Title:       "Run OEM command",
++		Description: "Run an OEM command on a device in fastboot mode",
++		Annotations: &mcp.ToolAnnotations{DestructiveHint: new(true)},
++	}
++)
++
++type OEMInput struct {
++	Path    string `json:"path" jsonschema:"path that uniquely identifies the fastboot device until it gets unplugged, in BUS-PORT form like 1-2-3"`
++	Command string `json:"command" jsonschema:"OEM command to run, without the leading oem, like ec:flash or speed:super-speed"`
++}
++
++type OEMOutput struct {
++	Response string `json:"response" jsonschema:"text that the device returned, if any"`
++}
++
++func (s *Service) OEM(ctx context.Context, req *mcp.CallToolRequest, input OEMInput) (*mcp.CallToolResult, *OEMOutput, error) {
++	if err := s.flashLock.Acquire(ctx, 1); err != nil {
++		return nil, nil, err
++	}
++	defer s.flashLock.Release(1)
++
++	session, err := fastboot.OpenSession(input.Path)
++	if err != nil {
++		return nil, nil, err
++	}
++	defer session.Close()
++
++	response, err := session.OEM(ctx, input.Command)
++	if err != nil {
++		return nil, nil, err
++	}
++
++	return nil, &OEMOutput{
++		Response: response,
++	}, nil
++}
+
