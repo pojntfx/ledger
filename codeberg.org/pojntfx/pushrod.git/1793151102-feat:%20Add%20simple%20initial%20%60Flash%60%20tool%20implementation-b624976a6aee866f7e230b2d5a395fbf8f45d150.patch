@@ -1,0 +1,264 @@
+From b624976a6aee866f7e230b2d5a395fbf8f45d150 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Tue, 27 Oct 2026 18:31:42 -0700
+Subject: [PATCH] feat: Add simple initial `Flash` tool implementation
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/main.go b/main.go
+index 557151caedd27c04748397a69de49db640aa3ee7..e190599e88865ebf68d5edca233846d7e964258d 100644
+--- a/main.go
++++ b/main.go
+@@ -83,6 +83,7 @@ 	mcp.AddTool(handler, svc.StageTool, service.Stage)
+ 	mcp.AddTool(handler, svc.ContinueTool, service.Continue)
+ 	mcp.AddTool(handler, svc.RebootTool, service.Reboot)
+ 	mcp.AddTool(handler, svc.OEMTool, service.OEM)
++	mcp.AddTool(handler, svc.FlashFileTool, service.FlashFile)
+ 
+ 	log.Println("Listening on", *laddr)
+ 
+diff --git a/pkg/fastboot/commands.go b/pkg/fastboot/commands.go
+index 8806d9a18c72d62175887f4a10423e20a95cc15e..3997737bc81ab59b1daccab184f66713c10ff29e 100644
+--- a/pkg/fastboot/commands.go
++++ b/pkg/fastboot/commands.go
+@@ -4,17 +4,20 @@ import (
+ 	"context"
+ 	"io"
+ 	"math"
++	"strconv"
+ 	"strings"
+ 	"time"
+ )
+ 
+ const (
+ 	// Regular commands finish quickly
+-	commandTimeout = 10 * time.Second
++	timeoutRegularCommand = 10 * time.Second
+ 	// OEM commands (e.g. flash) can take quite long
+-	oemTimeout = 10 * time.Minute
++	timeoutOEM = 10 * time.Minute
+ 	// Downloads can also take a bit longer
+-	downloadTimeout = time.Minute
++	timeoutDownload = time.Minute
++	// Device-side writes can also take quite long
++	timeoutWrite = 10 * time.Minute
+ )
+ 
+ type ProgressCallback func(sent int64)
+@@ -40,7 +43,7 @@ 	return strings.Join(responses, "\n"), nil
+ }
+ 
+ func (s *Session) GetVar(ctx context.Context, variable string) (string, error) {
+-	responses, err := s.command(ctx, "getvar:"+variable, commandTimeout)
++	responses, err := s.command(ctx, "getvar:"+variable, timeoutRegularCommand)
+ 	if err != nil {
+ 		return "", err
+ 	}
+@@ -52,16 +55,41 @@
+ 	return responses[len(responses)-1], nil
+ }
+ 
++func (s *Session) MaxDownloadSize(ctx context.Context) (int64, error) {
++	if s.protocol == nil {
++		return 0, ErrSessionClosed
++	}
++
++	// If we've already read and cached the max download size, don't read it again
++	if s.maxDownloadSize != nil {
++		return *s.maxDownloadSize, nil
++	}
++
++	value, err := s.GetVar(ctx, "max-download-size")
++	if err != nil {
++		return 0, err
++	}
++
++	size, err := strconv.ParseInt(strings.TrimPrefix(strings.TrimSpace(value), "0x"), 16, 63)
++	if err != nil || size <= 0 {
++		return 0, errInvalidResponse
++	}
++
++	s.maxDownloadSize = new(size)
++
++	return size, nil
++}
++
+ func (s *Session) Continue(ctx context.Context) (string, error) {
+-	return s.commandText(ctx, "continue", commandTimeout)
++	return s.commandText(ctx, "continue", timeoutRegularCommand)
+ }
+ 
+ func (s *Session) Reboot(ctx context.Context) (string, error) {
+-	return s.commandText(ctx, "reboot", commandTimeout)
++	return s.commandText(ctx, "reboot", timeoutRegularCommand)
+ }
+ 
+ func (s *Session) OEM(ctx context.Context, command string) (string, error) {
+-	return s.commandText(ctx, "oem "+command, oemTimeout)
++	return s.commandText(ctx, "oem "+command, timeoutOEM)
+ }
+ 
+ func (s *Session) Download(ctx context.Context, source io.Reader, size int64, progress ProgressCallback) error {
+@@ -73,5 +101,24 @@ 	if size < 0 || size > math.MaxUint32 {
+ 		return ErrInvalidDownloadSize
+ 	}
+ 
+-	return s.protocol.download(ctx, source, size, downloadTimeout, progress)
++	return s.protocol.download(ctx, source, size, timeoutDownload, progress)
++}
++
++func (s *Session) Flash(ctx context.Context, partition string, source io.Reader, size int64, progress ProgressCallback) error {
++	limit, err := s.MaxDownloadSize(ctx)
++	if err != nil {
++		return err
++	}
++
++	if size > limit {
++		return ErrDownloadTooLarge
++	}
++
++	if err := s.Download(ctx, source, size, progress); err != nil {
++		return err
++	}
++
++	_, err = s.protocol.command(ctx, "flash:"+partition, statusOKAY, timeoutWrite)
++
++	return err
+ }
+diff --git a/pkg/fastboot/protocol.go b/pkg/fastboot/protocol.go
+index def8b47cbba148f64404ecce9ec88bdc0579d912..ca9ca44c83a774d8c430c58b8595392d4c0262ec 100644
+--- a/pkg/fastboot/protocol.go
++++ b/pkg/fastboot/protocol.go
+@@ -168,7 +168,7 @@ 	}, nil
+ }
+ 
+ func (p *protocol) download(ctx context.Context, source io.Reader, size int64, timeout time.Duration, progress ProgressCallback) error {
+-	r, err := p.command(ctx, fmt.Sprintf("download:%08x", size), statusData, commandTimeout)
++	r, err := p.command(ctx, fmt.Sprintf("download:%08x", size), statusData, timeoutRegularCommand)
+ 	if err != nil {
+ 		return err
+ 	}
+@@ -187,7 +187,7 @@ 	if err := p.writeData(ctx, source, size, timeout, progress); err != nil {
+ 		return err
+ 	}
+ 
+-	_, err = p.accept(ctx, statusOKAY, commandTimeout)
++	_, err = p.accept(ctx, statusOKAY, timeoutRegularCommand)
+ 
+ 	return err
+ }
+diff --git a/pkg/fastboot/session.go b/pkg/fastboot/session.go
+index 0f7808f7942cdf5f13ab80a378d88c80be63a605..a8a23c022509e9edc559976e570d982048b2e647 100644
+--- a/pkg/fastboot/session.go
++++ b/pkg/fastboot/session.go
+@@ -11,14 +11,16 @@ var (
+ 	ErrDeviceNotFound      = errors.New("fastboot device not found")
+ 	ErrSessionClosed       = errors.New("fastboot session is closed")
+ 	ErrInvalidDownloadSize = errors.New("invalid fastboot download size")
++	ErrDownloadTooLarge    = errors.New("file exceeds the fastboot device download limit")
+ )
+ 
+ type Session struct {
+-	usbContext    *gousb.Context
+-	device        *gousb.Device
+-	configuration *gousb.Config
+-	iface         *gousb.Interface
+-	protocol      *protocol
++	usbContext      *gousb.Context
++	device          *gousb.Device
++	configuration   *gousb.Config
++	iface           *gousb.Interface
++	protocol        *protocol
++	maxDownloadSize *int64
+ }
+ 
+ func OpenSession(path string) (*Session, error) {
+@@ -120,6 +122,7 @@ 		s.usbContext = nil
+ 	}
+ 
+ 	s.protocol = nil
++	s.maxDownloadSize = nil
+ 
+ 	return errors.Join(errs...)
+ }
+diff --git a/pkg/svc/flash_flash_file.go b/pkg/svc/flash_flash_file.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..8efb7a01d08711840a49697959446a460f853ab2
+--- /dev/null
++++ b/pkg/svc/flash_flash_file.go
+@@ -0,0 +1,74 @@
++package svc
++
++import (
++	"context"
++	"time"
++
++	"codeberg.org/pojntfx/pushrod/pkg/fastboot"
++	"github.com/modelcontextprotocol/go-sdk/mcp"
++)
++
++var (
++	FlashFileTool = &mcp.Tool{
++		Name:        "flash.flashFile",
++		Title:       "Flash file",
++		Description: "Flash an uploaded file to a partition on a device in fastboot mode",
++		Annotations: &mcp.ToolAnnotations{DestructiveHint: new(true)},
++	}
++)
++
++type FlashFileInput struct {
++	Path      string `json:"path" jsonschema:"path that uniquely identifies the fastboot device until it gets unplugged, in BUS-PORT form like 1-2-3"`
++	File      string `json:"file" jsonschema:"name of the file to flash"`
++	Partition string `json:"partition" jsonschema:"partition to flash the file to, like boot or rootfs"`
++	Reboot    bool   `json:"reboot" jsonschema:"whether to reboot the device after flashing"`
++}
++
++type FlashFileOutput struct {
++	File       string `json:"file" jsonschema:"name of the file that was flashed"`
++	Partition  string `json:"partition" jsonschema:"partition the file was flashed to"`
++	Rebooted   bool   `json:"rebooted" jsonschema:"whether the device was rebooted afterwards"`
++	DurationMs int64  `json:"durationMs" jsonschema:"how long the flash took, in milliseconds"`
++}
++
++func (s *Service) FlashFile(ctx context.Context, req *mcp.CallToolRequest, input FlashFileInput) (*mcp.CallToolResult, *FlashFileOutput, error) {
++	file, err := s.openUploadedFile(input.File)
++	if err != nil {
++		return nil, nil, err
++	}
++	defer file.Close()
++
++	info, err := file.Stat()
++	if err != nil {
++		return nil, nil, err
++	}
++
++	if err := s.flashLock.Acquire(ctx, 1); err != nil {
++		return nil, nil, err
++	}
++	defer s.flashLock.Release(1)
++
++	session, err := fastboot.OpenSession(input.Path)
++	if err != nil {
++		return nil, nil, err
++	}
++	defer session.Close()
++
++	start := time.Now()
++	if err := session.Flash(ctx, input.Partition, file, info.Size(), notifyProgress(ctx, req, info.Size())); err != nil {
++		return nil, nil, err
++	}
++
++	if input.Reboot {
++		if _, err := session.Reboot(ctx); err != nil {
++			return nil, nil, err
++		}
++	}
++
++	return nil, &FlashFileOutput{
++		File:       input.File,
++		Partition:  input.Partition,
++		Rebooted:   input.Reboot,
++		DurationMs: time.Since(start).Milliseconds(),
++	}, nil
++}
+
