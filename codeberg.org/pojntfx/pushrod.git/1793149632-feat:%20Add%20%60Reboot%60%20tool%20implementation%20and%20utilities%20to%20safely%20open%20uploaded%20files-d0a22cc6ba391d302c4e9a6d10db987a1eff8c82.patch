@@ -1,0 +1,108 @@
+From d0a22cc6ba391d302c4e9a6d10db987a1eff8c82 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Tue, 27 Oct 2026 18:07:12 -0700
+Subject: [PATCH] feat: Add `Reboot` tool implementation and utilities to safely open uploaded files
+---
+diff --git a/main.go b/main.go
+index fd36d477e28f9030dbae52cba2a8b5f0f7df64f8..853c71a33f9b4567802ab9bbd1303c07a7c9a087 100644
+--- a/main.go
++++ b/main.go
+@@ -81,6 +81,7 @@ 	mcp.AddTool(handler, svc.GetFlashDevicesTool, service.GetFlashDevices)
+ 	mcp.AddTool(handler, svc.GetVarTool, service.GetVar)
+ 	mcp.AddTool(handler, svc.StageTool, service.Stage)
+ 	mcp.AddTool(handler, svc.ContinueTool, service.Continue)
++	mcp.AddTool(handler, svc.RebootTool, service.Reboot)
+ 
+ 	log.Println("Listening on", *laddr)
+ 
+diff --git a/pkg/fastboot/commands.go b/pkg/fastboot/commands.go
+index 995ee400f169c44707aa1b54e5fc520c923d8e74..cb3c3855bf5931484ad5163d87382d56f36d438f 100644
+--- a/pkg/fastboot/commands.go
++++ b/pkg/fastboot/commands.go
+@@ -26,6 +26,15 @@
+ 	return s.protocol.commandResponses(ctx, command, timeout)
+ }
+ 
++func (s *Session) commandText(ctx context.Context, command string, timeout time.Duration) (string, error) {
++	responses, err := s.command(ctx, command, timeout)
++	if err != nil {
++		return "", err
++	}
++
++	return strings.Join(responses, "\n"), nil
++}
++
+ func (s *Session) GetVar(ctx context.Context, variable string) (string, error) {
+ 	responses, err := s.command(ctx, "getvar:"+variable, commandTimeout)
+ 	if err != nil {
+@@ -40,12 +49,11 @@ 	return responses[len(responses)-1], nil
+ }
+ 
+ func (s *Session) Continue(ctx context.Context) (string, error) {
+-	responses, err := s.command(ctx, "continue", commandTimeout)
+-	if err != nil {
+-		return "", err
+-	}
++	return s.commandText(ctx, "continue", commandTimeout)
++}
+ 
+-	return strings.Join(responses, "\n"), nil
++func (s *Session) Reboot(ctx context.Context) (string, error) {
++	return s.commandText(ctx, "reboot", commandTimeout)
+ }
+ 
+ func (s *Session) Download(ctx context.Context, source io.Reader, size int64, progress ProgressCallback) error {
+diff --git a/pkg/svc/flash_reboot.go b/pkg/svc/flash_reboot.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..e924c6f696da9490ffa282a8a749f16f93897b87
+--- /dev/null
++++ b/pkg/svc/flash_reboot.go
+@@ -0,0 +1,47 @@
++package svc
++
++import (
++	"context"
++
++	"codeberg.org/pojntfx/pushrod/pkg/fastboot"
++	"github.com/modelcontextprotocol/go-sdk/mcp"
++)
++
++var (
++	RebootTool = &mcp.Tool{
++		Name:        "flash.reboot",
++		Title:       "Reboot",
++		Description: "Reboot a device out of fastboot mode",
++		Annotations: &mcp.ToolAnnotations{DestructiveHint: new(false)},
++	}
++)
++
++type RebootInput struct {
++	Path string `json:"path" jsonschema:"path that uniquely identifies the fastboot device until it gets unplugged, in BUS-PORT form like 1-2-3"`
++}
++
++type RebootOutput struct {
++	Response string `json:"response" jsonschema:"text that the device returned, if any"`
++}
++
++func (s *Service) Reboot(ctx context.Context, req *mcp.CallToolRequest, input RebootInput) (*mcp.CallToolResult, *RebootOutput, error) {
++	if err := s.flashLock.Acquire(ctx, 1); err != nil {
++		return nil, nil, err
++	}
++	defer s.flashLock.Release(1)
++
++	session, err := fastboot.OpenSession(input.Path)
++	if err != nil {
++		return nil, nil, err
++	}
++	defer session.Close()
++
++	response, err := session.Reboot(ctx)
++	if err != nil {
++		return nil, nil, err
++	}
++
++	return nil, &RebootOutput{
++		Response: response,
++	}, nil
++}
+
