@@ -1,0 +1,179 @@
+From e732f974cfde2f7959a288fd423853c3315d00e4 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Tue, 27 Oct 2026 19:02:25 -0700
+Subject: [PATCH] feat: Add sparse flash support for when the file size exceeds the limit
+---
+diff --git a/pkg/fastboot/commands.go b/pkg/fastboot/commands.go
+index 3997737bc81ab59b1daccab184f66713c10ff29e..9a403cc6c6873303a61f5b750d0f359c8add54b9 100644
+--- a/pkg/fastboot/commands.go
++++ b/pkg/fastboot/commands.go
+@@ -22,6 +22,10 @@ )
+ 
+ type ProgressCallback func(sent int64)
+ 
++func fitsUint32(value int64) bool {
++	return value >= 0 && value <= math.MaxUint32
++}
++
+ func (s *Session) command(ctx context.Context, command string, timeout time.Duration) ([]string, error) {
+ 	if s.protocol == nil {
+ 		return nil, ErrSessionClosed
+@@ -97,7 +101,7 @@ 	if s.protocol == nil {
+ 		return ErrSessionClosed
+ 	}
+ 
+-	if size < 0 || size > math.MaxUint32 {
++	if !fitsUint32(size) {
+ 		return ErrInvalidDownloadSize
+ 	}
+ 
+@@ -111,14 +115,18 @@ 		return err
+ 	}
+ 
+ 	if size > limit {
+-		return ErrDownloadTooLarge
++		return s.flashSparse(ctx, partition, source, size, limit, progress)
+ 	}
+ 
+ 	if err := s.Download(ctx, source, size, progress); err != nil {
+ 		return err
+ 	}
+ 
+-	_, err = s.protocol.command(ctx, "flash:"+partition, statusOKAY, timeoutWrite)
++	return s.flashDownloaded(ctx, partition)
++}
++
++func (s *Session) flashDownloaded(ctx context.Context, partition string) error {
++	_, err := s.protocol.command(ctx, "flash:"+partition, statusOKAY, timeoutWrite)
+ 
+ 	return err
+ }
+diff --git a/pkg/fastboot/sparse.go b/pkg/fastboot/sparse.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..b63dc18e1a9688505240e01615fc791b2d03d3ad
+--- /dev/null
++++ b/pkg/fastboot/sparse.go
+@@ -0,0 +1,122 @@
++package fastboot
++
++import (
++	"bytes"
++	"context"
++	"encoding/binary"
++	"io"
++	"math"
++)
++
++// Sadly there is no pre-existing implementation of this in Go, and we want to avoid having to link against
++// AOSP's `libsparse`, so we have this custom implementation instead.
++// See https://android.googlesource.com/platform/system/core/+/refs/heads/main/libsparse/sparse_format.h#25
++const (
++	sparseMagic             = 0xed26ff3a
++	sparseMajorVersion      = 1
++	sparseFileHeaderSize    = 28
++	sparseChunkHeaderSize   = 12
++	sparseBlockSize         = 4096
++	sparseChunkTypeRaw      = 0xcac1
++	sparseChunkTypeDontCare = 0xcac3
++	sparseMaxChunks         = 3
++	sparseMaxOverhead       = sparseFileHeaderSize + sparseMaxChunks*sparseChunkHeaderSize
++)
++
++func (s *Session) flashSparse(ctx context.Context, partition string, source io.Reader, size, limit int64, progress ProgressCallback) error {
++	maxBlocks := (min(limit, int64(math.MaxUint32)) - sparseMaxOverhead) / sparseBlockSize
++	if maxBlocks <= 0 {
++		return ErrDownloadTooLarge
++	}
++
++	totalBlocks := size / sparseBlockSize
++	if size%sparseBlockSize != 0 {
++		totalBlocks++
++	}
++
++	if !fitsUint32(totalBlocks) {
++		return ErrInvalidDownloadSize
++	}
++
++	for startBlock, sent := int64(0), int64(0); startBlock < totalBlocks; {
++		blocks := min(maxBlocks, totalBlocks-startBlock)
++		image, imageSize, sourceSize := sparseImageReader(source, size-sent, startBlock, totalBlocks, blocks)
++
++		if err := s.Download(ctx, image, imageSize, nil); err != nil {
++			return err
++		}
++
++		if err := s.flashDownloaded(ctx, partition); err != nil {
++			return err
++		}
++
++		startBlock += blocks
++		sent += sourceSize
++		if progress != nil {
++			progress(sent)
++		}
++	}
++
++	return nil
++}
++
++func sparseImageReader(source io.Reader, remaining, startBlock, totalBlocks, blocks int64) (io.Reader, int64, int64) {
++	endBlocks := totalBlocks - startBlock - blocks
++	chunks := int64(1)
++	if startBlock > 0 {
++		chunks++
++	}
++	if endBlocks > 0 {
++		chunks++
++	}
++
++	rawSize := blocks * sparseBlockSize
++	sourceSize := min(remaining, rawSize)
++	padding := rawSize - sourceSize
++	readers := make([]io.Reader, 0, 6)
++	readers = append(readers, bytes.NewReader(sparseFileHeader(totalBlocks, chunks)))
++
++	if startBlock > 0 {
++		readers = append(readers, bytes.NewReader(sparseChunkHeader(sparseChunkTypeDontCare, startBlock, 0)))
++	}
++
++	readers = append(readers,
++		bytes.NewReader(sparseChunkHeader(sparseChunkTypeRaw, blocks, rawSize)),
++		io.LimitReader(source, sourceSize),
++	)
++
++	if padding > 0 {
++		var zeroBlock [sparseBlockSize]byte
++		readers = append(readers, bytes.NewReader(zeroBlock[:padding]))
++	}
++
++	if endBlocks > 0 {
++		readers = append(readers, bytes.NewReader(sparseChunkHeader(sparseChunkTypeDontCare, endBlocks, 0)))
++	}
++
++	imageSize := int64(sparseFileHeaderSize) + chunks*sparseChunkHeaderSize + rawSize
++
++	return io.MultiReader(readers...), imageSize, sourceSize
++}
++
++func sparseFileHeader(totalBlocks, totalChunks int64) []byte {
++	header := make([]byte, sparseFileHeaderSize)
++	binary.LittleEndian.PutUint32(header[0:4], sparseMagic)
++	binary.LittleEndian.PutUint16(header[4:6], sparseMajorVersion)
++	binary.LittleEndian.PutUint16(header[8:10], sparseFileHeaderSize)
++	binary.LittleEndian.PutUint16(header[10:12], sparseChunkHeaderSize)
++	binary.LittleEndian.PutUint32(header[12:16], sparseBlockSize)
++	binary.LittleEndian.PutUint32(header[16:20], uint32(totalBlocks))
++	binary.LittleEndian.PutUint32(header[20:24], uint32(totalChunks))
++
++	return header
++}
++
++func sparseChunkHeader(chunkType uint16, blocks, dataSize int64) []byte {
++	header := make([]byte, sparseChunkHeaderSize)
++	binary.LittleEndian.PutUint16(header[0:2], chunkType)
++	binary.LittleEndian.PutUint32(header[4:8], uint32(blocks))
++	binary.LittleEndian.PutUint32(header[8:12], uint32(sparseChunkHeaderSize+dataSize))
++
++	return header
++}
+
