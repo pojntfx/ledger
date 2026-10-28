@@ -1,0 +1,478 @@
+From 3827bc30ced8d77ff884a093db385c0b8e22e923 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Tue, 27 Oct 2026 21:53:07 -0700
+Subject: [PATCH] feat: Add `MultiFlash` tool (SpacemiT fastboot extension) to more efficiently flash multiple partitions
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/main.go b/main.go
+index e190599e88865ebf68d5edca233846d7e964258d..18cba3bcde9100d315047e326bd6ab9d4a4fda4f 100644
+--- a/main.go
++++ b/main.go
+@@ -84,6 +84,7 @@ 	mcp.AddTool(handler, svc.ContinueTool, service.Continue)
+ 	mcp.AddTool(handler, svc.RebootTool, service.Reboot)
+ 	mcp.AddTool(handler, svc.OEMTool, service.OEM)
+ 	mcp.AddTool(handler, svc.FlashFileTool, service.FlashFile)
++	mcp.AddTool(handler, svc.MultiFlashTool, service.MultiFlash)
+ 
+ 	log.Println("Listening on", *laddr)
+ 
+diff --git a/pkg/svc/flash.go b/pkg/svc/flash.go
+index a1765bf93cbf3a2fe0c1403678a35ec11359971b..379257d1a91d70ff4213fefa51e35fe31ec9f7f9 100644
+--- a/pkg/svc/flash.go
++++ b/pkg/svc/flash.go
+@@ -3,12 +3,23 @@
+ import (
+ 	"context"
+ 	"fmt"
++	"io"
+ 	"time"
+ 
++	"codeberg.org/pojntfx/pushrod/pkg/fastboot"
++	"codeberg.org/pojntfx/pushrod/pkg/titanflasher"
+ 	"github.com/modelcontextprotocol/go-sdk/mcp"
+ )
+ 
+ const progressNotificationTimeout = 5 * time.Second // So that we don't hang forever if the remote disconnects
++
++func flashWithCompression(ctx context.Context, session *fastboot.Session, partition string, source io.Reader, size int64, compression titanflasher.Compression, gzipLevel titanflasher.GzipLevel, progress fastboot.ProgressCallback) error {
++	if compression == titanflasher.CompressionRaw {
++		return session.Flash(ctx, partition, source, size, progress)
++	}
++
++	return titanflasher.FlashGzip(ctx, session, partition, source, size, gzipLevel, progress)
++}
+ 
+ func notifyProgress(ctx context.Context, req *mcp.CallToolRequest, total int64) func(int64) {
+ 	progressToken := req.Params.GetProgressToken()
+diff --git a/pkg/svc/flash_flash_file.go b/pkg/svc/flash_flash_file.go
+index ebd77ab9f800b8fcf6b0f90271fcc0a492b38c5c..5bb630bd67d5e548a05023ada95a909e770c3d25 100644
+--- a/pkg/svc/flash_flash_file.go
++++ b/pkg/svc/flash_flash_file.go
+@@ -23,64 +23,23 @@
+ 	ErrInvalidCompression = errors.New("invalid compression, expected gzip-N with N from 0 to 9")
+ )
+ 
+-type flashCompression string
+-
+-const (
+-	flashCompressionRaw   flashCompression = ""
+-	flashCompressionGzip0 flashCompression = "gzip-0"
+-	flashCompressionGzip1 flashCompression = "gzip-1"
+-	flashCompressionGzip2 flashCompression = "gzip-2"
+-	flashCompressionGzip3 flashCompression = "gzip-3"
+-	flashCompressionGzip4 flashCompression = "gzip-4"
+-	flashCompressionGzip5 flashCompression = "gzip-5"
+-	flashCompressionGzip6 flashCompression = "gzip-6"
+-	flashCompressionGzip7 flashCompression = "gzip-7"
+-	flashCompressionGzip8 flashCompression = "gzip-8"
+-	flashCompressionGzip9 flashCompression = "gzip-9"
+-)
+-
+-var flashGzipLevels = map[flashCompression]titanflasher.GzipLevel{
+-	flashCompressionGzip0: titanflasher.GzipLevel0,
+-	flashCompressionGzip1: titanflasher.GzipLevel1,
+-	flashCompressionGzip2: titanflasher.GzipLevel2,
+-	flashCompressionGzip3: titanflasher.GzipLevel3,
+-	flashCompressionGzip4: titanflasher.GzipLevel4,
+-	flashCompressionGzip5: titanflasher.GzipLevel5,
+-	flashCompressionGzip6: titanflasher.GzipLevel6,
+-	flashCompressionGzip7: titanflasher.GzipLevel7,
+-	flashCompressionGzip8: titanflasher.GzipLevel8,
+-	flashCompressionGzip9: titanflasher.GzipLevel9,
+-}
+-
+ func flashFileSchema() *jsonschema.Schema {
+ 	schema, err := jsonschema.For[FlashFileInput](nil)
+ 	if err != nil {
+ 		panic(err)
+ 	}
+ 
+-	schema.Properties["compress"].Enum = []any{
+-		flashCompressionRaw,
+-		flashCompressionGzip0,
+-		flashCompressionGzip1,
+-		flashCompressionGzip2,
+-		flashCompressionGzip3,
+-		flashCompressionGzip4,
+-		flashCompressionGzip5,
+-		flashCompressionGzip6,
+-		flashCompressionGzip7,
+-		flashCompressionGzip8,
+-		flashCompressionGzip9,
+-	}
++	schema.Properties["compress"].Enum = titanflasher.CompressionEnum
+ 
+ 	return schema
+ }
+ 
+ type FlashFileInput struct {
+-	Path      string           `json:"path" jsonschema:"path that uniquely identifies the fastboot device until it gets unplugged, in BUS-PORT form like 1-2-3"`
+-	File      string           `json:"file" jsonschema:"name of the file to flash"`
+-	Partition string           `json:"partition" jsonschema:"partition to flash the file to, like boot or rootfs"`
+-	Compress  flashCompression `json:"compress,omitempty" jsonschema:"SpacemiT-specific compression to use for the transfer"`
+-	Reboot    bool             `json:"reboot" jsonschema:"whether to reboot the device after flashing"`
++	Path      string                   `json:"path" jsonschema:"path that uniquely identifies the fastboot device until it gets unplugged, in BUS-PORT form like 1-2-3"`
++	File      string                   `json:"file" jsonschema:"name of the file to flash"`
++	Partition string                   `json:"partition" jsonschema:"partition to flash the file to, like boot or rootfs"`
++	Compress  titanflasher.Compression `json:"compress,omitempty" jsonschema:"SpacemiT-specific compression to use for the transfer"`
++	Reboot    bool                     `json:"reboot" jsonschema:"whether to reboot the device after flashing"`
+ }
+ 
+ type FlashFileOutput struct {
+@@ -91,8 +50,8 @@ 	DurationMs int64  `json:"durationMs" jsonschema:"how long the flash took, in milliseconds"`
+ }
+ 
+ func (s *Service) FlashFile(ctx context.Context, req *mcp.CallToolRequest, input FlashFileInput) (*mcp.CallToolResult, *FlashFileOutput, error) {
+-	gzipLevel, ok := flashGzipLevels[input.Compress]
+-	if input.Compress != flashCompressionRaw && !ok {
++	gzipLevel, ok := input.Compress.GzipLevel()
++	if input.Compress != titanflasher.CompressionRaw && !ok {
+ 		return nil, nil, ErrInvalidCompression
+ 	}
+ 
+@@ -120,12 +79,7 @@ 	defer session.Close()
+ 
+ 	start := time.Now()
+ 	progress := notifyProgress(ctx, req, info.Size())
+-	if input.Compress == flashCompressionRaw {
+-		err = session.Flash(ctx, input.Partition, file, info.Size(), progress)
+-	} else {
+-		err = titanflasher.FlashGzip(ctx, session, input.Partition, file, info.Size(), gzipLevel, progress)
+-	}
+-	if err != nil {
++	if err := flashWithCompression(ctx, session, input.Partition, file, info.Size(), input.Compress, gzipLevel, progress); err != nil {
+ 		return nil, nil, err
+ 	}
+ 
+diff --git a/pkg/svc/flash_multi_flash.go b/pkg/svc/flash_multi_flash.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..07ae440d147fc2d94bbb2cb58e2d4aaaf91a417a
+--- /dev/null
++++ b/pkg/svc/flash_multi_flash.go
+@@ -0,0 +1,246 @@
++package svc
++
++import (
++	"bytes"
++	"context"
++	"encoding/json"
++	"errors"
++	"io"
++	"os"
++	"path"
++	"time"
++
++	"codeberg.org/pojntfx/pushrod/pkg/fastboot"
++	"codeberg.org/pojntfx/pushrod/pkg/titanflasher"
++	"github.com/google/jsonschema-go/jsonschema"
++	"github.com/modelcontextprotocol/go-sdk/mcp"
++)
++
++var (
++	MultiFlashTool = &mcp.Tool{
++		Name:        "flash.multiFlash",
++		Title:       "Flash partition layout",
++		Description: "Flash partition tables and their referenced images to a device in fastboot mode",
++		Annotations: &mcp.ToolAnnotations{DestructiveHint: new(true)},
++		InputSchema: multiFlashSchema(),
++	}
++
++	ErrNoPartitionTables = errors.New("no partition tables given")
++	ErrNoFormatPartition = errors.New("partition table has no format field")
++	ErrImagesNotUploaded = errors.New("images referenced by the partition tables are not uploaded")
++)
++
++func multiFlashSchema() *jsonschema.Schema {
++	schema, err := jsonschema.For[MultiFlashInput](nil)
++	if err != nil {
++		panic(err)
++	}
++
++	schema.Properties["partitionTables"].Items.Properties["partitions"].Items.Properties["compress"].Enum = titanflasher.CompressionEnum
++
++	return schema
++}
++
++type MultiFlashInput struct {
++	Path            string                        `json:"path" jsonschema:"path that uniquely identifies the fastboot device until it gets unplugged, in BUS-PORT form like 1-2-3"`
++	PartitionTables []titanflasher.PartitionTable `json:"partitionTables" jsonschema:"partition tables to apply in order"`
++	Reboot          bool                          `json:"reboot" jsonschema:"whether to reboot the device after flashing"`
++}
++
++type FlashedPartition struct {
++	Partition  string `json:"partition" jsonschema:"partition that was flashed"`
++	File       string `json:"file" jsonschema:"name of the file that was flashed to the partition"`
++	DurationMs int64  `json:"durationMs" jsonschema:"how long the partition took to flash, in milliseconds"`
++}
++
++type MultiFlashOutput struct {
++	FormatPartitions  []string           `json:"formatPartitions" jsonschema:"partitions that the tables were written to, in the same order"`
++	FlashedPartitions []FlashedPartition `json:"flashedPartitions" jsonschema:"partitions that were flashed, in the order the tables list them"`
++	Rebooted          bool               `json:"rebooted" jsonschema:"whether the device was rebooted afterwards"`
++	DurationMs        int64              `json:"durationMs" jsonschema:"how long the whole flash took, in milliseconds"`
++}
++
++type preparedPartitionImage struct {
++	partition string
++	name      string
++	file      *os.File
++	size      int64
++	compress  titanflasher.Compression
++	gzipLevel titanflasher.GzipLevel
++}
++
++type parsedPartitionTable struct {
++	format string
++	data   []byte
++	images []preparedPartitionImage
++}
++
++func newParsedPartitionTable(format string, data []byte) *parsedPartitionTable {
++	return &parsedPartitionTable{
++		format: format,
++		data:   data,
++	}
++}
++
++func (t *parsedPartitionTable) close() {
++	for _, image := range t.images {
++		if image.file != nil {
++			image.file.Close()
++		}
++	}
++}
++
++func (s *Service) preparePartitionTable(definition titanflasher.PartitionTable) (_ *parsedPartitionTable, _ []string, err error) {
++	if definition.Format == "" {
++		return nil, nil, ErrNoFormatPartition
++	}
++
++	contents, err := json.Marshal(definition)
++	if err != nil {
++		return nil, nil, err
++	}
++
++	parsed := newParsedPartitionTable(definition.Format, contents)
++	defer func() {
++		if err != nil {
++			parsed.close()
++		}
++	}()
++
++	missing := []string{}
++	for _, partition := range definition.Partitions {
++		if partition.Name == "" || partition.Image == "" {
++			continue
++		}
++
++		gzipLevel, ok := partition.Compress.GzipLevel()
++		if partition.Compress != titanflasher.CompressionRaw && !ok {
++			return nil, nil, ErrInvalidCompression
++		}
++
++		imageName := path.Base(partition.Image)
++		imageFile, err := s.openUploadedFile(imageName)
++		if err != nil {
++			if errors.Is(err, os.ErrNotExist) {
++				missing = append(missing, imageName)
++
++				continue
++			}
++
++			return nil, nil, err
++		}
++
++		imageInfo, err := imageFile.Stat()
++		if err != nil {
++			imageFile.Close()
++
++			return nil, nil, err
++		}
++
++		parsed.images = append(parsed.images, preparedPartitionImage{
++			partition: partition.Name,
++			name:      imageName,
++			file:      imageFile,
++			size:      imageInfo.Size(),
++			compress:  partition.Compress,
++			gzipLevel: gzipLevel,
++		})
++	}
++
++	return parsed, missing, nil
++}
++
++func (s *Service) MultiFlash(ctx context.Context, req *mcp.CallToolRequest, input MultiFlashInput) (*mcp.CallToolResult, *MultiFlashOutput, error) {
++	if len(input.PartitionTables) == 0 {
++		return nil, nil, ErrNoPartitionTables
++	}
++
++	partitionTables := make([]*parsedPartitionTable, 0, len(input.PartitionTables))
++	defer func() {
++		for _, table := range partitionTables {
++			table.close()
++		}
++	}()
++
++	missing := []string{}
++	var totalBytes int64
++	for _, definition := range input.PartitionTables {
++		table, missingImages, err := s.preparePartitionTable(definition)
++		if err != nil {
++			return nil, nil, err
++		}
++
++		partitionTables = append(partitionTables, table)
++		missing = append(missing, missingImages...)
++		totalBytes += int64(len(table.data))
++		for _, image := range table.images {
++			totalBytes += image.size
++		}
++	}
++
++	if len(missing) > 0 {
++		return nil, nil, ErrImagesNotUploaded
++	}
++
++	if err := s.flashLock.Acquire(ctx, 1); err != nil {
++		return nil, nil, err
++	}
++	defer s.flashLock.Release(1)
++
++	session, err := fastboot.OpenSession(input.Path)
++	if err != nil {
++		return nil, nil, err
++	}
++	defer session.Close()
++
++	start := time.Now()
++	progress := notifyProgress(ctx, req, totalBytes)
++	var sentBase int64
++	flash := func(partition string, source io.Reader, size int64, compression titanflasher.Compression, gzipLevel titanflasher.GzipLevel) error {
++		if progress == nil {
++			return flashWithCompression(ctx, session, partition, source, size, compression, gzipLevel, nil)
++		}
++
++		return flashWithCompression(ctx, session, partition, source, size, compression, gzipLevel, func(sent int64) {
++			progress(sentBase + sent)
++		})
++	}
++
++	formatPartitions := make([]string, 0, len(partitionTables))
++	flashedPartitions := []FlashedPartition{}
++	for _, table := range partitionTables {
++		tableSize := int64(len(table.data))
++		if err := flash(table.format, bytes.NewReader(table.data), tableSize, titanflasher.CompressionRaw, titanflasher.GzipLevel0); err != nil {
++			return nil, nil, err
++		}
++		sentBase += tableSize
++		formatPartitions = append(formatPartitions, table.format)
++
++		for _, image := range table.images {
++			partitionStart := time.Now()
++			if err := flash(image.partition, image.file, image.size, image.compress, image.gzipLevel); err != nil {
++				return nil, nil, err
++			}
++			sentBase += image.size
++
++			flashedPartitions = append(flashedPartitions, FlashedPartition{
++				Partition:  image.partition,
++				File:       image.name,
++				DurationMs: time.Since(partitionStart).Milliseconds(),
++			})
++		}
++	}
++
++	if input.Reboot {
++		if _, err := session.Reboot(ctx); err != nil {
++			return nil, nil, err
++		}
++	}
++
++	return nil, &MultiFlashOutput{
++		FormatPartitions:  formatPartitions,
++		FlashedPartitions: flashedPartitions,
++		Rebooted:          input.Reboot,
++		DurationMs:        time.Since(start).Milliseconds(),
++	}, nil
++}
+diff --git a/pkg/titanflasher/gzip.go b/pkg/titanflasher/gzip.go
+index 0e1527304408ca49c5eacf1d9fbdde34b3a8f194..972ea3266c17c1eb3df4a81884bdf8dd8b4b4ff5 100644
+--- a/pkg/titanflasher/gzip.go
++++ b/pkg/titanflasher/gzip.go
+@@ -25,6 +25,55 @@ 	GzipLevel8
+ 	GzipLevel9
+ )
+ 
++type Compression string
++
++const (
++	CompressionRaw   Compression = ""
++	CompressionGzip0 Compression = "gzip-0"
++	CompressionGzip1 Compression = "gzip-1"
++	CompressionGzip2 Compression = "gzip-2"
++	CompressionGzip3 Compression = "gzip-3"
++	CompressionGzip4 Compression = "gzip-4"
++	CompressionGzip5 Compression = "gzip-5"
++	CompressionGzip6 Compression = "gzip-6"
++	CompressionGzip7 Compression = "gzip-7"
++	CompressionGzip8 Compression = "gzip-8"
++	CompressionGzip9 Compression = "gzip-9"
++)
++
++var CompressionEnum = []any{
++	CompressionRaw,
++	CompressionGzip0,
++	CompressionGzip1,
++	CompressionGzip2,
++	CompressionGzip3,
++	CompressionGzip4,
++	CompressionGzip5,
++	CompressionGzip6,
++	CompressionGzip7,
++	CompressionGzip8,
++	CompressionGzip9,
++}
++
++var compressionLevels = map[Compression]GzipLevel{
++	CompressionGzip0: GzipLevel0,
++	CompressionGzip1: GzipLevel1,
++	CompressionGzip2: GzipLevel2,
++	CompressionGzip3: GzipLevel3,
++	CompressionGzip4: GzipLevel4,
++	CompressionGzip5: GzipLevel5,
++	CompressionGzip6: GzipLevel6,
++	CompressionGzip7: GzipLevel7,
++	CompressionGzip8: GzipLevel8,
++	CompressionGzip9: GzipLevel9,
++}
++
++func (c Compression) GzipLevel() (GzipLevel, bool) {
++	level, ok := compressionLevels[c]
++
++	return level, ok
++}
++
+ func FlashGzip(ctx context.Context, session *fastboot.Session, partition string, source io.Reader, size int64, level GzipLevel, progress fastboot.ProgressCallback) error {
+ 	if size < 0 {
+ 		return fastboot.ErrInvalidDownloadSize
+diff --git a/pkg/titanflasher/partition.go b/pkg/titanflasher/partition.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..f5c9451c2ad34d6ecbcae4010d8af5f4369e6400
+--- /dev/null
++++ b/pkg/titanflasher/partition.go
+@@ -0,0 +1,12 @@
++package titanflasher
++
++type PartitionTable struct {
++	Format     string      `json:"format" jsonschema:"partition to write this partition table to"`
++	Partitions []Partition `json:"partitions" jsonschema:"partitions and images to flash, in order"`
++}
++
++type Partition struct {
++	Name     string      `json:"name" jsonschema:"partition to flash the image to"`
++	Image    string      `json:"image" jsonschema:"name of the uploaded image file"`
++	Compress Compression `json:"compress,omitempty" jsonschema:"SpacemiT-specific compression to use for the transfer"`
++}
+
