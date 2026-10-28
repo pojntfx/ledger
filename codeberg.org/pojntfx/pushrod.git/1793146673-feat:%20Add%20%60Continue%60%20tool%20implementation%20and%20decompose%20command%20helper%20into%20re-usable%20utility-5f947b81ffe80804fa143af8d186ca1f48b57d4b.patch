@@ -1,0 +1,194 @@
+From 5f947b81ffe80804fa143af8d186ca1f48b57d4b Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Tue, 27 Oct 2026 17:17:53 -0700
+Subject: [PATCH] feat: Add `Continue` tool implementation and decompose command helper into re-usable utility
+---
+diff --git a/main.go b/main.go
+index ab1ad6554328c5af63fb919f6b7bff461ccd948f..fd36d477e28f9030dbae52cba2a8b5f0f7df64f8 100644
+--- a/main.go
++++ b/main.go
+@@ -80,6 +80,7 @@ 	mcp.AddTool(handler, svc.DeleteFileTool, service.DeleteFile)
+ 	mcp.AddTool(handler, svc.GetFlashDevicesTool, service.GetFlashDevices)
+ 	mcp.AddTool(handler, svc.GetVarTool, service.GetVar)
+ 	mcp.AddTool(handler, svc.StageTool, service.Stage)
++	mcp.AddTool(handler, svc.ContinueTool, service.Continue)
+ 
+ 	log.Println("Listening on", *laddr)
+ 
+diff --git a/pkg/fastboot/commands.go b/pkg/fastboot/commands.go
+index 842fc1832e6f192c8825e9b429ed33f8bd8b50c6..995ee400f169c44707aa1b54e5fc520c923d8e74 100644
+--- a/pkg/fastboot/commands.go
++++ b/pkg/fastboot/commands.go
+@@ -4,6 +4,7 @@ import (
+ 	"context"
+ 	"io"
+ 	"math"
++	"strings"
+ 	"time"
+ )
+ 
+@@ -14,45 +15,37 @@ )
+ 
+ type ProgressCallback func(sent int64)
+ 
+-func (s *Session) GetVar(ctx context.Context, variable string) (string, error) {
++func (s *Session) command(ctx context.Context, command string, timeout time.Duration) ([]string, error) {
+ 	if s.protocol == nil {
+-		return "", ErrSessionClosed
++		return nil, ErrSessionClosed
+ 	}
+ 
+-	ctx, cancel := context.WithTimeout(ctx, commandTimeout)
++	ctx, cancel := context.WithTimeout(ctx, timeout)
+ 	defer cancel()
+ 
+-	if err := s.protocol.writeCommand(ctx, "getvar:"+variable, commandTimeout); err != nil {
++	return s.protocol.commandResponses(ctx, command, timeout)
++}
++
++func (s *Session) GetVar(ctx context.Context, variable string) (string, error) {
++	responses, err := s.command(ctx, "getvar:"+variable, commandTimeout)
++	if err != nil {
+ 		return "", err
+ 	}
+ 
+-	value := ""
+-	for {
+-		r, err := s.protocol.readResponse(ctx, commandTimeout)
+-		if err != nil {
+-			return "", err
+-		}
++	if len(responses) == 0 {
++		return "", nil
++	}
+ 
+-		switch r.status {
+-		case statusInfo:
+-			if r.payload != "" {
+-				value = r.payload
+-			}
+-
+-		case statusOKAY:
+-			if r.payload != "" {
+-				value = r.payload
+-			}
+-
+-			return value, nil
++	return responses[len(responses)-1], nil
++}
+ 
+-		case statusFail:
+-			return "", errCommandFailed
+-
+-		default:
+-			return "", errUnexpectedResponse
+-		}
++func (s *Session) Continue(ctx context.Context) (string, error) {
++	responses, err := s.command(ctx, "continue", commandTimeout)
++	if err != nil {
++		return "", err
+ 	}
++
++	return strings.Join(responses, "\n"), nil
+ }
+ 
+ func (s *Session) Download(ctx context.Context, source io.Reader, size int64, progress ProgressCallback) error {
+diff --git a/pkg/fastboot/protocol.go b/pkg/fastboot/protocol.go
+index 451c3c26e025a2c39138b80577dcd65c23fc0dfb..def8b47cbba148f64404ecce9ec88bdc0579d912 100644
+--- a/pkg/fastboot/protocol.go
++++ b/pkg/fastboot/protocol.go
+@@ -63,6 +63,40 @@
+ 	return p.accept(ctx, expected, timeout)
+ }
+ 
++func (p *protocol) commandResponses(ctx context.Context, command string, timeout time.Duration) ([]string, error) {
++	if err := p.writeCommand(ctx, command, timeout); err != nil {
++		return nil, err
++	}
++
++	responses := []string{}
++	for {
++		r, err := p.readResponse(ctx, timeout)
++		if err != nil {
++			return nil, err
++		}
++
++		switch r.status {
++		case statusInfo:
++			if r.payload != "" {
++				responses = append(responses, r.payload)
++			}
++
++		case statusOKAY:
++			if r.payload != "" {
++				responses = append(responses, r.payload)
++			}
++
++			return responses, nil
++
++		case statusFail:
++			return nil, errCommandFailed
++
++		default:
++			return nil, errUnexpectedResponse
++		}
++	}
++}
++
+ func (p *protocol) writeCommand(ctx context.Context, command string, timeout time.Duration) error {
+ 	return p.write(ctx, []byte(command), timeout)
+ }
+diff --git a/pkg/svc/flash_continue.go b/pkg/svc/flash_continue.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..bf69225940148e82a76b9d6eb67621c3280e524c
+--- /dev/null
++++ b/pkg/svc/flash_continue.go
+@@ -0,0 +1,47 @@
++package svc
++
++import (
++	"context"
++
++	"codeberg.org/pojntfx/pushrod/pkg/fastboot"
++	"github.com/modelcontextprotocol/go-sdk/mcp"
++)
++
++var (
++	ContinueTool = &mcp.Tool{
++		Name:        "flash.continue",
++		Title:       "Continue",
++		Description: "Continue booting a device with the image last staged into its memory",
++		Annotations: &mcp.ToolAnnotations{DestructiveHint: new(false)},
++	}
++)
++
++type ContinueInput struct {
++	Path string `json:"path" jsonschema:"path that uniquely identifies the fastboot device until it gets unplugged, in BUS-PORT form like 1-2-3"`
++}
++
++type ContinueOutput struct {
++	Response string `json:"response" jsonschema:"text that the device returned, if any"`
++}
++
++func (s *Service) Continue(ctx context.Context, req *mcp.CallToolRequest, input ContinueInput) (*mcp.CallToolResult, *ContinueOutput, error) {
++	if err := s.flashLock.Acquire(ctx, 1); err != nil {
++		return nil, nil, err
++	}
++	defer s.flashLock.Release(1)
++
++	session, err := fastboot.OpenSession(input.Path)
++	if err != nil {
++		return nil, nil, err
++	}
++	defer session.Close()
++
++	response, err := session.Continue(ctx)
++	if err != nil {
++		return nil, nil, err
++	}
++
++	return nil, &ContinueOutput{
++		Response: response,
++	}, nil
++}
+
