@@ -1,0 +1,307 @@
+From 1f1fd5e5c62500ac14b7e8cf8aa27a323804a460 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Tue, 27 Oct 2026 20:29:49 -0700
+Subject: [PATCH] feat: Add SpacemiT-specific GZip fastboot compression with chunking support
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/pkg/fastboot/commands.go b/pkg/fastboot/commands.go
+index 9a403cc6c6873303a61f5b750d0f359c8add54b9..35a46179f6ba34fac44ad7da929a842fcf541f99 100644
+--- a/pkg/fastboot/commands.go
++++ b/pkg/fastboot/commands.go
+@@ -122,10 +122,14 @@ 	if err := s.Download(ctx, source, size, progress); err != nil {
+ 		return err
+ 	}
+ 
+-	return s.flashDownloaded(ctx, partition)
++	return s.FlashDownloaded(ctx, partition)
+ }
+ 
+-func (s *Session) flashDownloaded(ctx context.Context, partition string) error {
++func (s *Session) FlashDownloaded(ctx context.Context, partition string) error {
++	if s.protocol == nil {
++		return ErrSessionClosed
++	}
++
+ 	_, err := s.protocol.command(ctx, "flash:"+partition, statusOKAY, timeoutWrite)
+ 
+ 	return err
+diff --git a/pkg/fastboot/sparse.go b/pkg/fastboot/sparse.go
+index b63dc18e1a9688505240e01615fc791b2d03d3ad..baeb74188ff5c508d7d01c0c654643081c0f5617 100644
+--- a/pkg/fastboot/sparse.go
++++ b/pkg/fastboot/sparse.go
+@@ -46,7 +46,7 @@ 		if err := s.Download(ctx, image, imageSize, nil); err != nil {
+ 			return err
+ 		}
+ 
+-		if err := s.flashDownloaded(ctx, partition); err != nil {
++		if err := s.FlashDownloaded(ctx, partition); err != nil {
+ 			return err
+ 		}
+ 
+diff --git a/pkg/svc/flash_flash_file.go b/pkg/svc/flash_flash_file.go
+index 8efb7a01d08711840a49697959446a460f853ab2..ebd77ab9f800b8fcf6b0f90271fcc0a492b38c5c 100644
+--- a/pkg/svc/flash_flash_file.go
++++ b/pkg/svc/flash_flash_file.go
+@@ -2,9 +2,12 @@ package svc
+ 
+ import (
+ 	"context"
++	"errors"
+ 	"time"
+ 
+ 	"codeberg.org/pojntfx/pushrod/pkg/fastboot"
++	"codeberg.org/pojntfx/pushrod/pkg/titanflasher"
++	"github.com/google/jsonschema-go/jsonschema"
+ 	"github.com/modelcontextprotocol/go-sdk/mcp"
+ )
+ 
+@@ -14,14 +17,70 @@ 		Name:        "flash.flashFile",
+ 		Title:       "Flash file",
+ 		Description: "Flash an uploaded file to a partition on a device in fastboot mode",
+ 		Annotations: &mcp.ToolAnnotations{DestructiveHint: new(true)},
++		InputSchema: flashFileSchema(),
+ 	}
++
++	ErrInvalidCompression = errors.New("invalid compression, expected gzip-N with N from 0 to 9")
+ )
+ 
++type flashCompression string
++
++const (
++	flashCompressionRaw   flashCompression = ""
++	flashCompressionGzip0 flashCompression = "gzip-0"
++	flashCompressionGzip1 flashCompression = "gzip-1"
++	flashCompressionGzip2 flashCompression = "gzip-2"
++	flashCompressionGzip3 flashCompression = "gzip-3"
++	flashCompressionGzip4 flashCompression = "gzip-4"
++	flashCompressionGzip5 flashCompression = "gzip-5"
++	flashCompressionGzip6 flashCompression = "gzip-6"
++	flashCompressionGzip7 flashCompression = "gzip-7"
++	flashCompressionGzip8 flashCompression = "gzip-8"
++	flashCompressionGzip9 flashCompression = "gzip-9"
++)
++
++var flashGzipLevels = map[flashCompression]titanflasher.GzipLevel{
++	flashCompressionGzip0: titanflasher.GzipLevel0,
++	flashCompressionGzip1: titanflasher.GzipLevel1,
++	flashCompressionGzip2: titanflasher.GzipLevel2,
++	flashCompressionGzip3: titanflasher.GzipLevel3,
++	flashCompressionGzip4: titanflasher.GzipLevel4,
++	flashCompressionGzip5: titanflasher.GzipLevel5,
++	flashCompressionGzip6: titanflasher.GzipLevel6,
++	flashCompressionGzip7: titanflasher.GzipLevel7,
++	flashCompressionGzip8: titanflasher.GzipLevel8,
++	flashCompressionGzip9: titanflasher.GzipLevel9,
++}
++
++func flashFileSchema() *jsonschema.Schema {
++	schema, err := jsonschema.For[FlashFileInput](nil)
++	if err != nil {
++		panic(err)
++	}
++
++	schema.Properties["compress"].Enum = []any{
++		flashCompressionRaw,
++		flashCompressionGzip0,
++		flashCompressionGzip1,
++		flashCompressionGzip2,
++		flashCompressionGzip3,
++		flashCompressionGzip4,
++		flashCompressionGzip5,
++		flashCompressionGzip6,
++		flashCompressionGzip7,
++		flashCompressionGzip8,
++		flashCompressionGzip9,
++	}
++
++	return schema
++}
++
+ type FlashFileInput struct {
+-	Path      string `json:"path" jsonschema:"path that uniquely identifies the fastboot device until it gets unplugged, in BUS-PORT form like 1-2-3"`
+-	File      string `json:"file" jsonschema:"name of the file to flash"`
+-	Partition string `json:"partition" jsonschema:"partition to flash the file to, like boot or rootfs"`
+-	Reboot    bool   `json:"reboot" jsonschema:"whether to reboot the device after flashing"`
++	Path      string           `json:"path" jsonschema:"path that uniquely identifies the fastboot device until it gets unplugged, in BUS-PORT form like 1-2-3"`
++	File      string           `json:"file" jsonschema:"name of the file to flash"`
++	Partition string           `json:"partition" jsonschema:"partition to flash the file to, like boot or rootfs"`
++	Compress  flashCompression `json:"compress,omitempty" jsonschema:"SpacemiT-specific compression to use for the transfer"`
++	Reboot    bool             `json:"reboot" jsonschema:"whether to reboot the device after flashing"`
+ }
+ 
+ type FlashFileOutput struct {
+@@ -32,6 +91,11 @@ 	DurationMs int64  `json:"durationMs" jsonschema:"how long the flash took, in milliseconds"`
+ }
+ 
+ func (s *Service) FlashFile(ctx context.Context, req *mcp.CallToolRequest, input FlashFileInput) (*mcp.CallToolResult, *FlashFileOutput, error) {
++	gzipLevel, ok := flashGzipLevels[input.Compress]
++	if input.Compress != flashCompressionRaw && !ok {
++		return nil, nil, ErrInvalidCompression
++	}
++
+ 	file, err := s.openUploadedFile(input.File)
+ 	if err != nil {
+ 		return nil, nil, err
+@@ -55,7 +119,13 @@ 	}
+ 	defer session.Close()
+ 
+ 	start := time.Now()
+-	if err := session.Flash(ctx, input.Partition, file, info.Size(), notifyProgress(ctx, req, info.Size())); err != nil {
++	progress := notifyProgress(ctx, req, info.Size())
++	if input.Compress == flashCompressionRaw {
++		err = session.Flash(ctx, input.Partition, file, info.Size(), progress)
++	} else {
++		err = titanflasher.FlashGzip(ctx, session, input.Partition, file, info.Size(), gzipLevel, progress)
++	}
++	if err != nil {
+ 		return nil, nil, err
+ 	}
+ 
+diff --git a/pkg/titanflasher/gzip.go b/pkg/titanflasher/gzip.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..0e1527304408ca49c5eacf1d9fbdde34b3a8f194
+--- /dev/null
++++ b/pkg/titanflasher/gzip.go
+@@ -0,0 +1,140 @@
++package titanflasher
++
++import (
++	"compress/gzip"
++	"context"
++	"io"
++	"math"
++	"os"
++
++	"codeberg.org/pojntfx/pushrod/pkg/fastboot"
++)
++
++type GzipLevel int
++
++const (
++	GzipLevel0 GzipLevel = iota
++	GzipLevel1
++	GzipLevel2
++	GzipLevel3
++	GzipLevel4
++	GzipLevel5
++	GzipLevel6
++	GzipLevel7
++	GzipLevel8
++	GzipLevel9
++)
++
++func FlashGzip(ctx context.Context, session *fastboot.Session, partition string, source io.Reader, size int64, level GzipLevel, progress fastboot.ProgressCallback) error {
++	if size < 0 {
++		return fastboot.ErrInvalidDownloadSize
++	}
++
++	limit, err := session.MaxDownloadSize(ctx)
++	if err != nil {
++		return err
++	}
++
++	blockLimit := min(limit, int64(math.MaxUint32))
++	if blockLimit <= 0 {
++		return fastboot.ErrInvalidDownloadSize
++	}
++
++	if size == 0 {
++		return flashGzipBlock(ctx, session, partition, source, 0, limit, level)
++	}
++
++	for sent := int64(0); sent < size; {
++		blockSize := min(blockLimit, size-sent)
++		if err := flashGzipBlock(ctx, session, partition, source, blockSize, limit, level); err != nil {
++			return err
++		}
++
++		sent += blockSize
++		if progress != nil {
++			progress(sent)
++		}
++	}
++
++	return nil
++}
++
++func flashGzipBlock(ctx context.Context, session *fastboot.Session, partition string, source io.Reader, size, limit int64, level GzipLevel) error {
++	if level == GzipLevel0 {
++		if err := session.Download(ctx, io.LimitReader(source, size), size, nil); err != nil {
++			return err
++		}
++
++		return session.FlashDownloaded(ctx, partition)
++	}
++
++	block, compressedSize, err := gzipBlock(ctx, source, size, level)
++	if err != nil {
++		return err
++	}
++	defer func() {
++		block.Close()
++		os.Remove(block.Name())
++	}()
++
++	if compressedSize > limit {
++		return fastboot.ErrDownloadTooLarge
++	}
++
++	if err := session.Download(ctx, block, compressedSize, nil); err != nil {
++		return err
++	}
++
++	return session.FlashDownloaded(ctx, partition)
++}
++
++func gzipBlock(ctx context.Context, source io.Reader, size int64, level GzipLevel) (_ *os.File, _ int64, err error) {
++	// Fastboot needs the compressed size before download, so store each block in a temporary file first
++	file, err := os.CreateTemp("", "pushrod-gzip-")
++	if err != nil {
++		return nil, 0, err
++	}
++	defer func() {
++		if err != nil {
++			file.Close()
++			os.Remove(file.Name())
++		}
++	}()
++
++	compressor, err := gzip.NewWriterLevel(file, int(level))
++	if err != nil {
++		return nil, 0, err
++	}
++
++	if _, err = io.CopyN(compressor, contextReader{ctx: ctx, reader: source}, size); err != nil {
++		return nil, 0, err
++	}
++
++	if err = compressor.Close(); err != nil {
++		return nil, 0, err
++	}
++
++	info, err := file.Stat()
++	if err != nil {
++		return nil, 0, err
++	}
++
++	if _, err = file.Seek(0, io.SeekStart); err != nil {
++		return nil, 0, err
++	}
++
++	return file, info.Size(), nil
++}
++
++type contextReader struct {
++	ctx    context.Context
++	reader io.Reader
++}
++
++func (r contextReader) Read(data []byte) (int, error) {
++	if err := r.ctx.Err(); err != nil {
++		return 0, err
++	}
++
++	return r.reader.Read(data)
++}
+
