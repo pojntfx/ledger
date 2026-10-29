@@ -1,0 +1,30 @@
+From 97d23c65702206b9c94f9e6282bf2b18b1b432a3 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Wed, 28 Oct 2026 17:58:59 -0700
+Subject: [PATCH] docs: Add explict guidance for MCP callers to prevent accidental misuse without further instructions
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/main.go b/main.go
+index 8d044a37da6be6f3a8bedc532215e0da0f9a458c..eed23558f307db3ccc0df1359abdcbaec2a4b98a 100644
+--- a/main.go
++++ b/main.go
+@@ -54,6 +54,17 @@ 			WebsiteURL:  "https://codeberg.org/pojntfx/pushrod",
+ 		},
+ 		&mcp.ServerOptions{
+ 			Logger: logger,
++			Instructions: `Never call flash.multiFlash or flash.flashFile on a BROM device. It answers OKAY and writes nothing.
++
++Read flash.getDevices first. Manufacturer DFU with productId 1001 means BROM. Manufacturer U-Boot means U-Boot fastboot.
++
++Upload every image before a stage or flash. files.getFiles names the uploads.
++
++BROM: stage FSBL.bin, continue. Read flash.getDevices. Stage u-boot.itb, continue.
++
++U-Boot: read mtd-size and blk-size. Call flash.multiFlash with partition_<mtd-size>.json and partition_<blk-size>.json.
++
++Every partition in a table needs offset and size. The device builds its GPT from them.`,
+ 		},
+ 	)
+ 	handler.AddReceivingMiddleware(svc.LogIncoming(logger))
+
