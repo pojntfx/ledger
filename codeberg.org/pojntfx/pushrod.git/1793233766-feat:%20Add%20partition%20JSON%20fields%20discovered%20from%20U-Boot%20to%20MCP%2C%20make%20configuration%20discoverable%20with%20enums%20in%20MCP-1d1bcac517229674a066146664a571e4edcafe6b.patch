@@ -1,0 +1,67 @@
+From 1d1bcac517229674a066146664a571e4edcafe6b Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Wed, 28 Oct 2026 17:29:26 -0700
+Subject: [PATCH] feat: Add partition JSON fields discovered from U-Boot to MCP, make configuration discoverable with enums in MCP
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/pkg/svc/flash_multi_flash.go b/pkg/svc/flash_multi_flash.go
+index 891ceead0c8ea56dbbf6694f72b04d215b5b9bcd..d4af323884534541231ad842a54aee55432bf28d 100644
+--- a/pkg/svc/flash_multi_flash.go
++++ b/pkg/svc/flash_multi_flash.go
+@@ -35,6 +35,7 @@ 	if err != nil {
+ 		panic(err)
+ 	}
+ 
++	schema.Properties["partitionTables"].Items.Properties["format"].Enum = titanflasher.PartitionFormatEnum
+ 	schema.Properties["partitionTables"].Items.Properties["partitions"].Items.Properties["compress"].Enum = titanflasher.CompressionEnum
+ 
+ 	return schema
+@@ -107,7 +108,7 @@ 	if err != nil {
+ 		return nil, nil, err
+ 	}
+ 
+-	parsed := newParsedPartitionTable(definition.Format, contents)
++	parsed := newParsedPartitionTable(string(definition.Format), contents)
+ 	defer func() {
+ 		if err != nil {
+ 			parsed.close()
+diff --git a/pkg/titanflasher/partition.go b/pkg/titanflasher/partition.go
+index f5c9451c2ad34d6ecbcae4010d8af5f4369e6400..7516e890f04b870c2dd2911178645fb5ebdacf54 100644
+--- a/pkg/titanflasher/partition.go
++++ b/pkg/titanflasher/partition.go
+@@ -1,12 +1,30 @@
+ package titanflasher
+ 
+ type PartitionTable struct {
+-	Format     string      `json:"format" jsonschema:"partition to write this partition table to"`
+-	Partitions []Partition `json:"partitions" jsonschema:"partitions and images to flash, in order"`
++	Version    string          `json:"version,omitempty" jsonschema:"version of the partition table format"`
++	Format     PartitionFormat `json:"format" jsonschema:"partition to write this partition table to"`
++	Partitions []Partition     `json:"partitions" jsonschema:"partitions and images to flash, in order"`
++}
++
++type PartitionFormat string
++
++const (
++	PartitionFormatGPT PartitionFormat = "gpt"
++	PartitionFormatMTD PartitionFormat = "mtd"
++)
++
++var PartitionFormatEnum = []any{
++	PartitionFormatGPT,
++	PartitionFormatMTD,
+ }
+ 
+ type Partition struct {
+ 	Name     string      `json:"name" jsonschema:"partition to flash the image to"`
+-	Image    string      `json:"image" jsonschema:"name of the uploaded image file"`
++	Comment  string      `json:"comment,omitempty" jsonschema:"comment for the partition table"`
++	Hidden   bool        `json:"hidden,omitempty" jsonschema:"whether the partition is hidden"`
++	Offset   string      `json:"offset,omitempty" jsonschema:"offset of the partition in the partition table"`
++	Size     string      `json:"size,omitempty" jsonschema:"size of the partition in the partition table, - for the rest of the device"`
++	Image    string      `json:"image,omitempty" jsonschema:"name of the uploaded image file"`
++	Type     string      `json:"type,omitempty" jsonschema:"filesystem type of the partition"`
+ 	Compress Compression `json:"compress,omitempty" jsonschema:"SpacemiT-specific compression to use for the transfer"`
+ }
+
