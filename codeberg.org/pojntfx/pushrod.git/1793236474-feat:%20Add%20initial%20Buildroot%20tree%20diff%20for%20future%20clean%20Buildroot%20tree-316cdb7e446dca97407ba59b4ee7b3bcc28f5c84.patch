@@ -1,0 +1,780 @@
+From 316cdb7e446dca97407ba59b4ee7b3bcc28f5c84 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Wed, 28 Oct 2026 18:14:34 -0700
+Subject: [PATCH] feat: Add initial Buildroot tree diff for future clean Buildroot tree
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/buildroot.diff b/buildroot.diff
+new file mode 100644
+index 0000000000000000000000000000000000000000..8fe9bebed98511c6302206b66f6602f1568c53b5
+--- /dev/null
++++ b/buildroot.diff
+@@ -0,0 +1,766 @@
++diff --git a/buildroot-ext/PORT-NOTES.md b/buildroot-ext/PORT-NOTES.md
++new file mode 100644
++index 0000000..45d8721
++--- /dev/null
+++++ b/buildroot-ext/PORT-NOTES.md
++@@ -0,0 +1,42 @@
+++# K3 port notes
+++
+++This tree is SpaceMiT's external tree with our K3 changes. The companion diff records them.
+++
+++Base: SpaceMiT `buildroot-ext` commit `e4f708f` (tag `k3-br-v1.0.2`).
+++SpaceMiT branch state on 2026-10-28: `buildroot` tip `06a303b` (2026-02-21), `buildroot-ext` tip `6b13807` (2026-09-17).
+++
+++## Inputs
+++
+++- buildroot source: upstream tag `2026.08` or newer. Our tree holds upstream master from mid-2026 with `BR2_VERSION = 2026.08-git`.
+++- external tree: this tree.
+++- kernel: `bsp-src/linux-6.18` at `0ffac20d9ef93c572b649037213bbe20ef59a714`.
+++- u-boot: `bsp-src/uboot-2022.10` at `6747f87ae4cd359ff6e22daa38b06c3ecc2fecb4`.
+++- opensbi: `bsp-src/opensbi` at `e5fc30394ac18263fa045dcaef52f86f180ed512`.
+++- toolchain: prebuilt tarball `http://archive.spacemit.com/toolchain/spacemit-toolchain-linux-glibc-x86_64-v1.2.2.tar.xz`, GCC 15.2.0.
+++
+++## Excluded on purpose
+++
+++- `board/spacemit/k3/target_overlay/lib/firmware/powervr/rogue_36.56.104.183_v1.fw`: proprietary microcode, 131072 bytes, sha256 `1db1c399c17401d1f79d46c880db81c724d748c784d4639433b076aba2f9c0d2`. Fetch it as `board/spacemit/k3/target_overlay/lib/firmware/powervr/FETCH-FIRMWARE.md` describes.
+++- `board/spacemit/k3/target_overlay/root/.ssh/authorized_keys`: two ed25519 public keys. Add your own key instead.
+++
+++## Build
+++
+++    make O=$PWD/output/k3 BR2_EXTERNAL=$PWD/buildroot-ext BR2_DL_DIR=$PWD/buildroot/dl BR2_CCACHE_DIR=$PWD/buildroot-ccache -j14
+++
+++Set `BR2_GLOBAL_PATCH_DIR="$(BR2_EXTERNAL_Bianbu_PATH)/patches"` exactly once.
+++Do not list the same patch directory twice. Buildroot exits with `duplicate filename`.
+++
+++## Pitfalls
+++
+++- Buildroot applies patches with `patch -F0`. Write patches with full context.
+++- A failed patch leaves an entry in `output/k3/build/<pkg>/.applied_patches_list`. Delete that build directory before a retry.
+++- Mesa option names differ between releases. Read `package/mesa3d/Config.in` in the new tag.
+++- Weston patches `0001` and `0002` are dropped. Keep `0003` only.
+++- `linux.mk` needs no patch on the clean tree. Use `LINUX_OVERRIDE_SRCDIR`.
+++
+++## Verify
+++
+++- The image boots with console on `ttyS0` and `tty1`.
+++- `vulkaninfo` lists the imagination device.
+++- `eglinfo` works over zink.
+++- Weston shows the Terminal and GPU Cube Demo launchers.
++diff --git a/buildroot-ext/board/spacemit/k3/dracut-modules/99custom/module-setup.sh b/buildroot-ext/board/spacemit/k3/dracut-modules/99custom/module-setup.sh
++index 03b1683..3df9658 100755
++--- a/buildroot-ext/board/spacemit/k3/dracut-modules/99custom/module-setup.sh
+++++ b/buildroot-ext/board/spacemit/k3/dracut-modules/99custom/module-setup.sh
++@@ -13,6 +13,14 @@ depends() {
++ 
++ # called by dracut
++ install() {
+++    # Ensure bare-name binary lookup works regardless of the host build
+++    # environment's PATH. Under a direct (non-container) build the inherited
+++    # PATH may lack the standard sbin/bin dirs, which makes dracut-install's
+++    # name-based resolution silently fail for -o (optional) binaries such as
+++    # mount/blkid/fsck/e2fsck. Missing these leaves the initramfs unable to
+++    # mount the rootfs, hanging the boot with no console output.
+++    PATH="/usr/sbin:/usr/bin:/sbin:/bin:$PATH"
+++
++     inst_multiple -o ps grep more cat rm strace free showmount \
++         ping netstat rpcinfo vi scp ping6 ssh \
++         fsck fsck.ext2 fsck.ext4 fsck.ext3 fsck.ext4dev fsck.f2fs fsck.vfat e2fsck resize2fs mount blkid
++diff --git a/buildroot-ext/board/spacemit/k3/env_k3.txt b/buildroot-ext/board/spacemit/k3/env_k3.txt
++index 12b9498..18e3cd0 100644
++--- a/buildroot-ext/board/spacemit/k3/env_k3.txt
+++++ b/buildroot-ext/board/spacemit/k3/env_k3.txt
++@@ -1,5 +1,8 @@
++ // Common parameter
++-console=ttyS0,115200
+++// console: HDMI (tty1) AND the serial debug UART (ttyS0). Serial is listed LAST
+++// so it becomes the primary /dev/console (kernel log + init land on serial),
+++// while HDMI (tty1) still shows output too. Login gettys run on both (inittab).
+++console=tty1 console=ttyS0,115200
++ init=/init
++ bootdelay=0
++ knl_name=Image
++diff --git a/buildroot-ext/board/spacemit/k3/plt_overlay/root/run_weston.sh b/buildroot-ext/board/spacemit/k3/plt_overlay/root/run_weston.sh
++index ce7355d..36532a7 100755
++--- a/buildroot-ext/board/spacemit/k3/plt_overlay/root/run_weston.sh
+++++ b/buildroot-ext/board/spacemit/k3/plt_overlay/root/run_weston.sh
++@@ -1,7 +1,10 @@
++-export MESA_LOADER_DRIVER_OVERRIDE=pvr
+++export MESA_LOADER_DRIVER_OVERRIDE=zink
++ export XDG_RUNTIME_DIR=/root
++ export QT_QPA_PLATFORM_PLUGIN_PATH=/usr/lib/qt/plugins/platforms
++ export QT_QPA_PLATFORM=wayland
+++# Open imagination Vulkan driver gates itself as non-conformant for the K3 GPU
+++# revision; required for zink to get a Vulkan device.
+++export PVR_I_WANT_A_BROKEN_VULKAN_DRIVER=1
++ DRM_DEVICE="card1"
++ for entry in /sys/class/drm/card*-DP-*; do
++     [ -e "$entry" ] && DRM_DEVICE=$(basename "$entry" | grep -o 'card[0-9]*') && break
++diff --git a/buildroot-ext/board/spacemit/k3/post-build.sh b/buildroot-ext/board/spacemit/k3/post-build.sh
++index b38ef2e..e2d4ac5 100755
++--- a/buildroot-ext/board/spacemit/k3/post-build.sh
+++++ b/buildroot-ext/board/spacemit/k3/post-build.sh
++@@ -1,3 +1,20 @@
++ #!/bin/bash -e
++ DATE=$(date +%Y%m%d%H%M%S)
++-echo "$DATE" | tee "${TARGET_DIR}/etc/bianbu_version"
++\ No newline at end of file
+++echo "$DATE" | tee "${TARGET_DIR}/etc/bianbu_version"
+++
+++# --- SSH: allow key-based root login for the pre-seeded authorized_keys ---
+++# sshd is strict about permissions: /root/.ssh must be 0700 and
+++# authorized_keys 0600. Root ownership (uid 0) is applied later by Buildroot's
+++# fakeroot pass via the permission table in the .mk, so only fix modes here
+++# (a real chown would fail in a non-root build).
+++if [ -f "${TARGET_DIR}/root/.ssh/authorized_keys" ]; then
+++	chmod 0700 "${TARGET_DIR}/root/.ssh"
+++	chmod 0600 "${TARGET_DIR}/root/.ssh/authorized_keys"
+++fi
+++
+++# Ensure pubkey auth is explicitly enabled (default is on, but make it explicit).
+++SSHD_CONFIG="${TARGET_DIR}/etc/ssh/sshd_config"
+++if [ -f "${SSHD_CONFIG}" ]; then
+++	sed -i 's/^#\?PubkeyAuthentication .*/PubkeyAuthentication yes/' "${SSHD_CONFIG}"
+++	sed -i 's/^#\?PermitRootLogin .*/PermitRootLogin yes/' "${SSHD_CONFIG}"
+++fi
++\ No newline at end of file
++diff --git a/buildroot-ext/board/spacemit/k3/target_overlay/etc/inittab b/buildroot-ext/board/spacemit/k3/target_overlay/etc/inittab
++new file mode 100644
++index 0000000..9498f11
++--- /dev/null
+++++ b/buildroot-ext/board/spacemit/k3/target_overlay/etc/inittab
++@@ -0,0 +1,44 @@
+++# /etc/inittab
+++#
+++# Copyright (C) 2001 Erik Andersen <andersen@codepoet.org>
+++#
+++# Note: BusyBox init doesn't support runlevels.  The runlevels field is
+++# completely ignored by BusyBox init. If you want runlevels, use
+++# sysvinit.
+++#
+++# Format for each entry: <id>:<runlevels>:<action>:<process>
+++#
+++# id        == tty to run on, or empty for /dev/console
+++# runlevels == ignored
+++# action    == one of sysinit, respawn, askfirst, wait, and once
+++# process   == program to run
+++
+++# Startup the system
+++::sysinit:/bin/mount -t proc proc /proc
+++::sysinit:/bin/mount -o remount,rw /
+++::sysinit:/bin/mkdir -p /dev/pts /dev/shm
+++::sysinit:/bin/mount -a
+++::sysinit:/bin/mkdir -p /run/lock/subsys
+++::sysinit:/sbin/swapon -a
+++null::sysinit:/bin/ln -sf /proc/self/fd /dev/fd
+++null::sysinit:/bin/ln -sf /proc/self/fd/0 /dev/stdin
+++null::sysinit:/bin/ln -sf /proc/self/fd/1 /dev/stdout
+++null::sysinit:/bin/ln -sf /proc/self/fd/2 /dev/stderr
+++::sysinit:/bin/hostname -F /etc/hostname
+++# now run any rc scripts
+++::sysinit:/etc/init.d/rcS
+++
+++# Login prompt on the HDMI/framebuffer console (/dev/console -> tty1)
+++console::respawn:/sbin/getty -L  console 0 vt100
+++# Additional login prompt on the serial debug UART (ttyS0 @ 115200) so a login
+++# shell is always reachable over the serial console (minicom), independent of
+++# which device the kernel picked as /dev/console.
+++ttyS0::respawn:/sbin/getty -L ttyS0 115200 vt100
+++
+++# Stuff to do for the 3-finger salute
+++::ctrlaltdel:/sbin/reboot
+++
+++# Stuff to do before rebooting
+++::shutdown:/etc/init.d/rcK
+++::shutdown:/sbin/swapoff -a
+++::shutdown:/bin/umount -a -r
++diff --git a/buildroot-ext/board/spacemit/k3/target_overlay/etc/profile.d/powervr-vulkan.sh b/buildroot-ext/board/spacemit/k3/target_overlay/etc/profile.d/powervr-vulkan.sh
++new file mode 100644
++index 0000000..69f662b
++--- /dev/null
+++++ b/buildroot-ext/board/spacemit/k3/target_overlay/etc/profile.d/powervr-vulkan.sh
++@@ -0,0 +1,5 @@
+++# The open Mesa "imagination" Vulkan driver gates itself behind a conformance
+++# check that only passes for BVNC 36.53.104.796. The SpacemiT K3 GPU is
+++# 36.56.104.183, so without this override vkEnumeratePhysicalDevices fails with
+++# VK_ERROR_INITIALIZATION_FAILED and no Vulkan/zink/GL is available.
+++export PVR_I_WANT_A_BROKEN_VULKAN_DRIVER=1
++diff --git a/buildroot-ext/board/spacemit/k3/target_overlay/etc/xdg/weston/weston.ini b/buildroot-ext/board/spacemit/k3/target_overlay/etc/xdg/weston/weston.ini
++index 000ab07..ac471b3 100644
++--- a/buildroot-ext/board/spacemit/k3/target_overlay/etc/xdg/weston/weston.ini
+++++ b/buildroot-ext/board/spacemit/k3/target_overlay/etc/xdg/weston/weston.ini
++@@ -10,3 +10,11 @@ background-type=scale-crop
++ [keyboard]
++ [output]
++ mode=1920x1080
+++[launcher]
+++icon=/usr/share/pixmaps/weston-terminal.png
+++displayname=Terminal
+++path=/usr/bin/weston-terminal
+++[launcher]
+++icon=/usr/share/pixmaps/gpu-cubeDemo.png
+++displayname=GPU Cube Demo
+++path=/usr/bin/launch-gpu-cubeDemo
++diff --git a/buildroot-ext/board/spacemit/k3/target_overlay/lib/firmware/powervr/FETCH-FIRMWARE.md b/buildroot-ext/board/spacemit/k3/target_overlay/lib/firmware/powervr/FETCH-FIRMWARE.md
++new file mode 100644
++index 0000000..5ae5aab
++--- /dev/null
+++++ b/buildroot-ext/board/spacemit/k3/target_overlay/lib/firmware/powervr/FETCH-FIRMWARE.md
++@@ -0,0 +1,16 @@
+++# GPU firmware placeholder
+++
+++Place `rogue_36.56.104.183_v1.fw` in this directory before the build.
+++Do not commit the file. The licence is proprietary: SpaceMiT marks its DDK `Strictly Confidential` and non-redistributable.
+++
+++Obtain the file from one of these sources:
+++
+++- SpaceMiT K3 images, at https://archive.spacemit.com/image/k3/ . Extract `/lib/firmware/powervr/rogue_36.56.104.183_v1.fw` from an image.
+++- The K3 buildroot SDK, at `package-src/img-gpu-powervr/target/lib/firmware/rgx.fw.36.56.104.183`. That copy is a different build of the same microcode.
+++
+++Make sure that the file has these properties:
+++
+++- size 131072 bytes
+++- sha256 `1db1c399c17401d1f79d46c880db81c724d748c784d4639433b076aba2f9c0d2`
+++
+++The kernel driver `DRM_POWERVR` loads the file at boot. Without the file, the GPU stack fails.
++diff --git a/buildroot-ext/board/spacemit/k3/target_overlay/root/run_weston.sh b/buildroot-ext/board/spacemit/k3/target_overlay/root/run_weston.sh
++index 22ca456..7816b68 100755
++--- a/buildroot-ext/board/spacemit/k3/target_overlay/root/run_weston.sh
+++++ b/buildroot-ext/board/spacemit/k3/target_overlay/root/run_weston.sh
++@@ -1,12 +1,39 @@
++-export MESA_LOADER_DRIVER_OVERRIDE=pvr
+++export MESA_LOADER_DRIVER_OVERRIDE=zink
++ export XDG_RUNTIME_DIR=/root
++ export QT_QPA_PLATFORM_PLUGIN_PATH=/usr/lib/qt/plugins/platforms
++ export QT_QPA_PLATFORM=wayland
++ 
++-XDG_RUNTIME_DIR=/root weston --drm-device=card1 --idle-time=0 --log=/var/log/weston.1 &
++-WESTON_PID1=$!
+++# The open Mesa "imagination" Vulkan driver only reports itself as conformant
+++# for BVNC 36.53.104.796. The K3's GPU is 36.56.104.183, so the driver refuses
+++# to expose the physical device (vkEnumeratePhysicalDevices ->
+++# VK_ERROR_INITIALIZATION_FAILED, "not a conformant Vulkan implementation")
+++# unless this override is set. zink then has a Vulkan device to render on.
+++export PVR_I_WANT_A_BROKEN_VULKAN_DRIVER=1
++ 
++-XDG_RUNTIME_DIR=/root weston --drm-device=card2 --idle-time=0 --log=/var/log/weston.2 &
++-WESTON_PID2=$!
+++# Auto-detect the DRM card that actually has a connected output (DP/HDMI/eDP)
+++# instead of hard-coding card1/card2. On this board the edp0 CRTC often has no
+++# panel ("Cannot find any crtc or sizes"), and a second card2 may not exist at
+++# all, which made the old hard-coded launch fail. Pick the first card that has
+++# a connected connector, falling back to card1.
+++DRM_DEVICE="card1"
+++for status in /sys/class/drm/card*-*/status; do
+++    [ -e "$status" ] || continue
+++    if [ "$(cat "$status" 2>/dev/null)" = "connected" ]; then
+++        conn=$(basename "$(dirname "$status")")
+++        DRM_DEVICE=$(echo "$conn" | grep -o 'card[0-9]*')
+++        break
+++    fi
+++done
++ 
++-wait $WESTON_PID1 $WESTON_PID2
+++echo "run_weston: using DRM device $DRM_DEVICE"
+++
+++# Prefer Weston's native Vulkan renderer (weston 15+), which drives the open
+++# imagination Vulkan driver directly. Fall back to the GL renderer (zink over
+++# Vulkan) if the Vulkan renderer isn't available/fails.
+++if weston --help 2>&1 | grep -q -- '--renderer'; then
+++    echo "run_weston: trying native Vulkan renderer"
+++    XDG_RUNTIME_DIR=/root weston --drm-device="$DRM_DEVICE" --renderer=vulkan \
+++        --idle-time=0 --log=/var/log/weston.log && exit 0
+++    echo "run_weston: Vulkan renderer failed, falling back to GL (zink)"
+++fi
+++XDG_RUNTIME_DIR=/root weston --drm-device="$DRM_DEVICE" --idle-time=0 --log=/var/log/weston.log
++diff --git a/buildroot-ext/board/spacemit/k3/target_overlay/usr/bin/launch-gpu-cubeDemo b/buildroot-ext/board/spacemit/k3/target_overlay/usr/bin/launch-gpu-cubeDemo
++new file mode 100755
++index 0000000..3321d6a
++--- /dev/null
+++++ b/buildroot-ext/board/spacemit/k3/target_overlay/usr/bin/launch-gpu-cubeDemo
++@@ -0,0 +1,4 @@
+++#!/bin/sh
+++export XDG_RUNTIME_DIR=/root
+++export WAYLAND_DISPLAY=wayland-1
+++exec /usr/bin/gpu-cubeDemo
++diff --git a/buildroot-ext/board/spacemit/k3/target_overlay/usr/share/pixmaps/gpu-cubeDemo.png b/buildroot-ext/board/spacemit/k3/target_overlay/usr/share/pixmaps/gpu-cubeDemo.png
++new file mode 100644
++index 0000000000000000000000000000000000000000..118b1ba033f26c05676b55fddcab34ee81344842
++GIT binary patch
++literal 2313
++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
++
++literal 0
++HcmV?d00001
++
++diff --git a/buildroot-ext/board/spacemit/k3/target_overlay/usr/share/pixmaps/weston-terminal.png b/buildroot-ext/board/spacemit/k3/target_overlay/usr/share/pixmaps/weston-terminal.png
++new file mode 100644
++index 0000000000000000000000000000000000000000..7ce423e599bf2fa328626a0498c5463dd881a81c
++GIT binary patch
++literal 1203
++zcmV;k1WfyhP)<h;3K|Lk000e1NJLTq001BW001Be1^@s6b9#F8000DfNkl<ZSi|j?
++zO=w(I6vuz(-S_e`FCQ<7O~?l^iEXI(f#{;>!kR8xP>|AM7cG^PKo?SRA#~9e7mA?!
++zt_o5_L>Cp6Dpb@`wYn&#x)6&YEoyBi=|>u8rf)JI@7?2KX41rdC1I!=|8U_lbMN{8
++z@Bf^0?~G8z$i^*v^VKH+Y}m9_q9{T{s0UOP-}mY1?N!h7$Ye5n{_%SN2*6Y8pTih~
++z=XuP{&AFXjUGb&q>ADH9*3#PA%C&3POc;jNs%l&=GdMJaGqQ0D#u$t-GCDQ}5WB9M
++z0y+fRsEl?&=jXa$zJyWPFA|E7_>GO4%gj1al;itvzpgm2VbfMd$HsVV-#!Kg2M@$a
++z@(R{AI3mWXCJJgCJgda2C=MP<jG|Q+^=>YRh+~X7x~j8lPx`{2xl*a<TsVKu3c!<3
++zKkHUcexO_~zX=cn*JGOvjI_Gykewrw@(ELpV)L58mym{~Q2$#9-yJ$~?3u^9g`U0v
++zF(VtdNLzcmZ4JXzE|>cd)utHe5}o{PAecIrx0%_-V)o0uQ|a^5Ci83F%@*E>rnt&w
++zFYR^XVwb^R1|B$k@a^;y>qdU+?i+C2LZLvRP(*~3wbmEFDzq5QuL``d*Oa5Peq8Dp
++zDu?}Taa6owOYR!ll1@8A0tn7BTyRB%VzD@U{EH(2kazDN7@()82iNoL>G5%!k0N{#
++z&c^cSx-+wr)^Uc(2f@0R`X>@K!<|Tw>`YBK);y#sg+z6!?NV#UmgZ&!JOJ18Jo@?v
++zNd<wN{_zy$a*4)NpuVc3#;kP#45<2RU8z)^r~X=8MM0(7%C{x0<sP9_DiX&f{6>HN
++zD_2!%Of``Tnu*IL{+_u+Q%i`518A+vYa3*7T#>~e-%diMQKIWv+B@#6#;)e1W=)dB
++zh&ZS!`6!2~A|MOWyO3qcH&m@hMP#01QBmAjSY0aMI29qwV!De65y2)mUm4DdqpkqA
++zYL<H{;8yrwz<(~lUG@&Cwto$(%YKknCZNixMT;#ahzP2R6S#;gD;BXd0aihTB#P<W
++zwVKYcHN>+eOtZ^h`+p`HpTTKzE9;htJJ*1K#){V)(9jp4Wm}({Y1s}4s8vj>$IJ)6
++zbLH^aMJaFsv!c`AU4VkPLiu7IwUs%pV0^P+&Ali>M-WrJOSSe$)&~yNhXRp1N39>{
++z%>t~o*d(czSDmYD0d5u91@L{JRM2D<9BXae{*Wvp7s0AlU-=tuyMVs?&Oy`A;Ac8I
++zRvn$4x%y%*n<+cSaqE@p$`4)Dh6dk+VcYbnAC6A|jX>4~c=(aW?ZD7#x_kTgeEQM*
++z1DB_#)=QnUp$cKxHl4os$Dt_7r8jRIojG~p7_wv6%cO!PqU%}5_Z#i@vHiThcl+)_
++zAwOI*tWG}Y<Zr)BL{To?+!Br_ae1a#ELM)VeRK~m?AXooTX#ADukL#bAOJ$3wT`1}
++z^R`iwN(FdcgVbsO5#ikA87@z!?a=B6C6~<#kgwnA=aD^m;uytZQLIfA;2&D&<+9b*
++R13CZz002ovPDHLkV1i0IQds~1
++
++literal 0
++HcmV?d00001
++
++diff --git a/buildroot-ext/configs/spacemit_k3_defconfig b/buildroot-ext/configs/spacemit_k3_defconfig
++index 45e4fa8..689d60b 100644
++--- a/buildroot-ext/configs/spacemit_k3_defconfig
+++++ b/buildroot-ext/configs/spacemit_k3_defconfig
++@@ -9,7 +9,8 @@ BR2_TOOLCHAIN_EXTERNAL=y
++ BR2_TOOLCHAIN_EXTERNAL_DOWNLOAD=y
++ BR2_TOOLCHAIN_EXTERNAL_URL="http://archive.spacemit.com/toolchain/spacemit-toolchain-linux-glibc-x86_64-v1.2.2.tar.xz"
++ BR2_TOOLCHAIN_EXTERNAL_CUSTOM_PREFIX="$(ARCH)-unknown-linux-gnu"
++-BR2_TOOLCHAIN_EXTERNAL_HEADERS_6_12=y
+++BR2_TOOLCHAIN_EXTERNAL_HEADERS_6_16=y
+++BR2_TOOLCHAIN_EXTERNAL_GCC_15=y
++ BR2_TOOLCHAIN_EXTERNAL_CUSTOM_GLIBC=y
++ # BR2_TOOLCHAIN_EXTERNAL_INET_RPC is not set
++ BR2_TOOLCHAIN_EXTERNAL_CXX=y
++@@ -91,12 +92,15 @@ BR2_PACKAGE_LIBERATION=y
++ BR2_PACKAGE_WQY_ZENHEI=y
++ BR2_PACKAGE_GLMARK2=y
++ BR2_PACKAGE_LIBGLVND=y
++-BR2_PACKAGE_MESA3D_GALLIUM_DRIVER_SWRAST=y
+++BR2_PACKAGE_MESA3D_GALLIUM_DRIVER_LLVMPIPE=y
++ BR2_PACKAGE_MESA3D_GALLIUM_DRIVER_ZINK=y
++ BR2_PACKAGE_MESA3D_OPENGL_ES=y
++ BR2_PACKAGE_SDL2_KMSDRM=y
++ BR2_PACKAGE_SDL2_OPENGLES=y
++ BR2_PACKAGE_WESTON=y
+++# Native Weston Vulkan renderer (weston 15+): renders directly through the
+++# imagination Vulkan driver, avoiding the GL->zink->Vulkan chain.
+++BR2_PACKAGE_WESTON_VULKAN=y
++ BR2_PACKAGE_XORG7=y
++ BR2_PACKAGE_XWAYLAND=y
++ BR2_PACKAGE_CRYPTSETUP=y
++@@ -221,10 +225,28 @@ BR2_PACKAGE_HOST_PYTHON_PYYAML=y
++ BR2_PACKAGE_HOST_UBOOT_TOOLS=y
++ BR2_PACKAGE_HOST_UBOOT_TOOLS_FIT_SUPPORT=y
++ BR2_PACKAGE_HOST_UBOOT_TOOLS_FIT_SIGNATURE_SUPPORT=y
++-BR2_PACKAGE_RFKILL=y
++ BR2_PACKAGE_MPP=y
++-BR2_PACKAGE_IMG_GPU_POWERVR=y
++-BR2_PACKAGE_IMG_GPU_POWERVR_OUTPUT_WL=y
+++# mDNS/zeroconf: advertise <hostname>.local (e.g. K3-Buildroot.local) so the
+++# board is reachable by name, and resolve other *.local hosts (nss-mdns).
+++BR2_PACKAGE_AVAHI=y
+++BR2_PACKAGE_AVAHI_DAEMON=y
+++BR2_PACKAGE_NSS_MDNS=y
+++# Open-source PowerVR GPU stack (Mesa "imagination" Vulkan + zink GL over the
+++# open DRM_POWERVR kernel driver). Replaces the proprietary img-gpu-powervr DDK.
+++BR2_PACKAGE_MESA3D=y
+++BR2_PACKAGE_MESA3D_OPENGL_EGL=y
+++BR2_PACKAGE_MESA3D_GBM=y
+++# The open "imagination" Vulkan driver needs Mesa's CLC shader compiler, which
+++# requires LLVM. imagination selects NEEDS_PRECOMP_COMPILER, which pulls in the
+++# host-mesa3d (mesa_clc/pco_clc) + clang/libclc + spirv toolchain automatically.
+++BR2_PACKAGE_MESA3D_LLVM=y
+++BR2_PACKAGE_MESA3D_VULKAN_DRIVER_IMAGINATION=y
+++BR2_PACKAGE_VULKAN_LOADER=y
+++BR2_PACKAGE_VULKAN_HEADERS=y
+++# GPU diagnostic tools: vulkaninfo (vulkan-tools) and eglinfo/es2gears (mesa3d-demos)
+++# for bring-up/debug of the open GPU stack.
+++BR2_PACKAGE_VULKAN_TOOLS=y
+++BR2_PACKAGE_MESA3D_DEMOS=y
++ BR2_PACKAGE_DRM_TEST=y
++ BR2_PACKAGE_V2D_TEST=y
++ BR2_PACKAGE_K3X_VPU_TEST=y
++diff --git a/buildroot-ext/local.mk b/buildroot-ext/local.mk
++index c7b8976..051ee29 100644
++--- a/buildroot-ext/local.mk
+++++ b/buildroot-ext/local.mk
++@@ -30,7 +30,7 @@ endif
++ 
++ UBOOT_OVERRIDE_SRCDIR = $(TOPDIR)/../bsp-src/uboot-2022.10
++ OPENSBI_OVERRIDE_SRCDIR = $(TOPDIR)/../bsp-src/opensbi
++-MESA3D_OVERRIDE_SRCDIR = $(TOPDIR)/../package-src/mesa
+++#MESA3D_OVERRIDE_SRCDIR = $(TOPDIR)/../package-src/mesa
++ IMG_GPU_POWERVR_OVERRIDE_SRCDIR = $(TOPDIR)/../package-src/img-gpu-powervr
++ GLMARK2_OVERRIDE_SRCDIR = $(TOPDIR)/../package-src/glmark2
++ FACTORYTEST_OVERRIDE_SRCDIR = $(TOPDIR)/../package-src/factorytest
++diff --git a/buildroot-ext/patches/pahole/0001-Remove-Werror-from-debug-CFLAGS.patch b/buildroot-ext/patches/pahole/0001-Remove-Werror-from-debug-CFLAGS.patch
++new file mode 100644
++index 0000000..35ccb54
++--- /dev/null
+++++ b/buildroot-ext/patches/pahole/0001-Remove-Werror-from-debug-CFLAGS.patch
++@@ -0,0 +1,20 @@
+++Remove -Werror from pahole debug CFLAGS.
+++
+++Newer host GCC versions (e.g. GCC 16) emit warnings that pahole 1.31
+++does not handle (unused-but-set-variable, discarded-qualifiers), which
+++breaks the build because the Debug build type enables -Werror.
+++
+++Signed-off-by: pojntfx <pojntfx@users.noreply.github.com>
+++
+++diff -urN a/CMakeLists.txt b/CMakeLists.txt
+++--- a/CMakeLists.txt	2026-09-06 00:00:00.000000000 +0000
++++++ b/CMakeLists.txt	2026-09-06 00:00:00.000000000 +0000
+++@@ -34,7 +34,7 @@
+++ 	     FORCE)
+++ endif (NOT CMAKE_BUILD_TYPE)
+++ 
+++-set(CMAKE_C_FLAGS_DEBUG "-Wall -Werror -ggdb -O0")
++++set(CMAKE_C_FLAGS_DEBUG "-Wall -ggdb -O0")
+++ set(CMAKE_C_FLAGS_RELEASE "-Wall -O2")
+++ SET(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -pthread")
+++ 
++diff --git a/buildroot-ext/patches/weston/0001-backend-drm-set-default-compositor-to-gpu.patch b/buildroot-ext/patches/weston/0001-backend-drm-set-default-compositor-to-gpu.patch
++deleted file mode 100644
++index d0a41c3..0000000
++--- a/buildroot-ext/patches/weston/0001-backend-drm-set-default-compositor-to-gpu.patch
+++++ /dev/null
++@@ -1,34 +0,0 @@
++-From 94a5c56512cb74fe63b2d65dbec04a86bb9e9b17 Mon Sep 17 00:00:00 2001
++-From: liuyingjie <yingjie.liu@spacemit.com>
++-Date: Sun, 4 Jan 2026 20:15:27 +0800
++-Subject: [PATCH 1/3] backend-drm: set default compositor to gpu
++-
++-Workaround: spacemit drm has bug to assign multi planes to display.
++-Force all content to be composited by GPU renderer instead of using
++-hardware planes.
++-
++-This changes the default mode from DRM_OUTPUT_PROPOSE_STATE_PLANES_ONLY
++-to DRM_OUTPUT_PROPOSE_STATE_RENDERER_ONLY in drm_assign_planes().
++-
++-Patch from: dengbo <bo.deng@spacemit.com>
++-Date: 2023-12-27
++----
++- libweston/backend-drm/state-propose.c | 2 +-
++- 1 file changed, 1 insertion(+), 1 deletion(-)
++-
++-diff --git a/libweston/backend-drm/state-propose.c b/libweston/backend-drm/state-propose.c
++-index 1e62e2b..4a908cd 100644
++---- a/libweston/backend-drm/state-propose.c
++-+++ b/libweston/backend-drm/state-propose.c
++-@@ -973,7 +973,7 @@ drm_assign_planes(struct weston_output *output_base)
++- 	struct drm_writeback_state *wb_state = output->wb_state;
++- 	struct weston_paint_node *pnode;
++- 	struct weston_plane *primary = &output_base->primary_plane;
++--	enum drm_output_propose_state_mode mode = DRM_OUTPUT_PROPOSE_STATE_PLANES_ONLY;
++-+	enum drm_output_propose_state_mode mode = DRM_OUTPUT_PROPOSE_STATE_RENDERER_ONLY;
++- 
++- 	assert(output);
++- 
++--- 
++-2.49.0.windows.1
++-
++diff --git a/buildroot-ext/patches/weston/0002-animation-destroy-view-if-two-consecutive-timestamps.patch b/buildroot-ext/patches/weston/0002-animation-destroy-view-if-two-consecutive-timestamps.patch
++deleted file mode 100644
++index 14d3efa..0000000
++--- a/buildroot-ext/patches/weston/0002-animation-destroy-view-if-two-consecutive-timestamps.patch
+++++ /dev/null
++@@ -1,49 +0,0 @@
++-From 23e2f1d46704443f0b6213624baa5f17f84c42de Mon Sep 17 00:00:00 2001
++-From: liuyingjie <yingjie.liu@spacemit.com>
++-Date: Sun, 4 Jan 2026 20:15:41 +0800
++-Subject: [PATCH 2/3] animation: destroy view if two consecutive timestamps are
++- equal
++-
++-Fix animation stuttering issue by detecting when timestamps stop
++-advancing. Uses a static variable to track the last timestamp and
++-forces animation destruction when two consecutive frames have the
++-same timestamp.
++-
++-This is a cleaner solution than the previous frame counter approach
++-and directly addresses the display stuttering problem.
++-
++-Patch from: liyeshan <yeshan.li@spacemit.com>
++-Date: 2025-01-14
++----
++- libweston/animation.c | 5 ++++-
++- 1 file changed, 4 insertions(+), 1 deletion(-)
++-
++-diff --git a/libweston/animation.c b/libweston/animation.c
++-index 3d8cc7a..aa355b0 100644
++---- a/libweston/animation.c
++-+++ b/libweston/animation.c
++-@@ -198,17 +198,20 @@ weston_view_animation_frame(struct weston_animation *base,
++- 			     struct weston_view_animation, animation);
++- 	struct weston_compositor *compositor =
++- 		animation->view->surface->compositor;
++-+	static int64_t last_time = -1;
++- 
++- 	if (base->frame_counter <= 1)
++- 		animation->spring.timestamp = *time;
++- 
++- 	weston_spring_update(&animation->spring, time);
++- 
++--	if (weston_spring_done(&animation->spring)) {
++-+	if (weston_spring_done(&animation->spring) || (last_time == timespec_to_msec(time))) {
++- 		defer_animation_destroy(animation);
++- 		return;
++- 	}
++- 
++-+	last_time = timespec_to_msec(time);
++-+
++- 	if (animation->frame)
++- 		animation->frame(animation);
++- 
++--- 
++-2.49.0.windows.1
++-
++diff --git a/buildroot/package/jsoncpp/0001-Fix-C-11-ABI-breakage-when-compiled-with-C-17-1668.patch b/buildroot/package/jsoncpp/0001-Fix-C-11-ABI-breakage-when-compiled-with-C-17-1668.patch
++new file mode 100644
++index 0000000000..938c332185
++--- /dev/null
+++++ b/buildroot/package/jsoncpp/0001-Fix-C-11-ABI-breakage-when-compiled-with-C-17-1668.patch
++@@ -0,0 +1,192 @@
+++From e9e752beacba6ee0fcb7819109229541c8b5a1e2 Mon Sep 17 00:00:00 2001
+++From: Jordan Bayles <jophba@chromium.org>
+++Date: Tue, 7 Apr 2026 21:58:40 -0700
+++Subject: [PATCH] Fix C++11 ABI breakage when compiled with C++17 (#1668)
+++
+++When JSONCPP_HAS_STRING_VIEW was defined, the library dropped the
+++`const char*` and `const String&` overloads for `operator[]`, `get`,
+++`removeMember`, and `isMember`, breaking ABI compatibility for projects
+++consuming the library with C++11.
+++
+++This change unconditionally declares and defines the legacy overloads
+++so they are always exported, restoring compatibility.
+++
+++Upstream: https://github.com/open-source-parsers/jsoncpp/pull/1675
+++
+++Signed-off-by: Bernd Kuhls <bernd@kuhls.net>
+++---
+++ include/json/value.h        | 15 +++++----------
+++ src/lib_json/json_value.cpp | 15 +++++----------
+++ 2 files changed, 10 insertions(+), 20 deletions(-)
+++
+++diff --git a/include/json/value.h b/include/json/value.h
+++index f32f456..1369f92 100644
+++--- a/include/json/value.h
++++++ b/include/json/value.h
+++@@ -501,7 +501,7 @@ public:
+++   /// that name.
+++   /// \param key may contain embedded nulls.
+++   const Value& operator[](std::string_view key) const;
+++-#else
++++#endif
+++   /// Access an object value by name, create a null member if it does not exist.
+++   /// \note Because of our implementation, keys are limited to 2^30 -1 chars.
+++   /// Exceeding that will cause an exception.
+++@@ -516,7 +516,6 @@ public:
+++   /// that name.
+++   /// \param key may contain embedded nulls.
+++   const Value& operator[](const String& key) const;
+++-#endif
+++   /** \brief Access an object value by name, create a null member if it does not
+++    * exist.
+++    *
+++@@ -534,7 +533,7 @@ public:
+++   /// Return the member named key if it exist, defaultValue otherwise.
+++   /// \note deep copy
+++   Value get(std::string_view key, const Value& defaultValue) const;
+++-#else
++++#endif
+++   /// Return the member named key if it exist, defaultValue otherwise.
+++   /// \note deep copy
+++   Value get(const char* key, const Value& defaultValue) const;
+++@@ -542,7 +541,6 @@ public:
+++   /// \note deep copy
+++   /// \param key may contain embedded nulls.
+++   Value get(const String& key, const Value& defaultValue) const;
+++-#endif
+++   /// Return the member named key if it exist, defaultValue otherwise.
+++   /// \note deep copy
+++   /// \note key may contain embedded nulls.
+++@@ -589,12 +587,11 @@ public:
+++   /// \post type() is unchanged
+++ #if JSONCPP_HAS_STRING_VIEW
+++   void removeMember(std::string_view key);
+++-#else
++++#endif
+++   void removeMember(const char* key);
+++   /// Same as removeMember(const char*)
+++   /// \param key may contain embedded nulls.
+++   void removeMember(const String& key);
+++-#endif
+++   /** \brief Remove the named map member.
+++    *
+++    *  Update 'removed' iff removed.
+++@@ -603,12 +600,11 @@ public:
+++    */
+++ #if JSONCPP_HAS_STRING_VIEW
+++   bool removeMember(std::string_view key, Value* removed);
+++-#else
++++#endif
+++   bool removeMember(String const& key, Value* removed);
+++   /// Same as removeMember(const char* begin, const char* end, Value* removed),
+++   /// but 'key' is null-terminated.
+++   bool removeMember(const char* key, Value* removed);
+++-#endif
+++   /// Same as removeMember(String const& key, Value* removed)
+++   bool removeMember(const char* begin, const char* end, Value* removed);
+++   /** \brief Remove the indexed array element.
+++@@ -623,14 +619,13 @@ public:
+++   /// Return true if the object has a member named key.
+++   /// \param key may contain embedded nulls.
+++   bool isMember(std::string_view key) const;
+++-#else
++++#endif
+++   /// Return true if the object has a member named key.
+++   /// \note 'key' must be null-terminated.
+++   bool isMember(const char* key) const;
+++   /// Return true if the object has a member named key.
+++   /// \param key may contain embedded nulls.
+++   bool isMember(const String& key) const;
+++-#endif
+++   /// Same as isMember(String const& key)const
+++   bool isMember(const char* begin, const char* end) const;
+++ 
+++diff --git a/src/lib_json/json_value.cpp b/src/lib_json/json_value.cpp
+++index 74f7789..953d58e 100644
+++--- a/src/lib_json/json_value.cpp
++++++ b/src/lib_json/json_value.cpp
+++@@ -1200,7 +1200,7 @@ const Value& Value::operator[](std::string_view key) const {
+++ Value& Value::operator[](std::string_view key) {
+++   return resolveReference(key.data(), key.data() + key.length());
+++ }
+++-#else
++++#endif
+++ const Value& Value::operator[](const char* key) const {
+++   Value const* found = find(key, key + strlen(key));
+++   if (!found)
+++@@ -1221,7 +1221,6 @@ Value& Value::operator[](const char* key) {
+++ Value& Value::operator[](const String& key) {
+++   return resolveReference(key.data(), key.data() + key.length());
+++ }
+++-#endif
+++ 
+++ Value& Value::operator[](const StaticString& key) {
+++   return resolveReference(key.c_str());
+++@@ -1265,14 +1264,13 @@ Value Value::get(char const* begin, char const* end,
+++ Value Value::get(std::string_view key, const Value& defaultValue) const {
+++   return get(key.data(), key.data() + key.length(), defaultValue);
+++ }
+++-#else
++++#endif
+++ Value Value::get(char const* key, Value const& defaultValue) const {
+++   return get(key, key + strlen(key), defaultValue);
+++ }
+++ Value Value::get(String const& key, Value const& defaultValue) const {
+++   return get(key.data(), key.data() + key.length(), defaultValue);
+++ }
+++-#endif
+++ 
+++ bool Value::removeMember(const char* begin, const char* end, Value* removed) {
+++   if (type() != objectValue) {
+++@@ -1292,14 +1290,13 @@ bool Value::removeMember(const char* begin, const char* end, Value* removed) {
+++ bool Value::removeMember(std::string_view key, Value* removed) {
+++   return removeMember(key.data(), key.data() + key.length(), removed);
+++ }
+++-#else
++++#endif
+++ bool Value::removeMember(const char* key, Value* removed) {
+++   return removeMember(key, key + strlen(key), removed);
+++ }
+++ bool Value::removeMember(String const& key, Value* removed) {
+++   return removeMember(key.data(), key.data() + key.length(), removed);
+++ }
+++-#endif
+++ 
+++ #ifdef JSONCPP_HAS_STRING_VIEW
+++ void Value::removeMember(std::string_view key) {
+++@@ -1312,7 +1309,7 @@ void Value::removeMember(std::string_view key) {
+++                      CZString::noDuplication);
+++   value_.map_->erase(actualKey);
+++ }
+++-#else
++++#endif
+++ void Value::removeMember(const char* key) {
+++   JSON_ASSERT_MESSAGE(type() == nullValue || type() == objectValue,
+++                       "in Json::Value::removeMember(): requires objectValue");
+++@@ -1323,7 +1320,6 @@ void Value::removeMember(const char* key) {
+++   value_.map_->erase(actualKey);
+++ }
+++ void Value::removeMember(const String& key) { removeMember(key.c_str()); }
+++-#endif
+++ 
+++ bool Value::removeIndex(ArrayIndex index, Value* removed) {
+++   if (type() != arrayValue) {
+++@@ -1357,14 +1353,13 @@ bool Value::isMember(char const* begin, char const* end) const {
+++ bool Value::isMember(std::string_view key) const {
+++   return isMember(key.data(), key.data() + key.length());
+++ }
+++-#else
++++#endif
+++ bool Value::isMember(char const* key) const {
+++   return isMember(key, key + strlen(key));
+++ }
+++ bool Value::isMember(String const& key) const {
+++   return isMember(key.data(), key.data() + key.length());
+++ }
+++-#endif
+++ 
+++ Value::Members Value::getMemberNames() const {
+++   JSON_ASSERT_MESSAGE(
+++-- 
+++2.47.3
+++
+
