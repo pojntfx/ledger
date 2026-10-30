@@ -1,0 +1,80 @@
+From 2c8380b4c9e9c3461b638fae9a7e700104cb6f90 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Thu, 29 Oct 2026 23:07:29 -0700
+Subject: [PATCH] docs: Give MCP clients more context and instructions for how to use flashing tools
+---
+diff --git a/main.go b/main.go
+index eed23558f307db3ccc0df1359abdcbaec2a4b98a..be0b8a91a51bff23205c1d213811068194049359 100644
+--- a/main.go
++++ b/main.go
+@@ -56,15 +56,27 @@ 		&mcp.ServerOptions{
+ 			Logger: logger,
+ 			Instructions: `Never call flash.multiFlash or flash.flashFile on a BROM device. It answers OKAY and writes nothing.
+ 
+-Read flash.getDevices first. Manufacturer DFU with productId 1001 means BROM. Manufacturer U-Boot means U-Boot fastboot.
++Read flash.getDevices first. Manufacturer DFU means BROM. Manufacturer U-Boot means U-Boot fastboot. productId 1001 appears in both modes.
+ 
+-Upload every image before a stage or flash. files.getFiles names the uploads.
++To enter BROM, run target.reset, then target.enterFDL. The relay state does not prove the mode. Confirm the mode with flash.getDevices.
++
++Upload the images of the build that you want to flash. files.getFiles also lists uploads from earlier builds, so replace them. Each entry needs the uploadCommand.
+ 
+-BROM: stage FSBL.bin, continue. Read flash.getDevices. Stage u-boot.itb, continue.
++BROM: stage FSBL.bin, then continue. Read flash.getDevices. Run flash.oem with speed:super-speed only when superSpeedCapable is true. Stage u-boot.itb, then continue. Read flash.getDevices.
+ 
+-U-Boot: read mtd-size and blk-size. Call flash.multiFlash with partition_<mtd-size>.json and partition_<blk-size>.json.
++flash.oem with speed:super-speed sets a SoC register that survives target.reset. A USB 2 link can then fail to enumerate. Undo it with flash.oem speed:high-speed, and read flash.getDevices after every flash.oem call.
+ 
+-Every partition in a table needs offset and size. The device builds its GPT from them.`,
++U-Boot: read mtd-size and blk-size. Build the table inline from partition_<mtd-size>.json and partition_<blk-size>.json. Use the mtd table only when that file exists, otherwise flash the gpt table only. A disk image such as sdcard.img is not a table.
++
++Every partition needs name, offset, size and image. The device builds its GPT from offset and size. Call flash.multiFlash with reboot true when the flash must boot the new system.
++
++Watch a running flash with flash.getJobs. Read status, partition, sentBytes, totalBytes and error.
++
++Start serial buffering before a reset. serial.getConsoles lists the console paths. serial.readFrom returns the captured output. A boot succeeded when the log reaches K3-Buildroot login:.
++
++The KVM path shows the screen. kvm.getVideoCaptureDevices lists the capture path, and kvm.takeScreenshot returns a JPEG. kvm.getInputDevices lists the input path for kvm.sendMouseInput and kvm.pressKeys. A panel launcher needs a doubleClick.
++
++No fastboot device means no gadget. Run target.reset, then target.enterFDL, then read flash.getDevices again. The relays press the RST and FDL buttons only.`,
+ 		},
+ 	)
+ 	handler.AddReceivingMiddleware(svc.LogIncoming(logger))
+diff --git a/pkg/svc/flash_get_devices.go b/pkg/svc/flash_get_devices.go
+index 00f5f10693497de037ccd042724aaa300b14f06c..f60de43aff639f08f9efc45c7b708d8ef01dc147 100644
+--- a/pkg/svc/flash_get_devices.go
++++ b/pkg/svc/flash_get_devices.go
+@@ -19,7 +19,8 @@
+ type FlashDevice struct {
+ 	Path string `json:"path" jsonschema:"path that uniquely identifies the fastboot device until it gets unplugged, in BUS-PORT form like 1-2-3"`
+ 	USBIdentity
+-	SuperSpeed bool `json:"superSpeed" jsonschema:"whether the device is connected at USB 3.0 or faster"`
++	SuperSpeed        bool `json:"superSpeed" jsonschema:"whether the device is connected at USB 3.0 or faster"`
++	SuperSpeedCapable bool `json:"superSpeedCapable" jsonschema:"whether the device reports SuperSpeed capability, even when it runs at a lower speed"`
+ }
+ 
+ type GetFlashDevicesOutput struct {
+@@ -43,7 +44,8 @@ 				Manufacturer: device.Manufacturer,
+ 				Product:      device.Product,
+ 				SerialNumber: device.SerialNumber,
+ 			},
+-			SuperSpeed: device.SuperSpeed,
++			SuperSpeed:        device.SuperSpeed,
++			SuperSpeedCapable: device.SuperSpeedCapable,
+ 		})
+ 	}
+ 
+diff --git a/pkg/svc/flash_oem.go b/pkg/svc/flash_oem.go
+index 35baae9ef5198ff96ce1c33b67a4da51ede07dd9..2e4e8825bb0836f7ae550f2f23c99b7107dc6b02 100644
+--- a/pkg/svc/flash_oem.go
++++ b/pkg/svc/flash_oem.go
+@@ -11,7 +11,7 @@ var (
+ 	OEMTool = &mcp.Tool{
+ 		Name:        "flash.oem",
+ 		Title:       "Run OEM command",
+-		Description: "Run an OEM command on a device in fastboot mode",
++		Description: "Run an OEM command on a device in fastboot mode. speed:super-speed sets a SoC register that survives target.reset and can stop enumeration on a USB 2 link. Undo it with speed:high-speed",
+ 		Annotations: &mcp.ToolAnnotations{DestructiveHint: new(true)},
+ 	}
+ )
+
