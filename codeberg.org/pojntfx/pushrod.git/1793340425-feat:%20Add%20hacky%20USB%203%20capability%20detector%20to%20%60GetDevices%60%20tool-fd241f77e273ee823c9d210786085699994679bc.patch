@@ -1,0 +1,102 @@
+From fd241f77e273ee823c9d210786085699994679bc Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Thu, 29 Oct 2026 23:07:05 -0700
+Subject: [PATCH] feat: Add hacky USB 3 capability detector to `GetDevices` tool
+---
+diff --git a/pkg/fastboot/devices.go b/pkg/fastboot/devices.go
+index a61b6977a8b3cc10044d978c25e03839dd60dbdc..91c942a34385e911e61e1c8c68433897ef4f2759 100644
+--- a/pkg/fastboot/devices.go
++++ b/pkg/fastboot/devices.go
+@@ -1,21 +1,61 @@
+ package fastboot
+ 
+-import "github.com/google/gousb"
++import (
++	"encoding/binary"
++
++	"github.com/google/gousb"
++)
++
++const (
++	bosDescriptorType        = 0x0f
++	deviceCapabilityType     = 0x10
++	superSpeedCapabilityType = 0x03
++)
+ 
+ type Device struct {
+-	Path         string
+-	VendorID     uint16
+-	ProductID    uint16
+-	Manufacturer string
+-	Product      string
+-	SerialNumber string
+-	SuperSpeed   bool
++	Path              string
++	VendorID          uint16
++	ProductID         uint16
++	Manufacturer      string
++	Product           string
++	SerialNumber      string
++	SuperSpeed        bool
++	SuperSpeedCapable bool
+ }
+ 
+ func isSuperSpeed(speed gousb.Speed) bool {
+ 	return speed >= gousb.SpeedSuper
+ }
+ 
++func hasSuperSpeedCapability(dev *gousb.Device) bool {
++	buffer := make([]byte, 64)
++
++	count, err := dev.Control(0x80, 0x06, uint16(bosDescriptorType)<<8, 0, buffer)
++	if err != nil || count < 5 || buffer[1] != bosDescriptorType {
++		return false
++	}
++
++	total := int(binary.LittleEndian.Uint16(buffer[2:4]))
++	if total > count {
++		total = count
++	}
++
++	for offset := int(buffer[0]); offset+3 <= total; {
++		length := int(buffer[offset])
++		if length < 3 {
++			return false
++		}
++
++		if buffer[offset+1] == deviceCapabilityType && buffer[offset+2] == superSpeedCapabilityType {
++			return true
++		}
++
++		offset += length
++	}
++
++	return false
++}
++
+ func GetDevices() ([]Device, error) {
+ 	usbContext := gousb.NewContext()
+ 	defer usbContext.Close()
+@@ -48,13 +88,14 @@ 			return nil, err
+ 		}
+ 
+ 		devices = append(devices, Device{
+-			Path:         formatDevicePath(dev.Desc),
+-			VendorID:     uint16(dev.Desc.Vendor),
+-			ProductID:    uint16(dev.Desc.Product),
+-			Manufacturer: manufacturer,
+-			Product:      product,
+-			SerialNumber: serial,
+-			SuperSpeed:   isSuperSpeed(dev.Desc.Speed),
++			Path:              formatDevicePath(dev.Desc),
++			VendorID:          uint16(dev.Desc.Vendor),
++			ProductID:         uint16(dev.Desc.Product),
++			Manufacturer:      manufacturer,
++			Product:           product,
++			SerialNumber:      serial,
++			SuperSpeed:        isSuperSpeed(dev.Desc.Speed),
++			SuperSpeedCapable: hasSuperSpeedCapability(dev),
+ 		})
+ 	}
+ 
+
