@@ -1,0 +1,163 @@
+From 73bbf0c79e0dbdb8823a0eef170bb008ff35b70d Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Fri, 30 Oct 2026 22:24:55 -0700
+Subject: [PATCH] feat: Report whether a device is USB 3+ capable (e.g. for switch via Fastboot commands)
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/pkg/fastboot/devices.go b/pkg/fastboot/devices.go
+index a61b6977a8b3cc10044d978c25e03839dd60dbdc..faf74397b841143cb26e138737b50f519d777d2f 100644
+--- a/pkg/fastboot/devices.go
++++ b/pkg/fastboot/devices.go
+@@ -1,21 +1,96 @@
+ package fastboot
+ 
+-import "github.com/google/gousb"
++import (
++	"encoding/binary"
++
++	"github.com/google/gousb"
++)
++
++const (
++	// See https://github.com/torvalds/linux/blob/master/include/uapi/linux/usb/ch9.h#L257
++	bosDescriptorType = 0x0f
++
++	// See https://github.com/torvalds/linux/blob/master/include/uapi/linux/usb/ch9.h#L258
++	deviceCapabilityType = 0x10
++
++	// See https://github.com/torvalds/linux/blob/master/include/uapi/linux/usb/ch9.h#L942
++	superSpeedCapabilityType = 0x03
++
++	// See https://github.com/torvalds/linux/blob/master/include/uapi/linux/usb/ch9.h#L48-L63
++	requestTypeDeviceToHost = 0x80
++
++	// See https://github.com/torvalds/linux/blob/master/include/uapi/linux/usb/ch9.h#L82
++	requestGetDescriptor = 0x06
++)
+ 
+ type Device struct {
+-	Path         string
+-	VendorID     uint16
+-	ProductID    uint16
+-	Manufacturer string
+-	Product      string
+-	SerialNumber string
+-	SuperSpeed   bool
++	Path              string
++	VendorID          uint16
++	ProductID         uint16
++	Manufacturer      string
++	Product           string
++	SerialNumber      string
++	SuperSpeed        bool
++	SuperSpeedCapable bool
+ }
+ 
+ func isSuperSpeed(speed gousb.Speed) bool {
+ 	return speed >= gousb.SpeedSuper
+ }
+ 
++// See https://github.com/torvalds/linux/blob/master/include/uapi/linux/usb/ch9.h#L869-L887
++type bosDescriptor struct {
++	Length          uint8
++	DescriptorType  uint8
++	TotalLength     uint16
++	NumCapabilities uint8
++}
++
++type deviceCapability struct {
++	Length         uint8
++	DescriptorType uint8
++	CapabilityType uint8
++}
++
++func hasSuperSpeedCapability(dev *gousb.Device) bool {
++	// 5 is the BOS header size
++	var raw [5]byte
++	if count, err := dev.Control(requestTypeDeviceToHost, requestGetDescriptor, uint16(bosDescriptorType)<<8, 0, raw[:]); err != nil || count < len(raw) {
++		return false
++	}
++
++	var bos bosDescriptor
++	if _, err := binary.Decode(raw[:], binary.LittleEndian, &bos); err != nil || bos.DescriptorType != bosDescriptorType || int(bos.TotalLength) < int(bos.Length) {
++		return false
++	}
++
++	buffer := make([]byte, bos.TotalLength)
++	if count, err := dev.Control(requestTypeDeviceToHost, requestGetDescriptor, uint16(bosDescriptorType)<<8, 0, buffer); err != nil || count != len(buffer) {
++		return false
++	}
++
++	// Capability records follow the BOS header, 3 is the capability header size
++	for offset := int(bos.Length); offset+3 <= len(buffer); {
++		var capability deviceCapability
++		if _, err := binary.Decode(buffer[offset:], binary.LittleEndian, &capability); err != nil {
++			return false
++		}
++
++		if capability.DescriptorType == deviceCapabilityType && capability.CapabilityType == superSpeedCapabilityType {
++			return true
++		}
++
++		// A record shorter than its own header would stall or overlap the walk
++		if capability.Length < 3 {
++			return false
++		}
++
++		offset += int(capability.Length)
++	}
++
++	return false
++}
++
+ func GetDevices() ([]Device, error) {
+ 	usbContext := gousb.NewContext()
+ 	defer usbContext.Close()
+@@ -48,13 +123,14 @@ 			return nil, err
+ 		}
+ 
+ 		devices = append(devices, Device{
+-			Path:         formatDevicePath(dev.Desc),
+-			VendorID:     uint16(dev.Desc.Vendor),
+-			ProductID:    uint16(dev.Desc.Product),
+-			Manufacturer: manufacturer,
+-			Product:      product,
+-			SerialNumber: serial,
+-			SuperSpeed:   isSuperSpeed(dev.Desc.Speed),
++			Path:              formatDevicePath(dev.Desc),
++			VendorID:          uint16(dev.Desc.Vendor),
++			ProductID:         uint16(dev.Desc.Product),
++			Manufacturer:      manufacturer,
++			Product:           product,
++			SerialNumber:      serial,
++			SuperSpeed:        isSuperSpeed(dev.Desc.Speed),
++			SuperSpeedCapable: hasSuperSpeedCapability(dev),
+ 		})
+ 	}
+ 
+diff --git a/pkg/svc/flash_get_devices.go b/pkg/svc/flash_get_devices.go
+index 00f5f10693497de037ccd042724aaa300b14f06c..ddbfa47c7abd29248a66da8e063c2256323d15e4 100644
+--- a/pkg/svc/flash_get_devices.go
++++ b/pkg/svc/flash_get_devices.go
+@@ -19,7 +19,8 @@
+ type FlashDevice struct {
+ 	Path string `json:"path" jsonschema:"path that uniquely identifies the fastboot device until it gets unplugged, in BUS-PORT form like 1-2-3"`
+ 	USBIdentity
+-	SuperSpeed bool `json:"superSpeed" jsonschema:"whether the device is connected at USB 3.0 or faster"`
++	SuperSpeed        bool `json:"superSpeed" jsonschema:"whether the device is connected at USB 3.0 or faster"`
++	SuperSpeedCapable bool `json:"superSpeedCapable" jsonschema:"whether the device supports USB 3.0 or faster, even when it is connected at a lower speed"`
+ }
+ 
+ type GetFlashDevicesOutput struct {
+@@ -43,7 +44,8 @@ 				Manufacturer: device.Manufacturer,
+ 				Product:      device.Product,
+ 				SerialNumber: device.SerialNumber,
+ 			},
+-			SuperSpeed: device.SuperSpeed,
++			SuperSpeed:        device.SuperSpeed,
++			SuperSpeedCapable: device.SuperSpeedCapable,
+ 		})
+ 	}
+ 
+
