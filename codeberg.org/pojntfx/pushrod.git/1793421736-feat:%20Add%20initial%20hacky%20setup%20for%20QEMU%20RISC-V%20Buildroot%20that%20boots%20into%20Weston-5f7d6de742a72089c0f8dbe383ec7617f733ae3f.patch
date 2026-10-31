@@ -1,0 +1,555 @@
+From 5f7d6de742a72089c0f8dbe383ec7617f733ae3f Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Fri, 30 Oct 2026 21:42:16 -0700
+Subject: [PATCH] feat: Add initial hacky setup for QEMU RISC-V Buildroot that boots into Weston
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/Config.in b/Config.in
+new file mode 100644
+index 0000000000000000000000000000000000000000..8b137891791fe96927ad78e64b0aad7bded08bdc
+--- /dev/null
++++ b/Config.in
+@@ -0,0 +1 @@
++
+diff --git a/Makefile b/Makefile
+new file mode 100644
+index 0000000000000000000000000000000000000000..25779165e8fffce2097e0eef75aa41e1439fc655
+--- /dev/null
++++ b/Makefile
+@@ -0,0 +1,39 @@
++.SUFFIXES:
++
++THIS_EXTERNAL_PATH := $(abspath $(dir $(lastword $(MAKEFILE_LIST))))
++-include $(THIS_EXTERNAL_PATH)/local.mk
++BUILDROOT_DIR ?= $(abspath $(THIS_EXTERNAL_PATH)/../buildroot-k3-clean/buildroot)
++OUTPUT_DIR ?= $(THIS_EXTERNAL_PATH)/output/rva23
++BR2_DL_DIR ?= $(abspath $(THIS_EXTERNAL_PATH)/../buildroot-k3-clean/buildroot/dl)
++BR2_CCACHE_DIR ?= $(abspath $(THIS_EXTERNAL_PATH)/../buildroot-k3-clean/ccache)
++
++MAKE_BUILDROOT = $(MAKE) -C $(BUILDROOT_DIR) O=$(OUTPUT_DIR) BR2_EXTERNAL=$(THIS_EXTERNAL_PATH) BR2_DL_DIR=$(BR2_DL_DIR) BR2_CCACHE_DIR=$(BR2_CCACHE_DIR)
++BUILDROOT_PATCH = $(THIS_EXTERNAL_PATH)/patches/buildroot/0001-Enable-systemd-boot-on-64-bit-RISC-V.patch
++
++.PHONY: all configure build clean verify verify-image verify-boot boot boot-display
++
++all: build
++
++configure:
++	git -C $(BUILDROOT_DIR) apply --reverse --check $(BUILDROOT_PATCH)
++	$(MAKE_BUILDROOT) rva23_defconfig
++
++build: configure
++	$(MAKE_BUILDROOT)
++
++clean:
++	$(MAKE_BUILDROOT) clean
++
++verify-image: build
++	python3 scripts/verify-image.py $(OUTPUT_DIR) $(BR2_DL_DIR) $(BR2_CCACHE_DIR)
++
++verify-boot: build
++	python3 scripts/verify-boot.py $(OUTPUT_DIR)
++
++verify: verify-image verify-boot
++
++boot: build
++	$(THIS_EXTERNAL_PATH)/board/rva23-qemu/run-qemu.sh $(OUTPUT_DIR)/images
++
++boot-display: build
++	QEMU_VNC=1 $(THIS_EXTERNAL_PATH)/board/rva23-qemu/run-qemu.sh $(OUTPUT_DIR)/images
+diff --git a/README.md b/README.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..49c073ede232bebda9615fee7ec2cfccee5684b6
+--- /dev/null
++++ b/README.md
+@@ -0,0 +1,55 @@
++# RVA23 QEMU Buildroot
++
++## Start
++
++If the shared Buildroot checkout lacks the RISC-V patch, apply it:
++
++```sh
++git -C /home/pojntfx/Projets/buildroot-k3-clean/buildroot apply /home/pojntfx/Projets/buildroot-qemu/patches/buildroot/0001-Enable-systemd-boot-on-64-bit-RISC-V.patch
++```
++
++Copy the local configuration, then build and test:
++
++```sh
++cp local.mk.tpl local.mk
++make configure
++make build
++make verify
++```
++
++## Develop
++
++Run `make clean` before a clean rebuild. If `BR2_DL_DIR` is shared, do not run `distclean`, because it removes that directory.
++
++Save a minimal defconfig after configuration changes:
++
++```sh
++make -C output/rva23 savedefconfig BR2_DEFCONFIG=$PWD/configs/rva23_defconfig
++```
++
++Run individual acceptance tests:
++
++```sh
++make verify-image
++make verify-boot
++```
++
++## Run
++
++Use the serial console:
++
++```sh
++make boot
++```
++
++Use the graphical console:
++
++```sh
++make boot-display
++```
++
++Connect a VNC client:
++
++```sh
++vncviewer 127.0.0.1:5900
++```
+diff --git a/board/rva23-qemu/genimage.cfg b/board/rva23-qemu/genimage.cfg
+new file mode 100644
+index 0000000000000000000000000000000000000000..36cc3391e6f1cf20d65c052b5a81581ad0747306
+--- /dev/null
++++ b/board/rva23-qemu/genimage.cfg
+@@ -0,0 +1,22 @@
++image efi-part.vfat {
++	vfat {
++		file EFI {
++			image = "efi-part/EFI"
++		}
++	}
++
++	size = 256M
++}
++
++image disk.img {
++	hdimage {
++		partition-table-type = "gpt"
++	}
++
++	partition boot {
++		image = "efi-part.vfat"
++		partition-type-uuid = U
++		offset = 1M
++		bootable = true
++	}
++}
+diff --git a/board/rva23-qemu/linux.fragment b/board/rva23-qemu/linux.fragment
+new file mode 100644
+index 0000000000000000000000000000000000000000..364208fead86f060d14f1eb9b38422b8e06f5b35
+--- /dev/null
++++ b/board/rva23-qemu/linux.fragment
+@@ -0,0 +1,9 @@
++CONFIG_EFI=y
++CONFIG_EFI_STUB=y
++CONFIG_EFI_ZBOOT=y
++CONFIG_VIRTIO_PCI=y
++CONFIG_VIRTIO_BLK=y
++CONFIG_VIRTIO_MMIO=y
++CONFIG_DRM=y
++CONFIG_DRM_VIRTIO_GPU=y
++CONFIG_DRM_FBDEV_EMULATION=y
+diff --git a/board/rva23-qemu/post-image.sh b/board/rva23-qemu/post-image.sh
+new file mode 100755
+index 0000000000000000000000000000000000000000..4f0e1c4b9ff0818c371f4839a137935c3bfdab1c
+--- /dev/null
++++ b/board/rva23-qemu/post-image.sh
+@@ -0,0 +1,17 @@
++#!/bin/sh
++
++set -eu
++
++mkdir -p "${BINARIES_DIR}/efi-part/EFI/Linux"
++"${HOST_DIR}/bin/ukify" build \
++	--linux="${BINARIES_DIR}/Image" \
++	--initrd="${BINARIES_DIR}/rootfs.cpio.gz" \
++	--stub="${TARGET_DIR}/usr/lib/systemd/boot/efi/linuxriscv64.efi.stub" \
++	--efi-arch=riscv64 \
++	--uname=6.18.7 \
++	--cmdline="console=ttyS0,115200 earlycon=sbi" \
++	--os-release=@"${TARGET_DIR}/usr/lib/os-release" \
++	--output="${BINARIES_DIR}/efi-part/EFI/Linux/rva23.efi"
++rm -rf "${BINARIES_DIR}/efi-part/loader"
++truncate -s 32M "${BINARIES_DIR}/RISCV_VIRT_CODE.fd"
++truncate -s 32M "${BINARIES_DIR}/RISCV_VIRT_VARS.fd"
+diff --git a/board/rva23-qemu/rootfs-overlay/etc/systemd/system/graphical.target.wants/weston.service b/board/rva23-qemu/rootfs-overlay/etc/systemd/system/graphical.target.wants/weston.service
+new file mode 120000
+index 0000000000000000000000000000000000000000..d154c8fb98292777397c95e52ecb38dfbd6cfa7d
+--- /dev/null
++++ b/board/rva23-qemu/rootfs-overlay/etc/systemd/system/graphical.target.wants/weston.service
+@@ -0,0 +1 @@
++../weston.service
+\ No newline at end of file
+diff --git a/board/rva23-qemu/rootfs-overlay/etc/systemd/system/weston.service b/board/rva23-qemu/rootfs-overlay/etc/systemd/system/weston.service
+new file mode 100644
+index 0000000000000000000000000000000000000000..599448d7307563abcb7062aaa893c759407fe592
+--- /dev/null
++++ b/board/rva23-qemu/rootfs-overlay/etc/systemd/system/weston.service
+@@ -0,0 +1,13 @@
++[Unit]
++Description=Weston
++After=systemd-udevd.service
++RequiresMountsFor=/run
++
++[Service]
++Type=simple
++Environment=XDG_RUNTIME_DIR=/run/weston
++RuntimeDirectory=weston
++ExecStart=/usr/bin/weston --backend=drm-backend.so --shell=desktop-shell.so --renderer=pixman --idle-time=0 --continue-without-input --log=/run/weston/weston.log
++
++[Install]
++WantedBy=graphical.target
+diff --git a/board/rva23-qemu/run-qemu.sh b/board/rva23-qemu/run-qemu.sh
+new file mode 100755
+index 0000000000000000000000000000000000000000..4b58c378b53d64051c91d549837e1f23a4bb619c
+--- /dev/null
++++ b/board/rva23-qemu/run-qemu.sh
+@@ -0,0 +1,29 @@
++#!/bin/sh
++
++set -eu
++
++IMAGES_DIR=$(realpath "${1}")
++QEMU=${QEMU:-"${IMAGES_DIR}/../host/bin/qemu-system-riscv64"}
++
++if [ "${QEMU_VNC:-0}" = 1 ]; then
++	set -- -vnc 127.0.0.1:0
++else
++	set -- -display none
++fi
++
++exec "${QEMU}" \
++	-M virt,pflash0=pflash0,pflash1=pflash1,acpi=off \
++	-accel tcg \
++	-cpu rva23s64 \
++	-smp 4 \
++	-m 2048 \
++	-bios "${IMAGES_DIR}/fw_dynamic.bin" \
++	-blockdev node-name=pflash0,driver=file,read-only=on,filename="${IMAGES_DIR}/RISCV_VIRT_CODE.fd" \
++	-blockdev node-name=pflash1,driver=file,filename="${IMAGES_DIR}/RISCV_VIRT_VARS.fd" \
++	-drive file="${IMAGES_DIR}/disk.img",format=raw,if=virtio \
++	-device virtio-gpu-pci \
++	-device qemu-xhci \
++	-device usb-kbd \
++	-device usb-tablet \
++	"$@" \
++	-serial stdio
+diff --git a/configs/rva23_defconfig b/configs/rva23_defconfig
+new file mode 100644
+index 0000000000000000000000000000000000000000..f73e94492d2be734354852ad7a57ab277537bba7
+--- /dev/null
++++ b/configs/rva23_defconfig
+@@ -0,0 +1,34 @@
++BR2_riscv=y
++BR2_TOOLCHAIN_EXTERNAL=y
++BR2_TOOLCHAIN_EXTERNAL_BOOTLIN_RISCV64_LP64D_GLIBC_STABLE=y
++BR2_CCACHE=y
++BR2_DOWNLOAD_FORCE_CHECK_HASHES=y
++BR2_TARGET_GENERIC_HOSTNAME="rva23"
++BR2_INIT_SYSTEMD=y
++BR2_PACKAGE_SYSTEMD_DEFAULT_TARGET="graphical.target"
++BR2_TARGET_GENERIC_GETTY_PORT="ttyS0"
++BR2_ROOTFS_OVERLAY="$(BR2_EXTERNAL_RVA23_QEMU_PATH)/board/rva23-qemu/rootfs-overlay"
++BR2_ROOTFS_POST_IMAGE_SCRIPT="$(BR2_EXTERNAL_RVA23_QEMU_PATH)/board/rva23-qemu/post-image.sh support/scripts/genimage.sh"
++BR2_ROOTFS_POST_IMAGE_SCRIPT_ARGS="-c $(BR2_EXTERNAL_RVA23_QEMU_PATH)/board/rva23-qemu/genimage.cfg"
++BR2_LINUX_KERNEL=y
++BR2_LINUX_KERNEL_CUSTOM_VERSION=y
++BR2_LINUX_KERNEL_CUSTOM_VERSION_VALUE="6.18.7"
++BR2_LINUX_KERNEL_USE_ARCH_DEFAULT_CONFIG=y
++BR2_LINUX_KERNEL_CONFIG_FRAGMENT_FILES="$(BR2_EXTERNAL_RVA23_QEMU_PATH)/board/rva23-qemu/linux.fragment"
++BR2_LINUX_KERNEL_IMAGE=y
++BR2_PACKAGE_WESTON=y
++BR2_PACKAGE_WESTON_SIMPLE_CLIENTS=y
++BR2_PACKAGE_WAYLAND_UTILS=y
++BR2_PACKAGE_SYSTEMD_BOOT=y
++BR2_TARGET_ROOTFS_CPIO=y
++BR2_TARGET_ROOTFS_CPIO_GZIP=y
++# BR2_TARGET_ROOTFS_TAR is not set
++BR2_TARGET_EDK2=y
++BR2_TARGET_OPENSBI=y
++BR2_TARGET_OPENSBI_PLAT="generic"
++# BR2_TARGET_OPENSBI_INSTALL_JUMP_IMG is not set
++BR2_PACKAGE_HOST_DOSFSTOOLS=y
++BR2_PACKAGE_HOST_GENIMAGE=y
++BR2_PACKAGE_HOST_MTOOLS=y
++BR2_PACKAGE_HOST_QEMU=y
++BR2_PACKAGE_HOST_QEMU_SYSTEM_MODE=y
+diff --git a/external.desc b/external.desc
+new file mode 100644
+index 0000000000000000000000000000000000000000..4902a9f4d8dfa0f09157a60ba24e435ca1cf91f3
+--- /dev/null
++++ b/external.desc
+@@ -0,0 +1,2 @@
++name: RVA23_QEMU
++desc: RVA23 QEMU support
+diff --git a/external.mk b/external.mk
+new file mode 100644
+index 0000000000000000000000000000000000000000..8b137891791fe96927ad78e64b0aad7bded08bdc
+--- /dev/null
++++ b/external.mk
+@@ -0,0 +1 @@
++
+diff --git a/local.mk.tpl b/local.mk.tpl
+new file mode 100644
+index 0000000000000000000000000000000000000000..cc460dee255da411f4d502ee90f50c7ec5c63a23
+--- /dev/null
++++ b/local.mk.tpl
+@@ -0,0 +1,4 @@
++BUILDROOT_DIR = /home/pojntfx/Projets/buildroot-k3-clean/buildroot
++OUTPUT_DIR = /home/pojntfx/Projets/buildroot-qemu/output/rva23
++BR2_DL_DIR = /home/pojntfx/Projets/buildroot-k3-clean/buildroot/dl
++BR2_CCACHE_DIR = /home/pojntfx/Projets/buildroot-k3-clean/ccache
+diff --git a/patches/buildroot/0001-Enable-systemd-boot-on-64-bit-RISC-V.patch b/patches/buildroot/0001-Enable-systemd-boot-on-64-bit-RISC-V.patch
+new file mode 100644
+index 0000000000000000000000000000000000000000..cc4632c0fda826011242ca93843af36a8e13f894
+--- /dev/null
++++ b/patches/buildroot/0001-Enable-systemd-boot-on-64-bit-RISC-V.patch
+@@ -0,0 +1,20 @@
++diff --git a/package/systemd/Config.in b/package/systemd/Config.in
++--- a/package/systemd/Config.in
+++++ b/package/systemd/Config.in
++@@ -117,6 +117,6 @@ config BR2_PACKAGE_PROVIDES_UDEV
++ config BR2_PACKAGE_SYSTEMD_BOOT
++ 	bool "systemd-boot"
++-	depends on BR2_aarch64 || BR2_i386 || BR2_x86_64
+++	depends on BR2_aarch64 || BR2_i386 || BR2_x86_64 || BR2_RISCV_64
++ 	select BR2_PACKAGE_GNU_EFI
++ 	select BR2_PACKAGE_SYSTEMD_EFI
++ 	help
++@@ -164,7 +164,8 @@ config BR2_PACKAGE_SYSTEMD_BOOT_EFI_ARCH
++ config BR2_PACKAGE_SYSTEMD_BOOT_EFI_ARCH
++ 	string
++ 	default "aa64"  if BR2_aarch64
++ 	default "ia32"  if BR2_i386
++ 	default "x64"   if BR2_x86_64
+++	default "riscv64" if BR2_RISCV_64
++ 	depends on BR2_PACKAGE_SYSTEMD_BOOT
++ 
+diff --git a/scripts/verify-boot.py b/scripts/verify-boot.py
+new file mode 100755
+index 0000000000000000000000000000000000000000..7c1440dccae6887152043f91a5cfc1016ec44bc8
+--- /dev/null
++++ b/scripts/verify-boot.py
+@@ -0,0 +1,102 @@
++#!/usr/bin/env python3
++import os
++from pathlib import Path
++import re
++import select
++import subprocess
++import sys
++import time
++
++
++class Console:
++    def __init__(self, output):
++        self.output = output
++        self.log = (output / "boot.log").open("wb")
++        self.buffer = b""
++        self.command_id = 0
++        script = output.parent.parent / "board/rva23-qemu/run-qemu.sh"
++        self.process = subprocess.Popen(
++            [script, output / "images"],
++            stdin=subprocess.PIPE,
++            stdout=subprocess.PIPE,
++            stderr=subprocess.STDOUT,
++            bufsize=0,
++        )
++
++    def expect(self, pattern, timeout):
++        if isinstance(pattern, bytes):
++            pattern = re.compile(re.escape(pattern))
++        deadline = time.monotonic() + timeout
++        while True:
++            match = pattern.search(self.buffer)
++            if match:
++                self.buffer = self.buffer[match.end():]
++                return match
++            remaining = deadline - time.monotonic()
++            if remaining <= 0:
++                tail = self.buffer[-12000:].decode(errors="replace")
++                raise TimeoutError(f"QEMU console timeout\n{tail}")
++            ready, _, _ = select.select([self.process.stdout], [], [], remaining)
++            if not ready:
++                continue
++            data = os.read(self.process.stdout.fileno(), 65536)
++            if not data:
++                tail = self.buffer[-12000:].decode(errors="replace")
++                raise RuntimeError(f"QEMU exited with {self.process.poll()}\n{tail}")
++            self.log.write(data)
++            self.log.flush()
++            self.buffer += data
++
++    def sendline(self, line):
++        self.process.stdin.write(line.encode() + b"\n")
++        self.process.stdin.flush()
++
++    def command(self, command, timeout=60):
++        self.command_id += 1
++        token = f"__RVA23_RC_{self.command_id}__"
++        self.sendline(f"{command}; printf '\\n{token}:%s\\n' \"$?\"")
++        match = self.expect(re.compile(token.encode() + rb":(\d+)"), timeout)
++        status = int(match.group(1))
++        assert status == 0, f"Guest command failed with {status}: {command}"
++
++    def close(self):
++        if self.process.poll() is None:
++            self.process.terminate()
++            try:
++                self.process.wait(timeout=10)
++            except subprocess.TimeoutExpired:
++                self.process.kill()
++                self.process.wait()
++        self.log.close()
++
++
++def main():
++    output = Path(sys.argv[1]).resolve()
++    console = Console(output)
++    try:
++        console.expect(b"rva23 login:", 300)
++        console.sendline("root")
++        console.expect(b"# ", 30)
++        console.command("systemctl --no-pager --full status graphical.target weston.service || true")
++        console.command("journalctl -b --no-pager -u weston.service || true")
++        console.command("ls -la /run/weston")
++        checks = [
++            ("systemctl is-active --quiet --wait graphical.target", "systemd reaches graphical.target"),
++            ("systemctl is-active --quiet --wait weston.service", "systemd starts Weston"),
++            ("test -S /run/weston/wayland-1", "Weston creates its Wayland socket"),
++            ("XDG_RUNTIME_DIR=/run/weston WAYLAND_DISPLAY=wayland-1 wayland-info >/dev/null", "a Wayland client connects to Weston"),
++            ("test -e /dev/dri/card0", "the guest exposes a DRM device"),
++            ("test -d /sys/module/virtio_gpu", "the DRM device uses virtio graphics"),
++        ]
++        for command, description in checks:
++            console.command(command)
++            print(f"PASS: {description}")
++        console.sendline("poweroff")
++        console.process.wait(timeout=90)
++        print(f"PASS: QEMU shuts down cleanly; console log: {output / 'boot.log'}")
++    finally:
++        console.close()
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/scripts/verify-image.py b/scripts/verify-image.py
+new file mode 100755
+index 0000000000000000000000000000000000000000..80d69c12a4253060aebb2bf2e6519d1a2d968215
+--- /dev/null
++++ b/scripts/verify-image.py
+@@ -0,0 +1,101 @@
++#!/usr/bin/env python3
++import json
++import os
++from pathlib import Path
++import subprocess
++import sys
++
++
++def main():
++    output = Path(sys.argv[1]).resolve()
++    download_dir = Path(sys.argv[2]).resolve()
++    ccache_dir = Path(sys.argv[3]).resolve()
++    images = output / "images"
++    config = (output / ".config").read_text().splitlines()
++    required = {
++        "BR2_riscv=y",
++        "BR2_RISCV_64=y",
++        "BR2_INIT_SYSTEMD=y",
++        "BR2_PACKAGE_SYSTEMD=y",
++        "BR2_PACKAGE_SYSTEMD_BOOT=y",
++        'BR2_PACKAGE_SYSTEMD_BOOT_EFI_ARCH="riscv64"',
++        "BR2_CCACHE=y",
++        "BR2_CCACHE_USE_BASEDIR=y",
++        "BR2_TARGET_OPENSBI=y",
++        "BR2_TARGET_EDK2=y",
++        "BR2_PACKAGE_WESTON=y",
++        "BR2_PACKAGE_HOST_QEMU=y",
++    }
++    forbidden = {
++        "BR2_TARGET_GRUB2=y",
++        "BR2_TARGET_GRUB2_RISCV64_EFI=y",
++        "BR2_TARGET_EXTLINUX=y",
++    }
++    assert required <= set(config), sorted(required - set(config))
++    assert not forbidden & set(config), sorted(forbidden & set(config))
++    result = subprocess.run(
++        [
++            "make",
++            "-s",
++            "-C",
++            output,
++            f"BR2_DL_DIR={download_dir}",
++            f"BR2_CCACHE_DIR={ccache_dir}",
++            "printvars",
++            "VARS=BR2_DL_DIR BR2_CCACHE_DIR",
++        ],
++        check=True,
++        capture_output=True,
++        text=True,
++    )
++    cache_lines = set(result.stdout.splitlines())
++    assert f"BR2_DL_DIR={download_dir}" in cache_lines, result.stdout
++    assert f"BR2_CCACHE_DIR={ccache_dir}" in cache_lines, result.stdout
++    print("PASS: configuration uses RISC-V systemd-boot, shared caches, and no GRUB or extlinux")
++    artifacts = [
++        "fw_dynamic.bin",
++        "RISCV_VIRT_CODE.fd",
++        "RISCV_VIRT_VARS.fd",
++        "Image",
++        "rootfs.cpio.gz",
++        "disk.img",
++        "efi-part.vfat",
++        "efi-part/EFI/BOOT/bootriscv64.efi",
++        "efi-part/EFI/Linux/rva23.efi",
++    ]
++    for name in artifacts:
++        path = images / name
++        assert path.is_file() and path.stat().st_size > 0, path
++    for name in ["RISCV_VIRT_CODE.fd", "RISCV_VIRT_VARS.fd"]:
++        assert (images / name).stat().st_size == 32 * 1024 * 1024, name
++    print("PASS: firmware, kernel, root filesystem, bootloader, UKI, and disk artifacts exist")
++    host_bin = output / "host" / "bin"
++    env = os.environ.copy()
++    env["PATH"] = f"{host_bin}:{env['PATH']}"
++    result = subprocess.run(
++        [host_bin / "ukify", "--json=short", "inspect", images / "efi-part/EFI/Linux/rva23.efi"],
++        check=True,
++        capture_output=True,
++        text=True,
++        env=env,
++    )
++    sections = set(json.loads(result.stdout))
++    assert {".linux", ".initrd", ".osrel", ".cmdline"} <= sections, sections
++    print("PASS: UKI contains kernel, initramfs, OS metadata, and command line sections")
++    result = subprocess.run(
++        [host_bin / "mdir", "-i", images / "efi-part.vfat", "::/EFI/Linux"],
++        check=True,
++        capture_output=True,
++        text=True,
++    )
++    assert "RVA23" in result.stdout.upper(), result.stdout
++    result = subprocess.run(
++        [host_bin / "mdir", "-i", images / "efi-part.vfat", "::/loader/entries"],
++        capture_output=True,
++    )
++    assert result.returncode != 0, result.stdout
++    print("PASS: ESP contains a Type 2 UKI and no Type 1 entries")
++
++
++if __name__ == "__main__":
++    main()
+
