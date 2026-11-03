@@ -1,0 +1,348 @@
+From a36631815c9dda558a6e0997d53370aabb72199b Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Mon, 02 Nov 2026 22:58:15 -0700
+Subject: [PATCH] feat: Add basic Buildroot configuration for QEMU approximation of the K3
+---
+diff --git a/README.md b/README.md
+index 3ea97f5826bc16d5d8bfd51367c72e501e515137..ee45838c79700229a17163afe02a36c3f840d0aa 100644
+--- a/README.md
++++ b/README.md
+@@ -15,7 +15,7 @@   - Capture video output and provide emulated mouse/keyboard input via a [NanoKVM-USB](https://github.com/sipeed/NanoKVM-USB)
+   - Get early logs/a serial console from the board via UART
+   - Debug the board via JTAG (WIP)
+ - A clean Go reimplementation of the SpacemiT [Titanflasher/flashserver](https://www.spacemit.com/community/document/info?lang=en&nodepath=tools/user_guide/flasher_user_guide.md) to flash U-Boot, EDK2, or an entire OS onto the board
+-- A clean, close-to-mainline Buildroot tree with blob-free graphics drivers (WIP)
++- A clean, close-to-mainline Buildroot tree for the K3 (and a QEMU approximation of it) with blob-free graphics drivers
+ 
+ ## Tutorial
+ 
+diff --git a/buildroot/qemu/.gitignore b/buildroot/qemu/.gitignore
+new file mode 100644
+index 0000000000000000000000000000000000000000..3a3480dc30a63bd67e9fa40e94eb3c0f5b49f7fb
+--- /dev/null
++++ b/buildroot/qemu/.gitignore
+@@ -0,0 +1,2 @@
++/output/
++/local.mk
+diff --git a/buildroot/qemu/Config.in b/buildroot/qemu/Config.in
+new file mode 100644
+index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2e48c5391
+Binary files /dev/null and b/buildroot/qemu/Config.in differ
+diff --git a/buildroot/qemu/Makefile b/buildroot/qemu/Makefile
+new file mode 100644
+index 0000000000000000000000000000000000000000..7650d7264880b25a88a874a8767a79f6aac88e32
+--- /dev/null
++++ b/buildroot/qemu/Makefile
+@@ -0,0 +1,52 @@
++.SUFFIXES:
++
++THIS_EXTERNAL_PATH := $(abspath $(dir $(lastword $(MAKEFILE_LIST))))
++-include $(THIS_EXTERNAL_PATH)/local.mk
++BUILDROOT_DIR ?= $(abspath $(THIS_EXTERNAL_PATH)/../buildroot)
++OUTPUT_DIR ?= $(THIS_EXTERNAL_PATH)/output/rva23
++BR2_DL_DIR ?= $(abspath $(THIS_EXTERNAL_PATH)/../dl)
++BR2_CCACHE_DIR ?= $(abspath $(THIS_EXTERNAL_PATH)/../ccache)
++IMAGES_DIR := $(abspath $(OUTPUT_DIR)/images)
++QEMU ?= $(abspath $(OUTPUT_DIR)/host/bin/qemu-system-riscv64)
++
++MAKE_BUILDROOT = $(MAKE) -C $(BUILDROOT_DIR) O=$(OUTPUT_DIR) BR2_EXTERNAL=$(THIS_EXTERNAL_PATH) BR2_DL_DIR=$(BR2_DL_DIR) BR2_CCACHE_DIR=$(BR2_CCACHE_DIR)
++BUILDROOT_PATCHES = $(sort $(wildcard $(THIS_EXTERNAL_PATH)/patches/buildroot/*.patch))
++
++.PHONY: all configure build clean boot boot-display
++
++all: build
++
++configure:
++	@for patch in $(BUILDROOT_PATCHES); do \
++		if ! git -C $(BUILDROOT_DIR) apply --reverse --check "$$patch" 2>/dev/null; then \
++			git -C $(BUILDROOT_DIR) apply "$$patch"; \
++		fi; \
++	done
++	$(MAKE_BUILDROOT) rva23_defconfig
++
++build: configure
++	$(MAKE_BUILDROOT)
++
++clean:
++	$(MAKE_BUILDROOT) clean
++
++boot: QEMU_DISPLAY := $(if $(filter 1,$(QEMU_VNC)),-vnc 127.0.0.1:0,-display none)
++boot-display: QEMU_DISPLAY := -vnc 127.0.0.1:0
++
++boot boot-display: build
++	$(QEMU) \
++		-M virt,pflash0=pflash0,pflash1=pflash1,acpi=off \
++		-accel tcg \
++		-cpu rva23s64 \
++		-smp 4 \
++		-m 2048 \
++		-bios "$(IMAGES_DIR)/fw_dynamic.bin" \
++		-blockdev node-name=pflash0,driver=file,read-only=on,filename="$(IMAGES_DIR)/RISCV_VIRT_CODE.fd" \
++		-blockdev node-name=pflash1,driver=file,filename="$(IMAGES_DIR)/RISCV_VIRT_VARS.fd" \
++		-drive file="$(IMAGES_DIR)/disk.img",format=raw,if=virtio \
++		-device virtio-gpu-pci \
++		-device qemu-xhci \
++		-device usb-kbd \
++		-device usb-tablet \
++		$(QEMU_DISPLAY) \
++		-serial stdio
+diff --git a/buildroot/qemu/board/rva23-qemu/genimage.cfg b/buildroot/qemu/board/rva23-qemu/genimage.cfg
+new file mode 100644
+index 0000000000000000000000000000000000000000..36cc3391e6f1cf20d65c052b5a81581ad0747306
+--- /dev/null
++++ b/buildroot/qemu/board/rva23-qemu/genimage.cfg
+@@ -0,0 +1,22 @@
++image efi-part.vfat {
++	vfat {
++		file EFI {
++			image = "efi-part/EFI"
++		}
++	}
++
++	size = 256M
++}
++
++image disk.img {
++	hdimage {
++		partition-table-type = "gpt"
++	}
++
++	partition boot {
++		image = "efi-part.vfat"
++		partition-type-uuid = U
++		offset = 1M
++		bootable = true
++	}
++}
+diff --git a/buildroot/qemu/board/rva23-qemu/linux.fragment b/buildroot/qemu/board/rva23-qemu/linux.fragment
+new file mode 100644
+index 0000000000000000000000000000000000000000..364208fead86f060d14f1eb9b38422b8e06f5b35
+--- /dev/null
++++ b/buildroot/qemu/board/rva23-qemu/linux.fragment
+@@ -0,0 +1,9 @@
++CONFIG_EFI=y
++CONFIG_EFI_STUB=y
++CONFIG_EFI_ZBOOT=y
++CONFIG_VIRTIO_PCI=y
++CONFIG_VIRTIO_BLK=y
++CONFIG_VIRTIO_MMIO=y
++CONFIG_DRM=y
++CONFIG_DRM_VIRTIO_GPU=y
++CONFIG_DRM_FBDEV_EMULATION=y
+diff --git a/buildroot/qemu/board/rva23-qemu/post-image.sh b/buildroot/qemu/board/rva23-qemu/post-image.sh
+new file mode 100755
+index 0000000000000000000000000000000000000000..46862983dad8a960fc2c6d66c7e61fcf6bcd4db6
+--- /dev/null
++++ b/buildroot/qemu/board/rva23-qemu/post-image.sh
+@@ -0,0 +1,17 @@
++#!/bin/sh
++
++set -eu
++
++mkdir -p "${BINARIES_DIR}/efi-part/EFI/Linux"
++"${HOST_DIR}/bin/ukify" build \
++	--linux="${BINARIES_DIR}/Image" \
++	--initrd="${BINARIES_DIR}/rootfs.cpio.gz" \
++	--stub="${TARGET_DIR}/usr/lib/systemd/boot/efi/linuxriscv64.efi.stub" \
++	--efi-arch=riscv64 \
++	--uname=7.3.1 \
++	--cmdline="console=ttyS0,115200 earlycon=sbi" \
++	--os-release=@"${TARGET_DIR}/usr/lib/os-release" \
++	--output="${BINARIES_DIR}/efi-part/EFI/Linux/rva23.efi"
++rm -rf "${BINARIES_DIR}/efi-part/loader"
++truncate -s 32M "${BINARIES_DIR}/RISCV_VIRT_CODE.fd"
++truncate -s 32M "${BINARIES_DIR}/RISCV_VIRT_VARS.fd"
+diff --git a/buildroot/qemu/board/rva23-qemu/rootfs-overlay/etc/systemd/system/graphical.target.wants/weston.service b/buildroot/qemu/board/rva23-qemu/rootfs-overlay/etc/systemd/system/graphical.target.wants/weston.service
+new file mode 120000
+index 0000000000000000000000000000000000000000..d154c8fb98292777397c95e52ecb38dfbd6cfa7d
+--- /dev/null
++++ b/buildroot/qemu/board/rva23-qemu/rootfs-overlay/etc/systemd/system/graphical.target.wants/weston.service
+@@ -0,0 +1 @@
++../weston.service
+\ No newline at end of file
+diff --git a/buildroot/qemu/board/rva23-qemu/rootfs-overlay/etc/systemd/system/weston.service b/buildroot/qemu/board/rva23-qemu/rootfs-overlay/etc/systemd/system/weston.service
+new file mode 100644
+index 0000000000000000000000000000000000000000..599448d7307563abcb7062aaa893c759407fe592
+--- /dev/null
++++ b/buildroot/qemu/board/rva23-qemu/rootfs-overlay/etc/systemd/system/weston.service
+@@ -0,0 +1,13 @@
++[Unit]
++Description=Weston
++After=systemd-udevd.service
++RequiresMountsFor=/run
++
++[Service]
++Type=simple
++Environment=XDG_RUNTIME_DIR=/run/weston
++RuntimeDirectory=weston
++ExecStart=/usr/bin/weston --backend=drm-backend.so --shell=desktop-shell.so --renderer=pixman --idle-time=0 --continue-without-input --log=/run/weston/weston.log
++
++[Install]
++WantedBy=graphical.target
+diff --git a/buildroot/qemu/configs/rva23_defconfig b/buildroot/qemu/configs/rva23_defconfig
+new file mode 100644
+index 0000000000000000000000000000000000000000..899fffb32c15019a1d69af480ee50c412049c8da
+--- /dev/null
++++ b/buildroot/qemu/configs/rva23_defconfig
+@@ -0,0 +1,33 @@
++BR2_riscv=y
++BR2_RISCV_ISA_RVC=y
++BR2_TOOLCHAIN_EXTERNAL=y
++BR2_TOOLCHAIN_EXTERNAL_BOOTLIN_RISCV64_LP64D_GLIBC_BLEEDING_EDGE=y
++BR2_CCACHE=y
++BR2_DOWNLOAD_FORCE_CHECK_HASHES=y
++BR2_TARGET_GENERIC_HOSTNAME="rva23"
++BR2_INIT_SYSTEMD=y
++BR2_PACKAGE_SYSTEMD_DEFAULT_TARGET="graphical.target"
++BR2_TARGET_GENERIC_GETTY_PORT="ttyS0"
++BR2_ROOTFS_OVERLAY="$(BR2_EXTERNAL_RVA23_QEMU_PATH)/board/rva23-qemu/rootfs-overlay"
++BR2_ROOTFS_POST_IMAGE_SCRIPT="$(BR2_EXTERNAL_RVA23_QEMU_PATH)/board/rva23-qemu/post-image.sh support/scripts/genimage.sh"
++BR2_ROOTFS_POST_IMAGE_SCRIPT_ARGS="-c $(BR2_EXTERNAL_RVA23_QEMU_PATH)/board/rva23-qemu/genimage.cfg"
++BR2_LINUX_KERNEL=y
++BR2_LINUX_KERNEL_CUSTOM_VERSION=y
++BR2_LINUX_KERNEL_CUSTOM_VERSION_VALUE="7.3.1"
++BR2_LINUX_KERNEL_USE_ARCH_DEFAULT_CONFIG=y
++BR2_LINUX_KERNEL_CONFIG_FRAGMENT_FILES="$(BR2_EXTERNAL_RVA23_QEMU_PATH)/board/rva23-qemu/linux.fragment"
++BR2_PACKAGE_WESTON=y
++BR2_PACKAGE_WAYLAND_UTILS=y
++BR2_PACKAGE_SYSTEMD_BOOT=y
++BR2_TARGET_ROOTFS_CPIO=y
++BR2_TARGET_ROOTFS_CPIO_GZIP=y
++# BR2_TARGET_ROOTFS_TAR is not set
++BR2_TARGET_EDK2=y
++BR2_TARGET_OPENSBI=y
++BR2_TARGET_OPENSBI_PLAT="generic"
++# BR2_TARGET_OPENSBI_INSTALL_JUMP_IMG is not set
++BR2_PACKAGE_HOST_DOSFSTOOLS=y
++BR2_PACKAGE_HOST_GENIMAGE=y
++BR2_PACKAGE_HOST_MTOOLS=y
++BR2_PACKAGE_HOST_QEMU=y
++BR2_PACKAGE_HOST_QEMU_SYSTEM_MODE=y
+diff --git a/buildroot/qemu/external.desc b/buildroot/qemu/external.desc
+new file mode 100644
+index 0000000000000000000000000000000000000000..4902a9f4d8dfa0f09157a60ba24e435ca1cf91f3
+--- /dev/null
++++ b/buildroot/qemu/external.desc
+@@ -0,0 +1,2 @@
++name: RVA23_QEMU
++desc: RVA23 QEMU support
+diff --git a/buildroot/qemu/external.mk b/buildroot/qemu/external.mk
+new file mode 100644
+index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2e48c5391
+Binary files /dev/null and b/buildroot/qemu/external.mk differ
+diff --git a/buildroot/qemu/local.mk.tpl b/buildroot/qemu/local.mk.tpl
+new file mode 100644
+index 0000000000000000000000000000000000000000..eecfc068d4e61fb8248956b3f526eebde3e4c06b
+--- /dev/null
++++ b/buildroot/qemu/local.mk.tpl
+@@ -0,0 +1,4 @@
++BUILDROOT_DIR = /home/pojntfx/Projets/buildroot-k3-clean/buildroot
++OUTPUT_DIR = /home/pojntfx/Projets/pushrod/buildroot/qemu/output/rva23
++BR2_DL_DIR = /home/pojntfx/Projets/buildroot-k3-clean/buildroot/dl
++BR2_CCACHE_DIR = /home/pojntfx/Projets/buildroot-k3-clean/ccache
+diff --git a/buildroot/qemu/patches/buildroot/0001-Enable-systemd-boot-on-64-bit-RISC-V.patch b/buildroot/qemu/patches/buildroot/0001-Enable-systemd-boot-on-64-bit-RISC-V.patch
+new file mode 100644
+index 0000000000000000000000000000000000000000..cc4632c0fda826011242ca93843af36a8e13f894
+--- /dev/null
++++ b/buildroot/qemu/patches/buildroot/0001-Enable-systemd-boot-on-64-bit-RISC-V.patch
+@@ -0,0 +1,20 @@
++diff --git a/package/systemd/Config.in b/package/systemd/Config.in
++--- a/package/systemd/Config.in
+++++ b/package/systemd/Config.in
++@@ -117,6 +117,6 @@ config BR2_PACKAGE_PROVIDES_UDEV
++ config BR2_PACKAGE_SYSTEMD_BOOT
++ 	bool "systemd-boot"
++-	depends on BR2_aarch64 || BR2_i386 || BR2_x86_64
+++	depends on BR2_aarch64 || BR2_i386 || BR2_x86_64 || BR2_RISCV_64
++ 	select BR2_PACKAGE_GNU_EFI
++ 	select BR2_PACKAGE_SYSTEMD_EFI
++ 	help
++@@ -164,7 +164,8 @@ config BR2_PACKAGE_SYSTEMD_BOOT_EFI_ARCH
++ config BR2_PACKAGE_SYSTEMD_BOOT_EFI_ARCH
++ 	string
++ 	default "aa64"  if BR2_aarch64
++ 	default "ia32"  if BR2_i386
++ 	default "x64"   if BR2_x86_64
+++	default "riscv64" if BR2_RISCV_64
++ 	depends on BR2_PACKAGE_SYSTEMD_BOOT
++ 
+diff --git a/buildroot/qemu/patches/buildroot/0002-Update-systemd-to-262.1.patch b/buildroot/qemu/patches/buildroot/0002-Update-systemd-to-262.1.patch
+new file mode 100644
+index 0000000000000000000000000000000000000000..37b0f1c9cb2efa49720b58dcfa296242e2346427
+--- /dev/null
++++ b/buildroot/qemu/patches/buildroot/0002-Update-systemd-to-262.1.patch
+@@ -0,0 +1,73 @@
++diff --git a/package/systemd/systemd.hash b/package/systemd/systemd.hash
++--- a/package/systemd/systemd.hash
+++++ b/package/systemd/systemd.hash
++@@ -1,5 +1,5 @@
++ # sha256 locally computed
++-sha256  6bd311c25f00d634ae3b4544d582e27df0d4166e6ba3d403b18b3129d7f44cae  systemd-258.7.tar.gz
+++sha256  100fc873b848b9b0297d8a705e8e2ed326256c8483d9960ee1ffe264c8a5c3e3  systemd-262.1.tar.gz
++ sha256  ac4985facb553559981f507982444d779115e3e3a4c8b7847ae956198490c1b3  LICENSE.GPL2
++ sha256  6d9bb3b7fc818a8facc4cc296060a0883fef8710d6498f86165335846e82ee9d  LICENSE.LGPL2.1
++ sha256  c9e7bf5b7c243c719b8b43c36158effb9b54c5e80abc9d82e4b2d4b2a4aa64ad  LICENSES/alg-sha1-public-domain.txt
++diff --git a/package/systemd/systemd.mk b/package/systemd/systemd.mk
++--- a/package/systemd/systemd.mk
+++++ b/package/systemd/systemd.mk
++@@ -19,7 +19,7 @@
++ # - Diff sysusers.d with the previous version
++ # - Diff factory/etc/nsswitch.conf with the previous version
++ #   (details are often sprinkled around in README and manpages)
++-SYSTEMD_VERSION = 258.7
+++SYSTEMD_VERSION = 262.1
++ SYSTEMD_SITE = $(call github,systemd,systemd,v$(SYSTEMD_VERSION))
++ SYSTEMD_LICENSE = \
++ 	LGPL-2.1+, \
++@@ -95,8 +95,6 @@
++ 	-Dsulogin-path=/usr/sbin/sulogin \
++ 	-Dsystem-gid-max=999 \
++ 	-Dsystem-uid-max=999 \
++-	-Dsysvinit-path= \
++-	-Dsysvrcnd-path= \
++ 	-Dtests=false \
++ 	-Dfuzz-tests=false \
++ 	-Dinstall-tests=false \
++@@ -176,20 +174,15 @@
++ 
++ ifeq ($(BR2_PACKAGE_IPTABLES),y)
++ SYSTEMD_DEPENDENCIES += iptables
++-SYSTEMD_CONF_OPTS += -Dlibiptc=enabled
++ else
++-SYSTEMD_CONF_OPTS += -Dlibiptc=disabled
++ endif
++ 
++ # Both options can't be selected at the same time so prefer libidn2
++ ifeq ($(BR2_PACKAGE_LIBIDN2),y)
++ SYSTEMD_DEPENDENCIES += libidn2
++-SYSTEMD_CONF_OPTS += -Dlibidn2=enabled -Dlibidn=disabled
++ else ifeq ($(BR2_PACKAGE_LIBIDN),y)
++ SYSTEMD_DEPENDENCIES += libidn
++-SYSTEMD_CONF_OPTS += -Dlibidn=enabled -Dlibidn2=disabled
++ else
++-SYSTEMD_CONF_OPTS += -Dlibidn=disabled -Dlibidn2=disabled
++ endif
++ 
++ ifeq ($(BR2_PACKAGE_LIBSECCOMP),y)
++@@ -967,7 +960,6 @@
++ 	-Dglib=disabled \
++ 	-Dlibarchive=disabled \
++ 	-Dacl=disabled \
++-	-Dsysvinit-path='' \
++ 	-Dinitrd=false \
++ 	-Dxdg-autostart=false \
++ 	-Dkernel-install=false \
++@@ -982,12 +974,10 @@
++ 	-Dlibcryptsetup=disabled \
++ 	-Dlibcryptsetup-plugins=disabled \
++ 	-Delfutils=disabled \
++-	-Dlibiptc=disabled \
++ 	-Dapparmor=disabled \
++ 	-Daudit=disabled \
++ 	-Dxenctrl=disabled \
++ 	-Dlibidn2=disabled \
++-	-Dlibidn=disabled \
++ 	-Dseccomp=disabled \
++ 	-Dxkbcommon=disabled \
++ 	-Dbzip2=disabled \
+
