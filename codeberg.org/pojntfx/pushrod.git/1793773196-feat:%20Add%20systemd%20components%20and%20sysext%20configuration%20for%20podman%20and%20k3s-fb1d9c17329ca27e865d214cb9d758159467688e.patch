@@ -1,0 +1,576 @@
+From fb1d9c17329ca27e865d214cb9d758159467688e Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Tue, 03 Nov 2026 23:19:56 -0700
+Subject: [PATCH] feat: Add systemd components and sysext configuration for podman and k3s
+---
+diff --git a/buildroot/qemu/board/rva23-qemu/rootfs-overlay/etc/rancher b/buildroot/qemu/board/rva23-qemu/rootfs-overlay/etc/rancher
+new file mode 120000
+index 0000000000000000000000000000000000000000..9b4a06d6d6c8e7c393b85badc55073836687930c
+--- /dev/null
++++ b/buildroot/qemu/board/rva23-qemu/rootfs-overlay/etc/rancher
+@@ -0,0 +1 @@
++/var/lib/rancher
+\ No newline at end of file
+diff --git a/buildroot/qemu/board/rva23-qemu/rootfs-overlay/etc/systemd/system/graphical.target.wants/weston.service b/buildroot/qemu/board/rva23-qemu/rootfs-overlay/etc/systemd/system/graphical.target.wants/weston.service
+new file mode 120000
+index 0000000000000000000000000000000000000000..d154c8fb98292777397c95e52ecb38dfbd6cfa7d
+--- /dev/null
++++ b/buildroot/qemu/board/rva23-qemu/rootfs-overlay/etc/systemd/system/graphical.target.wants/weston.service
+@@ -0,0 +1 @@
++../weston.service
+\ No newline at end of file
+diff --git a/buildroot/qemu/board/rva23-qemu/rootfs-overlay/etc/systemd/system/multi-user.target.wants/systemd-networkd.service b/buildroot/qemu/board/rva23-qemu/rootfs-overlay/etc/systemd/system/multi-user.target.wants/systemd-networkd.service
+new file mode 120000
+index 0000000000000000000000000000000000000000..4c158e62e19939d13d5ac981b16408e9b67aaefa
+--- /dev/null
++++ b/buildroot/qemu/board/rva23-qemu/rootfs-overlay/etc/systemd/system/multi-user.target.wants/systemd-networkd.service
+@@ -0,0 +1 @@
++/usr/lib/systemd/system/systemd-networkd.service
+\ No newline at end of file
+diff --git a/buildroot/qemu/board/rva23-qemu/rootfs-overlay/etc/systemd/system/sysinit.target.wants/systemd-confext.service b/buildroot/qemu/board/rva23-qemu/rootfs-overlay/etc/systemd/system/sysinit.target.wants/systemd-confext.service
+new file mode 120000
+index 0000000000000000000000000000000000000000..da168afab814d7c6f749be9123a24afd0c57509b
+--- /dev/null
++++ b/buildroot/qemu/board/rva23-qemu/rootfs-overlay/etc/systemd/system/sysinit.target.wants/systemd-confext.service
+@@ -0,0 +1 @@
++/usr/lib/systemd/system/systemd-confext.service
+\ No newline at end of file
+diff --git a/buildroot/qemu/board/rva23-qemu/rootfs-overlay/etc/systemd/system/sysinit.target.wants/systemd-sysext.service b/buildroot/qemu/board/rva23-qemu/rootfs-overlay/etc/systemd/system/sysinit.target.wants/systemd-sysext.service
+new file mode 120000
+index 0000000000000000000000000000000000000000..6cd2a642e11a82f71af43dd936a33388b6050a5c
+--- /dev/null
++++ b/buildroot/qemu/board/rva23-qemu/rootfs-overlay/etc/systemd/system/sysinit.target.wants/systemd-sysext.service
+@@ -0,0 +1 @@
++/usr/lib/systemd/system/systemd-sysext.service
+\ No newline at end of file
+diff --git a/buildroot/qemu/board/rva23-qemu/rootfs-overlay/etc/systemd/system/weston.service b/buildroot/qemu/board/rva23-qemu/rootfs-overlay/etc/systemd/system/weston.service
+new file mode 100644
+index 0000000000000000000000000000000000000000..599448d7307563abcb7062aaa893c759407fe592
+--- /dev/null
++++ b/buildroot/qemu/board/rva23-qemu/rootfs-overlay/etc/systemd/system/weston.service
+@@ -0,0 +1,13 @@
++[Unit]
++Description=Weston
++After=systemd-udevd.service
++RequiresMountsFor=/run
++
++[Service]
++Type=simple
++Environment=XDG_RUNTIME_DIR=/run/weston
++RuntimeDirectory=weston
++ExecStart=/usr/bin/weston --backend=drm-backend.so --shell=desktop-shell.so --renderer=pixman --idle-time=0 --continue-without-input --log=/run/weston/weston.log
++
++[Install]
++WantedBy=graphical.target
+diff --git a/buildroot/qemu/board/rva23-qemu/rootfs-overlay/usr/lib/repart.d/10-usr-a.conf b/buildroot/qemu/board/rva23-qemu/rootfs-overlay/usr/lib/repart.d/10-usr-a.conf
+new file mode 100644
+index 0000000000000000000000000000000000000000..2a937750be587b0db9692bb4289f050a207a84be
+--- /dev/null
++++ b/buildroot/qemu/board/rva23-qemu/rootfs-overlay/usr/lib/repart.d/10-usr-a.conf
+@@ -0,0 +1,6 @@
++[Partition]
++Type=usr-riscv64
++Label=rva23_1
++ReadOnly=yes
++SizeMinBytes=512M
++SizeMaxBytes=512M
+diff --git a/buildroot/qemu/board/rva23-qemu/rootfs-overlay/usr/lib/repart.d/20-usr-b.conf b/buildroot/qemu/board/rva23-qemu/rootfs-overlay/usr/lib/repart.d/20-usr-b.conf
+new file mode 100644
+index 0000000000000000000000000000000000000000..00d3fbafadda4ce3ae6ee8ca95d76d0dbb4eb9f0
+--- /dev/null
++++ b/buildroot/qemu/board/rva23-qemu/rootfs-overlay/usr/lib/repart.d/20-usr-b.conf
+@@ -0,0 +1,6 @@
++[Partition]
++Type=usr-riscv64
++Label=_empty
++Format=empty
++SizeMinBytes=512M
++SizeMaxBytes=512M
+diff --git a/buildroot/qemu/board/rva23-qemu/rootfs-overlay/usr/lib/repart.d/25-usr-a-verity.conf b/buildroot/qemu/board/rva23-qemu/rootfs-overlay/usr/lib/repart.d/25-usr-a-verity.conf
+new file mode 100644
+index 0000000000000000000000000000000000000000..8a206bd1daa473141965fe22476be2291b7b921b
+--- /dev/null
++++ b/buildroot/qemu/board/rva23-qemu/rootfs-overlay/usr/lib/repart.d/25-usr-a-verity.conf
+@@ -0,0 +1,6 @@
++[Partition]
++Type=usr-riscv64-verity
++Label=rva23_1_verity
++ReadOnly=yes
++SizeMinBytes=64M
++SizeMaxBytes=64M
+diff --git a/buildroot/qemu/board/rva23-qemu/rootfs-overlay/usr/lib/repart.d/30-usr-b-verity.conf b/buildroot/qemu/board/rva23-qemu/rootfs-overlay/usr/lib/repart.d/30-usr-b-verity.conf
+new file mode 100644
+index 0000000000000000000000000000000000000000..91b37680c59caeb36e89b4e394066f9870a90cc2
+--- /dev/null
++++ b/buildroot/qemu/board/rva23-qemu/rootfs-overlay/usr/lib/repart.d/30-usr-b-verity.conf
+@@ -0,0 +1,6 @@
++[Partition]
++Type=usr-riscv64-verity
++Label=_empty
++Format=empty
++SizeMinBytes=64M
++SizeMaxBytes=64M
+diff --git a/buildroot/qemu/board/rva23-qemu/rootfs-overlay/usr/lib/repart.d/35-usr-a-verity-sig.conf b/buildroot/qemu/board/rva23-qemu/rootfs-overlay/usr/lib/repart.d/35-usr-a-verity-sig.conf
+new file mode 100644
+index 0000000000000000000000000000000000000000..210e69ad99d1241c8a73a00659a7af7731b6c3f5
+--- /dev/null
++++ b/buildroot/qemu/board/rva23-qemu/rootfs-overlay/usr/lib/repart.d/35-usr-a-verity-sig.conf
+@@ -0,0 +1,6 @@
++[Partition]
++Type=usr-riscv64-verity-sig
++Label=rva23_1_verity_sig
++ReadOnly=yes
++SizeMinBytes=16K
++SizeMaxBytes=16K
+diff --git a/buildroot/qemu/board/rva23-qemu/rootfs-overlay/usr/lib/repart.d/40-usr-b-verity-sig.conf b/buildroot/qemu/board/rva23-qemu/rootfs-overlay/usr/lib/repart.d/40-usr-b-verity-sig.conf
+new file mode 100644
+index 0000000000000000000000000000000000000000..c7ca076581bc9562fc3300d0a14481b5a312e6b7
+--- /dev/null
++++ b/buildroot/qemu/board/rva23-qemu/rootfs-overlay/usr/lib/repart.d/40-usr-b-verity-sig.conf
+@@ -0,0 +1,6 @@
++[Partition]
++Type=usr-riscv64-verity-sig
++Label=_empty
++Format=empty
++SizeMinBytes=16K
++SizeMaxBytes=16K
+diff --git a/buildroot/qemu/board/rva23-qemu/rootfs-overlay/usr/lib/repart.d/50-root.conf b/buildroot/qemu/board/rva23-qemu/rootfs-overlay/usr/lib/repart.d/50-root.conf
+new file mode 100644
+index 0000000000000000000000000000000000000000..8f0b6b258091bd2a329e578796f2b342fbea7fdd
+--- /dev/null
++++ b/buildroot/qemu/board/rva23-qemu/rootfs-overlay/usr/lib/repart.d/50-root.conf
+@@ -0,0 +1,12 @@
++[Partition]
++Type=root-riscv64
++Label=root
++Format=ext4
++Encrypt=tpm2
++MakeDirectories=/boot /dev /efi /etc /home /proc /root /run /sys /tmp /usr /var
++MakeSymlinks=/bin:usr/bin /lib:usr/lib /lib64:lib /sbin:usr/sbin
++CopyFiles=/usr/share/factory/etc:/etc
++CopyFiles=/usr/share/factory/var:/var
++FactoryReset=yes
++SizeMinBytes=512M
++SizeMaxBytes=1G
+diff --git a/buildroot/qemu/board/rva23-qemu/rootfs-overlay/usr/lib/repart.d/60-home.conf b/buildroot/qemu/board/rva23-qemu/rootfs-overlay/usr/lib/repart.d/60-home.conf
+new file mode 100644
+index 0000000000000000000000000000000000000000..8a9bd5952f119b4ff38460bb552e05888aa9b6de
+--- /dev/null
++++ b/buildroot/qemu/board/rva23-qemu/rootfs-overlay/usr/lib/repart.d/60-home.conf
+@@ -0,0 +1,8 @@
++[Partition]
++Type=home
++Label=home
++Format=ext4
++Encrypt=tpm2
++FactoryReset=yes
++SizeMinBytes=256M
++SizeMaxBytes=512M
+diff --git a/buildroot/qemu/board/rva23-qemu/rootfs-overlay/usr/lib/repart.d/70-swap.conf b/buildroot/qemu/board/rva23-qemu/rootfs-overlay/usr/lib/repart.d/70-swap.conf
+new file mode 100644
+index 0000000000000000000000000000000000000000..6be8376a453035901c98a6558119b295163c1c2d
+--- /dev/null
++++ b/buildroot/qemu/board/rva23-qemu/rootfs-overlay/usr/lib/repart.d/70-swap.conf
+@@ -0,0 +1,8 @@
++[Partition]
++Type=swap
++Label=swap
++Format=swap
++Encrypt=tpm2
++FactoryReset=yes
++SizeMinBytes=256M
++SizeMaxBytes=256M
+diff --git a/buildroot/qemu/board/rva23-qemu/rootfs-overlay/usr/lib/systemd/network/20-virtio.network b/buildroot/qemu/board/rva23-qemu/rootfs-overlay/usr/lib/systemd/network/20-virtio.network
+new file mode 100644
+index 0000000000000000000000000000000000000000..aec1849a827143d72f7db5f95e1c9b6732f6a18c
+--- /dev/null
++++ b/buildroot/qemu/board/rva23-qemu/rootfs-overlay/usr/lib/systemd/network/20-virtio.network
+@@ -0,0 +1,5 @@
++[Match]
++Name=en*
++
++[Network]
++DHCP=yes
+diff --git a/buildroot/qemu/board/rva23-qemu/rootfs-overlay/usr/lib/systemd/system/systemd-confext-initrd.service.d/50-debug-only.conf b/buildroot/qemu/board/rva23-qemu/rootfs-overlay/usr/lib/systemd/system/systemd-confext-initrd.service.d/50-debug-only.conf
+new file mode 100644
+index 0000000000000000000000000000000000000000..6c52e0c44dd9637227eeff178e038ebfc357ee81
+--- /dev/null
++++ b/buildroot/qemu/board/rva23-qemu/rootfs-overlay/usr/lib/systemd/system/systemd-confext-initrd.service.d/50-debug-only.conf
+@@ -0,0 +1,2 @@
++[Unit]
++ConditionKernelCommandLine=rd.debug
+diff --git a/buildroot/qemu/board/rva23-qemu/rootfs-overlay/usr/lib/systemd/system/systemd-confext-sysroot.service.d/50-debug-only.conf b/buildroot/qemu/board/rva23-qemu/rootfs-overlay/usr/lib/systemd/system/systemd-confext-sysroot.service.d/50-debug-only.conf
+new file mode 100644
+index 0000000000000000000000000000000000000000..6c52e0c44dd9637227eeff178e038ebfc357ee81
+--- /dev/null
++++ b/buildroot/qemu/board/rva23-qemu/rootfs-overlay/usr/lib/systemd/system/systemd-confext-sysroot.service.d/50-debug-only.conf
+@@ -0,0 +1,2 @@
++[Unit]
++ConditionKernelCommandLine=rd.debug
+diff --git a/buildroot/qemu/board/rva23-qemu/rootfs-overlay/usr/lib/systemd/system/systemd-confext.service.d/50-debug-only.conf b/buildroot/qemu/board/rva23-qemu/rootfs-overlay/usr/lib/systemd/system/systemd-confext.service.d/50-debug-only.conf
+new file mode 100644
+index 0000000000000000000000000000000000000000..6c52e0c44dd9637227eeff178e038ebfc357ee81
+--- /dev/null
++++ b/buildroot/qemu/board/rva23-qemu/rootfs-overlay/usr/lib/systemd/system/systemd-confext.service.d/50-debug-only.conf
+@@ -0,0 +1,2 @@
++[Unit]
++ConditionKernelCommandLine=rd.debug
+diff --git a/buildroot/qemu/board/rva23-qemu/rootfs-overlay/usr/lib/systemd/system/systemd-confext.service.d/50-signed.conf b/buildroot/qemu/board/rva23-qemu/rootfs-overlay/usr/lib/systemd/system/systemd-confext.service.d/50-signed.conf
+new file mode 100644
+index 0000000000000000000000000000000000000000..6d847638997ffae0e3222c18f71eb3df090e8e98
+--- /dev/null
++++ b/buildroot/qemu/board/rva23-qemu/rootfs-overlay/usr/lib/systemd/system/systemd-confext.service.d/50-signed.conf
+@@ -0,0 +1,5 @@
++[Service]
++ExecStart=
++ExecStart=/usr/bin/systemd-confext --image-policy=root=signed+absent refresh
++ExecReload=
++ExecReload=/usr/bin/systemd-confext --image-policy=root=signed+absent refresh
+diff --git a/buildroot/qemu/board/rva23-qemu/rootfs-overlay/usr/lib/systemd/system/systemd-pcrlock.socket.d/50-measured.conf b/buildroot/qemu/board/rva23-qemu/rootfs-overlay/usr/lib/systemd/system/systemd-pcrlock.socket.d/50-measured.conf
+new file mode 100644
+index 0000000000000000000000000000000000000000..5f7dc1e9e5696a584efa223d6fef2795adcd7def
+--- /dev/null
++++ b/buildroot/qemu/board/rva23-qemu/rootfs-overlay/usr/lib/systemd/system/systemd-pcrlock.socket.d/50-measured.conf
+@@ -0,0 +1,2 @@
++[Unit]
++ConditionSecurity=
+diff --git a/buildroot/qemu/board/rva23-qemu/rootfs-overlay/usr/lib/systemd/system/systemd-repart.service.d/50-tpm2.conf b/buildroot/qemu/board/rva23-qemu/rootfs-overlay/usr/lib/systemd/system/systemd-repart.service.d/50-tpm2.conf
+new file mode 100644
+index 0000000000000000000000000000000000000000..b614de2675750a52353ecab9a1a9017bb2e87cf3
+--- /dev/null
++++ b/buildroot/qemu/board/rva23-qemu/rootfs-overlay/usr/lib/systemd/system/systemd-repart.service.d/50-tpm2.conf
+@@ -0,0 +1,3 @@
++[Service]
++ExecStart=
++ExecStart=/usr/bin/systemd-repart --dry-run=no --tpm2-pcrs= --tpm2-public-key-pcrs=
+diff --git a/buildroot/qemu/board/rva23-qemu/rootfs-overlay/usr/lib/systemd/system/systemd-report-sign-tpm2.socket.d/50-measured.conf b/buildroot/qemu/board/rva23-qemu/rootfs-overlay/usr/lib/systemd/system/systemd-report-sign-tpm2.socket.d/50-measured.conf
+new file mode 100644
+index 0000000000000000000000000000000000000000..5f7dc1e9e5696a584efa223d6fef2795adcd7def
+--- /dev/null
++++ b/buildroot/qemu/board/rva23-qemu/rootfs-overlay/usr/lib/systemd/system/systemd-report-sign-tpm2.socket.d/50-measured.conf
+@@ -0,0 +1,2 @@
++[Unit]
++ConditionSecurity=
+diff --git a/buildroot/qemu/board/rva23-qemu/rootfs-overlay/usr/lib/systemd/system/systemd-report-sign-tpm2@.service.d/50-provision.conf b/buildroot/qemu/board/rva23-qemu/rootfs-overlay/usr/lib/systemd/system/systemd-report-sign-tpm2@.service.d/50-provision.conf
+new file mode 100644
+index 0000000000000000000000000000000000000000..a58a6cd702edc69757480faeaafdd2cb376efa50
+--- /dev/null
++++ b/buildroot/qemu/board/rva23-qemu/rootfs-overlay/usr/lib/systemd/system/systemd-report-sign-tpm2@.service.d/50-provision.conf
+@@ -0,0 +1,2 @@
++[Service]
++ExecStartPre=/usr/libexec/rva23-report-provision
+diff --git a/buildroot/qemu/board/rva23-qemu/rootfs-overlay/usr/lib/systemd/system/systemd-sysext.service.d/50-signed.conf b/buildroot/qemu/board/rva23-qemu/rootfs-overlay/usr/lib/systemd/system/systemd-sysext.service.d/50-signed.conf
+new file mode 100644
+index 0000000000000000000000000000000000000000..f9f5dea6e6a9be7413ded9a123e9d859a38594a8
+--- /dev/null
++++ b/buildroot/qemu/board/rva23-qemu/rootfs-overlay/usr/lib/systemd/system/systemd-sysext.service.d/50-signed.conf
+@@ -0,0 +1,5 @@
++[Service]
++ExecStart=
++ExecStart=/usr/bin/systemd-sysext --image-policy=root=signed+absent:usr=signed+absent refresh
++ExecReload=
++ExecReload=/usr/bin/systemd-sysext --image-policy=root=signed+absent:usr=signed+absent refresh
+diff --git a/buildroot/qemu/board/rva23-qemu/rootfs-overlay/usr/lib/sysupdate.bootloader.d/10-systemd-boot.transfer b/buildroot/qemu/board/rva23-qemu/rootfs-overlay/usr/lib/sysupdate.bootloader.d/10-systemd-boot.transfer
+new file mode 100644
+index 0000000000000000000000000000000000000000..23099a6bdad1482adc921d0706f7309df5b785c5
+--- /dev/null
++++ b/buildroot/qemu/board/rva23-qemu/rootfs-overlay/usr/lib/sysupdate.bootloader.d/10-systemd-boot.transfer
+@@ -0,0 +1,14 @@
++[Transfer]
++ProtectVersion=%A
++
++[Source]
++Type=url-file
++Path=http://10.0.2.2:8000/
++MatchPattern=systemd-boot_@v.efi
++
++[Target]
++Type=regular-file
++Path=/var/lib/sysupdate/bootloader
++MatchPattern=systemd-boot_@v.efi
++Mode=0644
++InstancesMax=2
+diff --git a/buildroot/qemu/board/rva23-qemu/rootfs-overlay/usr/lib/sysupdate.d/10-usr.transfer b/buildroot/qemu/board/rva23-qemu/rootfs-overlay/usr/lib/sysupdate.d/10-usr.transfer
+new file mode 100644
+index 0000000000000000000000000000000000000000..751527a878df2f0ef8239b860e55710e479d257a
+--- /dev/null
++++ b/buildroot/qemu/board/rva23-qemu/rootfs-overlay/usr/lib/sysupdate.d/10-usr.transfer
+@@ -0,0 +1,16 @@
++[Transfer]
++ProtectVersion=%A
++
++[Source]
++Type=url-file
++Path=http://10.0.2.2:8000/
++MatchPattern=rva23_@v_@u.usr.erofs.xz
++
++[Target]
++Type=partition
++Path=auto
++MatchPattern=rva23_@v
++MatchPartitionType=usr
++PartitionFlags=0
++ReadOnly=1
++InstancesMax=2
+diff --git a/buildroot/qemu/board/rva23-qemu/rootfs-overlay/usr/lib/sysupdate.d/20-usr-verity.transfer b/buildroot/qemu/board/rva23-qemu/rootfs-overlay/usr/lib/sysupdate.d/20-usr-verity.transfer
+new file mode 100644
+index 0000000000000000000000000000000000000000..2b07a3bb20b97ebea748712003f51541f5f8a005
+--- /dev/null
++++ b/buildroot/qemu/board/rva23-qemu/rootfs-overlay/usr/lib/sysupdate.d/20-usr-verity.transfer
+@@ -0,0 +1,16 @@
++[Transfer]
++ProtectVersion=%A
++
++[Source]
++Type=url-file
++Path=http://10.0.2.2:8000/
++MatchPattern=rva23_@v_@u.usr.verity.xz
++
++[Target]
++Type=partition
++Path=auto
++MatchPattern=rva23_@v_verity
++MatchPartitionType=usr-verity
++PartitionFlags=0
++ReadOnly=1
++InstancesMax=2
+diff --git a/buildroot/qemu/board/rva23-qemu/rootfs-overlay/usr/lib/sysupdate.d/30-usr-verity-sig.transfer b/buildroot/qemu/board/rva23-qemu/rootfs-overlay/usr/lib/sysupdate.d/30-usr-verity-sig.transfer
+new file mode 100644
+index 0000000000000000000000000000000000000000..526915c30921b025171045d519fa7fdcc647a3e6
+--- /dev/null
++++ b/buildroot/qemu/board/rva23-qemu/rootfs-overlay/usr/lib/sysupdate.d/30-usr-verity-sig.transfer
+@@ -0,0 +1,16 @@
++[Transfer]
++ProtectVersion=%A
++
++[Source]
++Type=url-file
++Path=http://10.0.2.2:8000/
++MatchPattern=rva23_@v.usr.verity-sig.xz
++
++[Target]
++Type=partition
++Path=auto
++MatchPattern=rva23_@v_verity_sig
++MatchPartitionType=usr-verity-sig
++PartitionFlags=0
++ReadOnly=1
++InstancesMax=2
+diff --git a/buildroot/qemu/board/rva23-qemu/rootfs-overlay/usr/lib/sysupdate.d/90-uki.transfer b/buildroot/qemu/board/rva23-qemu/rootfs-overlay/usr/lib/sysupdate.d/90-uki.transfer
+new file mode 100644
+index 0000000000000000000000000000000000000000..da6b08f03dbcacffaa9de47d0758213b30fb1beb
+--- /dev/null
++++ b/buildroot/qemu/board/rva23-qemu/rootfs-overlay/usr/lib/sysupdate.d/90-uki.transfer
+@@ -0,0 +1,17 @@
++[Transfer]
++ProtectVersion=%A
++
++[Source]
++Type=url-file
++Path=http://10.0.2.2:8000/
++MatchPattern=rva23_@v.efi
++
++[Target]
++Type=regular-file
++Path=/EFI/Linux
++PathRelativeTo=boot
++MatchPattern=rva23_@v+@l-@d.efi rva23_@v+@l.efi rva23_@v.efi
++Mode=0644
++TriesLeft=3
++TriesDone=0
++InstancesMax=2
+diff --git a/buildroot/qemu/board/rva23-qemu/rootfs-overlay/usr/lib/sysupdate.d/91-recovery-uki.transfer b/buildroot/qemu/board/rva23-qemu/rootfs-overlay/usr/lib/sysupdate.d/91-recovery-uki.transfer
+new file mode 100644
+index 0000000000000000000000000000000000000000..d4c45ab804d61e0581ef38b894e25cb6a3e19675
+--- /dev/null
++++ b/buildroot/qemu/board/rva23-qemu/rootfs-overlay/usr/lib/sysupdate.d/91-recovery-uki.transfer
+@@ -0,0 +1,15 @@
++[Transfer]
++ProtectVersion=%A
++
++[Source]
++Type=url-file
++Path=http://10.0.2.2:8000/
++MatchPattern=rva23-recovery_@v.efi
++
++[Target]
++Type=regular-file
++Path=/EFI/Linux
++PathRelativeTo=boot
++MatchPattern=rva23-recovery_@v.efi
++Mode=0644
++InstancesMax=2
+diff --git a/buildroot/qemu/board/rva23-qemu/rootfs-overlay/usr/lib/sysupdate.d/92-debug-uki.transfer b/buildroot/qemu/board/rva23-qemu/rootfs-overlay/usr/lib/sysupdate.d/92-debug-uki.transfer
+new file mode 100644
+index 0000000000000000000000000000000000000000..f8417adc07338188770dbafb4effe4e3813a2d97
+--- /dev/null
++++ b/buildroot/qemu/board/rva23-qemu/rootfs-overlay/usr/lib/sysupdate.d/92-debug-uki.transfer
+@@ -0,0 +1,15 @@
++[Transfer]
++ProtectVersion=%A
++
++[Source]
++Type=url-file
++Path=http://10.0.2.2:8000/
++MatchPattern=rva23-debug_@v.efi
++
++[Target]
++Type=regular-file
++Path=/EFI/Linux
++PathRelativeTo=boot
++MatchPattern=rva23-debug_@v.efi
++Mode=0644
++InstancesMax=2
+diff --git a/buildroot/qemu/board/rva23-qemu/rootfs-overlay/usr/lib/sysupdate.extensions.d/10-graphics.transfer b/buildroot/qemu/board/rva23-qemu/rootfs-overlay/usr/lib/sysupdate.extensions.d/10-graphics.transfer
+new file mode 100644
+index 0000000000000000000000000000000000000000..43c798b2057653602d5d98f246a5b38fcbea813d
+--- /dev/null
++++ b/buildroot/qemu/board/rva23-qemu/rootfs-overlay/usr/lib/sysupdate.extensions.d/10-graphics.transfer
+@@ -0,0 +1,14 @@
++[Transfer]
++ProtectVersion=%A
++
++[Source]
++Type=url-file
++Path=http://10.0.2.2:8000/
++MatchPattern=graphics_@v.raw.xz
++
++[Target]
++Type=regular-file
++Path=/var/lib/extensions
++MatchPattern=graphics_@v.raw
++Mode=0444
++InstancesMax=2
+diff --git a/buildroot/qemu/board/rva23-qemu/rootfs-overlay/usr/lib/sysupdate.extensions.d/20-debug.transfer b/buildroot/qemu/board/rva23-qemu/rootfs-overlay/usr/lib/sysupdate.extensions.d/20-debug.transfer
+new file mode 100644
+index 0000000000000000000000000000000000000000..490e6f97fff4f37fa8240d6033c126d5e68714d2
+--- /dev/null
++++ b/buildroot/qemu/board/rva23-qemu/rootfs-overlay/usr/lib/sysupdate.extensions.d/20-debug.transfer
+@@ -0,0 +1,14 @@
++[Transfer]
++ProtectVersion=%A
++
++[Source]
++Type=url-file
++Path=http://10.0.2.2:8000/
++MatchPattern=debug_@v.raw.xz
++
++[Target]
++Type=regular-file
++Path=/var/lib/confexts
++MatchPattern=debug_@v.raw
++Mode=0444
++InstancesMax=2
+diff --git a/buildroot/qemu/board/rva23-qemu/rootfs-overlay/usr/lib/sysupdate.extensions.d/30-podman.transfer b/buildroot/qemu/board/rva23-qemu/rootfs-overlay/usr/lib/sysupdate.extensions.d/30-podman.transfer
+new file mode 100644
+index 0000000000000000000000000000000000000000..e7951b3df3ce0210dfd75c67a6a2aad02f3cf88f
+--- /dev/null
++++ b/buildroot/qemu/board/rva23-qemu/rootfs-overlay/usr/lib/sysupdate.extensions.d/30-podman.transfer
+@@ -0,0 +1,14 @@
++[Transfer]
++ProtectVersion=%A
++
++[Source]
++Type=url-file
++Path=http://10.0.2.2:8000/
++MatchPattern=podman_@v.raw.xz
++
++[Target]
++Type=regular-file
++Path=/var/lib/extensions
++MatchPattern=podman_@v.raw
++Mode=0444
++InstancesMax=2
+diff --git a/buildroot/qemu/board/rva23-qemu/rootfs-overlay/usr/lib/sysupdate.extensions.d/40-podman-sidecar.transfer b/buildroot/qemu/board/rva23-qemu/rootfs-overlay/usr/lib/sysupdate.extensions.d/40-podman-sidecar.transfer
+new file mode 100644
+index 0000000000000000000000000000000000000000..6f81d15b07858a24df913616103eccd56bb5b29a
+--- /dev/null
++++ b/buildroot/qemu/board/rva23-qemu/rootfs-overlay/usr/lib/sysupdate.extensions.d/40-podman-sidecar.transfer
+@@ -0,0 +1,14 @@
++[Transfer]
++ProtectVersion=%A
++
++[Source]
++Type=url-file
++Path=http://10.0.2.2:8000/
++MatchPattern=podman_@v.raw.xz
++
++[Target]
++Type=regular-file
++Path=/boot/loader/extensions
++MatchPattern=podman_@v.raw
++Mode=0444
++InstancesMax=2
+diff --git a/buildroot/qemu/board/rva23-qemu/rootfs-overlay/usr/lib/sysupdate.extensions.d/50-k3s.transfer b/buildroot/qemu/board/rva23-qemu/rootfs-overlay/usr/lib/sysupdate.extensions.d/50-k3s.transfer
+new file mode 100644
+index 0000000000000000000000000000000000000000..9a4c57872430e3f125867a57cfeb9782ab2b74b4
+--- /dev/null
++++ b/buildroot/qemu/board/rva23-qemu/rootfs-overlay/usr/lib/sysupdate.extensions.d/50-k3s.transfer
+@@ -0,0 +1,14 @@
++[Transfer]
++ProtectVersion=%A
++
++[Source]
++Type=url-file
++Path=http://10.0.2.2:8000/
++MatchPattern=k3s_@v.raw.xz
++
++[Target]
++Type=regular-file
++Path=/var/lib/extensions
++MatchPattern=k3s_@v.raw
++Mode=0444
++InstancesMax=2
+diff --git a/buildroot/qemu/board/rva23-qemu/rootfs-overlay/usr/lib/sysupdate.extensions.d/60-k3s-sidecar.transfer b/buildroot/qemu/board/rva23-qemu/rootfs-overlay/usr/lib/sysupdate.extensions.d/60-k3s-sidecar.transfer
+new file mode 100644
+index 0000000000000000000000000000000000000000..ff5b3728bb32c4426076cb5bc768ca0ba2ec805c
+--- /dev/null
++++ b/buildroot/qemu/board/rva23-qemu/rootfs-overlay/usr/lib/sysupdate.extensions.d/60-k3s-sidecar.transfer
+@@ -0,0 +1,14 @@
++[Transfer]
++ProtectVersion=%A
++
++[Source]
++Type=url-file
++Path=http://10.0.2.2:8000/
++MatchPattern=k3s_@v.raw.xz
++
++[Target]
++Type=regular-file
++Path=/boot/loader/extensions
++MatchPattern=k3s_@v.raw
++Mode=0444
++InstancesMax=2
+diff --git a/buildroot/qemu/board/rva23-qemu/rootfs-overlay/usr/lib/sysusers.d/rva23.conf b/buildroot/qemu/board/rva23-qemu/rootfs-overlay/usr/lib/sysusers.d/rva23.conf
+new file mode 100644
+index 0000000000000000000000000000000000000000..e57e50f7d62bdea8b8cee7fb5714092f6b048acc
+--- /dev/null
++++ b/buildroot/qemu/board/rva23-qemu/rootfs-overlay/usr/lib/sysusers.d/rva23.conf
+@@ -0,0 +1 @@
++u rva23-state 950 "RVA23 state service" /var/lib/rva23-state /usr/bin/false
+diff --git a/buildroot/qemu/board/rva23-qemu/rootfs-overlay/usr/lib/tmpfiles.d/rva23.conf b/buildroot/qemu/board/rva23-qemu/rootfs-overlay/usr/lib/tmpfiles.d/rva23.conf
+new file mode 100644
+index 0000000000000000000000000000000000000000..40724d7f2082427454dc6d8e1c6b7b387826d49d
+--- /dev/null
++++ b/buildroot/qemu/board/rva23-qemu/rootfs-overlay/usr/lib/tmpfiles.d/rva23.conf
+@@ -0,0 +1,2 @@
++d /var/lib/rva23-state 0750 root root -
++d /etc/rva23 0755 root root -
+diff --git a/buildroot/qemu/board/rva23-qemu/rootfs-overlay/usr/libexec/rva23-report-provision b/buildroot/qemu/board/rva23-qemu/rootfs-overlay/usr/libexec/rva23-report-provision
+new file mode 100755
+index 0000000000000000000000000000000000000000..405380cb4491c0584105d48e92fa3c9718e41ecd
+--- /dev/null
++++ b/buildroot/qemu/board/rva23-qemu/rootfs-overlay/usr/libexec/rva23-report-provision
+@@ -0,0 +1,11 @@
++#!/bin/sh
++set -e
++key_dir=/var/lib/systemd/report.sign.tpm2
++mkdir -p "$key_dir"
++if [ ! -s "$key_dir/default.key" ]; then
++        tpm2_createek -c "$key_dir/ek.ctx" -G rsa -u "$key_dir/ek.pub"
++        tpm2_createak -C "$key_dir/ek.ctx" -G rsa -g sha256 -s rsassa -c "$key_dir/ak.ctx" -u "$key_dir/ak.pub" -r "$key_dir/ak.priv"
++        handle=$(printf '0x%08x\n' $((0x81000000 + $(date +%s) % 0x10000)))
++        tpm2_evictcontrol -c "$key_dir/ak.ctx" -o "$key_dir/ak.handle" "$handle"
++fi
++echo '{"type":"persistent","handle":"'$(base64 -w 0 "$key_dir/ak.handle")'"}' > "$key_dir/default.key"
+
