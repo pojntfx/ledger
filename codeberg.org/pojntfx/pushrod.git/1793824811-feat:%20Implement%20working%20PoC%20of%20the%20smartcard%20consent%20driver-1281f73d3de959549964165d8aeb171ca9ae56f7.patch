@@ -1,0 +1,493 @@
+From 1281f73d3de959549964165d8aeb171ca9ae56f7 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Wed, 04 Nov 2026 13:40:11 -0700
+Subject: [PATCH] feat: Implement working PoC of the smartcard consent driver
+---
+diff --git a/buildroot/qemu/board/rva23-qemu/rootfs-overlay/usr/libexec/rva23-report-provision b/buildroot/qemu/board/rva23-qemu/rootfs-overlay/usr/libexec/rva23-report-provision
+index 842beaee563528be3f0774c72a1074231ed83497..879e079541b764029dbf169ef92dbafbb4781eec 100755
+--- a/buildroot/qemu/board/rva23-qemu/rootfs-overlay/usr/libexec/rva23-report-provision
++++ b/buildroot/qemu/board/rva23-qemu/rootfs-overlay/usr/libexec/rva23-report-provision
+@@ -3,6 +3,11 @@ set -e
+ key_dir=/var/lib/systemd/report.sign.tpm2
+ mkdir -p "$key_dir"
+ if [ ! -s "$key_dir/default.key" ]; then
++        tpm2_getcap handles-persistent | awk '$2 ~ /^0x8100[0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F]$/ {print $2}' | while read -r handle; do
++                if tpm2_readpublic -c "$handle" 2>/dev/null | grep -q 'algorithm: RSA'; then
++                        tpm2_evictcontrol -C o -c "$handle"
++                fi
++        done
+         tpm2_createek -c "$key_dir/ek.ctx" -G rsa -u "$key_dir/ek.pub"
+         tpm2_createak -C "$key_dir/ek.ctx" -G rsa -g sha256 -s rsassa -c "$key_dir/ak.ctx" -u "$key_dir/ak.pub" -r "$key_dir/ak.priv"
+         handle=$(printf '0x%08x\n' $((0x81000000 + $(date +%s) % 0x10000)))
+diff --git a/buildroot/qemu/scripts/build-os-images.py b/buildroot/qemu/scripts/build-os-images.py
+index 6854ddb6ebb21a55d5ee326c7401d83ed4f9448b..18670cb149d643e612de56b0f4be99e8ed56583d 100755
+--- a/buildroot/qemu/scripts/build-os-images.py
++++ b/buildroot/qemu/scripts/build-os-images.py
+@@ -108,6 +108,8 @@     shutil.copy2(wallet_output, usr / "bin/wallet-client")
+     migration_output = binaries / "migration-client"
+     subprocess.run([host / "bin/go", "build", "-o", migration_output, "./cmd/migration-client"], check=True, env=environment, cwd=Path(__file__).with_name("migration"))
+     shutil.copy2(migration_output, usr / "bin/migration-client")
++    smartcard_include = host / "riscv64-buildroot-linux-gnu/sysroot/usr/include/PCSC"
++    subprocess.run([host / "bin/riscv64-linux-gcc", "-O2", f"-I{smartcard_include}", "-o", usr / "bin/smartcard-sign", Path(__file__).with_name("smartcard-sign.c"), "-lpcsclite", "-lcrypto"], check=True)
+ 
+ 
+ def main():
+diff --git a/buildroot/qemu/scripts/smartcard-sign.c b/buildroot/qemu/scripts/smartcard-sign.c
+new file mode 100644
+index 0000000000000000000000000000000000000000..b7cd39af9e85b463cdb67f91b7ce70fd7c322534
+--- /dev/null
++++ b/buildroot/qemu/scripts/smartcard-sign.c
+@@ -0,0 +1,170 @@
++#include <errno.h>
++#include <openssl/sha.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <winscard.h>
++
++static void print_hex(const unsigned char *data, size_t size)
++{
++    size_t i;
++    for (i = 0; i < size; i++)
++        printf("%02x", data[i]);
++    printf("\n");
++}
++
++static int transmit(SCARDHANDLE card, const unsigned char *command, size_t command_size,
++                    unsigned char *response, size_t *response_size)
++{
++    SCARD_IO_REQUEST protocol = {SCARD_PROTOCOL_T0, 0};
++    print_hex(command, command_size);
++    LONG result = SCardTransmit(card, &protocol, command, command_size, NULL,
++                                response, response_size);
++    if (result != SCARD_S_SUCCESS) {
++        fprintf(stderr, "SCardTransmit failed: 0x%08lx\n", result);
++        return -1;
++    }
++    if (*response_size >= 2 && response[*response_size - 2] == 0x61) {
++        unsigned char get_response[] = {0x00, 0xc0, 0x00, 0x00, response[*response_size - 1]};
++        *response_size = 1024;
++        result = SCardTransmit(card, &protocol, get_response, sizeof(get_response), NULL,
++                                response, response_size);
++        if (result != SCARD_S_SUCCESS) {
++            fprintf(stderr, "SCardTransmit GET RESPONSE failed: 0x%08lx\n", result);
++            return -1;
++        }
++    }
++    if (*response_size < 2 || response[*response_size - 2] != 0x90 || response[*response_size - 1] != 0x00) {
++        fprintf(stderr, "Card rejected APDU: ");
++        print_hex(response, *response_size);
++        return -1;
++    }
++    return 0;
++}
++
++static int read_file(const char *path, unsigned char **data, size_t *size)
++{
++    FILE *file = fopen(path, "rb");
++    long length;
++    if (!file) {
++        perror(path);
++        return -1;
++    }
++    if (fseek(file, 0, SEEK_END) != 0 || (length = ftell(file)) < 0 || fseek(file, 0, SEEK_SET) != 0) {
++        fclose(file);
++        return -1;
++    }
++    *data = malloc(length ? (size_t)length : 1);
++    if (!*data) {
++        fclose(file);
++        return -1;
++    }
++    *size = fread(*data, 1, (size_t)length, file);
++    fclose(file);
++    if (*size != (size_t)length) {
++        free(*data);
++        return -1;
++    }
++    return 0;
++}
++
++int main(int argc, char **argv)
++{
++    SCARDCONTEXT context;
++    SCARDHANDLE card = 0;
++    LONG result;
++    char readers[4096];
++    DWORD readers_size = sizeof(readers);
++    DWORD protocol = SCARD_PROTOCOL_T0;
++    unsigned char *message = NULL;
++    size_t message_size = 0;
++    unsigned char digest[SHA256_DIGEST_LENGTH];
++    unsigned char padded[256];
++    unsigned char sign_command[263];
++    unsigned char response[1024];
++    size_t response_size;
++    static const unsigned char select_pki[] = {0x00, 0xa4, 0x04, 0x00, 0x07, 0xa0, 0x00, 0x00, 0x00, 0x79, 0x01, 0x02};
++    static const unsigned char verify_pin[] = {0x00, 0x20, 0x00, 0x00, 0x00};
++    static const unsigned char sign_prefix[] = {0x00, 0x42, 0x00, 0x00};
++    static const unsigned char digest_info[] = {
++        0x30, 0x31, 0x30, 0x0d, 0x06, 0x09, 0x60, 0x86, 0x48, 0x01,
++        0x65, 0x03, 0x04, 0x02, 0x01, 0x05, 0x00, 0x04, 0x20
++    };
++    FILE *output;
++
++    if (argc != 3) {
++        fprintf(stderr, "usage: smartcard-sign MESSAGE SIGNATURE\n");
++        return 2;
++    }
++    if (read_file(argv[1], &message, &message_size) != 0)
++        return 1;
++    SHA256(message, message_size, digest);
++    if (message_size > 256) {
++        fprintf(stderr, "message is too long\n");
++        return 1;
++    }
++    memset(padded, 0, sizeof(padded));
++    padded[0] = 0x00;
++    padded[1] = 0x01;
++    memset(padded + 2, 0xff, sizeof(padded) - 3 - sizeof(digest_info) - SHA256_DIGEST_LENGTH);
++    padded[sizeof(padded) - sizeof(digest_info) - SHA256_DIGEST_LENGTH - 1] = 0x00;
++    memcpy(padded + sizeof(padded) - sizeof(digest_info) - SHA256_DIGEST_LENGTH, digest_info, sizeof(digest_info));
++    memcpy(padded + sizeof(padded) - SHA256_DIGEST_LENGTH, digest, SHA256_DIGEST_LENGTH);
++    free(message);
++    result = SCardEstablishContext(SCARD_SCOPE_SYSTEM, NULL, NULL, &context);
++    if (result != SCARD_S_SUCCESS) {
++        fprintf(stderr, "SCardEstablishContext failed: 0x%08lx\n", result);
++        return 1;
++    }
++    result = SCardListReaders(context, NULL, readers, &readers_size);
++    if (result != SCARD_S_SUCCESS || readers_size < 2) {
++        fprintf(stderr, "SCardListReaders failed: 0x%08lx\n", result);
++        SCardReleaseContext(context);
++        return 1;
++    }
++    result = SCardConnect(context, readers, SCARD_SHARE_SHARED, SCARD_PROTOCOL_T0, &card, &protocol);
++    if (result != SCARD_S_SUCCESS) {
++        fprintf(stderr, "SCardConnect failed: 0x%08lx\n", result);
++        SCardReleaseContext(context);
++        return 1;
++    }
++    if (SCardBeginTransaction(card) != SCARD_S_SUCCESS) {
++        SCardDisconnect(card, SCARD_LEAVE_CARD);
++        SCardReleaseContext(context);
++        return 1;
++    }
++    response_size = sizeof(response);
++    if (transmit(card, select_pki, sizeof(select_pki), response, &response_size) != 0)
++        goto fail;
++    memcpy(sign_command, sign_prefix, sizeof(sign_prefix));
++    sign_command[sizeof(sign_prefix)] = 0x00;
++    sign_command[sizeof(sign_prefix) + 1] = 0x01;
++    sign_command[sizeof(sign_prefix) + 2] = 0x00;
++    memcpy(sign_command + sizeof(sign_prefix) + 3, padded, sizeof(padded));
++    response_size = sizeof(response);
++    if (transmit(card, sign_command, sizeof(sign_command), response, &response_size) != 0)
++        goto fail;
++    if (SCardEndTransaction(card, SCARD_LEAVE_CARD) != SCARD_S_SUCCESS)
++        goto disconnect;
++    output = fopen(argv[2], "wb");
++    if (!output) {
++        perror(argv[2]);
++        goto disconnect;
++    }
++    if (fwrite(response, 1, response_size - 2, output) != response_size - 2) {
++        fclose(output);
++        goto disconnect;
++    }
++    fclose(output);
++    print_hex(response, response_size - 2);
++    SCardDisconnect(card, SCARD_LEAVE_CARD);
++    SCardReleaseContext(context);
++    return 0;
++
++fail:
++    SCardEndTransaction(card, SCARD_LEAVE_CARD);
++disconnect:
++    SCardDisconnect(card, SCARD_LEAVE_CARD);
++    SCardReleaseContext(context);
++    return 1;
++}
+diff --git a/buildroot/qemu/scripts/verify-hardening.py b/buildroot/qemu/scripts/verify-hardening.py
+index df5abd9f1b4a5c1e05b8a0536976a2dc301b0ada..36bebfc3368979540a3d363307818a5e8e23b7a0 100755
+--- a/buildroot/qemu/scripts/verify-hardening.py
++++ b/buildroot/qemu/scripts/verify-hardening.py
+@@ -12,6 +12,11 @@     console.sendline("root")
+     console.expect(b"# ", 30)
+ 
+ 
++def set_profile(console, development):
++    pattern = "rva23-debug_*.efi" if development else "rva23_[0-9]*.efi"
++    console.command(f"profile=$(ls /boot/EFI/Linux/{pattern} | sort -V | tail -n1); bootctl set-default \"$(basename \"$profile\")\"")
++
++
+ def os_version(console):
+     text = console.capture("sed -n 's/^IMAGE_VERSION=[\\\"]*\\([0-9][0-9]*\\)[\\\"].*/\\1/p' /usr/lib/os-release")
+     match = re.search(r"(?:^|\r?\n)(\d+)\r?\n", text)
+@@ -52,7 +57,7 @@     console = Console(output, "hardening.log")
+     try:
+         login(console)
+         console.command("systemctl is-active --quiet --wait graphical.target weston.service")
+-        console.command("bootctl set-default 'rva23-debug_*.efi'")
++        set_profile(console, development=True)
+         console.sendline("reboot")
+         login(console)
+         console.command("systemctl is-active --quiet --wait graphical.target weston.service")
+@@ -63,7 +68,7 @@         console.command("/var/tmp/true")
+         console.command("journalctl -k -b --no-pager | grep -E 'type=1420|IPE' | grep -q 'enforcing=0'")
+         print("PASS: signed sysext and confext images mount in permissive mode")
+         print("PASS: unsigned code runs with an audit event in permissive mode")
+-        console.command("bootctl set-default 'rva23_?.efi'")
++        set_profile(console, development=False)
+         console.sendline("reboot")
+         login(console)
+         console.command("systemctl is-active --quiet --wait graphical.target weston.service")
+diff --git a/buildroot/qemu/scripts/verify-k3s.py b/buildroot/qemu/scripts/verify-k3s.py
+index 4f0f39267ea9b88f3a280b0c0d6496751ea178ad..adb0cd77e4285ad74b1ade6d977e45a6390a9cd7 100644
+--- a/buildroot/qemu/scripts/verify-k3s.py
++++ b/buildroot/qemu/scripts/verify-k3s.py
+@@ -11,6 +11,11 @@     console.sendline("root")
+     console.expect(b"# ", 30)
+ 
+ 
++def set_profile(console, development):
++    pattern = "rva23-debug_*.efi" if development else "rva23_[0-9]*.efi"
++    console.command(f"profile=$(ls /boot/EFI/Linux/{pattern} | sort -V | tail -n1); bootctl set-default \"$(basename \"$profile\")\"")
++
++
+ def main():
+     output = Path(sys.argv[1]).resolve()
+     console = Console(output, "k3s.log")
+@@ -29,7 +34,7 @@         console.command("device=$(lsblk -ln -o NAME,TYPE | awk '$1 ~ /-verity$/ && $2 == \"crypt\" {print $1; exit}'); if dd if=/dev/$device of=/dev/null bs=1M status=none; then false; else true; fi", 120)
+         console.command(f"mv {image}.backup {image}")
+         console.command("systemd-sysext --image-policy=root=signed+absent:usr=signed+absent refresh", 120)
+         print("PASS: a modified k3s sysext fails signature enforcement")
+-        console.command("bootctl set-default 'rva23-debug_*.efi'")
++        set_profile(console, development=True)
+         console.sendline("reboot")
+         login(console)
+         console.command("systemctl is-active --quiet --wait graphical.target")
+@@ -41,7 +46,7 @@         console.expect(b'"gitVersion"', 240)
+         console.command("systemctl stop rva23-k3s-test")
+         print("PASS: k3s starts an API server and kubectl reads its version")
+         console.command("rm -rf /var/lib/k3s-test")
+-        console.command("bootctl set-default 'rva23_?.efi'")
++        set_profile(console, development=False)
+     finally:
+         console.close()
+ 
+diff --git a/buildroot/qemu/scripts/verify-podman.py b/buildroot/qemu/scripts/verify-podman.py
+index 84d4f84cbad6aee8043ec70d5245c9f9577949dd..c0820ece59e23cf063ba5247c9b035ea574dbc1e 100644
+--- a/buildroot/qemu/scripts/verify-podman.py
++++ b/buildroot/qemu/scripts/verify-podman.py
+@@ -11,6 +11,11 @@     console.sendline("root")
+     console.expect(b"# ", 30)
+ 
+ 
++def set_profile(console, development):
++    pattern = "rva23-debug_*.efi" if development else "rva23_[0-9]*.efi"
++    console.command(f"profile=$(ls /boot/EFI/Linux/{pattern} | sort -V | tail -n1); bootctl set-default \"$(basename \"$profile\")\"")
++
++
+ def main():
+     output = Path(sys.argv[1]).resolve()
+     console = Console(output, "podman.log")
+@@ -29,7 +34,7 @@         console.command("device=$(lsblk -ln -o NAME,TYPE | awk '$1 ~ /-verity$/ && $2 == \"crypt\" {print $1; exit}'); if dd if=/dev/$device of=/dev/null bs=1M status=none; then false; else true; fi", 120)
+         console.command(f"mv {image}.backup {image}")
+         console.command("systemd-sysext --image-policy=root=signed+absent:usr=signed+absent refresh", 120)
+         print("PASS: a modified Podman sysext fails signature enforcement")
+-        console.command("bootctl set-default 'rva23-debug_*.efi'")
++        set_profile(console, development=True)
+         console.sendline("reboot")
+         login(console)
+         console.command("systemctl is-active --quiet --wait graphical.target")
+@@ -41,7 +46,7 @@         result = console.capture("podman run --rm --network=none localhost/rva23-podman-test:latest", 300)
+         assert "podman-works" in result, result
+         console.command("podman info --format '{{.Host.OCIRuntime.Name}}' | grep -q crun")
+         print("PASS: Podman loads and runs the offline RISC-V OCI image with crun")
+-        console.command("bootctl set-default 'rva23_?.efi'")
++        set_profile(console, development=False)
+         console.sendline("poweroff")
+         console.process.wait(timeout=90)
+     finally:
+diff --git a/buildroot/qemu/scripts/verify-wallet.py b/buildroot/qemu/scripts/verify-wallet.py
+index 3c4ffefcd6e2d27ff7006fc16dfe62ca67faa199..2359bef74083c9ab18982b410f27114c50aa37c6 100644
+--- a/buildroot/qemu/scripts/verify-wallet.py
++++ b/buildroot/qemu/scripts/verify-wallet.py
+@@ -9,6 +9,7 @@ import secrets
+ import struct
+ import subprocess
+ import sys
++import time
+ import urllib.request
+ 
+ from verify_boot import Console
+@@ -53,6 +54,11 @@
+ 
+ def create_smartcard(directory):
+     directory.mkdir(exist_ok=True)
++    required = ("cert9.db", "key4.db", "encryption-cert.cer", "smartcard-public.pem", "noise")
++    if all((directory / name).is_file() for name in required):
++        certificate = directory / "encryption-cert.cer"
++        subprocess.run(["openssl", "x509", "-inform", "DER", "-in", certificate, "-pubkey", "-noout"], check=True, stdout=(directory / "smartcard-public.pem").open("w"))
++        return
+     noise = directory / "noise"
+     noise.write_bytes(secrets.token_bytes(64))
+     subprocess.run(["certutil", "-N", "-d", f"sql:{directory}", "--empty-password"], check=True)
+@@ -60,8 +66,8 @@     subprocess.run(["certutil", "-S", "-d", f"sql:{directory}", "-z", noise, "-s", "CN=RVA23 Smartcard CA", "-x", "-t", "TC,TC,TC", "-n", "fake-smartcard-ca", "-m", "1"], check=True)
+     subprocess.run(["certutil", "-S", "-d", f"sql:{directory}", "-z", noise, "-t", ",,", "-s", "CN=RVA23 User", "-n", "id-cert", "-c", "fake-smartcard-ca", "-m", "2"], check=True)
+     subprocess.run(["certutil", "-S", "-d", f"sql:{directory}", "-z", noise, "-t", ",,", "-s", "CN=RVA23 User (signing)", "--nsCertType", "smime", "-n", "signing-cert", "-c", "fake-smartcard-ca", "-m", "3"], check=True)
+     subprocess.run(["certutil", "-S", "-d", f"sql:{directory}", "-z", noise, "-t", ",,", "-s", "CN=RVA23 User (encryption)", "--nsCertType", "sslClient", "-n", "encryption-cert", "-c", "fake-smartcard-ca", "-m", "4"], check=True)
+-    certificate = directory / "signing-cert.cer"
+-    subprocess.run(["certutil", "-L", "-r", "-d", f"sql:{directory}", "-o", certificate, "-n", "signing-cert"], check=True)
++    certificate = directory / "encryption-cert.cer"
++    subprocess.run(["certutil", "-L", "-r", "-d", f"sql:{directory}", "-o", certificate, "-n", "encryption-cert"], check=True)
+     public_key = directory / "smartcard-public.pem"
+     subprocess.run(["openssl", "x509", "-inform", "DER", "-in", certificate, "-pubkey", "-noout"], check=True, stdout=public_key.open("w"))
+ 
+@@ -85,6 +91,19 @@     assert match, result.stdout
+     return match.group(1)
+ 
+ 
++def wait_service(url):
++    last_error = None
++    for _ in range(100):
++        try:
++            with urllib.request.urlopen(url, timeout=1) as response:
++                if response.status == 200:
++                    return
++        except Exception as error:
++            last_error = error
++        time.sleep(0.1)
++    raise RuntimeError(f"service did not start: {url}: {last_error}")
++
++
+ def start_services(output, receiver_dir, wallet_dir):
+     secret = secrets.token_bytes(32)
+     public_key = (receiver_dir / "public-key.pem").read_bytes()
+@@ -98,14 +117,17 @@     environment = os.environ.copy()
+     environment["RVA23_TOKEN_FILE"] = str(token_path)
+     environment["RVA23_ATTESTATION_DIR"] = str(receiver_dir)
+     receiver = subprocess.Popen([receiver_dir / "report-receiver"], stdout=(receiver_dir / "wallet-report-receiver.log").open("w"), stderr=subprocess.STDOUT, env=environment)
+-    smartcard = subprocess.Popen([wallet_dir / "consent-emulator", "-listen", "127.0.0.1:8082", "-kind", "smartcard", "-key", wallet_dir / "smartcard-private.pem", "-public", wallet_dir / "smartcard-public.pem"], stdout=(wallet_dir / "smartcard.log").open("w"), stderr=subprocess.STDOUT)
+     wallet_environment = environment.copy()
+     wallet_environment["RVA23_WALLET_DIR"] = str(wallet_dir)
+     wallet_environment["RVA23_WALLET_KEY_FILE"] = str(receiver_dir / "public-key.pem")
+     wallet_environment["RVA23_WALLET_CONSENT_DIR"] = str(wallet_dir)
+     wallet_environment["RVA23_WALLET_ATTESTATION_URL"] = "http://127.0.0.1:8080/v1/attest"
+     wallet = subprocess.Popen([wallet_dir / "wallet-server"], stdout=(wallet_dir / "wallet-server.log").open("w"), stderr=subprocess.STDOUT, env=wallet_environment)
+-    return [receiver, smartcard, wallet]
++    wait_service("http://127.0.0.1:8080/api/state")
++    wait_service("http://127.0.0.1:8081/api/state")
++    if receiver.poll() is not None or wallet.poll() is not None:
++        raise RuntimeError("wallet services exited during startup")
++    return [receiver, wallet]
+ 
+ 
+ def validate_ui_state():
+@@ -113,7 +135,7 @@     with urllib.request.urlopen("http://127.0.0.1:8081/api/state", timeout=10) as response:
+         wallet_state = json.load(response)
+     history = wallet_state["history"]
+     accepted = {}
+-    for tier, method in ((0, "host"), (1, "host"), (1, "fido2"), (2, "host"), (2, "fido2")):
++    for tier, method in ((0, "host"), (1, "host"), (1, "fido2"), (1, "smartcard"), (2, "host"), (2, "fido2"), (2, "smartcard")):
+         matches = [item for item in history if (item.get("contract") or {}).get("tier") == tier and item.get("consent") == method and (item.get("response") or {}).get("status") == "accepted"]
+         assert matches, (tier, method)
+         accepted[tier, method] = matches[0]
+@@ -126,12 +148,13 @@     assert accepted[0, "host"]["device"] == "tpm-resident-ak"
+     assert accepted[0, "host"]["evidence"] is None
+     assert accepted[0, "host"]["validation"]["consent"] == "not required for Tier 0"
+     assert accepted[0, "host"]["validation"]["hostOsReport"] == "not required"
+-    for method in ("host", "fido2"):
++    for method in ("host", "fido2", "smartcard"):
+         item = accepted[1, method]
+         assert item["evidence"] is not None
+         assert item["validation"]["hostOsReport"] == "accepted"
+         assert item["validation"]["pcr11Profile"] == "accepted"
+     assert accepted[1, "fido2"]["device"] == "qemu-u2f-emulated"
++    assert accepted[1, "smartcard"]["device"] == "qemu-ccid-card-emulated"
+     assert accepted[2, "host"]["device"] == "trusted-host-os"
+     assert accepted[2, "host"]["evidence"] is not None
+     assert accepted[2, "host"]["validation"]["hostOsReport"] == "accepted"
+@@ -140,6 +163,10 @@     assert accepted[2, "fido2"]["device"] == "qemu-u2f-emulated"
+     assert accepted[2, "fido2"]["evidence"] is None
+     assert accepted[2, "fido2"]["validation"]["hostOsReport"] == "not required"
+     assert accepted[2, "fido2"]["validation"]["pcr11Profile"] == "not required"
++    assert accepted[2, "smartcard"]["device"] == "qemu-ccid-card-emulated"
++    assert accepted[2, "smartcard"]["evidence"] is None
++    assert accepted[2, "smartcard"]["validation"]["hostOsReport"] == "not required"
++    assert accepted[2, "smartcard"]["validation"]["pcr11Profile"] == "not required"
+     with urllib.request.urlopen("http://127.0.0.1:8080/api/state", timeout=10) as response:
+         receiver_state = json.load(response)
+     reports = [item for item in receiver_state["history"] if item.get("path") == "/v1/attest" and (item.get("response") or {}).get("status") == "accepted"]
+@@ -153,15 +180,18 @@     output = Path(sys.argv[1]).resolve()
+     receiver_dir = output / "host-attestation"
+     wallet_dir = output / "wallet"
+     wallet_dir.mkdir(exist_ok=True)
+-    create_key(wallet_dir, "smartcard")
+     create_key(wallet_dir, "fido2")
+     create_fido2(wallet_dir / "u2f")
++    create_smartcard(wallet_dir / "smartcard")
++    (wallet_dir / "smartcard-public.pem").write_bytes((wallet_dir / "smartcard" / "smartcard-public.pem").read_bytes())
+     os.environ["RVA23_FIDO2_DIR"] = str(wallet_dir / "u2f")
++    os.environ["RVA23_SMARTCARD_DIR"] = str(wallet_dir / "smartcard")
+     os.environ["QEMU"] = str(output / "build/host-qemu-11.0.0/build/qemu-system-riscv64")
+     profiles = {"development": predict_profile(output, "rva23-debug_1.efi"), "production": predict_profile(output, "rva23_1+3-0.efi")}
+     (wallet_dir / "profiles.json").write_text(json.dumps(profiles) + "\n")
+     processes = start_services(output, receiver_dir, wallet_dir)
+     keep_services = os.environ.get("RVA23_WALLET_KEEP_SERVICES") == "1"
++    succeeded = False
+     console = Console(output, "wallet.log", firmware=True)
+     try:
+         login(console)
+@@ -174,24 +204,24 @@         print("PASS: tier 0 accepts a TPM-signed small payment and enforces its daily limit and replay protection", flush=True)
+ 
+         console = reboot_to(console, output, "rva23-debug_1.efi")
+         login(console)
+-        for method in ("host", "fido2"):
++        for method in ("host", "fido2", "smartcard"):
+             console.command(f"wallet-client --contract=development-payment --consent={method} --approve", 300)
+-        console.command("wallet-client --contract=development-payment --consent=host --approve", 300)
+         console.command("if wallet-client --contract=development-payment --consent=host --approve; then false; else true; fi", 300)
+-        print("PASS: tier 1 development payments accept host and FIDO2 consent within the daily limit", flush=True)
++        print("PASS: tier 1 development payments accept host, FIDO2, and smartcard consent within the daily limit", flush=True)
+ 
+         console = reboot_to(console, output, "rva23_1+3-0.efi")
+         login(console)
+-        for method in ("host", "fido2"):
++        for method in ("host", "fido2", "smartcard"):
+             console.command(f"wallet-client --contract=mortgage --consent={method} --approve", 300)
+-        print("PASS: tier 2 accepts the example mortgage with production host consent and external consent without an OS report", flush=True)
++        print("PASS: tier 2 accepts the example mortgage with production host, FIDO2, and smartcard consent without an OS report", flush=True)
+         validate_ui_state()
+ 
+         console.sendline("poweroff")
+         console.process.wait(timeout=90)
++        succeeded = True
+     finally:
+         console.close()
+-        if not keep_services:
++        if not keep_services or not succeeded:
+             for process in processes:
+                 process.terminate()
+             for process in processes:
+diff --git a/buildroot/qemu/scripts/wallet-client.go b/buildroot/qemu/scripts/wallet-client.go
+index f12a3e4dfd0e8b9af1ceece3470c2741b8da51da..4fc54fd1a07188dabf29b2382949dc50fc1930cc 100644
+--- a/buildroot/qemu/scripts/wallet-client.go
++++ b/buildroot/qemu/scripts/wallet-client.go
+@@ -176,9 +176,12 @@ 	}
+ 	signaturePath := output.Name()
+ 	output.Close()
+ 	defer os.Remove(signaturePath)
+-	command := exec.Command("pkcs11-tool", "--sign", "--id", "02", "--mechanism", "SHA256-RSA-PKCS", "--login", "--pin", "77777777", "--input-file", path, "--output-file", signaturePath)
++	if result, err := exec.Command("systemctl", "restart", "pcscd").CombinedOutput(); err != nil {
++		return "", fmt.Errorf("start pcscd: %s", result)
++	}
++	command := exec.Command("smartcard-sign", path, signaturePath)
+ 	if result, err := command.CombinedOutput(); err != nil {
+-		return "", fmt.Errorf("pkcs11-tool: %s", result)
++		return "", fmt.Errorf("smartcard-sign: %s", result)
+ 	}
+ 	signature, err := os.ReadFile(signaturePath)
+ 	if err != nil {
+
