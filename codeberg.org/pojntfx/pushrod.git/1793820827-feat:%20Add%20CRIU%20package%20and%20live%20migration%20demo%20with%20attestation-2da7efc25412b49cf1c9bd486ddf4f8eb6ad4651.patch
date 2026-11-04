@@ -1,0 +1,2824 @@
+From 2da7efc25412b49cf1c9bd486ddf4f8eb6ad4651 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Wed, 04 Nov 2026 12:33:47 -0700
+Subject: [PATCH] feat: Add CRIU package and live migration demo with attestation
+---
+diff --git a/buildroot/qemu/Config.in b/buildroot/qemu/Config.in
+index 5eaa08bbf7d625a4b09c3f39d054f31aaf8415a5..b5fbb19de22a64fe270a4a247cc4448f041158a5 100644
+--- a/buildroot/qemu/Config.in
++++ b/buildroot/qemu/Config.in
+@@ -1,3 +1,4 @@
+ source "$BR2_EXTERNAL_RVA23_QEMU_PATH/package/sbsigntools/Config.in.host"
+ source "$BR2_EXTERNAL_RVA23_QEMU_PATH/package/tpm2-tss/Config.in.host"
+ source "$BR2_EXTERNAL_RVA23_QEMU_PATH/package/k3s/Config.in"
++source "$BR2_EXTERNAL_RVA23_QEMU_PATH/package/rva23-criu/Config.in"
+diff --git a/buildroot/qemu/Makefile b/buildroot/qemu/Makefile
+index 142f3f3ffa5fdce4b63e6b4e1dcfc1a085e627d4..a8dd8ef35d5259438e5da74c4cef8c0ba646ee1d 100644
+--- a/buildroot/qemu/Makefile
++++ b/buildroot/qemu/Makefile
+@@ -12,7 +12,7 @@
+ MAKE_BUILDROOT = $(MAKE) -C $(BUILDROOT_DIR) O=$(OUTPUT_DIR) BR2_EXTERNAL=$(THIS_EXTERNAL_PATH) BR2_DL_DIR=$(BR2_DL_DIR) BR2_CCACHE_DIR=$(BR2_CCACHE_DIR) UBOOT_OVERRIDE_SRCDIR=$(UBOOT_OVERRIDE_SRCDIR) RVA23_KEY_DIR=$(RVA23_KEY_DIR)
+ BUILDROOT_PATCHES = $(sort $(wildcard $(THIS_EXTERNAL_PATH)/patches/buildroot/*.patch))
+ 
+-.PHONY: all configure build clean registry verify verify-image verify-boot verify-firmware verify-attestation verify-report verify-update verify-security verify-hardening verify-podman verify-k3s verify-attested-app verify-wallet boot boot-display boot-firmware
++.PHONY: all configure build clean registry verify verify-image verify-boot verify-firmware verify-attestation verify-report verify-update verify-security verify-hardening verify-podman verify-k3s verify-attested-app verify-wallet verify-migration boot boot-display boot-firmware
+ 
+ all: build
+ 
+@@ -65,7 +65,10 @@
+ verify-wallet: verify-attested-app
+ 	python3 scripts/verify-wallet.py $(OUTPUT_DIR)
+ 
+-verify: verify-image verify-boot verify-firmware verify-security verify-attestation verify-update verify-hardening verify-podman verify-k3s verify-report verify-attested-app verify-wallet
++verify-migration: verify-wallet
++	python3 scripts/verify-migration.py $(OUTPUT_DIR)
++
++verify: verify-image verify-boot verify-firmware verify-security verify-attestation verify-update verify-hardening verify-podman verify-k3s verify-report verify-attested-app verify-wallet verify-migration
+ 
+ boot: build
+ 	$(THIS_EXTERNAL_PATH)/board/rva23-qemu/run-qemu.sh $(OUTPUT_DIR)/images
+diff --git a/buildroot/qemu/board/rva23-qemu/linux.fragment b/buildroot/qemu/board/rva23-qemu/linux.fragment
+index 5d03e312622da92be04ad1ff074bebcf940d5d2a..e3c8e0da7e2f6579b23139c3992baae535bd309c 100644
+--- a/buildroot/qemu/board/rva23-qemu/linux.fragment
++++ b/buildroot/qemu/board/rva23-qemu/linux.fragment
+@@ -23,6 +23,9 @@ CONFIG_TCG_TIS=y
+ CONFIG_SECURITYFS=y
+ CONFIG_SECURITY_IPE=y
+ CONFIG_HIDRAW=y
++CONFIG_CHECKPOINT_RESTORE=y
++CONFIG_UNIX_DIAG=y
++CONFIG_PACKET_DIAG=y
+ CONFIG_KEYS=y
+ CONFIG_SYSTEM_TRUSTED_KEYRING=y
+ CONFIG_SECONDARY_TRUSTED_KEYRING=y
+diff --git a/buildroot/qemu/board/rva23-qemu/run-firmware.sh b/buildroot/qemu/board/rva23-qemu/run-firmware.sh
+index 46c9135c082ab5f1c439d1a4036c436db566e108..d55f730d146621ffc2b90ad72baeffff5a110478 100755
+--- a/buildroot/qemu/board/rva23-qemu/run-firmware.sh
++++ b/buildroot/qemu/board/rva23-qemu/run-firmware.sh
+@@ -6,6 +6,8 @@ IMAGES_DIR=$(realpath "${1}")
+ QEMU=${QEMU:-"${IMAGES_DIR}/../host/bin/qemu-system-riscv64"}
+ FIRMWARE_FIT=${FIRMWARE_FIT:-"${IMAGES_DIR}/firmware.itb"}
+ FIRMWARE_DTB=${FIRMWARE_DTB:-"${IMAGES_DIR}/qemu-control.dtb"}
++DISK_IMAGE=${RVA23_DISK:-"${IMAGES_DIR}/disk.img"}
++EDK2_VARS=${RVA23_EDK2_VARS:-"${IMAGES_DIR}/RISCV_VIRT_VARS.fd"}
+ SWTPM=${SWTPM:-"${IMAGES_DIR}/../host/bin/swtpm"}
+ TPM_STATE=${RVA23_TPM_STATE:-"${IMAGES_DIR}/../firmware-swtpm"}
+ mkdir -p "${TPM_STATE}"
+@@ -30,6 +32,11 @@ fi
+ if [ -n "${RVA23_UPDATE_IMAGE:-}" ]; then
+ 	set -- "$@" -drive file="${RVA23_UPDATE_IMAGE}",format=raw,if=virtio
+ fi
++if [ -n "${RVA23_UI_HOST_PORT:-}" ]; then
++	set -- "$@" -netdev "user,id=net0,hostfwd=tcp:127.0.0.1:${RVA23_UI_HOST_PORT}-:8084"
++else
++	set -- "$@" -netdev user,id=net0
++fi
+ if [ -n "${RVA23_FIDO2_DIR:-}" ]; then
+ 	set -- "$@" -device "u2f-emulated,dir=${RVA23_FIDO2_DIR}"
+ fi
+@@ -48,8 +55,8 @@ 	-dtb "${FIRMWARE_DTB}" \
+ 	-device loader,file="${FIRMWARE_FIT}",addr=0x80200000 \
+ 	-device loader,file="${FIRMWARE_FIT}",addr=0x90000000 \
+ 	-blockdev node-name=pflash0,driver=file,read-only=on,filename="${IMAGES_DIR}/RISCV_VIRT_CODE.fd" \
+-	-blockdev node-name=pflash1,driver=file,filename="${IMAGES_DIR}/RISCV_VIRT_VARS.fd" \
+-	-drive file="${IMAGES_DIR}/disk.img",format=raw,if=virtio \
++	-blockdev node-name=pflash1,driver=file,filename="${EDK2_VARS}" \
++	-drive file="${DISK_IMAGE}",format=raw,if=virtio \
+ 	-device virtio-gpu-pci \
+ 	-device qemu-xhci \
+ 	-device usb-kbd \
+@@ -57,7 +64,6 @@ 	-device usb-tablet \
+ 	-chardev socket,id=chrtpm,path="${TPM_STATE}/swtpm.sock" \
+ 	-tpmdev emulator,id=tpm0,chardev=chrtpm \
+ 	-device tpm-tis-device,tpmdev=tpm0 \
+-	-netdev user,id=net0 \
+ 	-device virtio-net-pci,netdev=net0 \
+ 	-monitor unix:"${IMAGES_DIR}/firmware-monitor.sock",server=on,wait=off \
+ 	"$@" \
+diff --git a/buildroot/qemu/board/rva23-qemu/run-qemu.sh b/buildroot/qemu/board/rva23-qemu/run-qemu.sh
+index c2a4bd5c37409f116f91a2ed07f41bd7d8075c54..a24d71e7b000ea80ee6fed2c2d2945ed86d7f6cc 100755
+--- a/buildroot/qemu/board/rva23-qemu/run-qemu.sh
++++ b/buildroot/qemu/board/rva23-qemu/run-qemu.sh
+@@ -5,6 +5,7 @@
+ IMAGES_DIR=$(realpath "${1}")
+ QEMU=${QEMU:-"${IMAGES_DIR}/../host/bin/qemu-system-riscv64"}
+ DISK_IMAGE=${RVA23_DISK:-"${IMAGES_DIR}/disk.img"}
++EDK2_VARS=${RVA23_EDK2_VARS:-"${IMAGES_DIR}/RISCV_VIRT_VARS.fd"}
+ SWTPM=${SWTPM:-"${IMAGES_DIR}/../host/bin/swtpm"}
+ TPM_STATE=${RVA23_TPM_STATE:-"${IMAGES_DIR}/../swtpm"}
+ mkdir -p "${TPM_STATE}"
+@@ -29,6 +30,11 @@ fi
+ if [ -n "${RVA23_UPDATE_IMAGE:-}" ]; then
+ 	set -- "$@" -drive file="${RVA23_UPDATE_IMAGE}",format=raw,if=virtio
+ fi
++if [ -n "${RVA23_UI_HOST_PORT:-}" ]; then
++	set -- "$@" -netdev "user,id=net0,hostfwd=tcp:127.0.0.1:${RVA23_UI_HOST_PORT}-:8084"
++else
++	set -- "$@" -netdev user,id=net0
++fi
+ if [ -n "${RVA23_FIDO2_DIR:-}" ]; then
+ 	set -- "$@" -device "u2f-emulated,dir=${RVA23_FIDO2_DIR}"
+ fi
+@@ -44,9 +50,8 @@ 	-smp 4 \
+ 	-m 2048 \
+ 	-bios "${IMAGES_DIR}/fw_dynamic.bin" \
+ 	-blockdev node-name=pflash0,driver=file,read-only=on,filename="${IMAGES_DIR}/RISCV_VIRT_CODE.fd" \
+-	-blockdev node-name=pflash1,driver=file,filename="${IMAGES_DIR}/RISCV_VIRT_VARS.fd" \
++	-blockdev node-name=pflash1,driver=file,filename="${EDK2_VARS}" \
+ 	-drive file="${DISK_IMAGE}",format=raw,if=virtio \
+-	-netdev user,id=net0 \
+ 	-device virtio-net-pci,netdev=net0 \
+ 	-device virtio-gpu-pci \
+ 	-device qemu-xhci \
+diff --git a/buildroot/qemu/configs/rva23_defconfig b/buildroot/qemu/configs/rva23_defconfig
+index 89a6116bde9ae94ba687c06a6f86a490007f252a..59902410bdd3fb2eee4a745222e797e57849d383 100644
+--- a/buildroot/qemu/configs/rva23_defconfig
++++ b/buildroot/qemu/configs/rva23_defconfig
+@@ -30,6 +30,7 @@ BR2_PACKAGE_WAYLAND_UTILS=y
+ BR2_PACKAGE_PODMAN=y
+ BR2_PACKAGE_CRUN=y
+ BR2_PACKAGE_K3S=y
++BR2_PACKAGE_RVA23_CRIU=y
+ BR2_PACKAGE_PODMAN_NET_SLIRP4NETNS=y
+ BR2_PACKAGE_BASH=y
+ BR2_PACKAGE_GNUPG2=y
+diff --git a/buildroot/qemu/external.mk b/buildroot/qemu/external.mk
+index f90afd71b945e682a23589c01b7d82d8307f4591..966171d475b05f71cf013088512be7e0ccc529f7 100644
+--- a/buildroot/qemu/external.mk
++++ b/buildroot/qemu/external.mk
+@@ -8,6 +8,7 @@
+ include $(BR2_EXTERNAL_RVA23_QEMU_PATH)/package/sbsigntools/sbsigntools.mk
+ include $(BR2_EXTERNAL_RVA23_QEMU_PATH)/package/tpm2-tss/tpm2-tss.mk
+ include $(BR2_EXTERNAL_RVA23_QEMU_PATH)/package/k3s/k3s.mk
++include $(BR2_EXTERNAL_RVA23_QEMU_PATH)/package/rva23-criu/criu.mk
+ 
+ define RVA23_PROVISION_EDK2_KEYS
+ 	$(HOST_DIR)/bin/python3 $(BR2_EXTERNAL_RVA23_QEMU_PATH)/scripts/provision-keys.py $(RVA23_KEY_DIR) $(@D)
+@@ -27,3 +28,4 @@ HOST_SYSTEMD_CONF_OPTS += -Dsysupdate=enabled -Dsysupdated=enabled -Dimportd=enabled -Dfdisk=enabled -Dlibcurl=enabled -Dopenssl=enabled -Dtpm2=enabled -Dzlib=enabled -Dxz=enabled -Defi=true -Dbootloader=enabled -Dblkid=enabled
+ HOST_SYSTEMD_DEPENDENCIES += host-libcurl host-openssl host-tpm2-tss
+ HOST_LIBCURL_CONF_OPTS += --without-brotli
+ HOST_QEMU_OPTS += --enable-u2f --enable-smartcard
++LIBNL_MAKE = $(MAKE) -j1
+diff --git a/buildroot/qemu/package/rva23-criu/Config.in b/buildroot/qemu/package/rva23-criu/Config.in
+new file mode 100644
+index 0000000000000000000000000000000000000000..e1d99c55208768bacd03719f0304904281bfd153
+--- /dev/null
++++ b/buildroot/qemu/package/rva23-criu/Config.in
+@@ -0,0 +1,12 @@
++config BR2_PACKAGE_RVA23_CRIU
++	bool "criu"
++	depends on BR2_PACKAGE_PROTOBUF_ARCH_SUPPORTS
++	depends on BR2_TOOLCHAIN_HAS_THREADS
++	select BR2_PACKAGE_PROTOBUF_C
++	select BR2_PACKAGE_LIBNL
++	select BR2_PACKAGE_LIBNET
++	select BR2_PACKAGE_LIBCAP
++	select BR2_PACKAGE_LIBAIO
++	select BR2_PACKAGE_HOST_PROTOBUF_C
++	help
++	  Checkpoint and restore Linux processes in userspace.
+diff --git a/buildroot/qemu/package/rva23-criu/criu.hash b/buildroot/qemu/package/rva23-criu/criu.hash
+new file mode 100644
+index 0000000000000000000000000000000000000000..04ddb04372fa4e4e472c7e95a072f11129bd2e0c
+--- /dev/null
++++ b/buildroot/qemu/package/rva23-criu/criu.hash
+@@ -0,0 +1 @@
++sha256  155d8853eec901a8a93cd6aaa5db1fa4a2106dc65ea4314e525fdaff322e52e8  v4.3.tar.gz
+diff --git a/buildroot/qemu/package/rva23-criu/criu.mk b/buildroot/qemu/package/rva23-criu/criu.mk
+new file mode 100644
+index 0000000000000000000000000000000000000000..8be74324f9f1e1a99fe66915244fc92c9cd56517
+--- /dev/null
++++ b/buildroot/qemu/package/rva23-criu/criu.mk
+@@ -0,0 +1,20 @@
++RVA23_CRIU_VERSION = 4.3
++RVA23_CRIU_SITE = https://github.com/checkpoint-restore/criu/archive/refs/tags
++RVA23_CRIU_SOURCE = v$(RVA23_CRIU_VERSION).tar.gz
++RVA23_CRIU_LICENSE = GPL-2.0
++RVA23_CRIU_LICENSE_FILES = COPYING
++RVA23_CRIU_DEPENDENCIES = protobuf-c libnl libnet libcap libaio util-linux
++
++RVA23_CRIU_MAKE_ENV = $(TARGET_MAKE_ENV) CROSS_COMPILE=$(TARGET_CROSS) CC=$(TARGET_CC) HOSTCC=gcc HOSTLD=ld ARCH=riscv64 NO_GNUTLS=1 NO_LZ4=1 WERROR=0 GOOGLE_INCLUDE=$(HOST_DIR)/include
++
++define RVA23_CRIU_BUILD_CMDS
++	rm -f $(@D)/.config $(@D)/images/google/protobuf/descriptor.proto
++	sed -i 's|^GOOGLE_INCLUDE=.*|GOOGLE_INCLUDE=$(HOST_DIR)/include/google/protobuf|' $(@D)/images/Makefile
++	$(RVA23_CRIU_MAKE_ENV) $(MAKE) -C $(@D) criu
++endef
++
++define RVA23_CRIU_INSTALL_TARGET_CMDS
++	$(INSTALL) -D -m 0755 $(@D)/criu/criu $(TARGET_DIR)/usr/bin/criu
++endef
++
++$(eval $(generic-package))
+diff --git a/buildroot/qemu/scripts/build-os-images.py b/buildroot/qemu/scripts/build-os-images.py
+index 9f524af9b2b225e7851112bc327d27ef12be11c1..6854ddb6ebb21a55d5ee326c7401d83ed4f9448b 100755
+--- a/buildroot/qemu/scripts/build-os-images.py
++++ b/buildroot/qemu/scripts/build-os-images.py
+@@ -105,6 +105,9 @@     shutil.copy2(output, usr / "bin/attested-client")
+     wallet_output = binaries / "wallet-client"
+     subprocess.run([host / "bin/go", "build", "-o", wallet_output, Path(__file__).with_name("wallet-client.go"), Path(__file__).with_name("u2f.go")], check=True, env=environment)
+     shutil.copy2(wallet_output, usr / "bin/wallet-client")
++    migration_output = binaries / "migration-client"
++    subprocess.run([host / "bin/go", "build", "-o", migration_output, "./cmd/migration-client"], check=True, env=environment, cwd=Path(__file__).with_name("migration"))
++    shutil.copy2(migration_output, usr / "bin/migration-client")
+ 
+ 
+ def main():
+diff --git a/buildroot/qemu/scripts/migration/checkpoint.go b/buildroot/qemu/scripts/migration/checkpoint.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..2fef574290b721e6a6a13eb10646f32110f17e40
+--- /dev/null
++++ b/buildroot/qemu/scripts/migration/checkpoint.go
+@@ -0,0 +1,263 @@
++package migration
++
++import (
++	"archive/tar"
++	"compress/gzip"
++	"crypto/sha256"
++	"encoding/hex"
++	"errors"
++	"fmt"
++	"io"
++	"os"
++	"path/filepath"
++	"strings"
++	"time"
++)
++
++const (
++	DefaultMaxCheckpointBytes = 64 * 1024 * 1024
++	DefaultMaxCheckpointFiles = 4096
++)
++
++type ArchiveDigest struct {
++	SHA256 string `json:"sha256"`
++	Size   int64  `json:"size"`
++}
++
++type limitedWriter struct {
++	writer io.Writer
++	remain int64
++}
++
++func (writer *limitedWriter) Write(data []byte) (int, error) {
++	if writer.remain <= 0 {
++		return 0, io.ErrShortWrite
++	}
++	if int64(len(data)) > writer.remain {
++		data = data[:writer.remain]
++	}
++	written, err := writer.writer.Write(data)
++	writer.remain -= int64(written)
++	return written, err
++}
++
++func safeArchivePath(name string) (string, error) {
++	if name == "" || strings.ContainsRune(name, '\x00') || strings.Contains(name, "\\") {
++		return "", errors.New("invalid checkpoint path")
++	}
++	clean := filepath.Clean(filepath.FromSlash(name))
++	if filepath.IsAbs(clean) || clean == "." || clean == ".." || strings.HasPrefix(clean, ".."+string(filepath.Separator)) {
++		return "", errors.New("invalid checkpoint path")
++	}
++	return clean, nil
++}
++
++func ArchiveCheckpoint(source, destination string, maxBytes int64) (ArchiveDigest, error) {
++	var digest ArchiveDigest
++	info, err := os.Stat(source)
++	if err != nil {
++		return digest, err
++	}
++	if !info.IsDir() {
++		return digest, errors.New("checkpoint source must be a directory")
++	}
++	output, err := os.OpenFile(destination, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
++	if err != nil {
++		return digest, err
++	}
++	completed := false
++	defer func() {
++		output.Close()
++		if !completed {
++			os.Remove(destination)
++		}
++	}()
++	hash := sha256.New()
++	limited := &limitedWriter{writer: io.MultiWriter(output, hash), remain: maxBytes + 1}
++	gzipWriter := gzip.NewWriter(limited)
++	tarWriter := tar.NewWriter(gzipWriter)
++	files := 0
++	err = filepath.WalkDir(source, func(path string, entry os.DirEntry, walkErr error) error {
++		if walkErr != nil {
++			return walkErr
++		}
++		if path == source {
++			return nil
++		}
++		files++
++		if files > DefaultMaxCheckpointFiles {
++			return errors.New("too many checkpoint files")
++		}
++		info, err := entry.Info()
++		if err != nil {
++			return err
++		}
++		if !info.Mode().IsRegular() && !info.IsDir() {
++			return fmt.Errorf("unsupported checkpoint file type at %s", path)
++		}
++		relative, err := filepath.Rel(source, path)
++		if err != nil {
++			return err
++		}
++		name := filepath.ToSlash(relative)
++		if info.IsDir() {
++			name += "/"
++		}
++		header, err := tar.FileInfoHeader(info, "")
++		if err != nil {
++			return err
++		}
++		header.Name = name
++		header.Uid = 0
++		header.Gid = 0
++		header.Uname = ""
++		header.Gname = ""
++		if err := tarWriter.WriteHeader(header); err != nil {
++			return err
++		}
++		if info.Mode().IsRegular() {
++			input, err := os.Open(path)
++			if err != nil {
++				return err
++			}
++			_, copyErr := io.Copy(tarWriter, input)
++			closeErr := input.Close()
++			if copyErr != nil {
++				return copyErr
++			}
++			if closeErr != nil {
++				return closeErr
++			}
++		}
++		return nil
++	})
++	if err == nil {
++		err = tarWriter.Close()
++	} else {
++		tarWriter.Close()
++	}
++	if err == nil {
++		err = gzipWriter.Close()
++	} else {
++		gzipWriter.Close()
++	}
++	if err != nil {
++		return digest, err
++	}
++	if limited.remain <= 0 {
++		return digest, errors.New("checkpoint archive exceeds the size limit")
++	}
++	if err := output.Sync(); err != nil {
++		return digest, err
++	}
++	info, err = output.Stat()
++	if err != nil {
++		return digest, err
++	}
++	if err := output.Close(); err != nil {
++		return digest, err
++	}
++	digest.Size = info.Size()
++	digest.SHA256 = hex.EncodeToString(hash.Sum(nil))
++	completed = true
++	return digest, nil
++}
++
++func ExtractCheckpoint(archive, destination string, maxBytes int64) error {
++	input, err := os.Open(archive)
++	if err != nil {
++		return err
++	}
++	defer input.Close()
++	if err := os.Mkdir(destination, 0o700); err != nil {
++		return err
++	}
++	completed := false
++	defer func() {
++		if !completed {
++			os.RemoveAll(destination)
++		}
++	}()
++	gzipReader, err := gzip.NewReader(input)
++	if err != nil {
++		return err
++	}
++	defer gzipReader.Close()
++	tarReader := tar.NewReader(gzipReader)
++	var total int64
++	files := 0
++	for {
++		header, err := tarReader.Next()
++		if errors.Is(err, io.EOF) {
++			break
++		}
++		if err != nil {
++			return err
++		}
++		files++
++		if files > DefaultMaxCheckpointFiles {
++			return errors.New("too many checkpoint files")
++		}
++		relative, err := safeArchivePath(header.Name)
++		if err != nil {
++			return err
++		}
++		target := filepath.Join(destination, relative)
++		if target != destination && !strings.HasPrefix(target, destination+string(filepath.Separator)) {
++			return errors.New("checkpoint path escapes the destination")
++		}
++		switch header.Typeflag {
++		case tar.TypeDir:
++			if err := os.MkdirAll(target, 0o700); err != nil {
++				return err
++			}
++		case tar.TypeReg, tar.TypeRegA:
++			if header.Size < 0 || header.Size > maxBytes || total > maxBytes-header.Size {
++				return errors.New("checkpoint contents exceed the size limit")
++			}
++			total += header.Size
++			if err := os.MkdirAll(filepath.Dir(target), 0o700); err != nil {
++				return err
++			}
++			output, err := os.OpenFile(target, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
++			if err != nil {
++				return err
++			}
++			_, copyErr := io.CopyN(output, tarReader, header.Size)
++			closeErr := output.Close()
++			if copyErr != nil {
++				return copyErr
++			}
++			if closeErr != nil {
++				return closeErr
++			}
++		default:
++			return fmt.Errorf("unsupported checkpoint entry type at %s", header.Name)
++		}
++	}
++	if err := os.Chtimes(destination, time.Now(), time.Now()); err != nil {
++		return err
++	}
++	completed = true
++	return nil
++}
++
++func DigestFile(path string, maxBytes int64) (ArchiveDigest, error) {
++	var result ArchiveDigest
++	input, err := os.Open(path)
++	if err != nil {
++		return result, err
++	}
++	defer input.Close()
++	hash := sha256.New()
++	written, err := io.Copy(hash, io.LimitReader(input, maxBytes+1))
++	if err != nil {
++		return result, err
++	}
++	if written > maxBytes {
++		return result, errors.New("checkpoint archive exceeds the size limit")
++	}
++	result.Size = written
++	result.SHA256 = hex.EncodeToString(hash.Sum(nil))
++	return result, nil
++}
+diff --git a/buildroot/qemu/scripts/migration/checkpoint_test.go b/buildroot/qemu/scripts/migration/checkpoint_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..419a422884982091efff5e7cc3acb02de97efe3b
+--- /dev/null
++++ b/buildroot/qemu/scripts/migration/checkpoint_test.go
+@@ -0,0 +1,116 @@
++package migration
++
++import (
++	"archive/tar"
++	"bytes"
++	"compress/gzip"
++	"os"
++	"path/filepath"
++	"testing"
++)
++
++func maliciousArchive(t *testing.T, name string, typeflag byte) string {
++	t.Helper()
++	path := filepath.Join(t.TempDir(), "checkpoint.tar.gz")
++	output, err := os.Create(path)
++	if err != nil {
++		t.Fatal(err)
++	}
++	gzipWriter := gzip.NewWriter(output)
++	tarWriter := tar.NewWriter(gzipWriter)
++	header := &tar.Header{Name: name, Typeflag: typeflag, Mode: 0o600}
++	if typeflag == tar.TypeReg || typeflag == tar.TypeRegA {
++		header.Size = 4
++	}
++	if err := tarWriter.WriteHeader(header); err != nil {
++		t.Fatal(err)
++	}
++	if header.Size > 0 {
++		if _, err := tarWriter.Write([]byte("data")); err != nil {
++			t.Fatal(err)
++		}
++	}
++	if typeflag == tar.TypeSymlink {
++		header.Linkname = "escape"
++	}
++	if err := tarWriter.Close(); err != nil {
++		t.Fatal(err)
++	}
++	if err := gzipWriter.Close(); err != nil {
++		t.Fatal(err)
++	}
++	if err := output.Close(); err != nil {
++		t.Fatal(err)
++	}
++	return path
++}
++
++func TestExtractRejectsInvalidCheckpointPaths(t *testing.T) {
++	tests := []struct {
++		name     string
++		entry    string
++		typeflag byte
++	}{
++		{name: "parent traversal", entry: "../escape", typeflag: tar.TypeReg},
++		{name: "nested traversal", entry: "images/../../escape", typeflag: tar.TypeReg},
++		{name: "absolute", entry: "/tmp/escape", typeflag: tar.TypeReg},
++		{name: "backslash", entry: "..\\escape", typeflag: tar.TypeReg},
++		{name: "symlink", entry: "image-link", typeflag: tar.TypeSymlink},
++	}
++	for _, test := range tests {
++		t.Run(test.name, func(t *testing.T) {
++			archive := maliciousArchive(t, test.entry, test.typeflag)
++			destination := filepath.Join(t.TempDir(), "restore")
++			if err := ExtractCheckpoint(archive, destination, DefaultMaxCheckpointBytes); err == nil {
++				t.Fatal("malicious checkpoint passed extraction")
++			}
++			if _, err := os.Stat(destination); !os.IsNotExist(err) {
++				t.Fatal("failed extraction left its destination behind")
++			}
++		})
++	}
++}
++
++func TestCheckpointArchiveRoundTrip(t *testing.T) {
++	source := t.TempDir()
++	if err := os.Mkdir(filepath.Join(source, "images"), 0o700); err != nil {
++		t.Fatal(err)
++	}
++	contents := []byte("criu image data")
++	if err := os.WriteFile(filepath.Join(source, "images", "pages-1.img"), contents, 0o600); err != nil {
++		t.Fatal(err)
++	}
++	archive := filepath.Join(t.TempDir(), "checkpoint.tar.gz")
++	digest, err := ArchiveCheckpoint(source, archive, DefaultMaxCheckpointBytes)
++	if err != nil {
++		t.Fatal(err)
++	}
++	if digest.Size <= 0 || len(digest.SHA256) != 64 {
++		t.Fatalf("invalid archive digest %+v", digest)
++	}
++	destination := filepath.Join(t.TempDir(), "restore")
++	if err := ExtractCheckpoint(archive, destination, DefaultMaxCheckpointBytes); err != nil {
++		t.Fatal(err)
++	}
++	restored, err := os.ReadFile(filepath.Join(destination, "images", "pages-1.img"))
++	if err != nil {
++		t.Fatal(err)
++	}
++	if !bytes.Equal(restored, contents) {
++		t.Fatal("round trip changed checkpoint contents")
++	}
++}
++
++func TestArchiveRejectsUnsupportedFiles(t *testing.T) {
++	source := t.TempDir()
++	if err := os.Symlink("outside", filepath.Join(source, "link")); err != nil {
++		t.Fatal(err)
++	}
++	archive := filepath.Join(t.TempDir(), "checkpoint.tar.gz")
++	if _, err := ArchiveCheckpoint(source, archive, DefaultMaxCheckpointBytes); err == nil {
++		t.Fatal("checkpoint symlink passed archiving")
++	}
++	if _, err := os.Stat(archive); !os.IsNotExist(err) {
++		t.Fatal("failed archive left its output behind")
++	}
++}
+diff --git a/buildroot/qemu/scripts/migration/cmd/migration-client/migration-client.go b/buildroot/qemu/scripts/migration/cmd/migration-client/migration-client.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..294956a6d1605fd2d7820d8aff9ac30df785283e
+--- /dev/null
++++ b/buildroot/qemu/scripts/migration/cmd/migration-client/migration-client.go
+@@ -0,0 +1,686 @@
++package main
++
++import (
++	"bytes"
++	"crypto/rand"
++	"crypto/sha256"
++	"encoding/base64"
++	"encoding/binary"
++	"encoding/hex"
++	"encoding/json"
++	"errors"
++	"flag"
++	"fmt"
++	"io"
++	"net/http"
++	"os"
++	"os/exec"
++	"path/filepath"
++	"strconv"
++	"strings"
++	"sync"
++	"time"
++
++	migration "rva23/scripts/migration"
++)
++
++const maxClientResponseBytes = 64 * 1024
++
++type messageSigner interface {
++	Sign(message []byte) (string, error)
++}
++
++type tpmSigner struct {
++	keyFile string
++}
++
++type clientState struct {
++	InstanceID    string    `json:"instanceId"`
++	PID           int       `json:"pid"`
++	Counter       uint64    `json:"counter"`
++	LastPhase     string    `json:"lastPhase,omitempty"`
++	LastOperation string    `json:"lastOperation,omitempty"`
++	LastError     string    `json:"lastError,omitempty"`
++	UpdatedAt     time.Time `json:"updatedAt"`
++}
++
++type migrationClient struct {
++	baseURL       string
++	statePath     string
++	httpClient    *http.Client
++	signer        messageSigner
++	maxCheckpoint int64
++	mutex         sync.Mutex
++	state         clientState
++}
++
++func environment(name, fallback string) string {
++	if value := os.Getenv(name); value != "" {
++		return value
++	}
++	return fallback
++}
++
++func saveClientState(path string, state clientState) error {
++	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
++		return err
++	}
++	encoded, err := json.Marshal(state)
++	if err != nil {
++		return err
++	}
++	temporary, err := os.CreateTemp(filepath.Dir(path), ".state-*")
++	if err != nil {
++		return err
++	}
++	temporaryPath := temporary.Name()
++	completed := false
++	defer func() {
++		temporary.Close()
++		if !completed {
++			os.Remove(temporaryPath)
++		}
++	}()
++	if err := temporary.Chmod(0o600); err != nil {
++		return err
++	}
++	if _, err := temporary.Write(append(encoded, '\n')); err != nil {
++		return err
++	}
++	if err := temporary.Sync(); err != nil {
++		return err
++	}
++	if err := temporary.Close(); err != nil {
++		return err
++	}
++	if err := os.Rename(temporaryPath, path); err != nil {
++		return err
++	}
++	completed = true
++	return nil
++}
++
++func loadClientState(path string, pid int) (clientState, error) {
++	var state clientState
++	encoded, err := os.ReadFile(path)
++	if errors.Is(err, os.ErrNotExist) {
++		instanceID := make([]byte, 16)
++		if _, err := io.ReadFull(rand.Reader, instanceID); err != nil {
++			return state, err
++		}
++		state = clientState{InstanceID: hex.EncodeToString(instanceID), PID: pid, UpdatedAt: time.Now().UTC()}
++		if err := saveClientState(path, state); err != nil {
++			return state, err
++		}
++		return state, nil
++	}
++	if err != nil {
++		return state, err
++	}
++	decoder := json.NewDecoder(bytes.NewReader(encoded))
++	decoder.DisallowUnknownFields()
++	if err := decoder.Decode(&state); err != nil {
++		return state, err
++	}
++	if err := migration.ValidateInstanceID(state.InstanceID); err != nil {
++		return state, err
++	}
++	if state.PID <= 0 {
++		return state, errors.New("saved PID must be positive")
++	}
++	return state, nil
++}
++
++func newMigrationClient() (*migrationClient, error) {
++	statePath := environment("RVA23_MIGRATION_CLIENT_STATE", "/var/lib/rva23-migration/state.json")
++	state, err := loadClientState(statePath, os.Getpid())
++	if err != nil {
++		return nil, err
++	}
++	return &migrationClient{
++		baseURL:   strings.TrimRight(environment("RVA23_MIGRATION_URL", "http://10.0.2.2:8083"), "/"),
++		statePath: statePath, httpClient: &http.Client{Timeout: 120 * time.Second},
++		signer:        &tpmSigner{keyFile: "/var/lib/systemd/report.sign.tpm2/default.key"},
++		maxCheckpoint: migration.DefaultMaxCheckpointBytes, state: state,
++	}, nil
++}
++
++func (client *migrationClient) nextCounter() (uint64, error) {
++	client.mutex.Lock()
++	defer client.mutex.Unlock()
++	if client.state.Counter == ^uint64(0) {
++		return 0, errors.New("migration counter exhausted")
++	}
++	client.state.Counter++
++	client.state.UpdatedAt = time.Now().UTC()
++	if err := saveClientState(client.statePath, client.state); err != nil {
++		client.state.Counter--
++		return 0, err
++	}
++	return client.state.Counter, nil
++}
++
++func (client *migrationClient) finish(operation, phase string, err error) {
++	client.mutex.Lock()
++	defer client.mutex.Unlock()
++	client.state.LastOperation = operation
++	client.state.LastPhase = phase
++	client.state.LastError = ""
++	if err != nil {
++		client.state.LastError = err.Error()
++	}
++	client.state.UpdatedAt = time.Now().UTC()
++	_ = saveClientState(client.statePath, client.state)
++}
++
++func (client *migrationClient) snapshot() clientState {
++	client.mutex.Lock()
++	defer client.mutex.Unlock()
++	return client.state
++}
++
++func postJSON(client *http.Client, url string, input any) ([]byte, int, error) {
++	body, err := json.Marshal(input)
++	if err != nil {
++		return nil, 0, err
++	}
++	request, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(body))
++	if err != nil {
++		return nil, 0, err
++	}
++	request.Header.Set("Content-Type", "application/json")
++	response, err := client.Do(request)
++	if err != nil {
++		return nil, 0, err
++	}
++	defer response.Body.Close()
++	result, err := io.ReadAll(io.LimitReader(response.Body, maxClientResponseBytes))
++	return result, response.StatusCode, err
++}
++
++func responseError(operation string, status int, body []byte) error {
++	if status >= 200 && status < 300 {
++		return nil
++	}
++	return fmt.Errorf("%s failed with status %d: %s", operation, status, strings.TrimSpace(string(body)))
++}
++
++func (client *migrationClient) challenge(phase string) (migration.ChallengeResponse, error) {
++	var challenge migration.ChallengeResponse
++	body, status, err := postJSON(client.httpClient, client.baseURL+"/v1/challenge", migration.ChallengeRequest{InstanceID: client.state.InstanceID, Phase: phase})
++	if err != nil {
++		return challenge, err
++	}
++	if err := responseError("challenge", status, body); err != nil {
++		return challenge, err
++	}
++	if err := json.Unmarshal(body, &challenge); err != nil {
++		return challenge, err
++	}
++	nonce, err := base64.RawURLEncoding.DecodeString(challenge.Nonce)
++	if err != nil || len(nonce) != 32 || !time.Now().Before(challenge.ExpiresAt) {
++		return challenge, errors.New("server returned an invalid challenge")
++	}
++	return challenge, nil
++}
++
++func (signer *tpmSigner) Sign(message []byte) (string, error) {
++	directory, err := os.MkdirTemp("", "rva23-migration-sign-*")
++	if err != nil {
++		return "", err
++	}
++	defer os.RemoveAll(directory)
++	messagePath := filepath.Join(directory, "message.bin")
++	signaturePath := filepath.Join(directory, "signature.bin")
++	if err := os.WriteFile(messagePath, message, 0o600); err != nil {
++		return "", err
++	}
++	handle, err := os.ReadFile(signer.keyFile)
++	if err != nil || len(handle) == 0 {
++		if result, provisionErr := exec.Command("/usr/libexec/rva23-report-provision").CombinedOutput(); provisionErr != nil {
++			return "", fmt.Errorf("provision TPM AK: %s", result)
++		}
++		handle, err = os.ReadFile(signer.keyFile)
++	}
++	if err != nil {
++		return "", err
++	}
++	var keyData struct {
++		Handle string `json:"handle"`
++	}
++	if err := json.Unmarshal(handle, &keyData); err != nil {
++		return "", err
++	}
++	serialized, err := base64.StdEncoding.DecodeString(keyData.Handle)
++	if err != nil || len(serialized) < 4 {
++		return "", errors.New("invalid persistent AK handle")
++	}
++	handleID := fmt.Sprintf("0x%08x", binary.BigEndian.Uint32(serialized[:4]))
++	command := exec.Command("tpm2_sign", "-c", handleID, "-g", "sha256", "-s", "rsassa", "-o", signaturePath, messagePath)
++	if result, err := command.CombinedOutput(); err != nil {
++		return "", fmt.Errorf("tpm2_sign: %s", result)
++	}
++	signature, err := os.ReadFile(signaturePath)
++	if err != nil {
++		return "", err
++	}
++	if len(signature) < 256 {
++		return "", errors.New("TPM AK signature is too short")
++	}
++	return base64.RawURLEncoding.EncodeToString(signature[len(signature)-256:]), nil
++}
++
++func attest(challengeNonce string) (migration.Evidence, error) {
++	var evidence migration.Evidence
++	if result, err := exec.Command("systemctl", "start", "systemd-pcrlock.socket").CombinedOutput(); err != nil {
++		return evidence, fmt.Errorf("systemd-pcrlock.socket: %s", result)
++	}
++	if result, err := exec.Command("systemctl", "restart", "systemd-report-sign-tpm2.socket").CombinedOutput(); err != nil {
++		return evidence, fmt.Errorf("systemd-report-sign-tpm2.socket: %s", result)
++	}
++	command := exec.Command("attested-client")
++	command.Env = append(os.Environ(), "RVA23_ATTESTATION_CAPTURE=1")
++	if result, err := command.CombinedOutput(); err != nil {
++		return evidence, fmt.Errorf("attested-client: %s", result)
++	}
++	report, err := os.ReadFile("/tmp/rva23-attested-body")
++	if err != nil {
++		return evidence, err
++	}
++	nonce, err := os.ReadFile("/tmp/rva23-attested-nonce")
++	if err != nil {
++		return evidence, err
++	}
++	token, err := os.ReadFile("/tmp/rva23-attested-token")
++	if err != nil {
++		return evidence, err
++	}
++	directory, err := os.MkdirTemp("", "rva23-migration-pcr-*")
++	if err != nil {
++		return evidence, err
++	}
++	defer os.RemoveAll(directory)
++	pcrPath := filepath.Join(directory, "pcr11.bin")
++	if result, err := exec.Command("tpm2_pcrread", "sha256:11", "-o", pcrPath).CombinedOutput(); err != nil {
++		return evidence, fmt.Errorf("tpm2_pcrread: %s", result)
++	}
++	pcr11, err := os.ReadFile(pcrPath)
++	if err != nil {
++		return evidence, err
++	}
++	if len(pcr11) != sha256.Size {
++		return evidence, errors.New("TPM PCR 11 must contain one SHA-256 value")
++	}
++	handle, err := os.ReadFile("/var/lib/systemd/report.sign.tpm2/default.key")
++	if err != nil {
++		return evidence, err
++	}
++	var keyData struct {
++		Handle string `json:"handle"`
++	}
++	if err := json.Unmarshal(handle, &keyData); err != nil {
++		return evidence, err
++	}
++	serialized, err := base64.StdEncoding.DecodeString(keyData.Handle)
++	if err != nil || len(serialized) < 4 {
++		return evidence, errors.New("invalid persistent AK handle")
++	}
++	handleID := fmt.Sprintf("0x%08x", binary.BigEndian.Uint32(serialized[:4]))
++	nonceBytes, err := base64.RawURLEncoding.DecodeString(challengeNonce)
++	if err != nil || len(nonceBytes) != 32 {
++		return evidence, errors.New("invalid migration challenge nonce")
++	}
++	quotePath := filepath.Join(directory, "quote.msg")
++	signaturePath := filepath.Join(directory, "quote.sig")
++	selectionsPath := filepath.Join(directory, "quote.pcrs")
++	if result, err := exec.Command("tpm2_quote", "-c", handleID, "-l", "sha256:11", "-q", hex.EncodeToString(nonceBytes), "-m", quotePath, "-s", signaturePath, "-o", selectionsPath, "-g", "sha256").CombinedOutput(); err != nil {
++		return evidence, fmt.Errorf("tpm2_quote: %s", result)
++	}
++	quote, err := os.ReadFile(quotePath)
++	if err != nil {
++		return evidence, err
++	}
++	quoteSignature, err := os.ReadFile(signaturePath)
++	if err != nil {
++		return evidence, err
++	}
++	selections, err := os.ReadFile(selectionsPath)
++	if err != nil {
++		return evidence, err
++	}
++	return migration.Evidence{
++		Report: base64.RawURLEncoding.EncodeToString(report), Nonce: strings.TrimSpace(string(nonce)),
++		Token: strings.TrimSpace(string(token)), PCR11: hex.EncodeToString(pcr11),
++		PCR11Quote: base64.RawURLEncoding.EncodeToString(quote), PCR11Signature: base64.RawURLEncoding.EncodeToString(quoteSignature),
++		PCR11Selections: base64.RawURLEncoding.EncodeToString(selections),
++	}, nil
++}
++
++func (client *migrationClient) attest(phase string) (response migration.AttestationResponse, err error) {
++	defer func() {
++		client.finish("attestation", phase, err)
++	}()
++	if err = migration.ValidatePhase(phase); err != nil {
++		return response, err
++	}
++	challenge, err := client.challenge(phase)
++	if err != nil {
++		return response, err
++	}
++	evidence, err := attest(challenge.Nonce)
++	if err != nil {
++		return response, err
++	}
++	counter, err := client.nextCounter()
++	if err != nil {
++		return response, err
++	}
++	input := migration.AttestationRequest{
++		InstanceID: client.state.InstanceID, PID: client.state.PID, Counter: counter,
++		Phase: phase, Nonce: challenge.Nonce, Evidence: evidence,
++	}
++	message, err := migration.AttestationMessage(input)
++	if err != nil {
++		return response, err
++	}
++	input.Signature, err = client.signer.Sign(message)
++	if err != nil {
++		return response, err
++	}
++	body, status, err := postJSON(client.httpClient, client.baseURL+"/v1/attestations", input)
++	if err != nil {
++		return response, err
++	}
++	if err = responseError("attestation", status, body); err != nil {
++		return response, err
++	}
++	if err = json.Unmarshal(body, &response); err != nil {
++		return response, err
++	}
++	return response, nil
++}
++
++func setCheckpointHeaders(request *http.Request, input migration.CheckpointAuthorization, signature string) {
++	request.Header.Set("X-Migration-Action", input.Action)
++	request.Header.Set("X-Migration-Instance-ID", input.InstanceID)
++	request.Header.Set("X-Migration-PID", strconv.Itoa(input.PID))
++	request.Header.Set("X-Migration-Counter", strconv.FormatUint(input.Counter, 10))
++	request.Header.Set("X-Migration-Phase", input.Phase)
++	request.Header.Set("X-Migration-Nonce", input.Nonce)
++	request.Header.Set("X-Migration-Checkpoint-SHA256", input.CheckpointSHA256)
++	request.Header.Set("X-Migration-Checkpoint-Size", strconv.FormatInt(input.CheckpointSize, 10))
++	request.Header.Set("X-Migration-Signature", signature)
++}
++
++func (client *migrationClient) upload(path string) (digest migration.ArchiveDigest, err error) {
++	defer func() {
++		client.finish(migration.ActionUpload, migration.PhaseBefore, err)
++	}()
++	digest, err = migration.DigestFile(path, client.maxCheckpoint)
++	if err != nil {
++		return digest, err
++	}
++	challenge, err := client.challenge(migration.PhaseBefore)
++	if err != nil {
++		return digest, err
++	}
++	counter, err := client.nextCounter()
++	if err != nil {
++		return digest, err
++	}
++	input := migration.CheckpointAuthorization{
++		Action: migration.ActionUpload, InstanceID: client.state.InstanceID, PID: client.state.PID,
++		Counter: counter, Phase: migration.PhaseBefore, Nonce: challenge.Nonce,
++		CheckpointSHA256: digest.SHA256, CheckpointSize: digest.Size,
++	}
++	message, err := migration.CheckpointMessage(input)
++	if err != nil {
++		return digest, err
++	}
++	signature, err := client.signer.Sign(message)
++	if err != nil {
++		return digest, err
++	}
++	archive, err := os.Open(path)
++	if err != nil {
++		return digest, err
++	}
++	defer archive.Close()
++	request, err := http.NewRequest(http.MethodPut, client.baseURL+"/v1/checkpoints/"+client.state.InstanceID, archive)
++	if err != nil {
++		return digest, err
++	}
++	request.ContentLength = digest.Size
++	request.Header.Set("Content-Type", "application/gzip")
++	setCheckpointHeaders(request, input, signature)
++	response, err := client.httpClient.Do(request)
++	if err != nil {
++		return digest, err
++	}
++	defer response.Body.Close()
++	body, err := io.ReadAll(io.LimitReader(response.Body, maxClientResponseBytes))
++	if err != nil {
++		return digest, err
++	}
++	if err = responseError("checkpoint upload", response.StatusCode, body); err != nil {
++		return digest, err
++	}
++	return digest, nil
++}
++
++func (client *migrationClient) download(path string) (digest migration.ArchiveDigest, err error) {
++	defer func() {
++		client.finish(migration.ActionDownload, migration.PhaseAfter, err)
++	}()
++	challenge, err := client.challenge(migration.PhaseAfter)
++	if err != nil {
++		return digest, err
++	}
++	counter, err := client.nextCounter()
++	if err != nil {
++		return digest, err
++	}
++	input := migration.CheckpointAuthorization{
++		Action: migration.ActionDownload, InstanceID: client.state.InstanceID, PID: client.state.PID,
++		Counter: counter, Phase: migration.PhaseAfter, Nonce: challenge.Nonce,
++	}
++	message, err := migration.CheckpointMessage(input)
++	if err != nil {
++		return digest, err
++	}
++	signature, err := client.signer.Sign(message)
++	if err != nil {
++		return digest, err
++	}
++	request, err := http.NewRequest(http.MethodPost, client.baseURL+"/v1/checkpoints/"+client.state.InstanceID+"/download", nil)
++	if err != nil {
++		return digest, err
++	}
++	setCheckpointHeaders(request, input, signature)
++	response, err := client.httpClient.Do(request)
++	if err != nil {
++		return digest, err
++	}
++	defer response.Body.Close()
++	if response.StatusCode != http.StatusOK {
++		body, _ := io.ReadAll(io.LimitReader(response.Body, maxClientResponseBytes))
++		return digest, responseError("checkpoint download", response.StatusCode, body)
++	}
++	if response.ContentLength < 0 || response.ContentLength > client.maxCheckpoint {
++		return digest, errors.New("download exceeds the checkpoint size limit")
++	}
++	expectedDigest := response.Header.Get("X-Checkpoint-SHA256")
++	decodedDigest, err := hex.DecodeString(expectedDigest)
++	if err != nil || len(decodedDigest) != sha256.Size {
++		return digest, errors.New("server returned an invalid checkpoint digest")
++	}
++	output, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
++	if err != nil {
++		return digest, err
++	}
++	completed := false
++	defer func() {
++		output.Close()
++		if !completed {
++			os.Remove(path)
++		}
++	}()
++	hash := sha256.New()
++	written, err := io.Copy(io.MultiWriter(output, hash), io.LimitReader(response.Body, client.maxCheckpoint+1))
++	if err != nil {
++		return digest, err
++	}
++	if written != response.ContentLength || written > client.maxCheckpoint {
++		return digest, errors.New("download size does not match the response")
++	}
++	if !strings.EqualFold(hex.EncodeToString(hash.Sum(nil)), expectedDigest) {
++		return digest, errors.New("download digest does not match the response")
++	}
++	if err := output.Sync(); err != nil {
++		return digest, err
++	}
++	if err := output.Close(); err != nil {
++		return digest, err
++	}
++	digest.Size = written
++	digest.SHA256 = expectedDigest
++	completed = true
++	return digest, nil
++}
++
++func clientUIHandler(client *migrationClient) http.Handler {
++	mux := http.NewServeMux()
++	mux.HandleFunc("/api/state", func(writer http.ResponseWriter, request *http.Request) {
++		if request.Method != http.MethodGet {
++			writer.Header().Set("Allow", http.MethodGet)
++			http.Error(writer, "method not allowed", http.StatusMethodNotAllowed)
++			return
++		}
++		writer.Header().Set("Content-Type", "application/json")
++		_ = json.NewEncoder(writer).Encode(client.snapshot())
++	})
++	mux.HandleFunc("/", func(writer http.ResponseWriter, request *http.Request) {
++		if request.URL.Path != "/" {
++			http.NotFound(writer, request)
++			return
++		}
++		if request.Method != http.MethodGet {
++			writer.Header().Set("Allow", http.MethodGet)
++			http.Error(writer, "method not allowed", http.StatusMethodNotAllowed)
++			return
++		}
++		writer.Header().Set("Content-Type", "text/html; charset=utf-8")
++		_, _ = io.WriteString(writer, `<!doctype html>
++<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>CRIU migration client</title></head>
++<body><h1>CRIU migration client</h1><p><button id="refresh" type="button">Refresh</button> <span id="status">Loading</span></p><div id="state">Loading</div>
++<script>
++function label(key){const names={instanceId:'Instance ID',pid:'PID',lastPhase:'Last phase',lastOperation:'Last operation',lastError:'Last error',updatedAt:'Updated at'};return names[key]||key}
++function render(value){const table=document.createElement('table');const body=document.createElement('tbody');for(const [key,entry] of Object.entries(value||{})){const row=document.createElement('tr');const heading=document.createElement('th');heading.scope='row';heading.textContent=label(key);const cell=document.createElement('td');cell.textContent=entry===null||entry===undefined||entry===''?'None':String(entry);row.append(heading,cell);body.append(row)}table.append(body);return table}
++function raw(value){const details=document.createElement('details');const summary=document.createElement('summary');summary.textContent='Raw JSON';const pre=document.createElement('pre');pre.textContent=JSON.stringify(value,null,2);details.append(summary,pre);return details}
++async function refresh(){const status=document.getElementById('status');try{const response=await fetch('/api/state');if(!response.ok)throw new Error(response.statusText);const data=await response.json();document.getElementById('state').replaceChildren(render(data),raw(data));status.textContent='Updated '+data.updatedAt}catch(error){status.textContent='Refresh failed: '+error.message}}
++document.getElementById('refresh').onclick=refresh;refresh()
++</script></body></html>`)
++	})
++	return mux
++}
++
++func printJSON(value any) error {
++	encoded, err := json.MarshalIndent(value, "", "  ")
++	if err != nil {
++		return err
++	}
++	fmt.Println(string(encoded))
++	return nil
++}
++
++func run() error {
++	if len(os.Args) > 1 && os.Args[1] == "archive" {
++		flags := flag.NewFlagSet("archive", flag.ContinueOnError)
++		source := flags.String("source", "", "checkpoint image directory")
++		output := flags.String("output", "", "new checkpoint archive")
++		if err := flags.Parse(os.Args[2:]); err != nil {
++			return err
++		}
++		if *source == "" || *output == "" {
++			return errors.New("archive requires -source and -output")
++		}
++		digest, err := migration.ArchiveCheckpoint(*source, *output, migration.DefaultMaxCheckpointBytes)
++		if err != nil {
++			return err
++		}
++		return printJSON(digest)
++	}
++	if len(os.Args) > 1 && os.Args[1] == "extract" {
++		flags := flag.NewFlagSet("extract", flag.ContinueOnError)
++		archive := flags.String("archive", "", "checkpoint archive")
++		destination := flags.String("destination", "", "new extraction directory")
++		if err := flags.Parse(os.Args[2:]); err != nil {
++			return err
++		}
++		if *archive == "" || *destination == "" {
++			return errors.New("extract requires -archive and -destination")
++		}
++		return migration.ExtractCheckpoint(*archive, *destination, migration.DefaultMaxCheckpointBytes)
++	}
++	client, err := newMigrationClient()
++	if err != nil {
++		return err
++	}
++	if len(os.Args) == 1 || os.Args[1] == "serve" {
++		httpServer := &http.Server{
++			Addr: "0.0.0.0:8084", Handler: clientUIHandler(client), ReadHeaderTimeout: 5 * time.Second,
++			ReadTimeout: 30 * time.Second, WriteTimeout: 30 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 64 * 1024,
++		}
++		return httpServer.ListenAndServe()
++	}
++	switch os.Args[1] {
++	case "attest":
++		flags := flag.NewFlagSet("attest", flag.ContinueOnError)
++		phase := flags.String("phase", "", "before or after")
++		if err := flags.Parse(os.Args[2:]); err != nil {
++			return err
++		}
++		response, err := client.attest(*phase)
++		if err != nil {
++			return err
++		}
++		return printJSON(response)
++	case "upload":
++		flags := flag.NewFlagSet("upload", flag.ContinueOnError)
++		archive := flags.String("archive", "", "checkpoint archive")
++		if err := flags.Parse(os.Args[2:]); err != nil {
++			return err
++		}
++		if *archive == "" {
++			return errors.New("upload requires -archive")
++		}
++		digest, err := client.upload(*archive)
++		if err != nil {
++			return err
++		}
++		return printJSON(digest)
++	case "download":
++		flags := flag.NewFlagSet("download", flag.ContinueOnError)
++		output := flags.String("output", "", "new checkpoint archive")
++		if err := flags.Parse(os.Args[2:]); err != nil {
++			return err
++		}
++		if *output == "" {
++			return errors.New("download requires -output")
++		}
++		digest, err := client.download(*output)
++		if err != nil {
++			return err
++		}
++		return printJSON(digest)
++	default:
++		return errors.New("use serve, attest, archive, upload, download, or extract")
++	}
++}
++
++func main() {
++	if err := run(); err != nil {
++		fmt.Fprintln(os.Stderr, err)
++		os.Exit(1)
++	}
++}
+diff --git a/buildroot/qemu/scripts/migration/cmd/migration-client/migration-client_test.go b/buildroot/qemu/scripts/migration/cmd/migration-client/migration-client_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..cb4335196b8972b3cde8c9166006636f6f643cf6
+--- /dev/null
++++ b/buildroot/qemu/scripts/migration/cmd/migration-client/migration-client_test.go
+@@ -0,0 +1,36 @@
++package main
++
++import (
++	"path/filepath"
++	"testing"
++)
++
++func TestStatePreservesIdentityAcrossRestore(t *testing.T) {
++	path := filepath.Join(t.TempDir(), "state.json")
++	state, err := loadClientState(path, 4242)
++	if err != nil {
++		t.Fatal(err)
++	}
++	client := &migrationClient{statePath: path, state: state}
++	counter, err := client.nextCounter()
++	if err != nil {
++		t.Fatal(err)
++	}
++	if counter != 1 {
++		t.Fatalf("first counter was %d", counter)
++	}
++	restored, err := loadClientState(path, 4242)
++	if err != nil {
++		t.Fatal(err)
++	}
++	if restored.InstanceID != state.InstanceID || restored.PID != state.PID || restored.Counter != 1 {
++		t.Fatalf("restored state %+v differs from saved state %+v", restored, state)
++	}
++	helper, err := loadClientState(path, 4243)
++	if err != nil {
++		t.Fatal(err)
++	}
++	if helper.PID != state.PID || helper.InstanceID != state.InstanceID || helper.Counter != 1 {
++		t.Fatal("helper process changed the saved workload identity")
++	}
++}
+diff --git a/buildroot/qemu/scripts/migration/cmd/migration-server/migration-server.go b/buildroot/qemu/scripts/migration/cmd/migration-server/migration-server.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..b550771602d76ebe087bab30482429b0aa07ec44
+--- /dev/null
++++ b/buildroot/qemu/scripts/migration/cmd/migration-server/migration-server.go
+@@ -0,0 +1,741 @@
++package main
++
++import (
++	"bytes"
++	"crypto"
++	"crypto/rand"
++	"crypto/rsa"
++	"crypto/sha256"
++	"crypto/x509"
++	"encoding/base64"
++	"encoding/hex"
++	"encoding/json"
++	"encoding/pem"
++	"errors"
++	"fmt"
++	"io"
++	"net/http"
++	"os"
++	"os/exec"
++	"path/filepath"
++	"strconv"
++	"strings"
++	"sync"
++	"time"
++
++	migration "rva23/scripts/migration"
++)
++
++const (
++	maxAttestationBody = 12 * 1024 * 1024
++	maxReportBytes     = 8 * 1024 * 1024
++	maxResponseBytes   = 64 * 1024
++	maxCheckpoints     = 16
++	maxNonces          = 1024
++	nonceLifetime      = time.Minute
++)
++
++type challengeRecord struct {
++	InstanceID string
++	Phase      string
++	ExpiresAt  time.Time
++}
++
++type requestRecord struct {
++	At            time.Time                          `json:"at"`
++	Operation     string                             `json:"operation"`
++	BodyBase64    string                             `json:"bodyBase64,omitempty"`
++	Attestation   *migration.AttestationRequest      `json:"attestation,omitempty"`
++	Authorization *migration.CheckpointAuthorization `json:"authorization,omitempty"`
++	Validation    map[string]string                  `json:"validation"`
++	Checkpoint    *migration.CheckpointMetadata      `json:"checkpoint,omitempty"`
++	Response      any                                `json:"response,omitempty"`
++	Error         string                             `json:"error,omitempty"`
++}
++
++type stateResponse struct {
++	Latest  *requestRecord  `json:"latest"`
++	History []requestRecord `json:"history"`
++}
++
++type migrationServer struct {
++	keys            map[int]*rsa.PublicKey
++	keyFiles        map[int]string
++	quoteVerifier   func(userID int, nonce string, evidence migration.Evidence) error
++	productionPCR11 string
++	attestationURL  string
++	checkpointDir   string
++	client          *http.Client
++	maxCheckpoint   int64
++	now             func() time.Time
++	mutex           sync.Mutex
++	nonces          map[string]challengeRecord
++	counters        map[string]uint64
++	checkpoints     map[string]migration.CheckpointMetadata
++	stateMutex      sync.RWMutex
++	latest          *requestRecord
++	history         []requestRecord
++}
++
++func environment(name, fallback string) string {
++	if value := os.Getenv(name); value != "" {
++		return value
++	}
++	return fallback
++}
++
++func loadPublicKey(path string) (*rsa.PublicKey, error) {
++	data, err := os.ReadFile(path)
++	if err != nil {
++		return nil, err
++	}
++	block, rest := pem.Decode(data)
++	if block == nil || block.Type != "PUBLIC KEY" || len(rest) != 0 {
++		return nil, errors.New("invalid AK public key PEM")
++	}
++	parsed, err := x509.ParsePKIXPublicKey(block.Bytes)
++	if err != nil {
++		return nil, err
++	}
++	key, ok := parsed.(*rsa.PublicKey)
++	if !ok || key.N.BitLen() < 2048 {
++		return nil, errors.New("AK public key must be RSA with at least 2048 bits")
++	}
++	return key, nil
++}
++
++func writeJSON(writer http.ResponseWriter, status int, value any) {
++	writer.Header().Set("Content-Type", "application/json")
++	writer.WriteHeader(status)
++	_ = json.NewEncoder(writer).Encode(value)
++}
++
++func methodNotAllowed(writer http.ResponseWriter, method string) {
++	writer.Header().Set("Allow", method)
++	writeJSON(writer, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
++}
++
++func decodeJSON(data []byte, output any) error {
++	decoder := json.NewDecoder(bytes.NewReader(data))
++	decoder.DisallowUnknownFields()
++	if err := decoder.Decode(output); err != nil {
++		return err
++	}
++	var extra any
++	if err := decoder.Decode(&extra); !errors.Is(err, io.EOF) {
++		return errors.New("request must contain one JSON value")
++	}
++	return nil
++}
++
++func (server *migrationServer) record(record requestRecord) {
++	server.stateMutex.Lock()
++	defer server.stateMutex.Unlock()
++	latest := record
++	server.latest = &latest
++	server.history = append([]requestRecord{record}, server.history...)
++	if len(server.history) > 32 {
++		server.history = server.history[:32]
++	}
++}
++
++func (server *migrationServer) reject(writer http.ResponseWriter, record requestRecord, status int, err error) {
++	record.Error = err.Error()
++	server.record(record)
++	writeJSON(writer, status, map[string]string{"error": err.Error()})
++}
++
++func (server *migrationServer) validNonce(nonce, instanceID, phase string) bool {
++	server.mutex.Lock()
++	defer server.mutex.Unlock()
++	challenge, ok := server.nonces[nonce]
++	return ok && challenge.InstanceID == instanceID && challenge.Phase == phase && server.now().Before(challenge.ExpiresAt)
++}
++
++func (server *migrationServer) consumeNonce(nonce, instanceID, phase string, counter uint64) error {
++	server.mutex.Lock()
++	defer server.mutex.Unlock()
++	challenge, ok := server.nonces[nonce]
++	if !ok || challenge.InstanceID != instanceID || challenge.Phase != phase || !server.now().Before(challenge.ExpiresAt) {
++		return errors.New("challenge nonce is expired, unknown, or already used")
++	}
++	if counter == 0 || counter <= server.counters[instanceID] {
++		return errors.New("migration counter must increase for the instance")
++	}
++	delete(server.nonces, nonce)
++	server.counters[instanceID] = counter
++	return nil
++}
++
++func (server *migrationServer) challengeHandler(writer http.ResponseWriter, request *http.Request) {
++	if request.Method != http.MethodPost {
++		methodNotAllowed(writer, http.MethodPost)
++		return
++	}
++	raw, err := io.ReadAll(http.MaxBytesReader(writer, request.Body, 4096))
++	if err != nil {
++		writeJSON(writer, http.StatusBadRequest, map[string]string{"error": "invalid challenge body"})
++		return
++	}
++	var input migration.ChallengeRequest
++	if err := decodeJSON(raw, &input); err != nil {
++		writeJSON(writer, http.StatusBadRequest, map[string]string{"error": "invalid challenge JSON"})
++		return
++	}
++	if err := migration.ValidateInstanceID(input.InstanceID); err != nil {
++		writeJSON(writer, http.StatusBadRequest, map[string]string{"error": err.Error()})
++		return
++	}
++	if err := migration.ValidatePhase(input.Phase); err != nil {
++		writeJSON(writer, http.StatusBadRequest, map[string]string{"error": err.Error()})
++		return
++	}
++	nonce := make([]byte, 32)
++	if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
++		writeJSON(writer, http.StatusInternalServerError, map[string]string{"error": err.Error()})
++		return
++	}
++	now := server.now().UTC()
++	response := migration.ChallengeResponse{
++		Nonce:     base64.RawURLEncoding.EncodeToString(nonce),
++		ExpiresAt: now.Add(nonceLifetime),
++	}
++	server.mutex.Lock()
++	for value, challenge := range server.nonces {
++		if !now.Before(challenge.ExpiresAt) {
++			delete(server.nonces, value)
++		}
++	}
++	if len(server.nonces) >= maxNonces {
++		server.mutex.Unlock()
++		writeJSON(writer, http.StatusServiceUnavailable, map[string]string{"error": "too many outstanding challenges"})
++		return
++	}
++	server.nonces[response.Nonce] = challengeRecord{InstanceID: input.InstanceID, Phase: input.Phase, ExpiresAt: response.ExpiresAt}
++	server.mutex.Unlock()
++	writeJSON(writer, http.StatusOK, response)
++}
++
++func (server *migrationServer) verifyAK(userID int, message []byte, encodedSignature string) error {
++	signature, err := migration.DecodeSignature(encodedSignature)
++	if err != nil {
++		return err
++	}
++	key := server.keys[userID]
++	if key == nil || len(signature) != key.Size() {
++		return errors.New("invalid AK signature length")
++	}
++	digest := sha256.Sum256(message)
++	if err := rsa.VerifyPKCS1v15(key, crypto.SHA256, digest[:], signature); err != nil {
++		return errors.New("AK signature does not match the enrolled identity")
++	}
++	return nil
++}
++
++func (server *migrationServer) verifyPCR11Quote(userID int, nonce string, evidence migration.Evidence) error {
++	keyFile := server.keyFiles[userID]
++	if keyFile == "" {
++		return errors.New("no enrolled AK file for this identity")
++	}
++	quote, err := base64.RawURLEncoding.DecodeString(evidence.PCR11Quote)
++	if err != nil || len(quote) == 0 {
++		return errors.New("invalid PCR 11 quote")
++	}
++	signature, err := base64.RawURLEncoding.DecodeString(evidence.PCR11Signature)
++	if err != nil || len(signature) == 0 {
++		return errors.New("invalid PCR 11 quote signature")
++	}
++	pcr11, err := hex.DecodeString(evidence.PCR11)
++	if err != nil || len(pcr11) != sha256.Size {
++		return errors.New("PCR 11 must contain one SHA-256 value")
++	}
++	nonceBytes, err := base64.RawURLEncoding.DecodeString(nonce)
++	if err != nil || len(nonceBytes) != 32 {
++		return errors.New("invalid PCR 11 quote nonce")
++	}
++	directory, err := os.MkdirTemp("", "rva23-migration-quote-")
++	if err != nil {
++		return err
++	}
++	defer os.RemoveAll(directory)
++	quotePath := filepath.Join(directory, "quote.msg")
++	signaturePath := filepath.Join(directory, "quote.sig")
++	selectionsPath := filepath.Join(directory, "quote.pcrs")
++	for path, data := range map[string][]byte{quotePath: quote, signaturePath: signature, selectionsPath: pcr11} {
++		if err := os.WriteFile(path, data, 0o600); err != nil {
++			return err
++		}
++	}
++	command := exec.Command("tpm2_checkquote", "-u", keyFile, "-m", quotePath, "-s", signaturePath, "-f", selectionsPath, "-l", "sha256:11", "-q", hex.EncodeToString(nonceBytes))
++	if result, err := command.CombinedOutput(); err != nil {
++		return fmt.Errorf("PCR 11 quote validation failed: %s", result)
++	}
++	return nil
++}
++
++func validateAttestationFields(input migration.AttestationRequest) (int, error) {
++	if err := migration.ValidateInstanceID(input.InstanceID); err != nil {
++		return 0, err
++	}
++	if input.PID <= 0 || input.Counter == 0 {
++		return 0, errors.New("PID and counter must be positive")
++	}
++	userID, err := migration.ExpectedUserID(input.Phase)
++	if err != nil {
++		return 0, err
++	}
++	if input.Evidence.Nonce == "" || input.Evidence.Token == "" || input.Evidence.Report == "" || input.Evidence.PCR11 == "" || input.Evidence.PCR11Quote == "" || input.Evidence.PCR11Signature == "" || input.Evidence.PCR11Selections == "" {
++		return 0, errors.New("full OS evidence and a PCR 11 quote are required")
++	}
++	return userID, nil
++}
++
++func (server *migrationServer) forwardReport(report []byte, evidence migration.Evidence) error {
++	request, err := http.NewRequest(http.MethodPost, server.attestationURL, bytes.NewReader(report))
++	if err != nil {
++		return err
++	}
++	request.Header.Set("Content-Type", "application/json")
++	request.Header.Set("X-Attestation-Nonce", evidence.Nonce)
++	request.Header.Set("X-Attestation-Token", evidence.Token)
++	response, err := server.client.Do(request)
++	if err != nil {
++		return fmt.Errorf("attestation request failed: %w", err)
++	}
++	defer response.Body.Close()
++	body, err := io.ReadAll(io.LimitReader(response.Body, maxResponseBytes))
++	if err != nil {
++		return fmt.Errorf("attestation response failed: %w", err)
++	}
++	if response.StatusCode < 200 || response.StatusCode >= 300 {
++		return fmt.Errorf("attestation service returned %s: %s", response.Status, strings.TrimSpace(string(body)))
++	}
++	return nil
++}
++
++func (server *migrationServer) attestHandler(writer http.ResponseWriter, request *http.Request) {
++	if request.Method != http.MethodPost {
++		methodNotAllowed(writer, http.MethodPost)
++		return
++	}
++	raw, readErr := io.ReadAll(http.MaxBytesReader(writer, request.Body, maxAttestationBody))
++	record := requestRecord{At: server.now().UTC(), Operation: "attestation", BodyBase64: base64.StdEncoding.EncodeToString(raw)}
++	if readErr != nil {
++		server.reject(writer, record, http.StatusBadRequest, errors.New("invalid attestation body"))
++		return
++	}
++	var input migration.AttestationRequest
++	if err := decodeJSON(raw, &input); err != nil {
++		server.reject(writer, record, http.StatusBadRequest, fmt.Errorf("invalid attestation JSON: %w", err))
++		return
++	}
++	record.Attestation = &input
++	record.Validation = map[string]string{
++		"identityBinding": "pending",
++		"freshNonce":      "pending",
++		"singleUseNonce":  "pending",
++		"counter":         "pending",
++		"hostOsReport":    "pending",
++		"pcr11Profile":    "pending",
++		"pcr11Quote":      "pending",
++	}
++	userID, err := validateAttestationFields(input)
++	if err != nil {
++		server.reject(writer, record, http.StatusBadRequest, err)
++		return
++	}
++	if !server.validNonce(input.Nonce, input.InstanceID, input.Phase) {
++		record.Validation["freshNonce"] = "rejected"
++		server.reject(writer, record, http.StatusForbidden, errors.New("challenge nonce is expired, unknown, or bound to another request"))
++		return
++	}
++	record.Validation["freshNonce"] = "accepted"
++	message, err := migration.AttestationMessage(input)
++	if err != nil {
++		server.reject(writer, record, http.StatusBadRequest, err)
++		return
++	}
++	if err := server.verifyAK(userID, message, input.Signature); err != nil {
++		server.reject(writer, record, http.StatusForbidden, err)
++		return
++	}
++	record.Validation["identityBinding"] = fmt.Sprintf("accepted for user %d", userID)
++	report, err := base64.RawURLEncoding.DecodeString(input.Evidence.Report)
++	if err != nil || len(report) == 0 || len(report) > maxReportBytes {
++		server.reject(writer, record, http.StatusBadRequest, errors.New("invalid OS report size or encoding"))
++		return
++	}
++	pcr11, err := hex.DecodeString(input.Evidence.PCR11)
++	if err != nil || len(pcr11) != sha256.Size {
++		server.reject(writer, record, http.StatusBadRequest, errors.New("PCR 11 must contain one SHA-256 value"))
++		return
++	}
++	if err := server.forwardReport(report, input.Evidence); err != nil {
++		server.reject(writer, record, http.StatusForbidden, err)
++		return
++	}
++	record.Validation["hostOsReport"] = "accepted"
++	if !strings.EqualFold(input.Evidence.PCR11, server.productionPCR11) {
++		server.reject(writer, record, http.StatusForbidden, errors.New("OS report PCR 11 does not match the required profile"))
++		return
++	}
++	record.Validation["pcr11Profile"] = "accepted"
++	if err := server.quoteVerifier(userID, input.Nonce, input.Evidence); err != nil {
++		server.reject(writer, record, http.StatusForbidden, err)
++		return
++	}
++	record.Validation["pcr11Quote"] = "accepted"
++	if err := server.consumeNonce(input.Nonce, input.InstanceID, input.Phase, input.Counter); err != nil {
++		server.reject(writer, record, http.StatusForbidden, err)
++		return
++	}
++	record.Validation["singleUseNonce"] = "consumed"
++	record.Validation["counter"] = "accepted"
++	response := migration.AttestationResponse{
++		Status: "accepted", UserID: userID, InstanceID: input.InstanceID,
++		PID: input.PID, Counter: input.Counter, Phase: input.Phase,
++	}
++	record.Response = response
++	server.record(record)
++	writeJSON(writer, http.StatusOK, response)
++}
++
++func checkpointInstanceID(path string) (string, string, error) {
++	remainder := strings.TrimPrefix(path, "/v1/checkpoints/")
++	if remainder == path {
++		return "", "", errors.New("invalid checkpoint path")
++	}
++	parts := strings.Split(remainder, "/")
++	if len(parts) == 1 {
++		return parts[0], migration.ActionUpload, nil
++	}
++	if len(parts) == 2 && parts[1] == "download" {
++		return parts[0], migration.ActionDownload, nil
++	}
++	return "", "", errors.New("invalid checkpoint path")
++}
++
++func checkpointAuthorization(request *http.Request, instanceID, action string) (migration.CheckpointAuthorization, error) {
++	var input migration.CheckpointAuthorization
++	pid, err := strconv.Atoi(request.Header.Get("X-Migration-PID"))
++	if err != nil {
++		return input, errors.New("invalid migration PID")
++	}
++	counter, err := strconv.ParseUint(request.Header.Get("X-Migration-Counter"), 10, 64)
++	if err != nil {
++		return input, errors.New("invalid migration counter")
++	}
++	size := int64(0)
++	if value := request.Header.Get("X-Migration-Checkpoint-Size"); value != "" {
++		size, err = strconv.ParseInt(value, 10, 64)
++		if err != nil {
++			return input, errors.New("invalid checkpoint size")
++		}
++	}
++	input = migration.CheckpointAuthorization{
++		Action: action, InstanceID: instanceID, PID: pid, Counter: counter,
++		Phase: request.Header.Get("X-Migration-Phase"), Nonce: request.Header.Get("X-Migration-Nonce"),
++		CheckpointSHA256: request.Header.Get("X-Migration-Checkpoint-SHA256"), CheckpointSize: size,
++	}
++	if request.Header.Get("X-Migration-Instance-ID") != instanceID || request.Header.Get("X-Migration-Action") != action {
++		return input, errors.New("checkpoint headers do not match the path")
++	}
++	return input, nil
++}
++
++func (server *migrationServer) verifyCheckpointAuthorization(input migration.CheckpointAuthorization, encodedSignature string) (int, error) {
++	if err := migration.ValidateInstanceID(input.InstanceID); err != nil {
++		return 0, err
++	}
++	if input.PID <= 0 || input.Counter == 0 {
++		return 0, errors.New("PID and counter must be positive")
++	}
++	expectedPhase, err := migration.ExpectedCheckpointPhase(input.Action)
++	if err != nil {
++		return 0, err
++	}
++	if input.Phase != expectedPhase {
++		return 0, errors.New("checkpoint action uses the wrong migration phase")
++	}
++	userID, err := migration.ExpectedUserID(input.Phase)
++	if err != nil {
++		return 0, err
++	}
++	message, err := migration.CheckpointMessage(input)
++	if err != nil {
++		return 0, err
++	}
++	if err := server.verifyAK(userID, message, encodedSignature); err != nil {
++		return 0, err
++	}
++	return userID, nil
++}
++
++func validDigest(value string) bool {
++	decoded, err := hex.DecodeString(value)
++	return err == nil && len(decoded) == sha256.Size && strings.ToLower(value) == value
++}
++
++func (server *migrationServer) checkpointHandler(writer http.ResponseWriter, request *http.Request) {
++	instanceID, action, err := checkpointInstanceID(request.URL.Path)
++	if err != nil {
++		writeJSON(writer, http.StatusBadRequest, map[string]string{"error": err.Error()})
++		return
++	}
++	switch action {
++	case migration.ActionUpload:
++		if request.Method != http.MethodPut {
++			methodNotAllowed(writer, http.MethodPut)
++			return
++		}
++		server.uploadHandler(writer, request, instanceID)
++	case migration.ActionDownload:
++		if request.Method != http.MethodPost {
++			methodNotAllowed(writer, http.MethodPost)
++			return
++		}
++		server.downloadHandler(writer, request, instanceID)
++	}
++}
++
++func (server *migrationServer) uploadHandler(writer http.ResponseWriter, request *http.Request, instanceID string) {
++	input, err := checkpointAuthorization(request, instanceID, migration.ActionUpload)
++	record := requestRecord{At: server.now().UTC(), Operation: migration.ActionUpload, Authorization: &input, Validation: map[string]string{"identityBinding": "pending", "freshNonce": "pending", "singleUseNonce": "pending", "counter": "pending", "checkpointDigest": "pending", "checkpointLimit": "pending"}}
++	if err != nil {
++		server.reject(writer, record, http.StatusBadRequest, err)
++		return
++	}
++	if !validDigest(input.CheckpointSHA256) || input.CheckpointSize <= 0 || input.CheckpointSize > server.maxCheckpoint {
++		server.reject(writer, record, http.StatusBadRequest, errors.New("invalid checkpoint digest or size"))
++		return
++	}
++	if !server.validNonce(input.Nonce, input.InstanceID, input.Phase) {
++		server.reject(writer, record, http.StatusForbidden, errors.New("challenge nonce is expired, unknown, or bound to another request"))
++		return
++	}
++	record.Validation["freshNonce"] = "accepted"
++	userID, err := server.verifyCheckpointAuthorization(input, request.Header.Get("X-Migration-Signature"))
++	if err != nil {
++		server.reject(writer, record, http.StatusForbidden, err)
++		return
++	}
++	record.Validation["identityBinding"] = fmt.Sprintf("accepted for user %d", userID)
++	if err := os.MkdirAll(server.checkpointDir, 0o700); err != nil {
++		server.reject(writer, record, http.StatusInternalServerError, err)
++		return
++	}
++	server.mutex.Lock()
++	_, replacing := server.checkpoints[instanceID]
++	count := len(server.checkpoints)
++	server.mutex.Unlock()
++	if !replacing && count >= maxCheckpoints {
++		server.reject(writer, record, http.StatusConflict, errors.New("checkpoint storage limit reached"))
++		return
++	}
++	temporary, err := os.CreateTemp(server.checkpointDir, ".upload-*")
++	if err != nil {
++		server.reject(writer, record, http.StatusInternalServerError, err)
++		return
++	}
++	temporaryPath := temporary.Name()
++	completed := false
++	defer func() {
++		temporary.Close()
++		if !completed {
++			os.Remove(temporaryPath)
++		}
++	}()
++	hash := sha256.New()
++	written, err := io.Copy(io.MultiWriter(temporary, hash), io.LimitReader(request.Body, server.maxCheckpoint+1))
++	if err != nil {
++		server.reject(writer, record, http.StatusBadRequest, err)
++		return
++	}
++	if written > server.maxCheckpoint || written != input.CheckpointSize {
++		server.reject(writer, record, http.StatusBadRequest, errors.New("checkpoint body size does not match the signed size or limit"))
++		return
++	}
++	record.Validation["checkpointLimit"] = "accepted"
++	digest := hex.EncodeToString(hash.Sum(nil))
++	if digest != input.CheckpointSHA256 {
++		server.reject(writer, record, http.StatusBadRequest, errors.New("checkpoint body digest does not match the signed digest"))
++		return
++	}
++	record.Validation["checkpointDigest"] = "accepted"
++	if err := temporary.Sync(); err != nil {
++		server.reject(writer, record, http.StatusInternalServerError, err)
++		return
++	}
++	if err := temporary.Close(); err != nil {
++		server.reject(writer, record, http.StatusInternalServerError, err)
++		return
++	}
++	if err := server.consumeNonce(input.Nonce, input.InstanceID, input.Phase, input.Counter); err != nil {
++		server.reject(writer, record, http.StatusForbidden, err)
++		return
++	}
++	finalPath := filepath.Join(server.checkpointDir, instanceID+".tar.gz")
++	if err := os.Rename(temporaryPath, finalPath); err != nil {
++		server.reject(writer, record, http.StatusInternalServerError, err)
++		return
++	}
++	completed = true
++	metadata := migration.CheckpointMetadata{InstanceID: instanceID, SHA256: digest, Size: written, UploadedAt: server.now().UTC()}
++	server.mutex.Lock()
++	server.checkpoints[instanceID] = metadata
++	server.mutex.Unlock()
++	record.Validation["singleUseNonce"] = "consumed"
++	record.Validation["counter"] = "accepted"
++	record.Checkpoint = &metadata
++	record.Response = map[string]string{"status": "uploaded"}
++	server.record(record)
++	writeJSON(writer, http.StatusCreated, record.Response)
++}
++
++func (server *migrationServer) downloadHandler(writer http.ResponseWriter, request *http.Request, instanceID string) {
++	input, err := checkpointAuthorization(request, instanceID, migration.ActionDownload)
++	record := requestRecord{At: server.now().UTC(), Operation: migration.ActionDownload, Authorization: &input, Validation: map[string]string{"identityBinding": "pending", "freshNonce": "pending", "singleUseNonce": "pending", "counter": "pending", "checkpointLimit": "pending"}}
++	if err != nil {
++		server.reject(writer, record, http.StatusBadRequest, err)
++		return
++	}
++	if input.CheckpointSHA256 != "" || input.CheckpointSize != 0 {
++		server.reject(writer, record, http.StatusBadRequest, errors.New("download authorization must not contain an upload digest or size"))
++		return
++	}
++	if !server.validNonce(input.Nonce, input.InstanceID, input.Phase) {
++		server.reject(writer, record, http.StatusForbidden, errors.New("challenge nonce is expired, unknown, or bound to another request"))
++		return
++	}
++	record.Validation["freshNonce"] = "accepted"
++	userID, err := server.verifyCheckpointAuthorization(input, request.Header.Get("X-Migration-Signature"))
++	if err != nil {
++		server.reject(writer, record, http.StatusForbidden, err)
++		return
++	}
++	record.Validation["identityBinding"] = fmt.Sprintf("accepted for user %d", userID)
++	server.mutex.Lock()
++	metadata, ok := server.checkpoints[instanceID]
++	server.mutex.Unlock()
++	if !ok {
++		server.reject(writer, record, http.StatusNotFound, errors.New("checkpoint not found"))
++		return
++	}
++	path := filepath.Join(server.checkpointDir, instanceID+".tar.gz")
++	archive, err := os.Open(path)
++	if err != nil {
++		server.reject(writer, record, http.StatusInternalServerError, err)
++		return
++	}
++	defer archive.Close()
++	info, err := archive.Stat()
++	if err != nil || info.Size() != metadata.Size || info.Size() > server.maxCheckpoint {
++		server.reject(writer, record, http.StatusInternalServerError, errors.New("stored checkpoint failed its size check"))
++		return
++	}
++	record.Validation["checkpointLimit"] = "accepted"
++	if err := server.consumeNonce(input.Nonce, input.InstanceID, input.Phase, input.Counter); err != nil {
++		server.reject(writer, record, http.StatusForbidden, err)
++		return
++	}
++	record.Validation["singleUseNonce"] = "consumed"
++	record.Validation["counter"] = "accepted"
++	record.Checkpoint = &metadata
++	record.Response = map[string]string{"status": "downloaded"}
++	server.record(record)
++	writer.Header().Set("Content-Type", "application/gzip")
++	writer.Header().Set("Content-Length", strconv.FormatInt(metadata.Size, 10))
++	writer.Header().Set("X-Checkpoint-SHA256", metadata.SHA256)
++	writer.Header().Set("Content-Disposition", "attachment; filename=checkpoint.tar.gz")
++	writer.WriteHeader(http.StatusOK)
++	_, _ = io.CopyN(writer, archive, metadata.Size)
++}
++
++func (server *migrationServer) stateHandler(writer http.ResponseWriter, request *http.Request) {
++	if request.Method != http.MethodGet {
++		methodNotAllowed(writer, http.MethodGet)
++		return
++	}
++	server.stateMutex.RLock()
++	response := stateResponse{History: append([]requestRecord(nil), server.history...)}
++	if server.latest != nil {
++		latest := *server.latest
++		response.Latest = &latest
++	}
++	server.stateMutex.RUnlock()
++	if response.History == nil {
++		response.History = []requestRecord{}
++	}
++	writeJSON(writer, http.StatusOK, response)
++}
++
++func uiHandler(writer http.ResponseWriter, request *http.Request) {
++	if request.URL.Path != "/" {
++		http.NotFound(writer, request)
++		return
++	}
++	if request.Method != http.MethodGet {
++		methodNotAllowed(writer, http.MethodGet)
++		return
++	}
++	writer.Header().Set("Content-Type", "text/html; charset=utf-8")
++	_, _ = io.WriteString(writer, `<!doctype html>
++<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>CRIU migration attestations</title></head>
++<body><h1>CRIU migration attestations</h1><p><button id="refresh" type="button">Refresh</button> <span id="status">Loading</span></p>
++<details open><summary>Latest request</summary><div id="latest">Loading</div></details>
++<details open><summary>Previous requests</summary><div id="history">Loading</div></details>
++<script>
++function label(key){const names={at:'Time',bodyBase64:'Request body base64',instanceId:'Instance ID',pid:'PID',pcr11:'PCR 11',hostOsReport:'Host OS report',identityBinding:'Identity binding',freshNonce:'Fresh nonce',singleUseNonce:'Single-use nonce',checkpointSha256:'Checkpoint SHA-256'};if(names[key])return names[key];const text=key.replace(/([a-z0-9])([A-Z])/g,'$1 $2').replace(/_/g,' ');return text.charAt(0).toUpperCase()+text.slice(1)}
++function scalar(value){if(value===null||value===undefined)return 'None';if(typeof value==='boolean')return value?'Yes':'No';if(value==='')return 'None';return String(value)}
++function render(name,value,expand){if(value===null||typeof value!=='object'){const content=scalar(value);if(content.length>160){const details=document.createElement('details');const summary=document.createElement('summary');summary.textContent=name+' ('+content.length+' characters)';const pre=document.createElement('pre');pre.textContent=content;details.append(summary,pre);return details}return document.createTextNode(content)}const array=Array.isArray(value);const entries=array?value.map((entry,index)=>[String(index+1),entry]):Object.entries(value);if(!entries.length)return document.createTextNode('None');const details=document.createElement('details');details.open=Boolean(expand);const summary=document.createElement('summary');summary.textContent=name+' ('+entries.length+(array?' items':' fields')+')';const table=document.createElement('table');const body=document.createElement('tbody');for(const [key,entry] of entries){const row=document.createElement('tr');const heading=document.createElement('th');heading.scope='row';heading.textContent=array?'Item '+key:label(key);const cell=document.createElement('td');cell.append(render(array?'Item '+key:label(key),entry,false));row.append(heading,cell);body.append(row)}table.append(body);details.append(summary,table);return details}
++function fields(item){const table=document.createElement('table');const body=document.createElement('tbody');for(const [key,value] of Object.entries(item||{})){const row=document.createElement('tr');const heading=document.createElement('th');heading.scope='row';heading.textContent=label(key);const cell=document.createElement('td');cell.append(render(label(key),value,true));row.append(heading,cell);body.append(row)}table.append(body);return table}
++function raw(item){const details=document.createElement('details');const summary=document.createElement('summary');summary.textContent='Raw JSON';const pre=document.createElement('pre');pre.textContent=JSON.stringify(item,null,2);details.append(summary,pre);return details}
++function summary(item){return (item.at||'Unknown time')+' | '+(item.operation||'Unknown operation')+' | '+((item.attestation&&item.attestation.phase)||(item.authorization&&item.authorization.phase)||'Unknown phase')+' | '+((item.response&&item.response.status)||item.error||'rejected')}
++function entry(item){const details=document.createElement('details');const heading=document.createElement('summary');heading.textContent=summary(item);details.append(heading,fields(item),raw(item));return details}
++async function refresh(){const status=document.getElementById('status');status.textContent='Loading';try{const response=await fetch('/api/state');if(!response.ok)throw new Error(response.statusText);const data=await response.json();const latest=document.getElementById('latest');if(data.latest){latest.replaceChildren(fields(data.latest),raw(data.latest))}else{latest.textContent='No requests'}const history=data.history||[];const previous=data.latest?history.slice(1):history;const container=document.getElementById('history');if(previous.length){container.replaceChildren(...previous.map(entry))}else{container.textContent='No previous requests'}status.textContent=data.latest?'Updated '+data.latest.at:'No requests'}catch(error){status.textContent='Refresh failed: '+error.message}}
++document.getElementById('refresh').onclick=refresh;refresh()
++</script></body></html>`)
++}
++
++func newHTTPHandler(server *migrationServer) http.Handler {
++	mux := http.NewServeMux()
++	mux.HandleFunc("/v1/challenge", server.challengeHandler)
++	mux.HandleFunc("/v1/attestations", server.attestHandler)
++	mux.HandleFunc("/v1/checkpoints/", server.checkpointHandler)
++	mux.HandleFunc("/api/state", server.stateHandler)
++	mux.HandleFunc("/", uiHandler)
++	return mux
++}
++
++func main() {
++	vm1KeyFile := environment("RVA23_MIGRATION_VM1_KEY_FILE", "output/rva23/migration/vm1-ak-public.pem")
++	vm2KeyFile := environment("RVA23_MIGRATION_VM2_KEY_FILE", "output/rva23/migration/vm2-ak-public.pem")
++	vm1Key, err := loadPublicKey(vm1KeyFile)
++	if err != nil {
++		panic(err)
++	}
++	vm2Key, err := loadPublicKey(vm2KeyFile)
++	if err != nil {
++		panic(err)
++	}
++	productionPCR11 := strings.ToLower(os.Getenv("RVA23_MIGRATION_PRODUCTION_PCR11"))
++	if !validDigest(productionPCR11) {
++		panic("RVA23_MIGRATION_PRODUCTION_PCR11 must contain one SHA-256 value")
++	}
++	server := &migrationServer{
++		keys: map[int]*rsa.PublicKey{1: vm1Key, 2: vm2Key}, keyFiles: map[int]string{1: vm1KeyFile, 2: vm2KeyFile}, productionPCR11: productionPCR11,
++		attestationURL: environment("RVA23_MIGRATION_ATTESTATION_URL", "http://127.0.0.1:8080/v1/attest"),
++		checkpointDir:  environment("RVA23_MIGRATION_CHECKPOINT_DIR", "output/rva23/migration/checkpoints"),
++		client:         &http.Client{Timeout: 60 * time.Second}, maxCheckpoint: migration.DefaultMaxCheckpointBytes,
++		now: func() time.Time { return time.Now().UTC() }, nonces: make(map[string]challengeRecord),
++		counters: make(map[string]uint64), checkpoints: make(map[string]migration.CheckpointMetadata), history: make([]requestRecord, 0),
++	}
++	server.quoteVerifier = server.verifyPCR11Quote
++	httpServer := &http.Server{
++		Addr: "127.0.0.1:8083", Handler: newHTTPHandler(server), ReadHeaderTimeout: 5 * time.Second,
++		ReadTimeout: 120 * time.Second, WriteTimeout: 120 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 64 * 1024,
++	}
++	if err := httpServer.ListenAndServe(); err != nil {
++		panic(err)
++	}
++}
+diff --git a/buildroot/qemu/scripts/migration/cmd/migration-server/migration-server_test.go b/buildroot/qemu/scripts/migration/cmd/migration-server/migration-server_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..18e2dd664b2e414b1e0a848eb47900c79a83ce3e
+--- /dev/null
++++ b/buildroot/qemu/scripts/migration/cmd/migration-server/migration-server_test.go
+@@ -0,0 +1,292 @@
++package main
++
++import (
++	"bytes"
++	"crypto"
++	"crypto/rand"
++	"crypto/rsa"
++	"crypto/sha256"
++	"encoding/base64"
++	"encoding/hex"
++	"encoding/json"
++	"fmt"
++	"io"
++	"net/http"
++	"net/http/httptest"
++	"strings"
++	"sync/atomic"
++	"testing"
++	"time"
++
++	migration "rva23/scripts/migration"
++)
++
++type testIdentity struct {
++	private *rsa.PrivateKey
++}
++
++func newTestIdentity(t *testing.T) testIdentity {
++	t.Helper()
++	private, err := rsa.GenerateKey(rand.Reader, 2048)
++	if err != nil {
++		t.Fatal(err)
++	}
++	return testIdentity{private: private}
++}
++
++func (identity testIdentity) sign(t *testing.T, message []byte) string {
++	t.Helper()
++	digest := sha256.Sum256(message)
++	signature, err := rsa.SignPKCS1v15(rand.Reader, identity.private, crypto.SHA256, digest[:])
++	if err != nil {
++		t.Fatal(err)
++	}
++	return base64.RawURLEncoding.EncodeToString(signature)
++}
++
++func newTestServer(t *testing.T, vm1, vm2 testIdentity) (*migrationServer, *httptest.Server, *atomic.Int64) {
++	t.Helper()
++	var reports atomic.Int64
++	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
++		reports.Add(1)
++		writer.Header().Set("Content-Type", "application/json")
++		_, _ = io.WriteString(writer, `{"status":"accepted"}`)
++	}))
++	t.Cleanup(upstream.Close)
++	server := &migrationServer{
++		keys:            map[int]*rsa.PublicKey{1: &vm1.private.PublicKey, 2: &vm2.private.PublicKey},
++		quoteVerifier:   func(userID int, nonce string, evidence migration.Evidence) error { return nil },
++		productionPCR11: strings.Repeat("11", sha256.Size), attestationURL: upstream.URL,
++		checkpointDir: t.TempDir(), client: upstream.Client(), maxCheckpoint: migration.DefaultMaxCheckpointBytes,
++		now:    func() time.Time { return time.Date(2026, 11, 4, 0, 0, 0, 0, time.UTC) },
++		nonces: make(map[string]challengeRecord), counters: make(map[string]uint64),
++		checkpoints: make(map[string]migration.CheckpointMetadata), history: make([]requestRecord, 0),
++	}
++	return server, upstream, &reports
++}
++
++func issueChallenge(t *testing.T, handler http.Handler, instanceID, phase string) string {
++	t.Helper()
++	body, err := json.Marshal(migration.ChallengeRequest{InstanceID: instanceID, Phase: phase})
++	if err != nil {
++		t.Fatal(err)
++	}
++	request := httptest.NewRequest(http.MethodPost, "/v1/challenge", bytes.NewReader(body))
++	response := httptest.NewRecorder()
++	handler.ServeHTTP(response, request)
++	if response.Code != http.StatusOK {
++		t.Fatalf("challenge returned %d: %s", response.Code, response.Body.String())
++	}
++	var challenge migration.ChallengeResponse
++	if err := json.Unmarshal(response.Body.Bytes(), &challenge); err != nil {
++		t.Fatal(err)
++	}
++	return challenge.Nonce
++}
++
++func testAttestation(instanceID, phase, nonce string, counter uint64) migration.AttestationRequest {
++	return migration.AttestationRequest{
++		InstanceID: instanceID, PID: 4242, Counter: counter, Phase: phase, Nonce: nonce,
++		Evidence: migration.Evidence{
++			Report: base64.RawURLEncoding.EncodeToString([]byte(`{"report":true}`)),
++			Nonce:  "attestation-nonce", Token: "attestation-token", PCR11: strings.Repeat("11", sha256.Size),
++			PCR11Quote: "quote", PCR11Signature: "signature", PCR11Selections: "selections",
++		},
++	}
++}
++
++func postAttestation(t *testing.T, handler http.Handler, input migration.AttestationRequest) *httptest.ResponseRecorder {
++	t.Helper()
++	body, err := json.Marshal(input)
++	if err != nil {
++		t.Fatal(err)
++	}
++	request := httptest.NewRequest(http.MethodPost, "/v1/attestations", bytes.NewReader(body))
++	response := httptest.NewRecorder()
++	handler.ServeHTTP(response, request)
++	return response
++}
++
++func signAttestation(t *testing.T, identity testIdentity, input *migration.AttestationRequest) {
++	t.Helper()
++	message, err := migration.AttestationMessage(*input)
++	if err != nil {
++		t.Fatal(err)
++	}
++	input.Signature = identity.sign(t, message)
++}
++
++func TestIdentityBinding(t *testing.T) {
++	vm1 := newTestIdentity(t)
++	vm2 := newTestIdentity(t)
++	server, _, reports := newTestServer(t, vm1, vm2)
++	handler := newHTTPHandler(server)
++	instanceID := strings.Repeat("a", 32)
++	nonce := issueChallenge(t, handler, instanceID, migration.PhaseBefore)
++	input := testAttestation(instanceID, migration.PhaseBefore, nonce, 1)
++	signAttestation(t, vm2, &input)
++	response := postAttestation(t, handler, input)
++	if response.Code != http.StatusForbidden {
++		t.Fatalf("wrong VM key returned %d: %s", response.Code, response.Body.String())
++	}
++	if reports.Load() != 0 {
++		t.Fatal("wrong VM key reached report forwarding")
++	}
++	signAttestation(t, vm1, &input)
++	response = postAttestation(t, handler, input)
++	if response.Code != http.StatusOK {
++		t.Fatalf("enrolled VM1 key returned %d: %s", response.Code, response.Body.String())
++	}
++	var accepted migration.AttestationResponse
++	if err := json.Unmarshal(response.Body.Bytes(), &accepted); err != nil {
++		t.Fatal(err)
++	}
++	if accepted.UserID != 1 {
++		t.Fatalf("before phase mapped to user %d", accepted.UserID)
++	}
++	if reports.Load() != 1 {
++		t.Fatalf("forwarded %d reports", reports.Load())
++	}
++}
++
++func TestNonceReplay(t *testing.T) {
++	vm1 := newTestIdentity(t)
++	vm2 := newTestIdentity(t)
++	server, _, reports := newTestServer(t, vm1, vm2)
++	handler := newHTTPHandler(server)
++	instanceID := strings.Repeat("b", 32)
++	nonce := issueChallenge(t, handler, instanceID, migration.PhaseBefore)
++	input := testAttestation(instanceID, migration.PhaseBefore, nonce, 1)
++	signAttestation(t, vm1, &input)
++	if response := postAttestation(t, handler, input); response.Code != http.StatusOK {
++		t.Fatalf("first request returned %d: %s", response.Code, response.Body.String())
++	}
++	response := postAttestation(t, handler, input)
++	if response.Code != http.StatusForbidden || !strings.Contains(response.Body.String(), "nonce") {
++		t.Fatalf("replay returned %d: %s", response.Code, response.Body.String())
++	}
++	if reports.Load() != 1 {
++		t.Fatalf("replay forwarded another report, total %d", reports.Load())
++	}
++}
++
++func TestWrongPhase(t *testing.T) {
++	vm1 := newTestIdentity(t)
++	vm2 := newTestIdentity(t)
++	server, _, reports := newTestServer(t, vm1, vm2)
++	handler := newHTTPHandler(server)
++	instanceID := strings.Repeat("c", 32)
++	nonce := issueChallenge(t, handler, instanceID, migration.PhaseBefore)
++	input := testAttestation(instanceID, migration.PhaseAfter, nonce, 1)
++	signAttestation(t, vm2, &input)
++	response := postAttestation(t, handler, input)
++	if response.Code != http.StatusForbidden || !strings.Contains(response.Body.String(), "bound to another request") {
++		t.Fatalf("wrong phase returned %d: %s", response.Code, response.Body.String())
++	}
++	if reports.Load() != 0 {
++		t.Fatal("wrong phase reached report forwarding")
++	}
++	afterNonce := issueChallenge(t, handler, instanceID, migration.PhaseAfter)
++	afterInput := testAttestation(instanceID, migration.PhaseAfter, afterNonce, 2)
++	signAttestation(t, vm1, &afterInput)
++	response = postAttestation(t, handler, afterInput)
++	if response.Code != http.StatusForbidden || !strings.Contains(response.Body.String(), "enrolled identity") {
++		t.Fatalf("after phase accepted VM1 key with %d: %s", response.Code, response.Body.String())
++	}
++}
++
++func signedCheckpointRequest(t *testing.T, handler http.Handler, identity testIdentity, method, path string, input migration.CheckpointAuthorization, body []byte) *httptest.ResponseRecorder {
++	t.Helper()
++	message, err := migration.CheckpointMessage(input)
++	if err != nil {
++		t.Fatal(err)
++	}
++	signature := identity.sign(t, message)
++	request := httptest.NewRequest(method, path, bytes.NewReader(body))
++	request.Header.Set("X-Migration-Action", input.Action)
++	request.Header.Set("X-Migration-Instance-ID", input.InstanceID)
++	request.Header.Set("X-Migration-PID", fmt.Sprint(input.PID))
++	request.Header.Set("X-Migration-Counter", fmt.Sprint(input.Counter))
++	request.Header.Set("X-Migration-Phase", input.Phase)
++	request.Header.Set("X-Migration-Nonce", input.Nonce)
++	request.Header.Set("X-Migration-Checkpoint-SHA256", input.CheckpointSHA256)
++	request.Header.Set("X-Migration-Checkpoint-Size", fmt.Sprint(input.CheckpointSize))
++	request.Header.Set("X-Migration-Signature", signature)
++	response := httptest.NewRecorder()
++	handler.ServeHTTP(response, request)
++	return response
++}
++
++func TestCheckpointUploadDownload(t *testing.T) {
++	vm1 := newTestIdentity(t)
++	vm2 := newTestIdentity(t)
++	server, _, _ := newTestServer(t, vm1, vm2)
++	handler := newHTTPHandler(server)
++	instanceID := strings.Repeat("d", 32)
++	archive := []byte("checkpoint archive bytes")
++	digest := sha256.Sum256(archive)
++	upload := migration.CheckpointAuthorization{
++		Action: migration.ActionUpload, InstanceID: instanceID, PID: 4242, Counter: 1,
++		Phase: migration.PhaseBefore, Nonce: issueChallenge(t, handler, instanceID, migration.PhaseBefore),
++		CheckpointSHA256: hex.EncodeToString(digest[:]), CheckpointSize: int64(len(archive)),
++	}
++	response := signedCheckpointRequest(t, handler, vm1, http.MethodPut, "/v1/checkpoints/"+instanceID, upload, archive)
++	if response.Code != http.StatusCreated {
++		t.Fatalf("upload returned %d: %s", response.Code, response.Body.String())
++	}
++	download := migration.CheckpointAuthorization{
++		Action: migration.ActionDownload, InstanceID: instanceID, PID: 4242, Counter: 2,
++		Phase: migration.PhaseAfter, Nonce: issueChallenge(t, handler, instanceID, migration.PhaseAfter),
++	}
++	response = signedCheckpointRequest(t, handler, vm2, http.MethodPost, "/v1/checkpoints/"+instanceID+"/download", download, nil)
++	if response.Code != http.StatusOK {
++		t.Fatalf("download returned %d: %s", response.Code, response.Body.String())
++	}
++	if !bytes.Equal(response.Body.Bytes(), archive) {
++		t.Fatal("download changed checkpoint bytes")
++	}
++	if response.Header().Get("X-Checkpoint-SHA256") != upload.CheckpointSHA256 {
++		t.Fatal("download returned the wrong digest")
++	}
++}
++
++func TestInvalidCheckpointPaths(t *testing.T) {
++	vm1 := newTestIdentity(t)
++	vm2 := newTestIdentity(t)
++	server, _, _ := newTestServer(t, vm1, vm2)
++	handler := newHTTPHandler(server)
++	paths := []string{
++		"/v1/checkpoints/%2e%2e/escape",
++		"/v1/checkpoints/" + strings.Repeat("e", 32) + "/escape",
++		"/v1/checkpoints/" + strings.Repeat("E", 32),
++		"/v1/checkpoints/not-an-instance",
++	}
++	for _, path := range paths {
++		request := httptest.NewRequest(http.MethodPut, path, strings.NewReader("data"))
++		response := httptest.NewRecorder()
++		handler.ServeHTTP(response, request)
++		if response.Code != http.StatusBadRequest {
++			t.Fatalf("path %q returned %d: %s", path, response.Code, response.Body.String())
++		}
++	}
++}
++
++func TestCheckpointLimit(t *testing.T) {
++	vm1 := newTestIdentity(t)
++	vm2 := newTestIdentity(t)
++	server, _, _ := newTestServer(t, vm1, vm2)
++	server.maxCheckpoint = 4
++	handler := newHTTPHandler(server)
++	instanceID := strings.Repeat("f", 32)
++	archive := []byte("12345")
++	digest := sha256.Sum256(archive)
++	upload := migration.CheckpointAuthorization{
++		Action: migration.ActionUpload, InstanceID: instanceID, PID: 4242, Counter: 1,
++		Phase: migration.PhaseBefore, Nonce: issueChallenge(t, handler, instanceID, migration.PhaseBefore),
++		CheckpointSHA256: hex.EncodeToString(digest[:]), CheckpointSize: int64(len(archive)),
++	}
++	response := signedCheckpointRequest(t, handler, vm1, http.MethodPut, "/v1/checkpoints/"+instanceID, upload, archive)
++	if response.Code != http.StatusBadRequest || !strings.Contains(response.Body.String(), "size") {
++		t.Fatalf("oversized upload returned %d: %s", response.Code, response.Body.String())
++	}
++}
+diff --git a/buildroot/qemu/scripts/migration/go.mod b/buildroot/qemu/scripts/migration/go.mod
+new file mode 100644
+index 0000000000000000000000000000000000000000..6d721cb6b0d2fd67e8cef710c130c4559ab3b1a9
+--- /dev/null
++++ b/buildroot/qemu/scripts/migration/go.mod
+@@ -0,0 +1,3 @@
++module rva23/scripts/migration
++
++go 1.26
+diff --git a/buildroot/qemu/scripts/migration/protocol.go b/buildroot/qemu/scripts/migration/protocol.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..91eb688beedf0150bff0099ce5c82bf83b46fc3e
+--- /dev/null
++++ b/buildroot/qemu/scripts/migration/protocol.go
+@@ -0,0 +1,180 @@
++package migration
++
++import (
++	"crypto/sha256"
++	"encoding/base64"
++	"encoding/hex"
++	"encoding/json"
++	"errors"
++	"strings"
++	"time"
++)
++
++const (
++	ProtocolVersion = "rva23-migration/v1"
++	PhaseBefore     = "before"
++	PhaseAfter      = "after"
++	ActionUpload    = "checkpoint-upload"
++	ActionDownload  = "checkpoint-download"
++)
++
++type ChallengeRequest struct {
++	InstanceID string `json:"instanceId"`
++	Phase      string `json:"phase"`
++}
++
++type ChallengeResponse struct {
++	Nonce     string    `json:"nonce"`
++	ExpiresAt time.Time `json:"expiresAt"`
++}
++
++type Evidence struct {
++	Report          string `json:"report"`
++	Nonce           string `json:"nonce"`
++	Token           string `json:"token"`
++	PCR11           string `json:"pcr11"`
++	PCR11Quote      string `json:"pcr11Quote"`
++	PCR11Signature  string `json:"pcr11Signature"`
++	PCR11Selections string `json:"pcr11Selections"`
++}
++
++type AttestationRequest struct {
++	InstanceID string   `json:"instanceId"`
++	PID        int      `json:"pid"`
++	Counter    uint64   `json:"counter"`
++	Phase      string   `json:"phase"`
++	Nonce      string   `json:"nonce"`
++	Evidence   Evidence `json:"evidence"`
++	Signature  string   `json:"signature"`
++}
++
++type AttestationResponse struct {
++	Status     string `json:"status"`
++	UserID     int    `json:"userId"`
++	InstanceID string `json:"instanceId"`
++	PID        int    `json:"pid"`
++	Counter    uint64 `json:"counter"`
++	Phase      string `json:"phase"`
++}
++
++type CheckpointAuthorization struct {
++	Action           string `json:"action"`
++	InstanceID       string `json:"instanceId"`
++	PID              int    `json:"pid"`
++	Counter          uint64 `json:"counter"`
++	Phase            string `json:"phase"`
++	Nonce            string `json:"nonce"`
++	CheckpointSHA256 string `json:"checkpointSha256"`
++	CheckpointSize   int64  `json:"checkpointSize"`
++}
++
++type CheckpointMetadata struct {
++	InstanceID string    `json:"instanceId"`
++	SHA256     string    `json:"sha256"`
++	Size       int64     `json:"size"`
++	UploadedAt time.Time `json:"uploadedAt"`
++}
++
++type attestationMessage struct {
++	Protocol         string `json:"protocol"`
++	InstanceID       string `json:"instanceId"`
++	PID              int    `json:"pid"`
++	Counter          uint64 `json:"counter"`
++	Phase            string `json:"phase"`
++	Nonce            string `json:"nonce"`
++	AttestationNonce string `json:"attestationNonce"`
++	AttestationToken string `json:"attestationToken"`
++	ReportSHA256     string `json:"reportSha256"`
++	PCR11            string `json:"pcr11"`
++}
++
++type checkpointMessage struct {
++	Protocol         string `json:"protocol"`
++	Action           string `json:"action"`
++	InstanceID       string `json:"instanceId"`
++	PID              int    `json:"pid"`
++	Counter          uint64 `json:"counter"`
++	Phase            string `json:"phase"`
++	Nonce            string `json:"nonce"`
++	CheckpointSHA256 string `json:"checkpointSha256"`
++	CheckpointSize   int64  `json:"checkpointSize"`
++}
++
++func ValidatePhase(phase string) error {
++	if phase != PhaseBefore && phase != PhaseAfter {
++		return errors.New("phase must be before or after")
++	}
++	return nil
++}
++
++func ValidateInstanceID(instanceID string) error {
++	decoded, err := hex.DecodeString(instanceID)
++	if err != nil || len(decoded) != 16 || strings.ToLower(instanceID) != instanceID {
++		return errors.New("instance ID must contain 32 lowercase hexadecimal characters")
++	}
++	return nil
++}
++
++func ExpectedUserID(phase string) (int, error) {
++	switch phase {
++	case PhaseBefore:
++		return 1, nil
++	case PhaseAfter:
++		return 2, nil
++	default:
++		return 0, errors.New("phase must be before or after")
++	}
++}
++
++func ExpectedCheckpointPhase(action string) (string, error) {
++	switch action {
++	case ActionUpload:
++		return PhaseBefore, nil
++	case ActionDownload:
++		return PhaseAfter, nil
++	default:
++		return "", errors.New("unknown checkpoint action")
++	}
++}
++
++func AttestationMessage(input AttestationRequest) ([]byte, error) {
++	report, err := base64.RawURLEncoding.DecodeString(input.Evidence.Report)
++	if err != nil || len(report) == 0 {
++		return nil, errors.New("invalid OS report encoding")
++	}
++	digest := sha256.Sum256(report)
++	return json.Marshal(attestationMessage{
++		Protocol:         ProtocolVersion,
++		InstanceID:       input.InstanceID,
++		PID:              input.PID,
++		Counter:          input.Counter,
++		Phase:            input.Phase,
++		Nonce:            input.Nonce,
++		AttestationNonce: input.Evidence.Nonce,
++		AttestationToken: input.Evidence.Token,
++		ReportSHA256:     hex.EncodeToString(digest[:]),
++		PCR11:            strings.ToLower(input.Evidence.PCR11),
++	})
++}
++
++func CheckpointMessage(input CheckpointAuthorization) ([]byte, error) {
++	return json.Marshal(checkpointMessage{
++		Protocol:         ProtocolVersion,
++		Action:           input.Action,
++		InstanceID:       input.InstanceID,
++		PID:              input.PID,
++		Counter:          input.Counter,
++		Phase:            input.Phase,
++		Nonce:            input.Nonce,
++		CheckpointSHA256: input.CheckpointSHA256,
++		CheckpointSize:   input.CheckpointSize,
++	})
++}
++
++func DecodeSignature(encoded string) ([]byte, error) {
++	signature, err := base64.RawURLEncoding.DecodeString(encoded)
++	if err != nil || len(signature) == 0 {
++		return nil, errors.New("invalid AK signature encoding")
++	}
++	return signature, nil
++}
+diff --git a/buildroot/qemu/scripts/verify-migration.py b/buildroot/qemu/scripts/verify-migration.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..ac4ff7e10321486abd30c71f48f66731ccb122bd
+--- /dev/null
++++ b/buildroot/qemu/scripts/verify-migration.py
+@@ -0,0 +1,226 @@
++#!/usr/bin/env python3
++import base64
++import hashlib
++import importlib.util
++import json
++import os
++from pathlib import Path
++import re
++import secrets
++import shutil
++import subprocess
++import sys
++import time
++import urllib.request
++
++from verify_boot import Console
++
++
++spec = importlib.util.spec_from_file_location("wallet", Path(__file__).with_name("verify-wallet.py"))
++wallet = importlib.util.module_from_spec(spec)
++spec.loader.exec_module(wallet)
++predict_profile = wallet.predict_profile
++
++
++def copy_disk(source, destination):
++    subprocess.run(["cp", "--reflink=auto", "--sparse=always", source, destination], check=True)
++
++
++def copy_guest_file(console, source, destination):
++    text = console.capture(f"printf '__BEGIN__\\n'; base64 {source}; printf '__END__\\n'", 120)
++    match = re.search(r"__BEGIN__\r?\n(.*?)\r?\n__END__", text, re.DOTALL)
++    assert match, text[-2000:]
++    destination.write_bytes(base64.b64decode(re.sub(r"\s", "", match.group(1))))
++
++
++def login(console):
++    console.expect(b"rva23 login:", 600)
++    console.sendline("root")
++    console.expect(b"# ", 30)
++    console.command("systemctl is-active --quiet --wait graphical.target")
++    console.command("systemctl start systemd-pcrlock.socket")
++    console.command("systemctl restart systemd-report-sign-tpm2.socket")
++    console.command("sleep 2")
++
++
++def start_receiver(output):
++    receiver_dir = output / "host-attestation"
++    public_key = (receiver_dir / "public-key.pem").read_bytes()
++    token_path = receiver_dir / "migration-token.json"
++    token_path.write_text(json.dumps({"keyId": hashlib.sha256(public_key).hexdigest(), "secret": base64.b64encode(secrets.token_bytes(32)).decode()}) + "\n")
++    token_path.chmod(0o600)
++    subprocess.run(["go", "build", "-o", receiver_dir / "report-receiver", "scripts/report-receiver.go"], check=True)
++    environment = os.environ.copy()
++    environment["RVA23_TOKEN_FILE"] = str(token_path)
++    environment["RVA23_ATTESTATION_DIR"] = str(receiver_dir)
++    receiver = subprocess.Popen([receiver_dir / "report-receiver"], stdout=(receiver_dir / "migration-receiver.log").open("w"), stderr=subprocess.STDOUT, env=environment)
++    wait_http("http://127.0.0.1:8080/api/state")
++    return receiver
++
++
++def start_migration_server(output, production_pcr11):
++    directory = output / "migration"
++    subprocess.run(["go", "build", "-o", directory / "migration-server", "./cmd/migration-server"], check=True, cwd=Path("scripts/migration"))
++    environment = os.environ.copy()
++    environment["RVA23_MIGRATION_VM1_KEY_FILE"] = str(directory / "vm1-ak-public.pem")
++    environment["RVA23_MIGRATION_VM2_KEY_FILE"] = str(directory / "vm2-ak-public.pem")
++    environment["RVA23_MIGRATION_PRODUCTION_PCR11"] = production_pcr11
++    environment["RVA23_MIGRATION_CHECKPOINT_DIR"] = str(directory / "checkpoints")
++    environment["RVA23_MIGRATION_ATTESTATION_URL"] = "http://127.0.0.1:8080/v1/attest"
++    server = subprocess.Popen([directory / "migration-server"], stdout=(directory / "migration-server.log").open("w"), stderr=subprocess.STDOUT, env=environment)
++    wait_http("http://127.0.0.1:8083/api/state")
++    if server.poll() is not None:
++        raise RuntimeError("migration server exited during startup")
++    if read_state("http://127.0.0.1:8083/api/state")["history"]:
++        raise RuntimeError("migration server returned stale request history")
++    return server
++
++
++def wait_http(url):
++    last_error = None
++    for _ in range(100):
++        try:
++            with urllib.request.urlopen(url, timeout=1) as response:
++                if response.status == 200:
++                    return
++        except Exception as error:
++            last_error = error
++        time.sleep(0.1)
++    raise RuntimeError(f"HTTP service did not start: {url}: {last_error}")
++
++
++def prepare_images(output):
++    images = output / "images"
++    directory = output / "migration"
++    directory.mkdir(exist_ok=True)
++    environment = os.environ.copy()
++    environment.update({
++        "BINARIES_DIR": str(images), "TARGET_DIR": str(output / "target"),
++        "HOST_DIR": str(output / "host"), "RVA23_KEY_DIR": str(Path("../buildroot-qemu-keys").resolve()),
++    })
++    with (output / "migration" / "build.log").open("w") as log:
++        subprocess.run(["python3", "scripts/build-os-images.py"], check=True, env=environment, stdout=log, stderr=subprocess.STDOUT)
++    subprocess.run([
++        output / "host/bin/genimage", "--rootpath", output / "target", "--inputpath", images,
++        "--outputpath", images, "--config", Path("board/rva23-qemu/genimage.cfg").resolve(),
++    ], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
++    environment = os.environ.copy()
++    environment["BINARIES_DIR"] = str(images)
++    subprocess.run(["python3", "scripts/finalize-disk.py"], check=True, env=environment, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
++    loader = output / "migration" / "loader.conf"
++    loader.write_text("default rva23-debug_1.efi\ntimeout 0\neditor no\n")
++    subprocess.run([output / "host/bin/mcopy", "-o", "-i", images / "efi-part.vfat", loader, "::/loader/loader.conf"], check=True)
++    initial = output / "build/edk2-edk2-stable202602/Build/RiscVVirtQemu/RELEASE_GCC5/FV/RISCV_VIRT_VARS.fd"
++    variables = images / "RISCV_VIRT_VARS.fd"
++    shutil.copyfile(initial, variables)
++    variables.write_bytes(variables.read_bytes().ljust(32 * 1024 * 1024, b"\0"))
++    directory = output / "migration"
++    directory.mkdir(exist_ok=True)
++    for name in ("vm1", "vm2"):
++        copy_disk(images / "disk.img", directory / f"{name}.img")
++        shutil.copyfile(variables, directory / f"{name}-vars.fd")
++
++
++def vm_console(output, name, host_port):
++    directory = output / "migration"
++    os.environ["RVA23_DISK"] = str(directory / f"{name}.img")
++    os.environ["RVA23_EDK2_VARS"] = str(directory / f"{name}-vars.fd")
++    os.environ["RVA23_TPM_STATE"] = str(directory / f"{name}-swtpm")
++    os.environ["RVA23_UI_HOST_PORT"] = str(host_port)
++    os.environ["QEMU"] = str(output / "build/host-qemu-11.0.0/build/qemu-system-riscv64")
++    return Console(output, f"migration-{name}.log", firmware=True)
++
++
++def enroll(console, output, name):
++    login(console)
++    console.command("bootctl set-default rva23-debug_1.efi")
++    console.sendline("reboot")
++    login(console)
++    console.command("attested-client", 300)
++    console.command("tpm2_readpublic -c /var/lib/systemd/report.sign.tpm2/ak.ctx -f pem -o /tmp/ak-public.pem")
++    copy_guest_file(console, "/tmp/ak-public.pem", output / "migration" / f"{name}-ak-public.pem")
++    console.command("criu check", 300)
++
++
++def start_workload(console):
++    output = console.capture("migration-client serve </dev/null >/tmp/migration-client.log 2>&1 & printf '%s\\n' $!")
++    match = re.search(r"(?:^|\r?\n)(\d+)\r?\n", output)
++    assert match, output[-2000:]
++    wait_http("http://127.0.0.1:18084/api/state")
++    return int(match.group(1))
++
++
++def read_state(url):
++    with urllib.request.urlopen(url, timeout=5) as response:
++        return json.load(response)
++
++
++def main():
++    output = Path(sys.argv[1]).resolve()
++    directory = output / "migration"
++    keep = os.environ.get("RVA23_MIGRATION_KEEP_SERVICES") == "1"
++    succeeded = False
++    prepare_images(output)
++    receiver = start_receiver(output)
++    server = None
++    first = None
++    second = None
++    try:
++        first = vm_console(output, "vm1", 18084)
++        enroll(first, output, "vm1")
++        second = vm_console(output, "vm2", 18085)
++        enroll(second, output, "vm2")
++        development = predict_profile(output, "rva23-debug_1.efi")
++        server = start_migration_server(output, development)
++        pid = start_workload(first)
++        first.command("migration-client attest -phase before", 300)
++        state = read_state("http://127.0.0.1:18084/api/state")
++        assert state["pid"] == pid
++        instance = state["instanceId"]
++        first.command("rm -rf /tmp/criu-dump /tmp/migration.tar.gz; mkdir -p /tmp/criu-dump")
++        first.command(f"CRIU_FAULT=129 criu dump -t {pid} -D /tmp/criu-dump --shell-job --tcp-close", 300)
++        first.command("migration-client archive -source /tmp/criu-dump -output /tmp/migration.tar.gz", 300)
++        first.command("migration-client upload -archive /tmp/migration.tar.gz", 300)
++        copy_guest_file(first, "/var/lib/rva23-migration/state.json", directory / "state.json")
++        first.sendline("poweroff")
++        first.process.wait(timeout=90)
++        first.close()
++        first = None
++        encoded_state = base64.b64encode((directory / "state.json").read_bytes()).decode()
++        second.command(f"mkdir -p /var/lib/rva23-migration; printf '%s' '{encoded_state}' | base64 -d > /var/lib/rva23-migration/state.json")
++        second.command("migration-client download -output /tmp/migration.tar.gz", 300)
++        second.command("rm -rf /tmp/criu-restore; migration-client extract -archive /tmp/migration.tar.gz -destination /tmp/criu-restore", 300)
++        second.command("touch /tmp/migration-client.log")
++        second.command("criu restore -D /tmp/criu-restore --shell-job --tcp-close -d", 300)
++        second.command("migration-client attest -phase after", 300)
++        restored = read_state("http://127.0.0.1:18085/api/state")
++        assert restored["pid"] == pid
++        assert restored["instanceId"] == instance
++        history = read_state("http://127.0.0.1:8083/api/state")["history"]
++        accepted = [item for item in history if item["operation"] == "attestation" and item.get("response", {}).get("status") == "accepted"]
++        assert [item["response"]["userId"] for item in accepted] == [2, 1]
++        for item in accepted:
++            assert item["attestation"]["instanceId"] == instance, (instance, item["attestation"]["instanceId"])
++            assert item["attestation"]["pid"] == pid, (pid, item["attestation"]["pid"])
++            assert item["validation"]["identityBinding"] in {"accepted for user 1", "accepted for user 2"}
++            assert item["validation"]["pcr11Quote"] == "accepted"
++            assert item["validation"]["hostOsReport"] == "accepted"
++        assert accepted[1]["response"]["counter"] < accepted[0]["response"]["counter"]
++        print("PASS: CRIU preserves instance ID and PID while the enrolled AK changes from user 1 to user 2", flush=True)
++        print("PASS: PCR 11 quotes, signed checkpoints, monotonic counters, and both migration UIs validate", flush=True)
++        succeeded = True
++    finally:
++        if first is not None:
++            first.close()
++        if second is not None and (not keep or not succeeded):
++            second.close()
++        if not keep or not succeeded:
++            receiver.terminate()
++            receiver.wait(timeout=15)
++            if server is not None:
++                server.terminate()
++                server.wait(timeout=15)
++
++
++if __name__ == "__main__":
++    main()
+
