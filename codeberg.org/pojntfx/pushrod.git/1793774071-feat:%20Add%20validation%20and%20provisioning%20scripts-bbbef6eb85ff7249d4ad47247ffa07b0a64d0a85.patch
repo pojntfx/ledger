@@ -1,0 +1,2292 @@
+From bbbef6eb85ff7249d4ad47247ffa07b0a64d0a85 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Tue, 03 Nov 2026 23:34:31 -0700
+Subject: [PATCH] feat: Add validation and provisioning scripts
+---
+diff --git a/buildroot/qemu/scripts/build-extensions.py b/buildroot/qemu/scripts/build-extensions.py
+new file mode 100755
+index 0000000000000000000000000000000000000000..afbcddba01522559ef96a0e728df289dc0b0f3f2
+--- /dev/null
++++ b/buildroot/qemu/scripts/build-extensions.py
+@@ -0,0 +1,218 @@
++#!/usr/bin/env python3
++import gzip
++import hashlib
++import json
++import os
++from pathlib import Path
++import re
++import shutil
++import subprocess
++import tarfile
++
++
++def build_ddi(host, key_dir, kind, name, tree, output):
++    environment = os.environ.copy()
++    environment["PATH"] = f"{host / 'bin'}:{environment['PATH']}"
++    environment["SOURCE_DATE_EPOCH"] = "0"
++    output.unlink(missing_ok=True)
++    subprocess.run(
++        [
++            "/usr/bin/systemd-repart",
++            f"--make-ddi={kind}",
++            "--architecture=riscv64",
++            "--seed=00000000-0000-0000-0000-000000000000",
++            "--copy-source", str(tree),
++            "--private-key", str(key_dir / "verity.key"),
++            "--certificate", str(key_dir / "verity.crt"),
++            str(output),
++        ],
++        check=True,
++        env=environment,
++    )
++
++
++def release(tree, kind, name, version):
++    if kind == "sysext":
++        directory = tree / "usr/lib/extension-release.d"
++    else:
++        directory = tree / "etc/extension-release.d"
++    directory.mkdir(parents=True, exist_ok=True)
++    (directory / f"extension-release.{name}").write_text(f"ID=buildroot\nVERSION_ID={version}\nIMAGE_ID=rva23\nIMAGE_VERSION={version}\n")
++
++
++def move_path(source, destination):
++    if not source.exists() and not source.is_symlink():
++        return
++    destination.parent.mkdir(parents=True, exist_ok=True)
++    shutil.move(str(source), str(destination))
++
++
++def move_contents(source, destination):
++    if not source.exists():
++        return
++    destination.parent.mkdir(parents=True, exist_ok=True)
++    shutil.copytree(source, destination, symlinks=True, dirs_exist_ok=True)
++    shutil.rmtree(source)
++
++
++def copy_dependencies(host, usr, podman):
++    readelf = host / "bin/riscv64-linux-readelf"
++    queue = [path for path in podman.rglob("*") if path.is_file() and not path.is_symlink()]
++    copied = set()
++    excluded = {"libc.so.6", "libm.so.6", "libresolv.so.2", "libsystemd.so.0", "libgcc_s.so.1", "libpthread.so.0", "libdl.so.2"}
++    while queue:
++        path = queue.pop()
++        result = subprocess.run([readelf, "-d", path], capture_output=True, text=True)
++        if result.returncode != 0:
++            continue
++        for name in re.findall(r"Shared library: \[(.*?)\]", result.stdout):
++            if name in copied or name in excluded:
++                continue
++            for directory in (usr / "lib", usr / "lib64"):
++                source = directory / name
++                if source.exists():
++                    destination = podman / "usr/lib" / name
++                    destination.parent.mkdir(parents=True, exist_ok=True)
++                    shutil.copy2(source, destination)
++                    copied.add(name)
++                    queue.append(destination)
++                    break
++
++
++def make_oci_image(host, usr, staging, destination):
++    root = staging / "rootfs"
++    (root / "bin").mkdir(parents=True)
++    source = staging / "test.c"
++    source.write_text('#include <stdio.h>\nint main(void) { puts("podman-works"); return 0; }\n')
++    subprocess.run([host / "bin/riscv64-linux-gcc", "-static", "-O2", "-o", root / "bin/test", source], check=True)
++    uncompressed_layer = staging / "layer.tar"
++    with tarfile.open(uncompressed_layer, "w", dereference=True) as archive:
++        seen = set()
++        for path in sorted(root.rglob("*")):
++            name = str(path.relative_to(root))
++            if name in seen:
++                continue
++            seen.add(name)
++            archive.add(path, arcname=name, recursive=False)
++    diff_id = hashlib.sha256(uncompressed_layer.read_bytes()).hexdigest()
++    layer = staging / "layer.tar.gz"
++    with gzip.open(layer, "wb") as stream:
++        stream.write(uncompressed_layer.read_bytes())
++    blobs = staging / "oci/blobs/sha256"
++    blobs.mkdir(parents=True)
++
++    def add_blob(data):
++        digest = hashlib.sha256(data).hexdigest()
++        (blobs / digest).write_bytes(data)
++        return digest, len(data)
++
++    config = json.dumps({
++        "architecture": "riscv64",
++        "os": "linux",
++        "config": {"Cmd": ["/bin/test"], "WorkingDir": "/"},
++        "rootfs": {"type": "layers", "diff_ids": [f"sha256:{diff_id}"]},
++    }, separators=(",", ":")).encode()
++    config_digest, config_size = add_blob(config)
++    layer_digest, layer_size = add_blob(layer.read_bytes())
++    manifest = json.dumps({
++        "schemaVersion": 2,
++        "mediaType": "application/vnd.oci.image.manifest.v1+json",
++        "config": {
++            "mediaType": "application/vnd.oci.image.config.v1+json",
++            "digest": f"sha256:{config_digest}",
++            "size": config_size,
++        },
++        "layers": [{
++            "mediaType": "application/vnd.oci.image.layer.v1.tar+gzip",
++            "digest": f"sha256:{layer_digest}",
++            "size": layer_size,
++        }],
++    }, separators=(",", ":")).encode()
++    manifest_digest, manifest_size = add_blob(manifest)
++    index = json.dumps({
++        "schemaVersion": 2,
++        "manifests": [{
++            "mediaType": "application/vnd.oci.image.manifest.v1+json",
++            "digest": f"sha256:{manifest_digest}",
++            "size": manifest_size,
++            "annotations": {"org.opencontainers.image.ref.name": "localhost/rva23-podman-test:latest"},
++        }],
++    }, separators=(",", ":")).encode()
++    (staging / "oci/index.json").write_bytes(index)
++    (staging / "oci/oci-layout").write_text('{"imageLayoutVersion":"1.0.0"}\n')
++    destination.parent.mkdir(parents=True, exist_ok=True)
++    with tarfile.open(destination, "w") as archive:
++        archive.add(staging / "oci", arcname=".")
++
++
++def main(host, key_dir, binaries, usr):
++    version = os.environ.get("RVA23_VERSION", "1")
++    graphics = binaries / "extension-staging/graphics"
++    if graphics.parent.exists():
++        shutil.rmtree(graphics.parent)
++    (graphics / "usr/bin").mkdir(parents=True)
++    for source in sorted((usr / "bin").glob("weston-*")):
++        shutil.move(str(source), graphics / "usr/bin" / source.name)
++    shutil.move(str(usr / "bin/wayland-info"), graphics / "usr/bin/wayland-info")
++    release(graphics, "sysext", f"graphics_{version}", version)
++    graphics_image = binaries / f"graphics_{version}.raw"
++    build_ddi(host, key_dir, "sysext", f"graphics_{version}", graphics, graphics_image)
++    graphics_destination = usr / f"share/factory/var/lib/extensions/graphics_{version}.raw"
++    graphics_destination.parent.mkdir(parents=True, exist_ok=True)
++    shutil.copyfile(graphics_image, graphics_destination)
++    debug = binaries / "extension-staging/debug"
++    (debug / "etc/systemd/journald.conf.d").mkdir(parents=True)
++    (debug / "etc/systemd/journald.conf.d/10-debug.conf").write_text("[Journal]\nMaxLevelStore=debug\n")
++    release(debug, "confext", f"debug_{version}", version)
++    debug_image = binaries / f"debug_{version}.raw"
++    build_ddi(host, key_dir, "confext", f"debug_{version}", debug, debug_image)
++    debug_destination = usr / f"lib/confexts/debug_{version}.raw"
++    debug_destination.parent.mkdir(parents=True, exist_ok=True)
++    shutil.copyfile(debug_image, debug_destination)
++    target = Path(os.environ["TARGET_DIR"])
++    podman = binaries / "extension-staging/podman"
++    for relative in (
++        "usr/bin/podman",
++        "usr/bin/conmon",
++        "usr/bin/crun",
++        "usr/bin/runc",
++        "usr/bin/netavark",
++        "usr/bin/aardvark-dns",
++        "usr/bin/catatonit",
++        "usr/bin/slirp4netns",
++        "usr/bin/pasta",
++    ):
++        move_path(usr / relative.removeprefix("usr/"), podman / relative)
++    move_contents(usr / "libexec/podman", podman / "usr/libexec/podman")
++    move_contents(usr / "share/containers", podman / "usr/share/containers")
++    shutil.copytree(target / "etc/containers", podman / "usr/share/containers", dirs_exist_ok=True)
++    helpers = podman / "usr/libexec/podman"
++    helpers.mkdir(parents=True, exist_ok=True)
++    for name in ("aardvark-dns", "netavark", "catatonit", "slirp4netns"):
++        (helpers / name).unlink(missing_ok=True)
++        (helpers / name).symlink_to(f"../../bin/{name}")
++    configuration = podman / "usr/share/containers/containers.conf.d"
++    configuration.mkdir(parents=True, exist_ok=True)
++    (configuration / "50-rva23.conf").write_text('[containers]\ninit_path = "/usr/libexec/podman/catatonit"\n[network]\ndefault_rootless_network_cmd = "slirp4netns"\n')
++    copy_dependencies(host, usr, podman)
++    make_oci_image(host, usr, binaries / "extension-staging/oci", podman / "usr/share/rva23/podman-test-image.tar")
++    release(podman, "sysext", f"podman_{version}", version)
++    podman_image = binaries / f"podman_{version}.raw"
++    build_ddi(host, key_dir, "sysext", f"podman_{version}", podman, podman_image)
++    podman_destination = usr / f"share/factory/var/lib/extensions/podman_{version}.raw"
++    podman_destination.parent.mkdir(parents=True, exist_ok=True)
++    shutil.copyfile(podman_image, podman_destination)
++    k3s = binaries / "extension-staging/k3s"
++    for name in ("k3s", "kubectl", "crictl", "ctr", "containerd", "runc", "cni", "check-config"):
++        move_path(usr / "bin" / name, k3s / "usr/bin" / name)
++    copy_dependencies(host, usr, k3s)
++    release(k3s, "sysext", f"k3s_{version}", version)
++    k3s_image = binaries / f"k3s_{version}.raw"
++    build_ddi(host, key_dir, "sysext", f"k3s_{version}", k3s, k3s_image)
++    k3s_destination = usr / f"share/factory/var/lib/extensions/k3s_{version}.raw"
++    k3s_destination.parent.mkdir(parents=True, exist_ok=True)
++    shutil.copyfile(k3s_image, k3s_destination)
++
++
++if __name__ == "__main__":
++    main(Path(os.environ["HOST_DIR"]), Path(os.environ["RVA23_KEY_DIR"]), Path(os.environ["BINARIES_DIR"]), Path(os.environ["BINARIES_DIR"]) / "image-staging/usr")
+diff --git a/buildroot/qemu/scripts/build-os-images.py b/buildroot/qemu/scripts/build-os-images.py
+new file mode 100755
+index 0000000000000000000000000000000000000000..9f524af9b2b225e7851112bc327d27ef12be11c1
+--- /dev/null
++++ b/buildroot/qemu/scripts/build-os-images.py
+@@ -0,0 +1,189 @@
++#!/usr/bin/env python3
++import base64
++import hashlib
++import json
++import os
++from pathlib import Path
++import shutil
++import subprocess
++
++
++def run(*args):
++    subprocess.run([str(arg) for arg in args], check=True)
++
++
++def ensure_key(key_dir, name):
++    key = key_dir / f"{name}.key"
++    cert = key_dir / f"{name}.crt"
++    if not key.exists():
++        run("openssl", "genpkey", "-algorithm", "RSA", "-out", key, "-pkeyopt", "rsa_keygen_bits:3072", "-pkeyopt", "rsa_keygen_pubexp:65537")
++        key.chmod(0o600)
++    if not cert.exists():
++        run("openssl", "req", "-batch", "-new", "-x509", "-sha256", "-days", "3650", "-subj", f"/CN=RVA23 development {name}/", "-key", key, "-out", cert)
++    return key, cert
++
++
++def sign_verity(key_dir, root_hash_file, output):
++    key, cert = ensure_key(key_dir, "verity")
++    result = subprocess.run(
++        ["openssl", "cms", "-sign", "-noattr", "-signer", str(cert), "-inkey", str(key), "-binary", "-in", str(root_hash_file), "-outform", "PEM"],
++        check=True,
++        capture_output=True,
++        text=True,
++    )
++    signature = "".join(line for line in result.stdout.splitlines() if not line.startswith("-----"))
++    der = subprocess.run(["openssl", "x509", "-in", str(cert), "-outform", "DER"], check=True, capture_output=True).stdout
++    document = {
++        "rootHash": root_hash_file.read_text().strip(),
++        "certificateFingerprint": hashlib.sha256(der).hexdigest(),
++        "signature": signature,
++    }
++    payload = json.dumps(document, separators=(",", ":")).encode()
++    padded = (len(payload) + 4095) // 4096 * 4096
++    output.write_bytes(payload.ljust(padded, b"\0"))
++    output.with_suffix(".sig-size").write_text(f"{padded}\n")
++    return cert
++
++
++def sign_pe(host, key_dir, path):
++    key, cert = ensure_key(key_dir, "secure-boot")
++    temporary = path.with_suffix(path.suffix + ".signed")
++    run(host / "bin/sbsign", "--key", key, "--cert", cert, "--output", temporary, path)
++    temporary.replace(path)
++
++
++def build_uki(host, images, usr, stub, name, cmdline, key_dir):
++    output = images / "efi-part/EFI/Linux" / name
++    (images / f"{name}.cmdline").write_text(cmdline + "\n")
++    base = images / "efi-part/EFI/Linux" / f".{name}.base"
++    result = subprocess.run(
++        [
++            str(host / "bin/python3"),
++            str(host / "bin/ukify"),
++            "build",
++            "--linux", str(images / "Image"),
++            "--initrd", str(images / "rootfs.cpio.gz"),
++            "--stub", str(stub),
++            "--efi-arch", "riscv64",
++            "--uname", "7.3.1",
++            "--cmdline", cmdline,
++            "--os-release", f"@{usr / 'lib/os-release'}",
++            "--pcr-public-key", str(key_dir / "pcr-public.pem"),
++            "--pcr-banks", "sha256",
++            "--policy-digest",
++            "--json=short",
++            "--output", str(base),
++        ],
++        check=True,
++        capture_output=True,
++        text=True,
++    )
++    policies = json.loads(result.stdout)
++    for bank, entries in policies.items():
++        for entry in entries:
++            digest = base64.b16decode(entry["pol"].upper())
++            signature = subprocess.run(
++                ["openssl", "dgst", f"-{bank}", "-sign", str(key_dir / "pcr.key")],
++                input=digest,
++                check=True,
++                capture_output=True,
++            ).stdout
++            entry["sig"] = base64.b64encode(signature).decode()
++    policy_file = images / f"{name}.pcrs.json"
++    policy_file.write_text(json.dumps(policies))
++    run(host / "bin/python3", host / "bin/ukify", "build", "--join-pcrsig", base, "--pcrsig", f"@{policy_file}", "--json=short", "--output", output)
++    base.unlink()
++
++
++def build_attested_client(host, binaries, usr):
++    environment = os.environ.copy()
++    environment.update({"GOOS": "linux", "GOARCH": "riscv64", "CGO_ENABLED": "0", "GOTOOLCHAIN": "local"})
++    output = binaries / "attested-client"
++    subprocess.run([host / "bin/go", "build", "-o", output, Path(__file__).with_name("attested-client.go")], check=True, env=environment)
++    (usr / "bin").mkdir(exist_ok=True)
++    shutil.copy2(output, usr / "bin/attested-client")
++    wallet_output = binaries / "wallet-client"
++    subprocess.run([host / "bin/go", "build", "-o", wallet_output, Path(__file__).with_name("wallet-client.go"), Path(__file__).with_name("u2f.go")], check=True, env=environment)
++    shutil.copy2(wallet_output, usr / "bin/wallet-client")
++
++
++def main():
++    binaries = Path(os.environ["BINARIES_DIR"]).resolve()
++    target = Path(os.environ["TARGET_DIR"]).resolve()
++    host = Path(os.environ["HOST_DIR"]).resolve()
++    key_dir = Path(os.environ["RVA23_KEY_DIR"]).resolve()
++    version = os.environ.get("RVA23_VERSION", "1")
++    key_dir.mkdir(parents=True, exist_ok=True)
++    run(Path(__file__).with_name("provision-keys.py"), key_dir)
++    pk_der = subprocess.run(["openssl", "x509", "-in", key_dir / "PK.crt", "-outform", "DER"], check=True, capture_output=True).stdout
++    oem = "4e32566d-8e9e-4f52-81d3-5bb9715f9727:" + base64.b64encode(pk_der).decode()
++    (binaries / "secure-boot-oem.txt").write_text(oem + "\n")
++    staging = binaries / "image-staging"
++    if staging.exists():
++        shutil.rmtree(staging)
++    usr = staging / "usr"
++    shutil.copytree(target / "usr", usr, symlinks=True)
++    os_release = usr / "lib/os-release"
++    retained = [line for line in os_release.read_text().splitlines() if line.split("=", 1)[0] not in {"IMAGE_VERSION", "VERSION_ID"}]
++    retained.extend([f'IMAGE_VERSION="{version}"', f'VERSION_ID="{version}"'])
++    os_release.write_text("\n".join(retained) + "\n")
++    _, verity_cert = ensure_key(key_dir, "verity")
++    cert_destination = usr / "share/rva23/verity.crt"
++    cert_destination.parent.mkdir(parents=True, exist_ok=True)
++    shutil.copyfile(verity_cert, cert_destination)
++    verity_config = usr / "lib/verity.d/00-rva23.crt"
++    verity_config.parent.mkdir(parents=True, exist_ok=True)
++    shutil.copyfile(verity_cert, verity_config)
++    import_ring = usr / "lib/systemd/import-pubring.pgp"
++    shutil.copyfile(key_dir / "update-public.pgp", import_ring)
++    run(Path(__file__).with_name("build-extensions.py"))
++    build_attested_client(host, binaries, usr)
++    artifact = "usr-a" if version == "1" else f"usr-{version}"
++    usr_image = binaries / f"{artifact}.erofs"
++    run(host / "bin/mkfs.erofs", "-zlz4hc,9", "-T", "0", "-U", "00000000-0000-0000-0000-000000000000", usr_image, usr)
++    with usr_image.open("r+b") as stream:
++        stream.truncate(512 * 1024 * 1024)
++    root_hash_file = binaries / f"{artifact}.roothash"
++    run(host / "sbin/veritysetup", "format", "--root-hash-file", root_hash_file, usr_image, binaries / f"{artifact}.verity")
++    with (binaries / f"{artifact}.verity").open("r+b") as stream:
++        stream.truncate(64 * 1024 * 1024)
++    sign_verity(key_dir, root_hash_file, binaries / f"{artifact}.verity-sig")
++    with (binaries / f"{artifact}.verity-sig").open("r+b") as stream:
++        stream.truncate(16 * 1024)
++    root_hash = root_hash_file.read_text().strip()
++    linux = binaries / "efi-part/EFI/Linux"
++    linux.mkdir(parents=True, exist_ok=True)
++    for old in linux.glob("*.efi"):
++        old.unlink()
++    base = f"console=ttyS0,115200 earlycon=sbi root=dissect mount.usr=dissect usrhash={root_hash} rw"
++    policy = "systemd.image_policy=usr=signed+read-only-on:root=unprotected+encrypted+absent+read-only-off:home=unprotected+encrypted+absent:swap=unprotected+encrypted+absent:esp=unprotected+unused:=unused+absent"
++    stub = target / "usr/lib/systemd/boot/efi/linuxriscv64.efi.stub"
++    fail_boot = " systemd.unit=emergency.target ipe.enforce=0" if os.environ.get("RVA23_FAIL_BOOT") == "1" else " ipe.enforce=1"
++    profiles = {
++        f"rva23_{version}+3-0.efi": f"{base} {policy}{fail_boot}",
++        f"rva23-recovery_{version}.efi": f"{base} {policy} systemd.unit=rescue.target ipe.enforce=0",
++        f"rva23-debug_{version}.efi": f"{base} {policy} rd.debug SYSTEMD_SULOGIN_FORCE=1 systemd.log_level=info systemd.log_target=console ipe.enforce=0",
++    }
++    if version == "1":
++        profiles.update({
++            "rva23-factory-reset.efi": "console=ttyS0,115200 earlycon=sbi root=off mount.usr=off systemd.factory_reset=yes rd.systemd.unit=rva23-factory-reset.service rd.debug SYSTEMD_SULOGIN_FORCE=1",
++            "rva23-emergency.efi": f"{base} {policy} systemd.unit=emergency.target ipe.enforce=0",
++        })
++    for name, cmdline in profiles.items():
++        build_uki(host, binaries, usr, stub, name, cmdline, key_dir)
++        sign_pe(host, key_dir, linux / name)
++    bootloader = binaries / "efi-part/EFI/BOOT/bootriscv64.efi"
++    if bootloader.exists():
++        sign_pe(host, key_dir, bootloader)
++    loader = binaries / "efi-part/loader"
++    loader.mkdir(parents=True, exist_ok=True)
++    sidecars = loader / "extensions"
++    sidecars.mkdir(exist_ok=True)
++    shutil.copyfile(binaries / f"podman_{version}.raw", sidecars / f"podman_{version}.raw")
++    shutil.copyfile(binaries / f"k3s_{version}.raw", sidecars / f"k3s_{version}.raw")
++    (loader / "loader.conf").write_text("default rva23_?.efi\ntimeout 0\neditor no\n")
++    (binaries / "rva23-version").write_text(f"{version}\n")
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/buildroot/qemu/scripts/build-registry.py b/buildroot/qemu/scripts/build-registry.py
+new file mode 100755
+index 0000000000000000000000000000000000000000..a0cd5c8e58c44101c478fd94196c1b73f0136cf2
+--- /dev/null
++++ b/buildroot/qemu/scripts/build-registry.py
+@@ -0,0 +1,81 @@
++#!/usr/bin/env python3
++import hashlib
++import lzma
++import os
++from pathlib import Path
++import shutil
++import subprocess
++import sys
++
++
++def uuid(hex_value):
++    return f"{hex_value[:8]}-{hex_value[8:12]}-{hex_value[12:16]}-{hex_value[16:20]}-{hex_value[20:32]}"
++
++
++def compress(source, destination):
++    with source.open("rb") as input_file, lzma.open(destination, "wb", preset=6) as output_file:
++        shutil.copyfileobj(input_file, output_file)
++
++
++def main():
++    output = Path(sys.argv[1]).resolve()
++    key_dir = Path(sys.argv[2]).resolve()
++    version = sys.argv[3] if len(sys.argv) > 3 else "2"
++    images = output / "images"
++    update = output / f"update-v{version}"
++    if update.exists():
++        shutil.rmtree(update)
++    update.mkdir(parents=True)
++    for name in ("Image", "rootfs.cpio.gz"):
++        shutil.copyfile(images / name, update / name)
++    bootloader = update / "efi-part/EFI/BOOT"
++    bootloader.mkdir(parents=True)
++    shutil.copyfile(output / "build/systemd-262.1/buildroot-build/src/boot/systemd-bootriscv64.efi", bootloader / "bootriscv64.efi")
++    environment = os.environ.copy()
++    environment.update({
++        "BINARIES_DIR": str(update),
++        "TARGET_DIR": str(output / "target"),
++        "HOST_DIR": str(output / "host"),
++        "RVA23_KEY_DIR": str(key_dir),
++        "RVA23_VERSION": version,
++    })
++    subprocess.run([output / "host/bin/fakeroot", "--", output.parent.parent / "scripts/build-os-images.py"], check=True, env=environment)
++    registry = output / "registry"
++    if registry.exists():
++        shutil.rmtree(registry)
++    registry.mkdir()
++    root_hash = (update / f"usr-{version}.roothash").read_text().strip()
++    partition_uuids = {
++        "usr.erofs.xz": uuid(root_hash[:32]),
++        "usr.verity.xz": uuid(root_hash[32:]),
++        "usr.verity-sig.xz": None,
++    }
++    for suffix, partition_uuid in partition_uuids.items():
++        source_suffix = suffix.removesuffix(".xz").removeprefix("usr.")
++        discriminator = f"_{partition_uuid}" if partition_uuid else ""
++        compress(update / f"usr-{version}.{source_suffix}", registry / f"rva23_{version}{discriminator}.{suffix}")
++    shutil.copyfile(update / f"efi-part/EFI/Linux/rva23_{version}+3-0.efi", registry / f"rva23_{version}.efi")
++    shutil.copyfile(update / f"efi-part/EFI/Linux/rva23-recovery_{version}.efi", registry / f"rva23-recovery_{version}.efi")
++    shutil.copyfile(update / f"efi-part/EFI/Linux/rva23-debug_{version}.efi", registry / f"rva23-debug_{version}.efi")
++    shutil.copyfile(update / "efi-part/EFI/BOOT/bootriscv64.efi", registry / f"systemd-boot_{version}.efi")
++    compress(update / f"graphics_{version}.raw", registry / f"graphics_{version}.raw.xz")
++    compress(update / f"debug_{version}.raw", registry / f"debug_{version}.raw.xz")
++    compress(update / f"podman_{version}.raw", registry / f"podman_{version}.raw.xz")
++    compress(update / f"k3s_{version}.raw", registry / f"k3s_{version}.raw.xz")
++    lines = []
++    for path in sorted(registry.iterdir()):
++        lines.append(f"{hashlib.sha256(path.read_bytes()).hexdigest()}  {path.name}")
++    (registry / "SHA256SUMS").write_text("\n".join(lines) + "\n")
++    subprocess.run(
++        [
++            "gpg", "--batch", "--yes", "--homedir", key_dir / "gnupg",
++            "--local-user", "RVA23 development update", "--detach-sign",
++            "--output", registry / "SHA256SUMS.gpg", registry / "SHA256SUMS",
++        ],
++        check=True,
++    )
++    print(registry)
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/buildroot/qemu/scripts/finalize-disk.py b/buildroot/qemu/scripts/finalize-disk.py
+new file mode 100755
+index 0000000000000000000000000000000000000000..ca1831177352dcdf6fbf6e97d301f14099337d23
+--- /dev/null
++++ b/buildroot/qemu/scripts/finalize-disk.py
+@@ -0,0 +1,19 @@
++#!/usr/bin/env python3
++from pathlib import Path
++import os
++import subprocess
++
++
++def uuid(hex_value):
++    return f"{hex_value[:8]}-{hex_value[8:12]}-{hex_value[12:16]}-{hex_value[16:20]}-{hex_value[20:32]}"
++
++
++def main():
++    images = Path(os.environ["BINARIES_DIR"]).resolve()
++    root_hash = (images / "usr-a.roothash").read_text().strip()
++    subprocess.run(["sfdisk", "--part-uuid", images / "disk.img", "2", uuid(root_hash[:32])], check=True)
++    subprocess.run(["sfdisk", "--part-uuid", images / "disk.img", "3", uuid(root_hash[32:])], check=True)
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/buildroot/qemu/scripts/prepare-target.py b/buildroot/qemu/scripts/prepare-target.py
+new file mode 100755
+index 0000000000000000000000000000000000000000..44da2f8187808098e97a57a0f82a1ca6b1646d8a
+--- /dev/null
++++ b/buildroot/qemu/scripts/prepare-target.py
+@@ -0,0 +1,64 @@
++#!/usr/bin/env python3
++from pathlib import Path
++import shutil
++import sys
++
++
++def copy_factory(target, name):
++    source = target / name
++    destination = target / "usr/share/factory" / name
++    if destination.exists() or destination.is_symlink():
++        if destination.is_dir() and not destination.is_symlink():
++            shutil.rmtree(destination)
++        else:
++            destination.unlink()
++    destination.parent.mkdir(parents=True, exist_ok=True)
++    shutil.copytree(source, destination, symlinks=True)
++
++
++def ensure_factory_accounts(target):
++    accounts = [
++        (100, "dbus", "/run/dbus"),
++        (101, "systemd-network", "/var/lib/systemd/network"),
++        (102, "systemd-resolve", "/var/lib/systemd/resolve"),
++        (103, "systemd-timesync", "/var/lib/systemd/timesync"),
++        (104, "tss", "/var/lib/tss"),
++    ]
++    passwd = target / "usr/share/factory/etc/passwd"
++    group = target / "usr/share/factory/etc/group"
++    passwd_lines = passwd.read_text().splitlines()
++    group_lines = group.read_text().splitlines()
++    for uid, name, home in accounts:
++        if not any(line.startswith(f"{name}:") for line in passwd_lines):
++            passwd_lines.append(f"{name}:x:{uid}:{uid}:{name}:{home}:/usr/bin/false")
++        if not any(line.startswith(f"{name}:") for line in group_lines):
++            group_lines.append(f"{name}:x:{uid}:")
++    passwd.write_text("\n".join(passwd_lines) + "\n")
++    group.write_text("\n".join(group_lines) + "\n")
++
++
++def main():
++    target = Path(sys.argv[1]).resolve()
++    copy_factory(target, "etc")
++    copy_factory(target, "var")
++    ensure_factory_accounts(target)
++    lines = []
++    for name in ("etc", "var"):
++        for source in sorted((target / name).iterdir()):
++            if source.is_symlink():
++                continue
++            lines.append(f"C! /{name}/{source.name} - - - - /usr/share/factory/{name}/{source.name}")
++    (target / "usr/lib/tmpfiles.d/rva23-factory.conf").write_text("\n".join(lines) + "\n")
++    os_release = target / "usr/lib/os-release"
++    fields = {
++        "IMAGE_ID": "rva23",
++        "IMAGE_VERSION": "1",
++        "VERSION_ID": "1",
++    }
++    retained = [line for line in os_release.read_text().splitlines() if line.split("=", 1)[0] not in fields]
++    retained.extend(f'{key}="{value}"' for key, value in fields.items())
++    os_release.write_text("\n".join(retained) + "\n")
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/buildroot/qemu/scripts/provision-edk2.py b/buildroot/qemu/scripts/provision-edk2.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..6adfd9722c625b3bc30b74c887dfc52870608bc7
+--- /dev/null
++++ b/buildroot/qemu/scripts/provision-edk2.py
+@@ -0,0 +1,159 @@
++#!/usr/bin/env python3
++from pathlib import Path
++import shutil
++import sys
++
++
++def insert(path, anchor, addition, marker):
++    content = path.read_text()
++    if marker in content:
++        return
++    if anchor not in content:
++        raise RuntimeError(f"Missing anchor in {path}: {anchor}")
++    path.write_text(content.replace(anchor, anchor + addition, 1))
++
++
++def main():
++    edk2 = Path(sys.argv[1]).resolve()
++    external = Path(__file__).resolve().parent.parent
++    source = external / "board/rva23-qemu/edk2/Rva23SecureBootEnroll/Rva23SecureBootEnroll.c"
++    bds = edk2 / "MdeModulePkg/Universal/BdsDxe"
++    dsc = edk2 / "OvmfPkg/RiscVVirt/RiscVVirtQemu.dsc"
++    none_guid = "  gEfiSecurityPkgTokenSpaceGuid.PcdTpmInstanceGuid|{0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}"
++    dtpm_guid = "  gEfiSecurityPkgTokenSpaceGuid.PcdTpmInstanceGuid|{0x5a, 0xf2, 0x6b, 0x28, 0xc3, 0xc2, 0x8c, 0x40, 0xb3, 0xb4, 0x25, 0xe6, 0x75, 0x8b, 0x73, 0x17}"
++    content = dsc.read_text()
++    if none_guid in content:
++        content = content.replace(none_guid, dtpm_guid, 1)
++    elif dtpm_guid not in content:
++        raise RuntimeError(f"Missing TPM instance GUID in {dsc}")
++    tpm_base = "  gEfiSecurityPkgTokenSpaceGuid.PcdTpmBaseAddress|0x0\n"
++    qemu_tpm_base = "  gEfiSecurityPkgTokenSpaceGuid.PcdTpmBaseAddress|0x04000000\n"
++    if qemu_tpm_base not in content:
++        if tpm_base not in content:
++            raise RuntimeError(f"Missing TPM base address in {dsc}")
++        content = content.replace(tpm_base, qemu_tpm_base, 1)
++    content = content.replace("  gEfiSecurityPkgTokenSpaceGuid.PcdTpm2HashMask|0\n", "  gEfiSecurityPkgTokenSpaceGuid.PcdTpm2HashMask|0x0000000F\n", 1)
++    dsc.write_text(content)
++    insert(
++        dsc,
++        dtpm_guid + "\n",
++        "  gEfiSecurityPkgTokenSpaceGuid.PcdActiveTpmInterfaceType|1\n",
++        "PcdActiveTpmInterfaceType",
++    )
++    platform_sec = edk2 / "OvmfPkg/RiscVVirt/Library/PlatformSecLib"
++    shutil.copy2(external / "board/rva23-qemu/edk2/PlatformTpm.c", platform_sec / "PlatformTpm.c")
++    insert(
++        platform_sec / "PlatformSecLib.inf",
++        "  Platform.c\n",
++        "  PlatformTpm.c\n",
++        "PlatformTpm.c",
++    )
++    insert(
++        platform_sec / "PlatformSecLib.inf",
++        "  OvmfPkg/OvmfPkg.dec\n",
++        "  SecurityPkg/SecurityPkg.dec\n",
++        "SecurityPkg/SecurityPkg.dec",
++    )
++    insert(
++        platform_sec / "PlatformSecLib.inf",
++        "[Pcd]\n",
++        "  gEfiSecurityPkgTokenSpaceGuid.PcdTpmBaseAddress\n",
++        "PcdTpmBaseAddress",
++    )
++    platform_header = platform_sec / "PlatformSecLib.h"
++    content = platform_header.read_text()
++    if "SecSetupTpmResources" not in content:
++        content = content.replace(
++            "#endif /* PLATFORM_SEC_LIB_ */",
++            "VOID\nSecSetupTpmResources (\n  VOID  *FdtBase\n  );\n\n#endif /* PLATFORM_SEC_LIB_ */",
++            1,
++        )
++        platform_header.write_text(content)
++    insert(
++        platform_sec / "PlatformSecLib.c",
++        "    PlatformInitialization (SecHobList->SecHandoffData.FdtPointer);\n",
++        "    SecSetupTpmResources (SecHobList->SecHandoffData.FdtPointer);\n",
++        "SecSetupTpmResources",
++    )
++    dtpm = edk2 / "SecurityPkg/Library/Tpm2DeviceLibDTpm/Tpm2InstanceLibDTpm.c"
++    content = dtpm.read_text()
++    content = content.replace("      DumpPtpInfo ((VOID *)(UINTN)PcdGet64 (PcdTpmBaseAddress));\n", "")
++    dtpm.write_text(content)
++    tcg2 = edk2 / "SecurityPkg/Tcg/Tcg2Dxe"
++    insert(
++        tcg2 / "Tcg2Dxe.inf",
++        "  UefiBootServicesTableLib\n",
++        "  DxeServicesTableLib\n",
++        "DxeServicesTableLib",
++    )
++    tcg2_inf = tcg2 / "Tcg2Dxe.inf"
++    content = tcg2_inf.read_text()
++    if "PcdTpmBaseAddress" not in content:
++        content = content.replace(
++            "  gEfiSecurityPkgTokenSpaceGuid.PcdTpmPlatformClass",
++            "  gEfiSecurityPkgTokenSpaceGuid.PcdTpmBaseAddress                           ## CONSUMES\n  gEfiSecurityPkgTokenSpaceGuid.PcdTpmPlatformClass",
++            1,
++        )
++        tcg2_inf.write_text(content)
++    insert(
++        tcg2 / "Tcg2Dxe.c",
++        "#include <Library/UefiBootServicesTableLib.h>\n",
++        "#include <Library/DxeServicesTableLib.h>\n",
++        "DxeServicesTableLib.h",
++    )
++    insert(
++        tcg2 / "Tcg2Dxe.c",
++        "  mImageHandle = ImageHandle;\n",
++        "\n  Status = gDS->AddMemorySpace (\n                  EfiGcdMemoryTypeMemoryMappedIo,\n                  PcdGet64 (PcdTpmBaseAddress),\n                  SIZE_64KB,\n                  EFI_MEMORY_UC\n                  );\n  if (EFI_ERROR (Status) && (Status != EFI_ALREADY_STARTED) && (Status != EFI_ACCESS_DENIED)) {\n    return Status;\n  }\n",
++        "gDS->AddMemorySpace",
++    )
++
++    shutil.copy2(source, bds / "Rva23SecureBootEnroll.c")
++
++    insert(
++        bds / "BdsDxe.inf",
++        "  BdsEntry.c\n",
++        "  Rva23SecureBootEnroll.c\n",
++        "Rva23SecureBootEnroll.c",
++    )
++    insert(
++        bds / "BdsDxe.inf",
++        "  MdeModulePkg/MdeModulePkg.dec\n",
++        "  SecurityPkg/SecurityPkg.dec\n",
++        "SecurityPkg/SecurityPkg.dec",
++    )
++    insert(
++        bds / "BdsDxe.inf",
++        "  PrintLib\n",
++        "  SecureBootVariableLib\n  SecureBootVariableProvisionLib\n",
++        "SecureBootVariableProvisionLib",
++    )
++    insert(
++        bds / "BdsDxe.inf",
++        "[Guids]\n",
++        "  gEfiCustomModeEnableGuid\n  gEfiSecureBootEnableDisableGuid\n",
++        "gEfiSecureBootEnableDisableGuid",
++    )
++    insert(
++        bds / "BdsEntry.c",
++        '#include "Bds.h"\n',
++        "\nEFI_STATUS\nEFIAPI\nRva23SecureBootEnrollEntry (\n  IN EFI_HANDLE        ImageHandle,\n  IN EFI_SYSTEM_TABLE  *SystemTable\n  );\n",
++        "Rva23SecureBootEnrollEntry",
++    )
++    insert(
++        bds / "BdsEntry.c",
++        "  BootSuccess     = FALSE;\n",
++        "\n  Status = Rva23SecureBootEnrollEntry (NULL, NULL);\n  if (EFI_ERROR (Status)) {\n    DEBUG ((DEBUG_ERROR, \"RVA23 enrollment failed: %r\\n\", Status));\n  }\n",
++        "Status = Rva23SecureBootEnrollEntry",
++    )
++
++    insert(
++        dsc,
++        "[LibraryClasses.common]\n",
++        "  SecureBootVariableLib|SecurityPkg/Library/SecureBootVariableLib/SecureBootVariableLib.inf\n  SecureBootVariableProvisionLib|SecurityPkg/Library/SecureBootVariableProvisionLib/SecureBootVariableProvisionLib.inf\n",
++        "SecureBootVariableProvisionLib",
++    )
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/buildroot/qemu/scripts/provision-keys.py b/buildroot/qemu/scripts/provision-keys.py
+new file mode 100755
+index 0000000000000000000000000000000000000000..c5a8c42e5ea25604e9123c11730393a6673578b9
+--- /dev/null
++++ b/buildroot/qemu/scripts/provision-keys.py
+@@ -0,0 +1,60 @@
++#!/usr/bin/env python3
++from pathlib import Path
++import subprocess
++import sys
++
++
++def run(*args):
++    subprocess.run([str(arg) for arg in args], check=True)
++
++
++def ensure_key(key_dir, name):
++    key = key_dir / f"{name}.key"
++    cert = key_dir / f"{name}.crt"
++    if not key.exists():
++        run("openssl", "genpkey", "-algorithm", "RSA", "-out", key, "-pkeyopt", "rsa_keygen_bits:3072", "-pkeyopt", "rsa_keygen_pubexp:65537")
++        key.chmod(0o600)
++    if not cert.exists():
++        run("openssl", "req", "-batch", "-new", "-x509", "-sha256", "-days", "3650", "-subj", f"/CN=RVA23 development {name}/", "-key", key, "-out", cert)
++    return key, cert
++
++
++def main():
++    key_dir = Path(sys.argv[1]).resolve()
++    key_dir.mkdir(parents=True, exist_ok=True)
++    for name in ("PK", "KEK", "secure-boot", "verity", "pcr", "update", "ipe"):
++        ensure_key(key_dir, name)
++    run("openssl", "pkey", "-in", key_dir / "pcr.key", "-pubout", "-out", key_dir / "pcr-public.pem")
++    (key_dir / "trusted.pem").write_bytes((key_dir / "verity.crt").read_bytes() + (key_dir / "ipe.crt").read_bytes())
++    gnupg_home = key_dir / "gnupg"
++    gnupg_home.mkdir(mode=0o700, exist_ok=True)
++    gnupg_home.chmod(0o700)
++    if not (key_dir / "update-public.pgp").exists():
++        run("gpg", "--batch", "--homedir", gnupg_home, "--pinentry-mode", "loopback", "--passphrase", "", "--quick-generate-key", "RVA23 development update", "rsa3072", "sign", "never")
++        run("gpg", "--batch", "--homedir", gnupg_home, "--export", "--output", key_dir / "update-public.pgp", "RVA23 development update")
++    if len(sys.argv) > 2:
++        source = Path(sys.argv[2]).resolve()
++        fdf = source / "OvmfPkg/RiscVVirt/RiscVVirtQemu.fdf"
++        replacements = {
++            b"OvmfPkg/RiscVVirt/Feature/SecureBoot/SecureBootKeys/PK/PK.cer": b"Build/Buildroot/SecureBootKeys/PK.cer",
++            b"OvmfPkg/RiscVVirt/Feature/SecureBoot/SecureBootKeys/KEK/MicCorKEKCA2011_2011-06-24.crt": b"Build/Buildroot/SecureBootKeys/KEK.cer",
++            b"OvmfPkg/RiscVVirt/Feature/SecureBoot/SecureBootKeys/db/MicWinProPCA2011_2011-10-19.crt": b"Build/Buildroot/SecureBootKeys/db.cer",
++        }
++        content = fdf.read_bytes()
++        for old, new in replacements.items():
++            if old not in content and new not in content:
++                raise RuntimeError(f"Missing EDK2 key path: {old.decode()}")
++            content = content.replace(old, new)
++        content = content.replace(b"    SECTION RAW = OvmfPkg/RiscVVirt/Feature/SecureBoot/SecureBootKeys/db/MicCorUEFCA2011_2011-06-27.crt\r\n", b"")
++        dbx = b"  FILE FREEFORM = 5740766a-718e-4dc0-9935-c36f7d3f884f {\r\n    SECTION RAW = OvmfPkg/RiscVVirt/Feature/SecureBoot/SecureBootKeys/dbx/dbxupdate_x64.bin\r\n  }\r\n"
++        content = content.replace(dbx, b"")
++        fdf.write_bytes(content)
++        destination = source / "Build/Buildroot/SecureBootKeys"
++        destination.mkdir(parents=True, exist_ok=True)
++        for name in ("PK", "KEK", "secure-boot"):
++            output = "db.cer" if name == "secure-boot" else f"{name}.cer"
++            run("openssl", "x509", "-in", key_dir / f"{name}.crt", "-outform", "DER", "-out", destination / output)
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/buildroot/qemu/scripts/verify-attestation.py b/buildroot/qemu/scripts/verify-attestation.py
+new file mode 100755
+index 0000000000000000000000000000000000000000..6ac9efd3e20655e6ce6644b2075b8fc528b57272
+--- /dev/null
++++ b/buildroot/qemu/scripts/verify-attestation.py
+@@ -0,0 +1,163 @@
++#!/usr/bin/env python3
++import base64
++import json
++from pathlib import Path
++import re
++import secrets
++import shutil
++import struct
++import subprocess
++import sys
++
++from verify_boot import Console
++
++
++def copy_guest_file(console, source, destination):
++    text = console.capture(f"printf '__BEGIN__\\n'; base64 {source}; printf '__END__\\n'", 120)
++    match = re.search(r"__BEGIN__\r?\n(.*?)\r?\n__END__", text, re.DOTALL)
++    assert match, text[-2000:]
++    destination.write_bytes(base64.b64decode(re.sub(r"\s", "", match.group(1))))
++
++
++def trim_tcg2(path):
++    data = path.read_bytes()
++    if len(data) < 32:
++        raise ValueError(f"short TPM log: {path}")
++    event_type = struct.unpack_from("<I", data, 4)[0]
++    if event_type == 3:
++        offset = 32 + struct.unpack_from("<I", data, 28)[0]
++    else:
++        offset = 0
++    while offset + 16 <= len(data):
++        _, event_type, count = struct.unpack_from("<III", data, offset)
++        if event_type == 0:
++            break
++        pos = offset + 12
++        for _ in range(count):
++            algorithm = struct.unpack_from("<H", data, pos)[0]
++            digest_size = {0x0004: 20, 0x000b: 32, 0x000c: 48, 0x000d: 64, 0x0012: 32}.get(algorithm)
++            if digest_size is None:
++                raise ValueError(f"unknown TPM digest algorithm {algorithm:#x}")
++            pos += 2 + digest_size
++        event_size = struct.unpack_from("<I", data, pos)[0]
++        pos += 4 + event_size
++        if pos > len(data):
++            raise ValueError(f"invalid TPM event at {offset:x}")
++        offset = pos
++    path.write_bytes(data[:offset])
++
++
++def first_event_end(data):
++    if len(data) < 32 or struct.unpack_from("<I", data, 4)[0] != 3:
++        raise ValueError("missing TCG2 log header")
++    return 32 + struct.unpack_from("<I", data, 28)[0]
++
++
++def main():
++    output = Path(sys.argv[1]).resolve()
++    key_dir = Path(sys.argv[2]).resolve()
++    images = output / "images"
++    destination = output / "attestation"
++    destination.mkdir(exist_ok=True)
++    initial_variables = output / "build/edk2-edk2-stable202602/Build/RiscVVirtQemu/RELEASE_GCC5/FV/RISCV_VIRT_VARS.fd"
++    shutil.copyfile(initial_variables, images / "RISCV_VIRT_VARS.fd")
++    (images / "RISCV_VIRT_VARS.fd").write_bytes((images / "RISCV_VIRT_VARS.fd").read_bytes().ljust(32 * 1024 * 1024, b"\0"))
++    console = Console(output, "attestation.log", firmware=True)
++    nonce = secrets.token_hex(32)
++    try:
++        console.expect(b"rva23 login:", 300)
++        console.sendline("root")
++        console.expect(b"# ", 30)
++        console.command("systemctl is-active --quiet --wait graphical.target")
++        guest = "/var/lib/rva23-attestation"
++        console.command(f"mkdir -p {guest}")
++        console.command(f"cp /sys/kernel/security/tpm0/binary_bios_measurements {guest}/firmware.tcglog")
++        console.command(f"cp /sys/kernel/security/tpm0/binary_early_measurements {guest}/early.tcglog")
++        console.command(f"if [ -f /run/log/systemd/tpm2-measure.log ]; then cp /run/log/systemd/tpm2-measure.log {guest}/userspace.json; else printf '{{}}' > {guest}/userspace.json; fi")
++        console.command(f"tpm2_createek -c {guest}/ek.ctx -G rsa -u {guest}/ek.pub", 180)
++        console.command(f"tpm2_createak -C {guest}/ek.ctx -c {guest}/ak.ctx -G rsa -g sha256 -s rsassa -u {guest}/ak.pub -f pem -n {guest}/ak.name", 180)
++        console.command(f"tpm2_quote -c {guest}/ak.ctx -l sha256:11 -q {nonce} -m {guest}/quote.msg -s {guest}/quote.sig -o {guest}/quote.pcrs -g sha256", 180)
++        console.command(f"tpm2_pcrread sha256:11 -o {guest}/pcr11.bin")
++        stub_pcr = console.capture("od -An -t u1 /sys/firmware/efi/efivars/StubPcrKernelImage-*")
++        assert re.search(r"49\s+0\s+49\s+0", stub_pcr), stub_pcr
++        for name in ("firmware.tcglog", "early.tcglog", "userspace.json", "ak.pub", "quote.msg", "quote.sig", "quote.pcrs", "pcr11.bin"):
++            copy_guest_file(console, f"{guest}/{name}", destination / name)
++        supported = console.capture("/usr/lib/systemd/systemd-pcrlock is-supported || true")
++        (destination / "pcrlock-support.txt").write_text(supported)
++        log = console.capture("/usr/lib/systemd/systemd-pcrlock --no-pager log --pcr=11 || true", 120)
++        (destination / "pcrlock-log.txt").write_text(log)
++        console.sendline("poweroff")
++        console.process.wait(timeout=90)
++    finally:
++        console.close()
++    trim_tcg2(destination / "firmware.tcglog")
++    trim_tcg2(destination / "early.tcglog")
++    firmware_data = (destination / "firmware.tcglog").read_bytes()
++    early_data = (destination / "early.tcglog").read_bytes()
++    (destination / "complete.tcglog").write_bytes(early_data + firmware_data[first_event_end(firmware_data):])
++    subprocess.run(["tpm2_eventlog", destination / "firmware.tcglog"], check=True, stdout=(destination / "firmware-events.txt").open("w"))
++    subprocess.run(["tpm2_eventlog", destination / "early.tcglog"], check=True, stdout=(destination / "early-events.txt").open("w"))
++    subprocess.run(["tpm2_eventlog", destination / "complete.tcglog"], check=True, stdout=(destination / "complete-events.txt").open("w"))
++    subprocess.run(
++        [
++            "tpm2_checkquote", "-u", destination / "ak.pub", "-m", destination / "quote.msg",
++            "-s", destination / "quote.sig", "-f", destination / "quote.pcrs", "-g", "sha256", "-q", nonce,
++        ],
++        check=True,
++    )
++    cmdline = destination / "prediction.cmdline"
++    cmdline.write_text((images / "rva23_1+3-0.efi.cmdline").read_text().rstrip("\n"))
++    uname = destination / "prediction.uname"
++    uname.write_text(next(output.glob("build/linux-*/include/config/kernel.release")).read_text().rstrip("\n"))
++    sbat = destination / "prediction.sbat"
++    subprocess.run(
++        [
++            output / "host/bin/riscv64-linux-objcopy", "-O", "binary", "--only-section=.sbat",
++            images / "efi-part/EFI/Linux/rva23_1+3-0.efi", sbat,
++        ],
++        check=True,
++    )
++    result = subprocess.run(
++        [
++            "/usr/lib/systemd/systemd-measure", "calculate",
++            "--linux", images / "Image",
++            "--initrd", images / "rootfs.cpio.gz",
++            "--osrel", images / "image-staging/usr/lib/os-release",
++            "--cmdline", cmdline,
++            "--uname", uname,
++            "--sbat", sbat,
++            "--pcrpkey", key_dir / "pcr-public.pem",
++            "--bank", "sha256",
++            "--phase", "enter-initrd:leave-initrd:sysinit:ready",
++        ],
++        check=True,
++        capture_output=True,
++        text=True,
++    )
++    (destination / "pcr11-prediction.txt").write_text(result.stdout)
++    match = re.search(r"11:sha256=([0-9a-f]{64})", result.stdout)
++    assert match, result.stdout
++    predicted = bytes.fromhex(match.group(1))
++    actual = (destination / "pcr11.bin").read_bytes()
++    assert len(actual) == 32, len(actual)
++    assert actual == predicted, f"PCR 11 mismatch: predicted {predicted.hex()}, actual {actual.hex()}"
++    assert (destination / "firmware.tcglog").stat().st_size > 0
++    early_events = (destination / "early-events.txt").read_text()
++    complete_data = (destination / "complete.tcglog").read_bytes()
++    assert "U-Boot SPL" in early_events
++    assert "/fit-images/opensbi" in early_events
++    assert "/fit-images/edk2" in early_events
++    assert ".linux".encode("utf-16-le") in firmware_data
++    assert ".initrd".encode("utf-16-le") in firmware_data
++    assert b"U-Boot SPL" in complete_data
++    assert ".linux".encode("utf-16-le") in complete_data
++    userspace_records = [json.loads(line.lstrip("\x1e")) for line in (destination / "userspace.json").read_text().splitlines() if line.strip()]
++    assert any(record.get("pcr") == 11 for record in userspace_records)
++    (destination / "reference.json").write_text(json.dumps({"pcr11": actual.hex(), "nonce": nonce}, indent=2) + "\n")
++    print("PASS: PCR 11 matches the build prediction")
++    print("PASS: TPM quote binds PCR 11 to a fresh nonce and the enrolled attestation key")
++    print("PASS: SPL, EDK2, and systemd event logs are readable")
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/buildroot/qemu/scripts/verify-attested-app.py b/buildroot/qemu/scripts/verify-attested-app.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..0831812899bbbe31311e23847259a700ae048946
+--- /dev/null
++++ b/buildroot/qemu/scripts/verify-attested-app.py
+@@ -0,0 +1,67 @@
++#!/usr/bin/env python3
++import base64
++import hashlib
++import json
++import os
++from pathlib import Path
++import re
++import secrets
++import subprocess
++import sys
++
++from verify_boot import Console
++
++
++def copy_guest_file(console, source, destination):
++    text = console.capture(f"printf '__BEGIN__\\n'; base64 {source}; printf '__END__\\n'", 120)
++    match = re.search(r"__BEGIN__\r?\n(.*?)\r?\n__END__", text, re.DOTALL)
++    assert match, text[-2000:]
++    destination.write_bytes(base64.b64decode(re.sub(r"\s", "", match.group(1))))
++
++
++def main():
++    output = Path(sys.argv[1]).resolve()
++    receiver_dir = output / "host-attestation"
++    public_key = (receiver_dir / "public-key.pem").read_bytes()
++    key_id = hashlib.sha256(public_key).hexdigest()
++    secret = secrets.token_bytes(32)
++    token_document = {"keyId": key_id, "secret": base64.b64encode(secret).decode()}
++    token_path = receiver_dir / "token.json"
++    token_path.write_text(json.dumps(token_document) + "\n")
++    token_path.chmod(0o600)
++    environment = os.environ.copy()
++    environment["RVA23_TOKEN_FILE"] = str(token_path)
++    subprocess.run(["go", "build", "-o", receiver_dir / "report-receiver", "scripts/report-receiver.go"], check=True)
++    receiver = subprocess.Popen(
++        [receiver_dir / "report-receiver"],
++        stdout=(receiver_dir / "app-receiver.log").open("w"),
++        stderr=subprocess.STDOUT,
++        env=environment,
++    )
++    console = Console(output, "attested-app.log", firmware=True)
++    try:
++        console.expect(b"rva23 login:", 300)
++        console.sendline("root")
++        console.expect(b"# ", 30)
++        console.command("systemctl is-active --quiet --wait graphical.target")
++        console.command("systemctl start systemd-pcrlock.socket")
++        console.command("systemctl restart systemd-report-sign-tpm2.socket")
++        console.command("sleep 2")
++        console.command("attested-client", 300)
++        copy_guest_file(console, "/tmp/rva23-attested-body", receiver_dir / "guest-report.json")
++        console.command("if attested-client --replay; then false; else true; fi", 300)
++        console.sendline("poweroff")
++        console.process.wait(timeout=90)
++    finally:
++        console.close()
++        receiver.terminate()
++        receiver.wait(timeout=15)
++    response = json.loads((receiver_dir / "response.json").read_text())
++    assert response["status"] == "accepted", response
++    assert response["componentsVerified"] > 0, response
++    assert response["eventLogRecords"] > 0, response
++    print("PASS: the Go server accepts a TPM-bound attestation and rejects replay")
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/buildroot/qemu/scripts/verify-boot.py b/buildroot/qemu/scripts/verify-boot.py
+new file mode 100755
+index 0000000000000000000000000000000000000000..a8e3be06fdfaf0b2a4fa5de00d287372eca62ec9
+--- /dev/null
++++ b/buildroot/qemu/scripts/verify-boot.py
+@@ -0,0 +1,154 @@
++#!/usr/bin/env python3
++import os
++from pathlib import Path
++import re
++import select
++import subprocess
++import sys
++import time
++
++
++class Console:
++    def __init__(self, output, log_name="boot.log", firmware=False):
++        self.output = output
++        self.log = (output / log_name).open("wb")
++        self.buffer = b""
++        self.last_consumed = b""
++        self.command_id = 0
++        script_name = "run-firmware.sh" if firmware else "run-qemu.sh"
++        script = output.parent.parent / "board/rva23-qemu" / script_name
++        self.process = subprocess.Popen(
++            [script, output / "images"],
++            stdin=subprocess.PIPE,
++            stdout=subprocess.PIPE,
++            stderr=subprocess.STDOUT,
++            bufsize=0,
++        )
++
++    def expect(self, pattern, timeout):
++        if isinstance(pattern, bytes):
++            pattern = re.compile(re.escape(pattern))
++        deadline = time.monotonic() + timeout
++        while True:
++            match = pattern.search(self.buffer)
++            if match:
++                self.last_consumed = self.buffer[:match.end()]
++                self.buffer = self.buffer[match.end():]
++                return match
++            remaining = deadline - time.monotonic()
++            if remaining <= 0:
++                tail = self.buffer[-12000:].decode(errors="replace")
++                raise TimeoutError(f"QEMU console timeout\n{tail}")
++            ready, _, _ = select.select([self.process.stdout], [], [], remaining)
++            if not ready:
++                continue
++            data = os.read(self.process.stdout.fileno(), 65536)
++            if not data:
++                tail = self.buffer[-12000:].decode(errors="replace")
++                raise RuntimeError(f"QEMU exited with {self.process.poll()}\n{tail}")
++            self.log.write(data)
++            self.log.flush()
++            self.buffer += data
++
++    def sendline(self, line):
++        self.process.stdin.write(line.encode() + b"\n")
++        self.process.stdin.flush()
++
++    def command(self, command, timeout=60):
++        self.command_id += 1
++        token = f"__RVA23_RC_{self.command_id}__"
++        self.sendline(f"{command}; printf '\\n{token}:%s\\n' \"$?\"")
++        match = self.expect(re.compile(token.encode() + rb":(\d+)"), timeout)
++        status = int(match.group(1))
++        assert status == 0, f"Guest command failed with {status}: {command}"
++
++    def capture(self, command, timeout=60):
++        self.command_id += 1
++        token = f"__RVA23_RC_{self.command_id}__"
++        self.sendline(f"{command}; printf '\\n{token}:%s\\n' \"$?\"")
++        match = self.expect(re.compile(token.encode() + rb":(\d+)"), timeout)
++        status = int(match.group(1))
++        assert status == 0, f"Guest command failed with {status}: {command}"
++        return self.last_consumed[:match.start()].decode(errors="replace")
++
++    def close(self):
++        if self.process.poll() is None:
++            self.process.terminate()
++            try:
++                self.process.wait(timeout=10)
++            except subprocess.TimeoutExpired:
++                self.process.kill()
++                self.process.wait()
++        self.log.close()
++
++
++def main():
++    output = Path(sys.argv[1]).resolve()
++    console = Console(output)
++    try:
++        console.expect(b"rva23 login:", 300)
++        console.sendline("root")
++        console.expect(b"# ", 30)
++        console.command("systemctl --no-pager --full status graphical.target weston.service || true")
++        console.command("journalctl -b --no-pager -u weston.service || true")
++        console.command("ls -la /run/weston")
++        checks = [
++            ("systemctl is-active --quiet --wait graphical.target", "systemd reaches graphical.target"),
++            ("systemctl is-active --quiet --wait weston.service", "systemd starts Weston"),
++            ("test -S /run/weston/wayland-1", "Weston creates its Wayland socket"),
++            ("XDG_RUNTIME_DIR=/run/weston WAYLAND_DISPLAY=wayland-1 wayland-info >/dev/null", "a Wayland client connects to Weston"),
++            ("test -e /dev/dri/card0", "the guest exposes a DRM device"),
++            ("test -d /sys/module/virtio_gpu", "the DRM device uses virtio graphics"),
++            ("grep -q 'root=dissect' /proc/cmdline", "the UKI selects discoverable root storage"),
++            ("grep -q 'mount.usr=dissect' /proc/cmdline", "the UKI selects discoverable /usr storage"),
++            ("findmnt -ln -o FSTYPE | grep -q '^erofs$'", "the storage chain mounts EROFS"),
++            ("findmnt -n -o OPTIONS /usr | grep -Eq '(^|,)ro(,|$)'", "/usr stays read-only"),
++            ("touch /etc/rva23-write-test /var/lib/rva23-write-test && rm /etc/rva23-write-test /var/lib/rva23-write-test", "/etc and /var stay writable"),
++            ("test -f /usr/share/factory/etc/passwd", "factory configuration lives below /usr/share/factory"),
++            ("id rva23-state >/dev/null", "sysusers instantiates the service identity"),
++            ("test \"$(lsblk -ln -o PARTLABEL | grep -c _empty)\" -eq 3", "first boot creates three empty B slots"),
++            ("test -b /dev/disk/by-designator/root && test -b /dev/disk/by-designator/home", "first boot creates root and home"),
++            ("swapon --show | grep -q '/dev/'", "first boot activates swap"),
++            ("test -c /dev/tpmrm0", "QEMU exposes the persistent TPM"),
++            ("dmsetup table root | grep -q crypt", "root uses a LUKS2 mapping"),
++            ("dmsetup table home | grep -q crypt", "home uses a LUKS2 mapping"),
++            ("dmsetup table swap | grep -q crypt", "swap uses a LUKS2 mapping"),
++            ("cryptsetup luksDump /dev/vda8 | grep -q tpm2", "root has a TPM2 token"),
++            ("cryptsetup luksDump /dev/vda9 | grep -q tpm2", "home has a TPM2 token"),
++            ("cryptsetup luksDump /dev/vda10 | grep -q tpm2", "swap has a TPM2 token"),
++        ]
++        for command, description in checks:
++            console.command(command)
++            print(f"PASS: {description}")
++        console.command("printf persistent > /var/lib/rva23-persistent")
++        console.sendline("reboot")
++        console.expect(b"rva23 login:", 300)
++        console.sendline("root")
++        console.expect(b"# ", 30)
++        console.command("test \"$(cat /var/lib/rva23-persistent)\" = persistent")
++        print("PASS: local storage survives reboot")
++        console.command("bootctl set-default rva23-recovery_1.efi")
++        console.sendline("reboot")
++        console.expect(b"(or press Control-D to continue):", 300)
++        console.sendline("")
++        console.expect(b"# ", 30)
++        console.command("systemctl is-active --quiet rescue.target")
++        console.command("findmnt -n -o OPTIONS /usr | grep -Eq '(^|,)ro(,|$)'")
++        print("PASS: recovery boots with read-only /usr and writable local state")
++        console.command("bootctl set-default rva23-factory-reset.efi")
++        console.sendline("reboot")
++        console.expect(b"rva23 login:", 600)
++        console.sendline("root")
++        console.expect(b"# ", 30)
++        console.command("test ! -e /var/lib/rva23-persistent")
++        console.command("test \"$(lsblk -ln -o PARTLABEL | grep -c _empty)\" -eq 3")
++        print("PASS: factory reset recreates local state and preserves empty B slots")
++        console.sendline("poweroff")
++        console.process.wait(timeout=90)
++        print(f"PASS: QEMU shuts down cleanly; console log: {output / 'boot.log'}")
++    finally:
++        console.close()
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/buildroot/qemu/scripts/verify-firmware.py b/buildroot/qemu/scripts/verify-firmware.py
+new file mode 100755
+index 0000000000000000000000000000000000000000..eccd1e741d074497465bd41b5acdc86a4491bb1c
+--- /dev/null
++++ b/buildroot/qemu/scripts/verify-firmware.py
+@@ -0,0 +1,77 @@
++#!/usr/bin/env python3
++import os
++from pathlib import Path
++import select
++import subprocess
++import sys
++import time
++
++
++def capture(output, fit, timeout):
++    log_path = output / ("firmware-boot.log" if fit.name == "firmware.itb" else "firmware-bad-boot.log")
++    process = subprocess.Popen(
++        [output.parent.parent / "board/rva23-qemu/run-firmware.sh", output / "images"],
++        env={**os.environ, "FIRMWARE_FIT": fit},
++        stdout=subprocess.PIPE,
++        stderr=subprocess.STDOUT,
++        bufsize=0,
++    )
++    data = b""
++    deadline = time.monotonic() + timeout
++    try:
++        while time.monotonic() < deadline:
++            ready, _, _ = select.select([process.stdout], [], [], max(0, deadline - time.monotonic()))
++            if not ready:
++                break
++            chunk = os.read(process.stdout.fileno(), 65536)
++            if not chunk:
++                break
++            data += chunk
++            if b"RISC-V EDK2 firmware version 2.7" in data or b"Signature check Bad" in data:
++                break
++        log_path.write_bytes(data)
++        return data
++    finally:
++        process.terminate()
++        try:
++            process.wait(timeout=10)
++        except subprocess.TimeoutExpired:
++            process.kill()
++            process.wait()
++
++
++def main():
++    output = Path(sys.argv[1]).resolve()
++    images = output / "images"
++    fit = images / "firmware.itb"
++    key = images / "qemu-control.dtb"
++    checker = output / "host/bin/fit_check_sign"
++    for path in [images / "u-boot-spl.bin", images / "fw_dynamic.bin", fit, key]:
++        assert path.is_file() and path.stat().st_size > 0, path
++    print("PASS: SPL, OpenSBI, signed FIT, and signed QEMU control DTB exist")
++    subprocess.run([checker, "-f", fit, "-k", key, "-c", "conf"], check=True, capture_output=True)
++    print("PASS: the development key authenticates the firmware configuration")
++    bad = images / "firmware-bad.itb"
++    offset = int(subprocess.check_output(
++        [output / "host/bin/fdtget", "-t", "x", fit, "/images/edk2", "data-position"],
++        text=True,
++    ), 16)
++    content = bytearray(fit.read_bytes())
++    content[offset] ^= 1
++    bad.write_bytes(content)
++    result = subprocess.run([checker, "-f", bad, "-k", key, "-c", "conf"], capture_output=True)
++    assert result.returncode != 0, "the modified FIT passed host verification"
++    print("PASS: the modified FIT fails host verification")
++    log = capture(output, fit, 90)
++    assert b"OpenSBI v1.8" in log, log[-4000:]
++    assert b"RISC-V EDK2 firmware version 2.7" in log, log[-4000:]
++    assert b"U-Boot 202" not in log, log[-4000:]
++    print("PASS: SPL reaches EDK2 without U-Boot proper")
++    log = capture(output, bad, 45)
++    assert b"RISC-V EDK2 firmware version 2.7" not in log, log[-4000:]
++    assert b"signature" in log.lower() or b"verify" in log.lower(), log[-4000:]
++    print("PASS: SPL rejects the modified FIT before EDK2")
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/buildroot/qemu/scripts/verify-hardening.py b/buildroot/qemu/scripts/verify-hardening.py
+new file mode 100755
+index 0000000000000000000000000000000000000000..df5abd9f1b4a5c1e05b8a0536976a2dc301b0ada
+--- /dev/null
++++ b/buildroot/qemu/scripts/verify-hardening.py
+@@ -0,0 +1,83 @@
++#!/usr/bin/env python3
++from pathlib import Path
++import re
++import sys
++
++from verify_boot import Console
++
++
++def login(console, timeout=300):
++    console.expect(b"rva23 login:", timeout)
++    console.sendline("root")
++    console.expect(b"# ", 30)
++
++
++def os_version(console):
++    text = console.capture("sed -n 's/^IMAGE_VERSION=[\\\"]*\\([0-9][0-9]*\\)[\\\"].*/\\1/p' /usr/lib/os-release")
++    match = re.search(r"(?:^|\r?\n)(\d+)\r?\n", text)
++    assert match, text
++    return match.group(1)
++
++
++def extension_checks(console, version, include_confext):
++    policy = "root=signed+absent:usr=signed+absent"
++    console.command(f"systemd-sysext status | grep -q graphics_{version}")
++    if include_confext:
++        console.command(f"systemd-confext status | grep -q debug_{version}")
++    console.command("XDG_RUNTIME_DIR=/run/weston WAYLAND_DISPLAY=wayland-1 wayland-info >/dev/null")
++    graphics = f"/var/lib/extensions/graphics_{version}.raw"
++    console.command("systemd-sysext unmerge")
++    console.command(f"cp {graphics} {graphics}.backup")
++    console.command(f"printf X | dd of={graphics} bs=1 seek=1048576 conv=notrunc 2>/dev/null")
++    console.command(f"systemd-sysext --image-policy={policy} refresh", 120)
++    console.command("device=$(lsblk -ln -o NAME,TYPE | awk '$1 ~ /-verity$/ && $2 == \"crypt\" {print $1; exit}'); if dd if=/dev/$device of=/dev/null bs=1M status=none; then false; else true; fi", 120)
++    console.command(f"mv {graphics}.backup {graphics}")
++    console.command(f"systemd-sysext --image-policy={policy} refresh", 120)
++    if include_confext:
++        debug = f"debug_{version}.raw"
++        console.command("systemd-confext unmerge")
++        console.command("mkdir -p /etc/confexts")
++        console.command(f"cp /usr/lib/confexts/{debug} /etc/confexts/{debug}")
++        console.command(f"printf X | dd of=/etc/confexts/{debug} bs=1 seek=4096 conv=notrunc 2>/dev/null")
++        console.command(f"systemd-confext --image-policy={policy} refresh", 120)
++        console.command("device=$(lsblk -ln -o NAME,TYPE | awk '$1 ~ /-verity$/ && $2 == \"crypt\" {print $1; exit}'); if dd if=/dev/$device of=/dev/null bs=1M status=none; then false; else true; fi", 120)
++        console.command("systemd-confext unmerge")
++        console.command(f"rm -f /etc/confexts/{debug}")
++        console.command(f"systemd-confext --image-policy={policy} refresh", 120)
++
++
++def main():
++    output = Path(sys.argv[1]).resolve()
++    console = Console(output, "hardening.log")
++    try:
++        login(console)
++        console.command("systemctl is-active --quiet --wait graphical.target weston.service")
++        console.command("bootctl set-default 'rva23-debug_*.efi'")
++        console.sendline("reboot")
++        login(console)
++        console.command("systemctl is-active --quiet --wait graphical.target weston.service")
++        console.command("test \"$(cat /sys/kernel/security/ipe/enforce)\" = 0")
++        extension_checks(console, os_version(console), include_confext=True)
++        console.command("cp /usr/bin/true /var/tmp/true && chmod 0755 /var/tmp/true")
++        console.command("/var/tmp/true")
++        console.command("journalctl -k -b --no-pager | grep -E 'type=1420|IPE' | grep -q 'enforcing=0'")
++        print("PASS: signed sysext and confext images mount in permissive mode")
++        print("PASS: unsigned code runs with an audit event in permissive mode")
++        console.command("bootctl set-default 'rva23_?.efi'")
++        console.sendline("reboot")
++        login(console)
++        console.command("systemctl is-active --quiet --wait graphical.target weston.service")
++        console.command("test \"$(cat /sys/kernel/security/ipe/enforce)\" = 1")
++        extension_checks(console, os_version(console), include_confext=False)
++        console.command("if /var/tmp/true; then false; else test $? -eq 126; fi")
++        console.command("journalctl -k -b --no-pager | grep -E 'type=1420|IPE' | grep -q 'enforcing=1'")
++        print("PASS: a modified extension fails signature enforcement")
++        print("PASS: unsigned code fails with EACCES and an audit event in enforcement mode")
++        console.sendline("poweroff")
++        console.process.wait(timeout=90)
++    finally:
++        console.close()
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/buildroot/qemu/scripts/verify-image.py b/buildroot/qemu/scripts/verify-image.py
+new file mode 100755
+index 0000000000000000000000000000000000000000..4d839827f68476fc14152094ae361b0fb1299bdc
+--- /dev/null
++++ b/buildroot/qemu/scripts/verify-image.py
+@@ -0,0 +1,153 @@
++#!/usr/bin/env python3
++import json
++import os
++from pathlib import Path
++import subprocess
++import sys
++
++
++def main():
++    output = Path(sys.argv[1]).resolve()
++    download_dir = Path(sys.argv[2]).resolve()
++    ccache_dir = Path(sys.argv[3]).resolve()
++    key_dir = Path(sys.argv[4]).resolve()
++    images = output / "images"
++    config = (output / ".config").read_text().splitlines()
++    required = {
++        "BR2_riscv=y",
++        "BR2_RISCV_64=y",
++        "BR2_INIT_SYSTEMD=y",
++        "BR2_PACKAGE_SYSTEMD=y",
++        "BR2_PACKAGE_SYSTEMD_BOOT=y",
++        'BR2_PACKAGE_SYSTEMD_BOOT_EFI_ARCH="riscv64"',
++        "BR2_CCACHE=y",
++        "BR2_CCACHE_USE_BASEDIR=y",
++        "BR2_TARGET_OPENSBI=y",
++        "BR2_TARGET_EDK2=y",
++        "BR2_PACKAGE_WESTON=y",
++        "BR2_PACKAGE_HOST_QEMU=y",
++        "BR2_PACKAGE_SYSTEMD_INITRD=y",
++        "BR2_PACKAGE_SYSTEMD_REPART=y",
++        "BR2_PACKAGE_SYSTEMD_SYSEXT=y",
++        "BR2_PACKAGE_SYSTEMD_SYSUPDATE=y",
++        "BR2_PACKAGE_CRYPTSETUP=y",
++        "BR2_PACKAGE_TPM2_TSS=y",
++        "BR2_PACKAGE_TPM2_TOOLS=y",
++        "BR2_TARGET_ROOTFS_CPIO_DRACUT=y",
++        "BR2_PACKAGE_HOST_SBSIGNTOOLS=y",
++        "BR2_PACKAGE_HOST_SWTPM=y",
++    }
++    forbidden = {
++        "BR2_TARGET_GRUB2=y",
++        "BR2_TARGET_GRUB2_RISCV64_EFI=y",
++        "BR2_TARGET_EXTLINUX=y",
++    }
++    assert required <= set(config), sorted(required - set(config))
++    assert not forbidden & set(config), sorted(forbidden & set(config))
++    result = subprocess.run(
++        [
++            "make",
++            "-s",
++            "-C",
++            output,
++            f"BR2_DL_DIR={download_dir}",
++            f"BR2_CCACHE_DIR={ccache_dir}",
++            "printvars",
++            "VARS=BR2_DL_DIR BR2_CCACHE_DIR",
++        ],
++        check=True,
++        capture_output=True,
++        text=True,
++    )
++    cache_lines = set(result.stdout.splitlines())
++    assert f"BR2_DL_DIR={download_dir}" in cache_lines, result.stdout
++    assert f"BR2_CCACHE_DIR={ccache_dir}" in cache_lines, result.stdout
++    print("PASS: configuration uses RISC-V systemd-boot, shared caches, and no GRUB or extlinux")
++    artifacts = [
++        "fw_dynamic.bin",
++        "RISCV_VIRT_CODE.fd",
++        "RISCV_VIRT_VARS.fd",
++        "Image",
++        "rootfs.cpio.gz",
++        "usr-a.erofs",
++        "usr-a.verity",
++        "usr-a.verity-sig",
++        "usr-a.roothash",
++        "disk.img",
++        "efi-part.vfat",
++        "efi-part/EFI/BOOT/bootriscv64.efi",
++        "efi-part/EFI/Linux/rva23_1+3-0.efi",
++        "efi-part/EFI/Linux/rva23-recovery_1.efi",
++        "efi-part/EFI/Linux/rva23-factory-reset.efi",
++        "efi-part/EFI/Linux/rva23-emergency.efi",
++        "efi-part/EFI/Linux/rva23-debug_1.efi",
++    ]
++    for name in artifacts:
++        path = images / name
++        assert path.is_file() and path.stat().st_size > 0, path
++    for name in ["RISCV_VIRT_CODE.fd", "RISCV_VIRT_VARS.fd"]:
++        assert (images / name).stat().st_size == 32 * 1024 * 1024, name
++    print("PASS: firmware, kernel, root filesystem, bootloader, UKI, and disk artifacts exist")
++    host_bin = output / "host" / "bin"
++    env = os.environ.copy()
++    env["PATH"] = f"{host_bin}:{env['PATH']}"
++    profiles = [
++        "rva23_1+3-0.efi",
++        "rva23-recovery_1.efi",
++        "rva23-factory-reset.efi",
++        "rva23-emergency.efi",
++        "rva23-debug_1.efi",
++    ]
++    for profile in profiles:
++        path = images / "efi-part/EFI/Linux" / profile
++        result = subprocess.run(
++            [host_bin / "ukify", "--json=short", "inspect", path],
++            check=True,
++            capture_output=True,
++            text=True,
++            env=env,
++        )
++        sections = set(json.loads(result.stdout))
++        assert {".linux", ".initrd", ".osrel", ".cmdline", ".pcrsig", ".pcrpkey"} <= sections, sections
++        subprocess.run(
++            [host_bin / "sbverify", "--cert", key_dir / "secure-boot.crt", path],
++            check=True,
++            capture_output=True,
++        )
++    subprocess.run(
++        [host_bin / "sbverify", "--cert", key_dir / "secure-boot.crt", images / "efi-part/EFI/BOOT/bootriscv64.efi"],
++        check=True,
++        capture_output=True,
++    )
++    print("PASS: all UKI profiles and systemd-boot contain required sections and valid signatures")
++    result = subprocess.run(
++        [host_bin / "mdir", "-i", images / "efi-part.vfat", "::/EFI/Linux"],
++        check=True,
++        capture_output=True,
++        text=True,
++    )
++    assert "RVA23" in result.stdout.upper(), result.stdout
++    result = subprocess.run(
++        [host_bin / "mdir", "-i", images / "efi-part.vfat", "::/loader/entries"],
++        capture_output=True,
++    )
++    assert result.returncode != 0, result.stdout
++    print("PASS: ESP contains Type 2 UKI profiles and no Type 1 entries")
++    result = subprocess.run(
++        ["sfdisk", "--json", images / "disk.img"],
++        check=True,
++        capture_output=True,
++        text=True,
++    )
++    partitions = json.loads(result.stdout)["partitiontable"]["partitions"]
++    labels = {partition.get("name") for partition in partitions}
++    assert {"esp", "rva23_1", "rva23_1_verity", "rva23_1_verity_sig"} <= labels, labels
++    signature = json.loads((images / "usr-a.verity-sig").read_bytes().rstrip(b"\0"))
++    assert signature["rootHash"] == (images / "usr-a.roothash").read_text().strip()
++    assert (images / "usr-a.erofs").stat().st_size == 512 * 1024 * 1024
++    assert (images / "usr-a.verity").stat().st_size == 64 * 1024 * 1024
++    print("PASS: disk ships signed EROFS /usr A, dm-verity data A, and dm-verity signature A")
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/buildroot/qemu/scripts/verify-k3s.py b/buildroot/qemu/scripts/verify-k3s.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..4f0f39267ea9b88f3a280b0c0d6496751ea178ad
+--- /dev/null
++++ b/buildroot/qemu/scripts/verify-k3s.py
+@@ -0,0 +1,50 @@
++#!/usr/bin/env python3
++from pathlib import Path
++import sys
++
++from verify_boot import Console
++
++
++def login(console):
++    console.expect(b"rva23 login:", 300)
++    console.sendline("root")
++    console.expect(b"# ", 30)
++
++
++def main():
++    output = Path(sys.argv[1]).resolve()
++    console = Console(output, "k3s.log")
++    try:
++        login(console)
++        console.command("systemctl is-active --quiet --wait graphical.target")
++        console.command("systemd-sysext status | grep -q k3s_")
++        console.command("k3s --version")
++        print("PASS: the signed k3s sysext loads in IPE enforcement mode")
++        image = "$(find /var/lib/extensions -maxdepth 1 -name 'k3s_*.raw' -not -name '*.backup' -print -quit)"
++        console.command("systemd-sysext unmerge")
++        console.command(f"cp {image} {image}.backup")
++        console.command(f"printf X | dd of={image} bs=1 seek=1048576 conv=notrunc 2>/dev/null")
++        console.command("if systemd-sysext --image-policy=root=signed+absent:usr=signed+absent refresh; then false; else true; fi", 120)
++        console.command("device=$(lsblk -ln -o NAME,TYPE | awk '$1 ~ /-verity$/ && $2 == \"crypt\" {print $1; exit}'); if dd if=/dev/$device of=/dev/null bs=1M status=none; then false; else true; fi", 120)
++        console.command(f"mv {image}.backup {image}")
++        console.command("systemd-sysext --image-policy=root=signed+absent:usr=signed+absent refresh", 120)
++        print("PASS: a modified k3s sysext fails signature enforcement")
++        console.command("bootctl set-default 'rva23-debug_*.efi'")
++        console.sendline("reboot")
++        login(console)
++        console.command("systemctl is-active --quiet --wait graphical.target")
++        console.command("systemd-sysext status | grep -q k3s_")
++        console.command("mkdir -p /var/lib/rancher")
++        console.command("systemd-run --unit=rva23-k3s-test --property=Type=simple k3s server --disable-agent --disable=metrics-server --data-dir=/var/lib/k3s-test")
++        console.sendline("for i in $(seq 1 180); do if k3s kubectl --kubeconfig=/var/lib/k3s-test/server/cred/admin.kubeconfig get --raw=/version; then break; fi; sleep 1; done")
++        console.expect(b'"gitVersion"', 240)
++        console.command("systemctl stop rva23-k3s-test")
++        print("PASS: k3s starts an API server and kubectl reads its version")
++        console.command("rm -rf /var/lib/k3s-test")
++        console.command("bootctl set-default 'rva23_?.efi'")
++    finally:
++        console.close()
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/buildroot/qemu/scripts/verify-podman.py b/buildroot/qemu/scripts/verify-podman.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..84d4f84cbad6aee8043ec70d5245c9f9577949dd
+--- /dev/null
++++ b/buildroot/qemu/scripts/verify-podman.py
+@@ -0,0 +1,52 @@
++#!/usr/bin/env python3
++from pathlib import Path
++import sys
++
++from verify_boot import Console
++
++
++def login(console):
++    console.expect(b"rva23 login:", 300)
++    console.sendline("root")
++    console.expect(b"# ", 30)
++
++
++def main():
++    output = Path(sys.argv[1]).resolve()
++    console = Console(output, "podman.log")
++    try:
++        login(console)
++        console.command("systemctl is-active --quiet --wait graphical.target")
++        console.command("systemd-sysext status | grep -q podman_")
++        console.command("podman --version")
++        print("PASS: the signed Podman sysext loads in IPE enforcement mode")
++        image = "$(ls -1 /var/lib/extensions/podman_*.raw | sort -V | tail -n1)"
++        console.command("systemd-sysext unmerge")
++        console.command(f"cp {image} {image}.backup")
++        console.command(f"printf X | dd of={image} bs=1 seek=1048576 conv=notrunc 2>/dev/null")
++        console.command("if systemd-sysext --image-policy=root=signed+absent:usr=signed+absent refresh; then false; else true; fi", 120)
++        console.command("device=$(lsblk -ln -o NAME,TYPE | awk '$1 ~ /-verity$/ && $2 == \"crypt\" {print $1; exit}'); if dd if=/dev/$device of=/dev/null bs=1M status=none; then false; else true; fi", 120)
++        console.command(f"mv {image}.backup {image}")
++        console.command("systemd-sysext --image-policy=root=signed+absent:usr=signed+absent refresh", 120)
++        print("PASS: a modified Podman sysext fails signature enforcement")
++        console.command("bootctl set-default 'rva23-debug_*.efi'")
++        console.sendline("reboot")
++        login(console)
++        console.command("systemctl is-active --quiet --wait graphical.target")
++        console.command("systemd-sysext status | grep -q podman_")
++        console.command("podman image rm -f localhost/rva23-podman-test:latest || true")
++        console.command("podman load -i /usr/share/rva23/podman-test-image.tar", 300)
++        console.command("podman image exists localhost/rva23-podman-test:latest")
++        result = console.capture("podman run --rm --network=none localhost/rva23-podman-test:latest", 300)
++        assert "podman-works" in result, result
++        console.command("podman info --format '{{.Host.OCIRuntime.Name}}' | grep -q crun")
++        print("PASS: Podman loads and runs the offline RISC-V OCI image with crun")
++        console.command("bootctl set-default 'rva23_?.efi'")
++        console.sendline("poweroff")
++        console.process.wait(timeout=90)
++    finally:
++        console.close()
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/buildroot/qemu/scripts/verify-report.py b/buildroot/qemu/scripts/verify-report.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..e5e943b67ded03ac5b20d1b21625e1abb800edb8
+--- /dev/null
++++ b/buildroot/qemu/scripts/verify-report.py
+@@ -0,0 +1,118 @@
++#!/usr/bin/env python3
++import base64
++from datetime import datetime, timedelta, timezone
++import json
++from pathlib import Path
++import re
++import subprocess
++import sys
++
++from cryptography import x509
++from cryptography.hazmat.primitives import hashes
++from cryptography.hazmat.primitives.serialization import load_pem_public_key
++from cryptography.x509.oid import NameOID
++
++from verify_boot import Console
++
++
++def der_length(length):
++    if length < 128:
++        return bytes([length])
++    encoded = length.to_bytes((length.bit_length() + 7) // 8, "big")
++    return bytes([128 | len(encoded)]) + encoded
++
++
++def der_sequence(*parts):
++    payload = b"".join(parts)
++    return b"\x30" + der_length(len(payload)) + payload
++
++
++def guest_base64(console, path):
++    output = console.capture(f"base64 -w 0 {path}")
++    encoded = "".join(line.strip() for line in output.splitlines() if re.fullmatch(r"[A-Za-z0-9+/=]+", line.strip()))
++    return base64.b64decode(encoded)
++
++
++def provision_ek(console):
++    key_dir = "/var/lib/systemd/report.sign.tpm2"
++    console.command(f"mkdir -p {key_dir}")
++    console.command(f"tpm2_createek -c {key_dir}/ek.ctx -G rsa -u {key_dir}/ek.pub")
++    console.command(f"tpm2_readpublic -c {key_dir}/ek.ctx -f pem -o {key_dir}/ek.pem")
++    public_key = load_pem_public_key(guest_base64(console, f"{key_dir}/ek.pem"))
++    name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "RVA23 EK")])
++    now = datetime.now(timezone.utc)
++    builder = (
++        x509.CertificateBuilder()
++        .subject_name(name)
++        .issuer_name(name)
++        .public_key(public_key)
++        .serial_number(1)
++        .not_valid_before(now - timedelta(days=1))
++        .not_valid_after(now + timedelta(days=3650))
++        .add_extension(x509.BasicConstraints(ca=False, path_length=None), critical=True)
++    )
++    tbs_certificate = builder.create_unsigned().tbs_certificate_bytes
++    console.command(f"echo {base64.b64encode(tbs_certificate).decode()} | base64 -d > /tmp/rva23-ek-tbs.der")
++    console.command("tpm2_hash -C o -g sha256 -o /tmp/rva23-ek-tbs.digest -t /tmp/rva23-ek-tbs.ticket /tmp/rva23-ek-tbs.der")
++    console.command(f"tpm2_createak -C {key_dir}/ek.ctx -G rsa -g sha256 -s rsassa -c {key_dir}/ak.ctx -u {key_dir}/ak.pub -r {key_dir}/ak.priv")
++    console.command(f"tpm2_sign -c {key_dir}/ak.ctx -g sha256 -d /tmp/rva23-ek-tbs.digest -t /tmp/rva23-ek-tbs.ticket -o /tmp/rva23-ek-tbs.sig")
++    signature = guest_base64(console, "/tmp/rva23-ek-tbs.sig")[-256:]
++    algorithm = der_sequence(b"\x06\x09\x2a\x86\x48\x86\xf7\x0d\x01\x01\x0b", b"\x05\x00")
++    certificate = der_sequence(tbs_certificate, algorithm, b"\x03" + der_length(len(signature) + 1) + b"\x00" + signature)
++    x509.load_der_x509_certificate(certificate)
++    console.command(f"echo {base64.b64encode(certificate).decode()} | base64 -d > /tmp/rva23-ek.crt")
++    console.command("tpm2_nvundefine 0x1c00012 -C p || true")
++    console.command("tpm2_changeauth -C p -P '' -p ''")
++    console.command("tpm2_nvdefine 0x1c00012 -C p -s 1024 -a 'authread|ppwrite|platformcreate' || true")
++    console.command("tpm2_nvsetbits 0x1c00012 -C p -a no_da")
++    console.command("tpm2_nvwrite 0x1c00012 -C p -i /tmp/rva23-ek.crt")
++    console.command("tpm2_nvundefine 0x1c00002 -C p || true")
++    console.command("tpm2_nvdefine 0x1c00002 -C p -s 1024 -a 'authread|ppwrite|platformcreate' || true")
++    console.command("tpm2_nvsetbits 0x1c00002 -C p -a no_da")
++    console.command("tpm2_nvwrite 0x1c00002 -C p -i /tmp/rva23-ek.crt")
++    console.command(f"rm -f {key_dir}/default.key")
++
++
++def main():
++    output = Path(sys.argv[1]).resolve()
++    receiver_dir = output / "host-attestation"
++    receiver_dir.mkdir(exist_ok=True)
++    subprocess.run(["go", "build", "-o", receiver_dir / "report-receiver", "scripts/report-receiver.go"], check=True)
++    receiver = subprocess.Popen(
++        [receiver_dir / "report-receiver"],
++        stdout=(receiver_dir / "receiver.log").open("w"),
++        stderr=subprocess.STDOUT,
++    )
++    console = Console(output, "report-upload.log", firmware=True)
++    try:
++        console.expect(b"rva23 login:", 300)
++        console.sendline("root")
++        console.expect(b"# ", 30)
++        console.command("systemctl is-active --quiet --wait graphical.target")
++        console.command("mkdir -p /var/lib/rva23-attestation")
++        console.command("mountpoint -q /sys/kernel/security || mount -t securityfs securityfs /sys/kernel/security")
++        console.command("systemctl start systemd-pcrlock.socket")
++        console.command("ip link set dev $(ip -o link show | awk -F': ' '$2 != \"lo\" {print $2; exit}') up")
++        console.command("ip addr replace 10.0.2.15/24 dev $(ip -o link show | awk -F': ' '$2 != \"lo\" {print $2; exit}')")
++        console.command("ip route replace default via 10.0.2.2")
++        console.command("ping -c 1 10.0.2.2")
++        console.command("systemctl start systemd-report-sign-tpm2.socket")
++        console.command("/usr/lib/systemd/systemd-report upload --url=http://10.0.2.2:8080/reports --sign=require-one", 300)
++        console.sendline("poweroff")
++        console.process.wait(timeout=90)
++    finally:
++        console.close()
++        receiver.terminate()
++        receiver.wait(timeout=15)
++    response = json.loads((receiver_dir / "response.json").read_text())
++    assert response["status"] == "accepted", response
++    assert response["componentsVerified"] > 0, response
++    assert response["eventLogRecords"] > 0, response
++    signature = json.loads((receiver_dir / "signature.json").read_text())
++    assert any(record.get("pcr") == 13 and record.get("content_type") == "pcclient_std" and "Global system extension initrd" in bytes.fromhex(record["content"].get("event_data", "")).decode("utf-16le") for record in signature["data"]["eventLog"]), "Podman sysext is absent from the attested event log"
++    print(f"PASS: Go receiver accepted {response['componentsVerified']} TPM signatures and {response['eventLogRecords']} event-log records")
++    print("PASS: the attested event log includes the Podman sysext")
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/buildroot/qemu/scripts/verify-security.py b/buildroot/qemu/scripts/verify-security.py
+new file mode 100755
+index 0000000000000000000000000000000000000000..9fc7b2133cda04f4e178b591f030a326e938b0f0
+--- /dev/null
++++ b/buildroot/qemu/scripts/verify-security.py
+@@ -0,0 +1,119 @@
++#!/usr/bin/env python3
++import json
++import os
++from pathlib import Path
++import re
++import select
++import subprocess
++import sys
++import time
++
++from verify_boot import Console
++
++
++def partitions(disk):
++    result = subprocess.run(["sfdisk", "--json", disk], check=True, capture_output=True, text=True)
++    return {entry.get("name"): entry for entry in json.loads(result.stdout)["partitiontable"]["partitions"]}
++
++
++def copy_disk(source, destination):
++    subprocess.run(["cp", "--reflink=auto", "--sparse=always", source, destination], check=True)
++
++
++def expect_boot_failure(output, disk, name, pattern):
++    environment = os.environ.copy()
++    environment["RVA23_DISK"] = str(disk)
++    environment["RVA23_TPM_STATE"] = str(output / f"swtpm-{name}")
++    log = (output / f"{name}.log").open("wb")
++    process = subprocess.Popen(
++        [output.parent.parent / "board/rva23-qemu/run-qemu.sh", output / "images"],
++        env=environment,
++        stdin=subprocess.DEVNULL,
++        stdout=subprocess.PIPE,
++        stderr=subprocess.STDOUT,
++        bufsize=0,
++    )
++    buffer = b""
++    deadline = time.monotonic() + 180
++    try:
++        expression = re.compile(pattern, re.IGNORECASE)
++        while time.monotonic() < deadline:
++            match = expression.search(buffer)
++            if match:
++                return
++            assert b"rva23 login:" not in buffer, buffer[-12000:].decode(errors="replace")
++            ready, _, _ = select.select([process.stdout], [], [], max(0, deadline - time.monotonic()))
++            if not ready:
++                continue
++            data = os.read(process.stdout.fileno(), 65536)
++            if not data:
++                break
++            log.write(data)
++            log.flush()
++            buffer += data
++        raise AssertionError(buffer[-12000:].decode(errors="replace"))
++    finally:
++        process.terminate()
++        try:
++            process.wait(timeout=10)
++        except subprocess.TimeoutExpired:
++            process.kill()
++            process.wait()
++        log.close()
++
++
++def main():
++    output = Path(sys.argv[1]).resolve()
++    key_dir = Path(sys.argv[2]).resolve()
++    images = output / "images"
++    enrollment = Console(output, "security-enroll.log")
++    try:
++        enrollment.expect(b"rva23 login:", 300)
++        enrollment.sendline("root")
++        enrollment.expect(b"# ", 30)
++        enrollment.sendline("poweroff")
++        enrollment.process.wait(timeout=90)
++    finally:
++        enrollment.close()
++    console = Console(output, "security-valid.log")
++    try:
++        console.expect(b"rva23 login:", 300)
++        console.sendline("root")
++        console.expect(b"# ", 30)
++        print(console.capture("od -An -tu1 -j4 -N1 /sys/firmware/efi/efivars/SecureBoot-8be4df61-93ca-11d2-aa0d-00e098032b8c", 30))
++        console.command("test \"$(od -An -tu1 -j4 -N1 /sys/firmware/efi/efivars/SecureBoot-8be4df61-93ca-11d2-aa0d-00e098032b8c | tr -d '[:space:]')\" = 1")
++        console.command("test \"$(cat /sys/kernel/security/ipe/enforce)\" = 1")
++        console.sendline("poweroff")
++        console.process.wait(timeout=90)
++    finally:
++        console.close()
++    print("PASS: Secure Boot and IPE enforcement are active")
++    parts = partitions(images / "disk.img")
++    esp_offset = int(parts["esp"]["start"]) * 512
++    original_uki = images / "efi-part/EFI/Linux/rva23_1+3-0.efi"
++    bad_uki = output / "bad-uki.efi"
++    original_data = original_uki.read_bytes()
++    bad_uki.write_bytes(original_data[:1024] + bytes([original_data[1024] ^ 1]) + original_data[1025:])
++    result = subprocess.run([images.parent / "host/bin/sbverify", "--cert", key_dir / "secure-boot.crt", bad_uki], capture_output=True)
++    assert result.returncode != 0
++    disk = output / "bad-uki.img"
++    copy_disk(images / "disk.img", disk)
++    subprocess.run([images.parent / "host/bin/mcopy", "-o", "-i", f"{disk}@@{esp_offset}", bad_uki, "::/EFI/Linux/rva23_1.efi"], check=True)
++    expect_boot_failure(output, disk, "bad-uki-boot", rb"security violation|access denied|failed to load|startimage failed")
++    print("PASS: a modified UKI fails signature verification and Secure Boot")
++    disk = output / "bad-usr.img"
++    copy_disk(images / "disk.img", disk)
++    with disk.open("r+b") as stream:
++        stream.seek(int(parts["rva23_1"]["start"]) * 512 + 1024)
++        current = stream.read(1)
++        stream.seek(-1, 1)
++        stream.write(bytes([current[0] ^ 1]))
++    expect_boot_failure(output, disk, "bad-usr-boot", rb"verity|failed to mount|unable to mount|input/output error")
++    print("PASS: modified /usr data fails before login")
++    bad_uki.unlink(missing_ok=True)
++    (output / "bad-uki.img").unlink(missing_ok=True)
++    (output / "bad-usr.img").unlink(missing_ok=True)
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/buildroot/qemu/scripts/verify-update.py b/buildroot/qemu/scripts/verify-update.py
+new file mode 100755
+index 0000000000000000000000000000000000000000..54bc456070f3dd7ad6e3a641a222e2db3e63b7d8
+--- /dev/null
++++ b/buildroot/qemu/scripts/verify-update.py
+@@ -0,0 +1,186 @@
++#!/usr/bin/env python3
++from contextlib import contextmanager
++import functools
++import hashlib
++import http.server
++import os
++from pathlib import Path
++import shutil
++import subprocess
++import sys
++import threading
++import time
++import urllib.request
++
++from verify_boot import Console
++
++
++class InterruptingHandler(http.server.SimpleHTTPRequestHandler):
++    def do_GET(self):
++        if self.path.startswith("/rva23_2_") and self.path.endswith(".usr.erofs.xz"):
++            data = (Path(self.directory) / self.path.lstrip("/")).read_bytes()
++            self.send_response(200)
++            self.send_header("Content-Length", str(len(data)))
++            self.end_headers()
++            self.wfile.write(data[: len(data) // 2])
++            self.wfile.flush()
++            self.close_connection = True
++            return
++        super().do_GET()
++
++    def log_message(self, format, *args):
++        pass
++
++
++@contextmanager
++def registry_server(path, interrupt=False):
++    handler = InterruptingHandler if interrupt else http.server.SimpleHTTPRequestHandler
++    server = http.server.ThreadingHTTPServer(("127.0.0.1", 8000), functools.partial(handler, directory=str(path)))
++    thread = threading.Thread(target=server.serve_forever, daemon=True)
++    thread.start()
++    try:
++        deadline = time.monotonic() + 15
++        while True:
++            try:
++                urllib.request.urlopen("http://127.0.0.1:8000/SHA256SUMS", timeout=1).close()
++                break
++            except Exception:
++                if not thread.is_alive() or time.monotonic() > deadline:
++                    raise
++                time.sleep(0.1)
++        yield
++    finally:
++        server.shutdown()
++        server.server_close()
++        thread.join(timeout=10)
++
++
++def clone(source, destination):
++    if destination.exists():
++        shutil.rmtree(destination)
++    shutil.copytree(source, destination)
++
++
++def make_offline_image(output, offline):
++    for component, directory in (("os", "sysupdate.d"), ("extensions", "sysupdate.extensions.d"), ("bootloader", "sysupdate.bootloader.d")):
++        for source in (output / "target/usr/lib" / directory).glob("*.transfer"):
++            text = source.read_text()
++            text = text.replace("Type=url-file", "Type=regular-file")
++            text = text.replace("Path=http://10.0.2.2:8000/", "Path=/")
++            text = text.replace("[Source]\n", "[Source]\nPathRelativeTo=explicit\n")
++            destination = offline / "definitions" / component / source.name
++            destination.parent.mkdir(parents=True, exist_ok=True)
++            destination.write_text(text)
++    image = output / "offline-registry.img"
++    payload = sum(path.stat().st_size for path in offline.rglob("*") if path.is_file())
++    size = max(512 * 1024 * 1024, ((payload + 128 * 1024 * 1024 - 1) // (64 * 1024 * 1024)) * (64 * 1024 * 1024))
++    subprocess.run(["truncate", "-s", str(size), image], check=True)
++    subprocess.run(["mkfs.ext2", "-F", "-d", offline, image], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
++    return image
++
++
++def update_failure(console, component=None):
++    option = f" --component={component}" if component else ""
++    console.command(f"if /usr/lib/systemd/systemd-sysupdate{option} update; then false; else true; fi", 300)
++    console.command("test ! -e /boot/EFI/Linux/rva23_2+3-0.efi")
++    console.command("if lsblk -ln -o PARTLABEL | grep -q rva23_2_verity; then false; else true; fi")
++
++
++def main():
++    output = Path(sys.argv[1]).resolve()
++    key_dir = Path(sys.argv[2]).resolve()
++    registry = output / "registry"
++    registry_v2 = output / "registry-v2"
++    clone(registry, registry_v2)
++    bad = output / "registry-bad"
++    clone(registry_v2, bad)
++    with (bad / "SHA256SUMS.gpg").open("ab") as stream:
++        stream.write(b"bad")
++    interrupted = output / "registry-interrupted"
++    clone(registry_v2, interrupted)
++    offline = output / "offline-registry"
++    clone(registry_v2, offline)
++    subprocess.run(["gpg", "--batch", "--homedir", key_dir / "gnupg", "--verify", offline / "SHA256SUMS.gpg", offline / "SHA256SUMS"], check=True)
++    subprocess.run(["sha256sum", "-c", "SHA256SUMS"], cwd=offline, check=True, stdout=subprocess.DEVNULL)
++    os.environ["RVA23_UPDATE_IMAGE"] = str(make_offline_image(output, offline))
++    console = Console(output, "update.log")
++    try:
++        console.expect(b"rva23 login:", 300)
++        console.sendline("root")
++        console.expect(b"# ", 30)
++        console.command("systemctl is-active --quiet --wait graphical.target")
++        console.command("systemctl start systemd-networkd.service")
++        console.command("/usr/lib/systemd/systemd-networkd-wait-online --timeout=60", 90)
++        console.command("ping -c 1 -W 5 10.0.2.2")
++        with registry_server(bad):
++            update_failure(console)
++        print("PASS: a bad manifest signature stops installation")
++        with registry_server(interrupted, interrupt=True):
++            update_failure(console)
++        console.command("/usr/lib/systemd/systemd-sysupdate vacuum")
++        console.command("udevadm settle")
++        console.command("if lsblk -ln -o PARTLABEL | grep -q rva23_2; then false; else true; fi")
++        print("PASS: an interrupted payload leaves no bootable installation and vacuum removes it")
++        console.command("printf persistent > /var/lib/rva23-update-persistent")
++        console.command("mkdir -p /mnt/offline")
++        console.command("mount -t ext2 -o ro /dev/vdb /mnt/offline")
++        console.command("gpgv --keyring /usr/lib/systemd/import-pubring.pgp /mnt/offline/SHA256SUMS.gpg /mnt/offline/SHA256SUMS")
++        console.command("ip link set dev enp0s1 down")
++        console.command("/usr/lib/systemd/systemd-sysupdate --definitions=/mnt/offline/definitions/os --transfer-source=/mnt/offline update", 600)
++        console.command("/usr/lib/systemd/systemd-sysupdate --definitions=/mnt/offline/definitions/extensions --transfer-source=/mnt/offline update", 600)
++        console.command("/usr/lib/systemd/systemd-sysupdate --definitions=/mnt/offline/definitions/bootloader --transfer-source=/mnt/offline update", 600)
++        expected_bootloader = hashlib.sha256((offline / "systemd-boot_2.efi").read_bytes()).hexdigest()
++        console.command("install -m 0644 /var/lib/sysupdate/bootloader/systemd-boot_2.efi /boot/EFI/BOOT/bootriscv64.efi.new")
++        console.command("mv /boot/EFI/BOOT/bootriscv64.efi.new /boot/EFI/BOOT/bootriscv64.efi")
++        console.command("sync")
++        console.command(f"test \"$(sha256sum /boot/EFI/BOOT/bootriscv64.efi | cut -d ' ' -f 1)\" = {expected_bootloader}")
++        print("PASS: offline acquisition installs signed OS, extension, and bootloader components")
++        console.sendline("reboot")
++        console.expect(b"rva23 login:", 300)
++        console.sendline("root")
++        console.expect(b"# ", 30)
++        console.command("systemctl is-active --quiet --wait graphical.target weston.service")
++        console.command("grep -q 'IMAGE_VERSION=\"2\"' /usr/lib/os-release")
++        console.command("test \"$(cat /var/lib/rva23-update-persistent)\" = persistent")
++        console.command("find /boot/EFI/Linux -name 'rva23_1*.efi' | grep -q . && find /boot/EFI/Linux -name 'rva23_2*.efi' | grep -q .")
++        console.command("test -e /boot/EFI/Linux/rva23-recovery_2.efi")
++        console.command("XDG_RUNTIME_DIR=/run/weston WAYLAND_DISPLAY=wayland-1 wayland-info >/dev/null")
++        print("PASS: the A/B update boots version 2 with persistent state and two retained UKIs")
++        console.command("ip link set dev enp0s1 up")
++        console.command("/usr/lib/systemd/systemd-networkd-wait-online --timeout=60", 90)
++        environment = os.environ.copy()
++        environment["RVA23_FAIL_BOOT"] = "1"
++        subprocess.run([output.parent.parent / "scripts/build-registry.py", output, key_dir, "3"], check=True, env=environment)
++        with registry_server(registry):
++            console.command("/usr/lib/systemd/systemd-sysupdate update", 600)
++            console.command("/usr/lib/systemd/systemd-sysupdate --component=extensions update", 600)
++        for attempt in range(3):
++            console.sendline("reboot")
++            console.expect(b"(or press Control-D to continue):", 300)
++            console.sendline("")
++            console.expect(b"# ", 30)
++            console.command("systemctl is-active --quiet emergency.target")
++            print(f"PASS: failed boot attempt {attempt + 1} consumes one boot counter")
++        console.sendline("reboot")
++        console.expect(b"rva23 login:", 300)
++        console.sendline("root")
++        console.expect(b"# ", 30)
++        console.command("systemctl is-active --quiet --wait graphical.target weston.service")
++        console.command("grep -q 'IMAGE_VERSION=\"2\"' /usr/lib/os-release")
++        print("PASS: three failed boots return to the previous slot")
++        console.command("bootctl set-default rva23-recovery_2.efi")
++        console.sendline("reboot")
++        console.expect(b"(or press Control-D to continue):", 300)
++        console.sendline("")
++        console.expect(b"# ", 30)
++        console.command("systemctl is-active --quiet rescue.target")
++        print("PASS: recovery remains available after updates and rollback")
++        console.command("bootctl set-default 'rva23_?.efi'")
++        console.sendline("poweroff")
++        console.process.wait(timeout=90)
++    finally:
++        console.close()
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/buildroot/qemu/scripts/verify-wallet.py b/buildroot/qemu/scripts/verify-wallet.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..9662d5a2e54be1db61f32328115bc106ca972d4e
+--- /dev/null
++++ b/buildroot/qemu/scripts/verify-wallet.py
+@@ -0,0 +1,152 @@
++#!/usr/bin/env python3
++import base64
++import hashlib
++import json
++import os
++from pathlib import Path
++import re
++import secrets
++import struct
++import subprocess
++import sys
++
++from verify_boot import Console
++
++
++def login(console):
++    console.expect(b"rva23 login:", 300)
++    console.sendline("root")
++    console.expect(b"# ", 30)
++    console.command("systemctl is-active --quiet --wait graphical.target")
++    console.command("systemctl start systemd-pcrlock.socket")
++    console.command("systemctl restart systemd-report-sign-tpm2.socket")
++    console.command("sleep 2")
++
++
++def reboot_to(console, output, profile):
++    console.command(f"bootctl set-default '{profile}'")
++    console.sendline("poweroff")
++    console.process.wait(timeout=90)
++    console.close()
++    return Console(output, "wallet.log", firmware=True)
++
++
++def create_key(directory, name):
++    private = directory / f"{name}-private.pem"
++    public = directory / f"{name}-public.pem"
++    subprocess.run(["openssl", "genpkey", "-algorithm", "RSA", "-pkeyopt", "rsa_keygen_bits:2048", "-out", private], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
++    subprocess.run(["openssl", "pkey", "-in", private, "-pubout", "-out", public], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
++    private.chmod(0o600)
++
++
++def create_fido2(directory):
++    directory.mkdir(exist_ok=True)
++    subprocess.run(["openssl", "ecparam", "-name", "prime256v1", "-genkey", "-noout", "-out", directory / "private-key.pem"], check=True)
++    subprocess.run(["openssl", "req", "-new", "-x509", "-key", directory / "private-key.pem", "-out", directory / "certificate.pem", "-subj", "/CN=RVA23 U2F Test", "-days", "365"], check=True)
++    (directory / "counter").write_bytes(struct.pack(">I", 1))
++    (directory / "entropy").write_bytes(secrets.token_bytes(48))
++
++
++def create_smartcard(directory):
++    directory.mkdir(exist_ok=True)
++    noise = directory / "noise"
++    noise.write_bytes(secrets.token_bytes(64))
++    subprocess.run(["certutil", "-N", "-d", f"sql:{directory}", "--empty-password"], check=True)
++    subprocess.run(["certutil", "-S", "-d", f"sql:{directory}", "-z", noise, "-s", "CN=RVA23 Smartcard CA", "-x", "-t", "TC,TC,TC", "-n", "fake-smartcard-ca", "-m", "1"], check=True)
++    subprocess.run(["certutil", "-S", "-d", f"sql:{directory}", "-z", noise, "-t", ",,", "-s", "CN=RVA23 User", "-n", "id-cert", "-c", "fake-smartcard-ca", "-m", "2"], check=True)
++    subprocess.run(["certutil", "-S", "-d", f"sql:{directory}", "-z", noise, "-t", ",,", "-s", "CN=RVA23 User (signing)", "--nsCertType", "smime", "-n", "signing-cert", "-c", "fake-smartcard-ca", "-m", "3"], check=True)
++    subprocess.run(["certutil", "-S", "-d", f"sql:{directory}", "-z", noise, "-t", ",,", "-s", "CN=RVA23 User (encryption)", "--nsCertType", "sslClient", "-n", "encryption-cert", "-c", "fake-smartcard-ca", "-m", "4"], check=True)
++    certificate = directory / "signing-cert.cer"
++    subprocess.run(["certutil", "-L", "-r", "-d", f"sql:{directory}", "-o", certificate, "-n", "signing-cert"], check=True)
++    public_key = directory / "smartcard-public.pem"
++    subprocess.run(["openssl", "x509", "-inform", "DER", "-in", certificate, "-pubkey", "-noout"], check=True, stdout=public_key.open("w"))
++
++
++def predict_profile(output, filename):
++    images = output / "images"
++    key_dir = output.parent.parent.parent / "buildroot-qemu-keys"
++    cmdline = output / "wallet" / f"{filename}.cmdline"
++    cmdline.write_text((images / f"{filename}.cmdline").read_text().rstrip("\n"))
++    uname = output / "wallet" / f"{filename}.uname"
++    uname.write_text(next(output.glob("build/linux-*/include/config/kernel.release")).read_text().rstrip("\n"))
++    sbat = output / "wallet" / f"{filename}.sbat"
++    subprocess.run([output / "host/bin/riscv64-linux-objcopy", "-O", "binary", "--only-section=.sbat", images / "efi-part/EFI/Linux" / filename, sbat], check=True)
++    result = subprocess.run([
++        "/usr/lib/systemd/systemd-measure", "calculate", "--linux", images / "Image", "--initrd", images / "rootfs.cpio.gz",
++        "--osrel", images / "image-staging/usr/lib/os-release", "--cmdline", cmdline, "--uname", uname,
++        "--sbat", sbat, "--pcrpkey", key_dir / "pcr-public.pem", "--bank", "sha256", "--phase", "enter-initrd:leave-initrd:sysinit:ready",
++    ], check=True, capture_output=True, text=True)
++    match = re.search(r"11:sha256=([0-9a-f]{64})", result.stdout)
++    assert match, result.stdout
++    return match.group(1)
++
++
++def start_services(output, receiver_dir, wallet_dir):
++    secret = secrets.token_bytes(32)
++    public_key = (receiver_dir / "public-key.pem").read_bytes()
++    token_path = receiver_dir / "token.json"
++    token_path.write_text(json.dumps({"keyId": hashlib.sha256(public_key).hexdigest(), "secret": base64.b64encode(secret).decode()}) + "\n")
++    token_path.chmod(0o600)
++    subprocess.run(["go", "build", "-o", receiver_dir / "report-receiver", "scripts/report-receiver.go"], check=True)
++    subprocess.run(["go", "build", "-o", wallet_dir / "wallet-server", "scripts/wallet-server.go"], check=True)
++    subprocess.run(["go", "build", "-o", wallet_dir / "consent-emulator", "scripts/consent-emulator.go"], check=True)
++    environment = os.environ.copy()
++    environment["RVA23_TOKEN_FILE"] = str(token_path)
++    environment["RVA23_ATTESTATION_DIR"] = str(receiver_dir)
++    receiver = subprocess.Popen([receiver_dir / "report-receiver"], stdout=(receiver_dir / "wallet-report-receiver.log").open("w"), stderr=subprocess.STDOUT, env=environment)
++    smartcard = subprocess.Popen([wallet_dir / "consent-emulator", "-listen", "127.0.0.1:8082", "-kind", "smartcard", "-key", wallet_dir / "smartcard-private.pem", "-public", wallet_dir / "smartcard-public.pem"], stdout=(wallet_dir / "smartcard.log").open("w"), stderr=subprocess.STDOUT)
++    wallet_environment = environment.copy()
++    wallet_environment["RVA23_WALLET_DIR"] = str(wallet_dir)
++    wallet_environment["RVA23_WALLET_KEY_FILE"] = str(receiver_dir / "public-key.pem")
++    wallet_environment["RVA23_WALLET_CONSENT_DIR"] = str(wallet_dir)
++    wallet_environment["RVA23_WALLET_ATTESTATION_URL"] = "http://127.0.0.1:8080/v1/attest"
++    wallet = subprocess.Popen([wallet_dir / "wallet-server"], stdout=(wallet_dir / "wallet-server.log").open("w"), stderr=subprocess.STDOUT, env=wallet_environment)
++    return [receiver, smartcard, wallet]
++
++
++def main():
++    output = Path(sys.argv[1]).resolve()
++    receiver_dir = output / "host-attestation"
++    wallet_dir = output / "wallet"
++    wallet_dir.mkdir(exist_ok=True)
++    create_key(wallet_dir, "smartcard")
++    create_key(wallet_dir, "fido2")
++    create_fido2(wallet_dir / "u2f")
++    os.environ["RVA23_FIDO2_DIR"] = str(wallet_dir / "u2f")
++    os.environ["QEMU"] = str(output / "build/host-qemu-11.0.0/build/qemu-system-riscv64")
++    profiles = {"development": predict_profile(output, "rva23-debug_1.efi"), "production": predict_profile(output, "rva23_1+3-0.efi")}
++    (wallet_dir / "profiles.json").write_text(json.dumps(profiles) + "\n")
++    processes = start_services(output, receiver_dir, wallet_dir)
++    console = Console(output, "wallet.log", firmware=True)
++    try:
++        login(console)
++        console.command("wallet-client --contract=small-payment --consent=host --approve", 300)
++        console.command("if wallet-client --replay; then false; else true; fi", 300)
++        console.command("if wallet-client --contract=small-payment --consent=host --approve; then false; else true; fi", 300)
++        print("PASS: tier 0 accepts a TPM-signed small payment and enforces its daily limit and replay protection")
++
++        console = reboot_to(console, output, "rva23-debug_*.efi")
++        login(console)
++        for method in ("host", "fido2"):
++            console.command(f"wallet-client --contract=development-payment --consent={method} --approve", 300)
++        console.command("if wallet-client --contract=development-payment --consent=host --approve; then false; else true; fi", 300)
++        print("PASS: tier 1 development payments accept host and FIDO2 consent within the daily limit")
++
++        console = reboot_to(console, output, "rva23_?.efi")
++        login(console)
++        for method in ("host", "fido2"):
++            console.command(f"wallet-client --contract=mortgage --consent={method} --approve", 300)
++        print("PASS: tier 2 accepts the example mortgage with production host consent and external consent without an OS report")
++
++        console.sendline("poweroff")
++        console.process.wait(timeout=90)
++    finally:
++        console.close()
++        for process in processes:
++            process.terminate()
++        for process in processes:
++            process.wait(timeout=15)
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/buildroot/qemu/scripts/verify_boot.py b/buildroot/qemu/scripts/verify_boot.py
+new file mode 120000
+index 0000000000000000000000000000000000000000..a909e8bfb07ceaa52eec06c5df2b80f8f0073179
+--- /dev/null
++++ b/buildroot/qemu/scripts/verify_boot.py
+@@ -0,0 +1 @@
++verify-boot.py
+\ No newline at end of file
+
