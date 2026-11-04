@@ -1,0 +1,784 @@
+From 3262c493e2a974b04010d88aa0405fdb27d58633 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Wed, 04 Nov 2026 01:59:43 -0700
+Subject: [PATCH] feat: Finalize U2F support for tier 2 assurance without remote attestation requirement, rework attestation UIs
+---
+diff --git a/buildroot/qemu/board/rva23-qemu/rootfs-overlay/usr/libexec/rva23-report-provision b/buildroot/qemu/board/rva23-qemu/rootfs-overlay/usr/libexec/rva23-report-provision
+index 405380cb4491c0584105d48e92fa3c9718e41ecd..842beaee563528be3f0774c72a1074231ed83497 100755
+--- a/buildroot/qemu/board/rva23-qemu/rootfs-overlay/usr/libexec/rva23-report-provision
++++ b/buildroot/qemu/board/rva23-qemu/rootfs-overlay/usr/libexec/rva23-report-provision
+@@ -7,5 +7,6 @@         tpm2_createek -c "$key_dir/ek.ctx" -G rsa -u "$key_dir/ek.pub"
+         tpm2_createak -C "$key_dir/ek.ctx" -G rsa -g sha256 -s rsassa -c "$key_dir/ak.ctx" -u "$key_dir/ak.pub" -r "$key_dir/ak.priv"
+         handle=$(printf '0x%08x\n' $((0x81000000 + $(date +%s) % 0x10000)))
+         tpm2_evictcontrol -c "$key_dir/ak.ctx" -o "$key_dir/ak.handle" "$handle"
++        tpm2_readpublic -c "$handle" -t "$key_dir/ak.handle"
+ fi
+ echo '{"type":"persistent","handle":"'$(base64 -w 0 "$key_dir/ak.handle")'"}' > "$key_dir/default.key"
+diff --git a/buildroot/qemu/scripts/report-receiver.go b/buildroot/qemu/scripts/report-receiver.go
+index 8cf611b3a95c6081e9ef3fe61ed4328269e19984..9bacede195eb2e1631d47c9786dac2d8b2c6860a 100644
+--- a/buildroot/qemu/scripts/report-receiver.go
++++ b/buildroot/qemu/scripts/report-receiver.go
+@@ -193,9 +193,13 @@
+ func stateHandler(writer http.ResponseWriter, request *http.Request) {
+ 	state.Mutex.RLock()
+ 	response := struct {
+-		Latest  requestSnapshot   `json:"latest"`
++		Latest  *requestSnapshot  `json:"latest"`
+ 		History []requestSnapshot `json:"history"`
+-	}{state.Snapshot, append([]requestSnapshot(nil), state.History...)}
++	}{History: append([]requestSnapshot(nil), state.History...)}
++	if len(state.History) > 0 {
++		latest := state.Snapshot
++		response.Latest = &latest
++	}
+ 	state.Mutex.RUnlock()
+ 	writer.Header().Set("Content-Type", "application/json")
+ 	_ = json.NewEncoder(writer).Encode(response)
+@@ -652,14 +656,20 @@ 	mux.HandleFunc("/", func(writer http.ResponseWriter, request *http.Request) {
+ 		writer.Header().Set("Content-Type", "text/html; charset=utf-8")
+ 		_, _ = io.WriteString(writer, `<!doctype html>
+ <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Attestation receiver</title></head>
+-<body><h1>Attestation receiver</h1><p>Latest request: <span id="updated">No request yet</span>. <a href="/api/state">JSON state</a>. <button id="refresh" type="button">Refresh</button></p>
+-<p>The Go client in the VM sends <code>POST /v1/attest</code> through its local upload proxy. Expand a <code>/v1/attest</code> history entry to see its headers, nonce, token, and full JSON-SEQ body.</p>
+-<p>systemd measures signed system extensions into PCR 13 as <code>Global system extension initrd</code>. Expand Sysext attestation to see those records. The history retains both <code>/reports</code> and <code>/v1/attest</code> requests in server memory.</p>
+-<p><a href="https://www.freedesktop.org/software/systemd/man/latest/systemd-sysext.html">systemd-sysext documentation</a>. <a href="https://www.freedesktop.org/software/systemd/man/latest/systemd-report.html">systemd-report documentation</a>.</p>
+-<details open><summary>Latest request</summary><div id="state">Loading…</div></details>
+-<details open><summary>Sysext attestation</summary><div id="sysext">Loading…</div></details>
+-<details open><summary>Request history</summary><div id="history">Loading…</div></details>
+-<script>function render(item){const fragment=document.createDocumentFragment();for(const [name,value] of Object.entries(item||{}){const details=document.createElement('details');const summary=document.createElement('summary');summary.textContent=name;const pre=document.createElement('pre');pre.textContent=JSON.stringify(value,null,2);details.append(summary,pre);fragment.append(details)}const raw=document.createElement('details');const summary=document.createElement('summary');summary.textContent='Raw JSON';const pre=document.createElement('pre');pre.textContent=JSON.stringify(item,null,2);raw.append(summary,pre);fragment.append(raw);return fragment}async function refresh(){const data=await fetch('/api/state').then(response=>response.json());const latest=data.latest||{};document.getElementById('updated').textContent=latest.at||'No request yet';document.getElementById('state').replaceChildren(render(latest));document.getElementById('sysext').replaceChildren(render({records:latest.sysext||[]}));document.getElementById('history').replaceChildren(...(data.history||[]).map(item=>{const details=document.createElement('details');const summary=document.createElement('summary');summary.textContent=(item.at||'Unknown time')+' '+item.path+' '+((item.response&&item.response.status)||item.error||'pending');details.append(summary,render(item));return details}))}document.getElementById('refresh').onclick=refresh;refresh()</script></body></html>`)
++<body><h1>Attestation receiver</h1><p><button id="refresh" type="button">Refresh</button> <span id="status">Loading</span></p>
++<details open><summary>Latest request</summary><div id="latest">Loading</div></details>
++<details open><summary>Previous requests</summary><div id="history">Loading</div></details>
++<script>
++function label(key){const names={at:'Time',bodyBase64:'Request body base64',pcr11:'PCR 11',publicKeyPEM:'Public key PEM',signaturePEM:'Signature PEM',qualifiedSigner:'Qualified signer',firmwareVersion:'Firmware version',eventType:'Event type',eventData:'Event data',hashAlg:'Hash algorithm',keyBits:'Key bits',contentType:'Content type'};if(names[key])return names[key];const text=key.replace(/([a-z0-9])([A-Z])/g,'$1 $2').replace(/_/g,' ');return text.charAt(0).toUpperCase()+text.slice(1)}
++function scalar(value){if(value===null||value===undefined)return 'None';if(typeof value==='boolean')return value?'Yes':'No';if(value==='')return 'None';return String(value)}
++function render(name,value,expand){if(value===null||typeof value!=='object'){const content=scalar(value);if(content.length>160){const details=document.createElement('details');const summary=document.createElement('summary');summary.textContent=name+' ('+content.length+' characters)';const pre=document.createElement('pre');pre.textContent=content;details.append(summary,pre);return details}return document.createTextNode(content)}const array=Array.isArray(value);const entries=array?value.map((entry,index)=>[String(index+1),entry]):Object.entries(value);if(!entries.length)return document.createTextNode('None');const details=document.createElement('details');details.open=Boolean(expand);const summary=document.createElement('summary');summary.textContent=name+' ('+entries.length+(array?' items':' fields')+')';const table=document.createElement('table');const body=document.createElement('tbody');for(const [key,entry] of entries){const row=document.createElement('tr');const heading=document.createElement('th');heading.scope='row';heading.textContent=array?'Item '+key:label(key);const cell=document.createElement('td');cell.append(render(array?'Item '+key:label(key),entry,false));row.append(heading,cell);body.append(row)}table.append(body);details.append(summary,table);return details}
++function fields(item){const table=document.createElement('table');const body=document.createElement('tbody');for(const [key,value] of Object.entries(item||{})){const row=document.createElement('tr');const heading=document.createElement('th');heading.scope='row';heading.textContent=label(key);const cell=document.createElement('td');cell.append(render(label(key),value,true));row.append(heading,cell);body.append(row)}table.append(body);return table}
++function raw(item){const details=document.createElement('details');const summary=document.createElement('summary');summary.textContent='Raw JSON';const pre=document.createElement('pre');pre.textContent=JSON.stringify(item,null,2);details.append(summary,pre);return details}
++function summary(item){return (item.at||'Unknown time')+' | '+(item.path||'Unknown path')+' | '+((item.response&&item.response.status)||item.error||'pending')}
++function entry(item){const details=document.createElement('details');const heading=document.createElement('summary');heading.textContent=summary(item);details.append(heading,fields(item),raw(item));return details}
++async function refresh(){const status=document.getElementById('status');status.textContent='Loading';try{const response=await fetch('/api/state');if(!response.ok)throw new Error(response.statusText);const data=await response.json();const latest=document.getElementById('latest');if(data.latest){latest.replaceChildren(fields(data.latest),raw(data.latest))}else{latest.textContent='No requests'}const history=data.history||[];const previous=data.latest?history.slice(1):history;const container=document.getElementById('history');if(previous.length){container.replaceChildren(...previous.map(entry))}else{container.textContent='No previous requests'}status.textContent=data.latest?'Updated '+data.latest.at:'No requests'}catch(error){status.textContent='Refresh failed: '+error.message}}
++document.getElementById('refresh').onclick=refresh;refresh()
++</script></body></html>`)
+ 	})
+ 	server.Handler = mux
+ 	if err := server.ListenAndServe(); err != nil {
+diff --git a/buildroot/qemu/scripts/u2f.go b/buildroot/qemu/scripts/u2f.go
+index 4040fed4dc56a39703931406799255bff263e9aa..a2a892f7c792dd89f26fbcd9802eaad48c669081 100644
+--- a/buildroot/qemu/scripts/u2f.go
++++ b/buildroot/qemu/scripts/u2f.go
+@@ -8,6 +8,7 @@ 	"crypto/x509"
+ 	"encoding/asn1"
+ 	"encoding/base64"
+ 	"encoding/binary"
++	"encoding/hex"
+ 	"encoding/json"
+ 	"encoding/pem"
+ 	"errors"
+@@ -34,16 +35,21 @@ 	u2fCachePath      = "/var/lib/rva23-wallet/fido2.json"
+ )
+ 
+ type U2FConsent struct {
+-	PublicKey   string `json:"publicKey"`
+-	Certificate string `json:"certificate"`
+-	Signature   string `json:"signature"`
+-	Counter     uint32 `json:"counter"`
++	PublicKey             string `json:"publicKey"`
++	Certificate           string `json:"certificate"`
++	KeyHandle             string `json:"keyHandle"`
++	RegistrationChallenge string `json:"registrationChallenge"`
++	RegistrationSignature string `json:"registrationSignature"`
++	Signature             string `json:"signature"`
++	Counter               uint32 `json:"counter"`
+ }
+ 
+ type u2fRegistration struct {
+-	KeyHandle   string `json:"keyHandle"`
+-	PublicKey   string `json:"publicKey"`
+-	Certificate string `json:"certificate"`
++	KeyHandle             string `json:"keyHandle"`
++	PublicKey             string `json:"publicKey"`
++	Certificate           string `json:"certificate"`
++	RegistrationChallenge string `json:"registrationChallenge"`
++	RegistrationSignature string `json:"registrationSignature"`
+ }
+ 
+ type u2fDevice struct {
+@@ -62,7 +68,7 @@ 	}
+ 	if len(application) != 32 {
+ 		return U2FConsent{}, fmt.Errorf("U2F application parameter must contain 32 bytes, got %d", len(application))
+ 	}
+-	registration, err := u2fReadRegistration()
++	registration, err := u2fReadRegistration(application)
+ 	if err != nil {
+ 		return U2FConsent{}, err
+ 	}
+@@ -76,7 +82,7 @@ 		registration, err = u2fRegister(device, challenge, application)
+ 		if err != nil {
+ 			return U2FConsent{}, err
+ 		}
+-		if err := u2fWriteRegistration(registration); err != nil {
++		if err := u2fWriteRegistration(application, registration); err != nil {
+ 			return U2FConsent{}, err
+ 		}
+ 	}
+@@ -89,10 +95,13 @@ 	if err != nil {
+ 		return U2FConsent{}, err
+ 	}
+ 	return U2FConsent{
+-		PublicKey:   registration.PublicKey,
+-		Certificate: registration.Certificate,
+-		Signature:   base64.RawURLEncoding.EncodeToString(signature),
+-		Counter:     counter,
++		PublicKey:             registration.PublicKey,
++		Certificate:           registration.Certificate,
++		KeyHandle:             registration.KeyHandle,
++		RegistrationChallenge: registration.RegistrationChallenge,
++		RegistrationSignature: registration.RegistrationSignature,
++		Signature:             base64.RawURLEncoding.EncodeToString(signature),
++		Counter:               counter,
+ 	}, nil
+ }
+ 
+@@ -371,9 +380,11 @@ 	if len(publicKeyPEM) == 0 {
+ 		return nil, errors.New("encode U2F public key PEM")
+ 	}
+ 	return &u2fRegistration{
+-		KeyHandle:   base64.RawURLEncoding.EncodeToString(keyHandle),
+-		PublicKey:   string(publicKeyPEM),
+-		Certificate: base64.RawURLEncoding.EncodeToString(certificate),
++		KeyHandle:             base64.RawURLEncoding.EncodeToString(keyHandle),
++		PublicKey:             string(publicKeyPEM),
++		Certificate:           base64.RawURLEncoding.EncodeToString(certificate),
++		RegistrationChallenge: base64.RawURLEncoding.EncodeToString(challenge),
++		RegistrationSignature: base64.RawURLEncoding.EncodeToString(signature),
+ 	}, nil
+ }
+ 
+@@ -445,21 +456,41 @@ 	}
+ 	return nil
+ }
+ 
+-func u2fReadRegistration() (*u2fRegistration, error) {
++func u2fReadCache() (map[string]u2fRegistration, error) {
++	cache := make(map[string]u2fRegistration)
+ 	encoded, err := os.ReadFile(u2fCachePath)
+ 	if errors.Is(err, os.ErrNotExist) {
+-		return nil, nil
++		return cache, nil
+ 	}
+ 	if err != nil {
+ 		return nil, fmt.Errorf("read U2F registration cache: %w", err)
+ 	}
+-	var registration u2fRegistration
+-	if err := json.Unmarshal(encoded, &registration); err != nil {
+-		return nil, fmt.Errorf("decode U2F registration cache: %w", err)
++	if err := json.Unmarshal(encoded, &cache); err != nil {
++		return make(map[string]u2fRegistration), nil
++	}
++	return cache, nil
++}
++
++func u2fReadRegistration(application []byte) (*u2fRegistration, error) {
++	cache, err := u2fReadCache()
++	if err != nil {
++		return nil, err
++	}
++	registration, ok := cache[hex.EncodeToString(application)]
++	if !ok {
++		return nil, nil
+ 	}
+ 	keyHandle, err := base64.RawURLEncoding.DecodeString(registration.KeyHandle)
+ 	if err != nil || len(keyHandle) == 0 || len(keyHandle) > 255 {
+ 		return nil, errors.New("U2F registration cache contains an invalid key handle")
++	}
++	registrationChallenge, err := base64.RawURLEncoding.DecodeString(registration.RegistrationChallenge)
++	if err != nil || len(registrationChallenge) != 32 {
++		return nil, errors.New("U2F registration cache contains an invalid registration challenge")
++	}
++	registrationSignature, err := base64.RawURLEncoding.DecodeString(registration.RegistrationSignature)
++	if err != nil || u2fValidateSignature(registrationSignature) != nil {
++		return nil, errors.New("U2F registration cache contains an invalid registration signature")
+ 	}
+ 	certificate, err := base64.RawURLEncoding.DecodeString(registration.Certificate)
+ 	if err != nil {
+@@ -483,8 +514,13 @@ 	}
+ 	return &registration, nil
+ }
+ 
+-func u2fWriteRegistration(registration *u2fRegistration) error {
+-	encoded, err := json.Marshal(registration)
++func u2fWriteRegistration(application []byte, registration *u2fRegistration) error {
++	cache, err := u2fReadCache()
++	if err != nil {
++		return err
++	}
++	cache[hex.EncodeToString(application)] = *registration
++	encoded, err := json.Marshal(cache)
+ 	if err != nil {
+ 		return fmt.Errorf("encode U2F registration cache: %w", err)
+ 	}
+diff --git a/buildroot/qemu/scripts/verify-wallet.py b/buildroot/qemu/scripts/verify-wallet.py
+index 9662d5a2e54be1db61f32328115bc106ca972d4e..3c4ffefcd6e2d27ff7006fc16dfe62ca67faa199 100644
+--- a/buildroot/qemu/scripts/verify-wallet.py
++++ b/buildroot/qemu/scripts/verify-wallet.py
+@@ -9,6 +9,7 @@ import secrets
+ import struct
+ import subprocess
+ import sys
++import urllib.request
+ 
+ from verify_boot import Console
+ 
+@@ -41,6 +42,9 @@
+ 
+ def create_fido2(directory):
+     directory.mkdir(exist_ok=True)
++    required = ("private-key.pem", "certificate.pem", "counter", "entropy")
++    if all((directory / name).is_file() for name in required):
++        return
+     subprocess.run(["openssl", "ecparam", "-name", "prime256v1", "-genkey", "-noout", "-out", directory / "private-key.pem"], check=True)
+     subprocess.run(["openssl", "req", "-new", "-x509", "-key", directory / "private-key.pem", "-out", directory / "certificate.pem", "-subj", "/CN=RVA23 U2F Test", "-days", "365"], check=True)
+     (directory / "counter").write_bytes(struct.pack(">I", 1))
+@@ -104,6 +108,46 @@     wallet = subprocess.Popen([wallet_dir / "wallet-server"], stdout=(wallet_dir / "wallet-server.log").open("w"), stderr=subprocess.STDOUT, env=wallet_environment)
+     return [receiver, smartcard, wallet]
+ 
+ 
++def validate_ui_state():
++    with urllib.request.urlopen("http://127.0.0.1:8081/api/state", timeout=10) as response:
++        wallet_state = json.load(response)
++    history = wallet_state["history"]
++    accepted = {}
++    for tier, method in ((0, "host"), (1, "host"), (1, "fido2"), (2, "host"), (2, "fido2")):
++        matches = [item for item in history if (item.get("contract") or {}).get("tier") == tier and item.get("consent") == method and (item.get("response") or {}).get("status") == "accepted"]
++        assert matches, (tier, method)
++        accepted[tier, method] = matches[0]
++        validation = matches[0]["validation"]
++        assert validation["tpmAkSignature"] == "accepted"
++        assert validation["freshNonce"] == "accepted"
++        assert validation["singleUseNonce"] == "consumed"
++        assert validation["u2fRegistrationAttestation"] == ("accepted" if method == "fido2" else "not required")
++    assert accepted[0, "host"]["device"] == "tpm-resident-ak"
++    assert accepted[0, "host"]["evidence"] is None
++    assert accepted[0, "host"]["validation"]["consent"] == "not required for Tier 0"
++    assert accepted[0, "host"]["validation"]["hostOsReport"] == "not required"
++    for method in ("host", "fido2"):
++        item = accepted[1, method]
++        assert item["evidence"] is not None
++        assert item["validation"]["hostOsReport"] == "accepted"
++        assert item["validation"]["pcr11Profile"] == "accepted"
++    assert accepted[1, "fido2"]["device"] == "qemu-u2f-emulated"
++    assert accepted[2, "host"]["device"] == "trusted-host-os"
++    assert accepted[2, "host"]["evidence"] is not None
++    assert accepted[2, "host"]["validation"]["hostOsReport"] == "accepted"
++    assert accepted[2, "host"]["validation"]["pcr11Profile"] == "accepted"
++    assert accepted[2, "fido2"]["device"] == "qemu-u2f-emulated"
++    assert accepted[2, "fido2"]["evidence"] is None
++    assert accepted[2, "fido2"]["validation"]["hostOsReport"] == "not required"
++    assert accepted[2, "fido2"]["validation"]["pcr11Profile"] == "not required"
++    with urllib.request.urlopen("http://127.0.0.1:8080/api/state", timeout=10) as response:
++        receiver_state = json.load(response)
++    reports = [item for item in receiver_state["history"] if item.get("path") == "/v1/attest" and (item.get("response") or {}).get("status") == "accepted"]
++    assert len(reports) >= 4
++    assert receiver_state["latest"] is not None
++    print("PASS: both UIs expose distinct accepted evidence for every tier and consent path", flush=True)
++
++
+ def main():
+     output = Path(sys.argv[1]).resolve()
+     receiver_dir = output / "host-attestation"
+@@ -117,35 +161,41 @@     os.environ["QEMU"] = str(output / "build/host-qemu-11.0.0/build/qemu-system-riscv64")
+     profiles = {"development": predict_profile(output, "rva23-debug_1.efi"), "production": predict_profile(output, "rva23_1+3-0.efi")}
+     (wallet_dir / "profiles.json").write_text(json.dumps(profiles) + "\n")
+     processes = start_services(output, receiver_dir, wallet_dir)
++    keep_services = os.environ.get("RVA23_WALLET_KEEP_SERVICES") == "1"
+     console = Console(output, "wallet.log", firmware=True)
+     try:
+         login(console)
++        console.command("attested-client", 300)
++        console.command("rm -f /var/lib/rva23-wallet/fido2.json")
+         console.command("wallet-client --contract=small-payment --consent=host --approve", 300)
+         console.command("if wallet-client --replay; then false; else true; fi", 300)
+         console.command("if wallet-client --contract=small-payment --consent=host --approve; then false; else true; fi", 300)
+-        print("PASS: tier 0 accepts a TPM-signed small payment and enforces its daily limit and replay protection")
++        print("PASS: tier 0 accepts a TPM-signed small payment and enforces its daily limit and replay protection", flush=True)
+ 
+-        console = reboot_to(console, output, "rva23-debug_*.efi")
++        console = reboot_to(console, output, "rva23-debug_1.efi")
+         login(console)
+         for method in ("host", "fido2"):
+             console.command(f"wallet-client --contract=development-payment --consent={method} --approve", 300)
++        console.command("wallet-client --contract=development-payment --consent=host --approve", 300)
+         console.command("if wallet-client --contract=development-payment --consent=host --approve; then false; else true; fi", 300)
+-        print("PASS: tier 1 development payments accept host and FIDO2 consent within the daily limit")
++        print("PASS: tier 1 development payments accept host and FIDO2 consent within the daily limit", flush=True)
+ 
+-        console = reboot_to(console, output, "rva23_?.efi")
++        console = reboot_to(console, output, "rva23_1+3-0.efi")
+         login(console)
+         for method in ("host", "fido2"):
+             console.command(f"wallet-client --contract=mortgage --consent={method} --approve", 300)
+-        print("PASS: tier 2 accepts the example mortgage with production host consent and external consent without an OS report")
++        print("PASS: tier 2 accepts the example mortgage with production host consent and external consent without an OS report", flush=True)
++        validate_ui_state()
+ 
+         console.sendline("poweroff")
+         console.process.wait(timeout=90)
+     finally:
+         console.close()
+-        for process in processes:
+-            process.terminate()
+-        for process in processes:
+-            process.wait(timeout=15)
++        if not keep_services:
++            for process in processes:
++                process.terminate()
++            for process in processes:
++                process.wait(timeout=15)
+ 
+ 
+ if __name__ == "__main__":
+diff --git a/buildroot/qemu/scripts/wallet-client.go b/buildroot/qemu/scripts/wallet-client.go
+index 2fa1cac317c7c2b3f752c4e221f7811ff9b8d1c8..f12a3e4dfd0e8b9af1ceece3470c2741b8da51da 100644
+--- a/buildroot/qemu/scripts/wallet-client.go
++++ b/buildroot/qemu/scripts/wallet-client.go
+@@ -114,6 +114,12 @@ 	if err := input.Close(); err != nil {
+ 		return "", err
+ 	}
+ 	handle, err := os.ReadFile("/var/lib/systemd/report.sign.tpm2/default.key")
++	if err != nil || len(handle) == 0 {
++		if result, provisionErr := exec.Command("/usr/libexec/rva23-report-provision").CombinedOutput(); provisionErr != nil {
++			return "", fmt.Errorf("provision TPM AK: %s", result)
++		}
++		handle, err = os.ReadFile("/var/lib/systemd/report.sign.tpm2/default.key")
++	}
+ 	if err != nil {
+ 		return "", err
+ 	}
+@@ -354,10 +360,14 @@ 	signature, err := signTPM(messageBytes)
+ 	if err != nil {
+ 		return fmt.Errorf("TPM signature: %w", err)
+ 	}
++	device := map[string]string{"host": "trusted-host-os", "smartcard": "qemu-ccid-card-emulated", "fido2": "qemu-u2f-emulated"}[consent]
++	if selected.Tier == 0 {
++		device = "tpm-resident-ak"
++	}
+ 	requestBody := signRequest{
+ 		ContractID: selected.ID, Consent: consent, Approved: approved, Nonce: currentChallenge.Nonce,
+ 		ConsentProof: consentProof, Signature: signature, Evidence: currentEvidence,
+-		Device: map[string]string{"host": "trusted-host-os", "smartcard": "qemu-ccid-card-emulated", "fido2": "qemu-u2f-emulated"}[consent],
++		Device: device,
+ 	}
+ 	encodedRequest, err := json.Marshal(requestBody)
+ 	if err != nil {
+diff --git a/buildroot/qemu/scripts/wallet-server.go b/buildroot/qemu/scripts/wallet-server.go
+index 88841eb39e712140eb9d8698fd5ab930376a1e06..d9c8fdab1ce6e5946c78f1037893f55de8411ad2 100644
+--- a/buildroot/qemu/scripts/wallet-server.go
++++ b/buildroot/qemu/scripts/wallet-server.go
+@@ -2,8 +2,10 @@ package main
+ 
+ import (
+ 	"bytes"
++	"crypto/ecdsa"
+ 	"crypto/rand"
+ 	"crypto/sha256"
++	"crypto/x509"
+ 	"encoding/base64"
+ 	"encoding/binary"
+ 	"encoding/hex"
+@@ -61,13 +63,16 @@ 	Method         string `json:"method"`
+ }
+ 
+ type u2fConsent struct {
+-	PublicKey   string `json:"publicKey"`
+-	Certificate string `json:"certificate"`
+-	Signature   string `json:"signature"`
+-	Counter     uint32 `json:"counter"`
++	PublicKey             string `json:"publicKey"`
++	Certificate           string `json:"certificate"`
++	KeyHandle             string `json:"keyHandle"`
++	RegistrationChallenge string `json:"registrationChallenge"`
++	RegistrationSignature string `json:"registrationSignature"`
++	Signature             string `json:"signature"`
++	Counter               uint32 `json:"counter"`
+ }
+ 
+-func (server *walletServer) verifyFido2Consent(input signRequest, message []byte, contractDigest string) error {
++func (server *walletServer) verifyFido2Consent(input signRequest, contractDigest string) error {
+ 	encoded, err := base64.RawURLEncoding.DecodeString(input.ConsentProof)
+ 	if err != nil {
+ 		return errors.New("invalid U2F consent encoding")
+@@ -88,33 +93,74 @@ 	block, _ := pem.Decode(expected)
+ 	if block == nil || !bytes.Equal(block.Bytes, certificate) {
+ 		return errors.New("U2F attestation certificate is not allowlisted")
+ 	}
+-	signature, err := base64.RawURLEncoding.DecodeString(proof.Signature)
++	attestationCertificate, err := x509.ParseCertificate(certificate)
+ 	if err != nil {
+-		return errors.New("invalid U2F signature encoding")
++		return errors.New("invalid U2F attestation certificate")
++	}
++	attestationKey, ok := attestationCertificate.PublicKey.(*ecdsa.PublicKey)
++	if !ok || attestationKey.Curve.Params().Name != "P-256" {
++		return errors.New("U2F attestation certificate does not contain a P-256 key")
++	}
++	application, err := hex.DecodeString(contractDigest)
++	if err != nil || len(application) != 32 {
++		return errors.New("invalid U2F application parameter")
+ 	}
+-	directory, err := os.MkdirTemp("", "rva23-u2f-public-")
++	keyHandle, err := base64.RawURLEncoding.DecodeString(proof.KeyHandle)
++	if err != nil || len(keyHandle) == 0 || len(keyHandle) > 255 {
++		return errors.New("invalid U2F key handle")
++	}
++	registrationChallenge, err := base64.RawURLEncoding.DecodeString(proof.RegistrationChallenge)
++	if err != nil || len(registrationChallenge) != 32 {
++		return errors.New("invalid U2F registration challenge")
++	}
++	registrationSignature, err := base64.RawURLEncoding.DecodeString(proof.RegistrationSignature)
+ 	if err != nil {
+-		return err
++		return errors.New("invalid U2F registration signature encoding")
+ 	}
+-	defer os.RemoveAll(directory)
+-	publicKey := filepath.Join(directory, "public.pem")
+-	if err := os.WriteFile(publicKey, []byte(proof.PublicKey), 0o600); err != nil {
+-		return err
++	publicBlock, rest := pem.Decode([]byte(proof.PublicKey))
++	if publicBlock == nil || publicBlock.Type != "PUBLIC KEY" || len(rest) != 0 {
++		return errors.New("invalid U2F public key PEM")
++	}
++	parsedPublicKey, err := x509.ParsePKIXPublicKey(publicBlock.Bytes)
++	if err != nil {
++		return errors.New("invalid U2F public key")
++	}
++	consentKey, ok := parsedPublicKey.(*ecdsa.PublicKey)
++	if !ok || consentKey.Curve.Params().Name != "P-256" {
++		return errors.New("U2F consent key is not P-256")
++	}
++	publicKeyBytes := make([]byte, 65)
++	publicKeyBytes[0] = 4
++	consentKey.X.FillBytes(publicKeyBytes[1:33])
++	consentKey.Y.FillBytes(publicKeyBytes[33:65])
++	registrationMessage := make([]byte, 0, 1+32+32+len(keyHandle)+len(publicKeyBytes))
++	registrationMessage = append(registrationMessage, 0)
++	registrationMessage = append(registrationMessage, application...)
++	registrationMessage = append(registrationMessage, registrationChallenge...)
++	registrationMessage = append(registrationMessage, keyHandle...)
++	registrationMessage = append(registrationMessage, publicKeyBytes...)
++	registrationDigest := sha256.Sum256(registrationMessage)
++	if !ecdsa.VerifyASN1(attestationKey, registrationDigest[:], registrationSignature) {
++		return errors.New("U2F registration attestation signature is invalid")
+ 	}
+-	application, err := hex.DecodeString(contractDigest)
++	signature, err := base64.RawURLEncoding.DecodeString(proof.Signature)
+ 	if err != nil {
+-		return err
++		return errors.New("invalid U2F signature encoding")
+ 	}
+ 	nonce, err := base64.RawURLEncoding.DecodeString(input.Nonce)
+-	if err != nil {
+-		return err
++	if err != nil || len(nonce) != 32 {
++		return errors.New("invalid U2F consent nonce")
+ 	}
+ 	counter := make([]byte, 4)
+ 	binary.BigEndian.PutUint32(counter, proof.Counter)
+ 	signed := append(application, 1)
+ 	signed = append(signed, counter...)
+ 	signed = append(signed, nonce...)
+-	return verifySignature(publicKey, signed, signature)
++	consentDigest := sha256.Sum256(signed)
++	if !ecdsa.VerifyASN1(consentKey, consentDigest[:], signature) {
++		return errors.New("U2F consent signature is invalid")
++	}
++	return nil
+ }
+ 
+ type signatureMessage struct {
+@@ -139,14 +185,15 @@ 	Consent        string `json:"consent"`
+ }
+ 
+ type requestRecord struct {
+-	At         time.Time     `json:"at"`
+-	BodyBase64 string        `json:"bodyBase64"`
+-	Contract   *contract     `json:"contract"`
+-	Consent    string        `json:"consent"`
+-	Device     string        `json:"device"`
+-	Evidence   *evidence     `json:"evidence"`
+-	Response   *signResponse `json:"response"`
+-	Error      string        `json:"error"`
++	At         time.Time         `json:"at"`
++	BodyBase64 string            `json:"bodyBase64"`
++	Contract   *contract         `json:"contract"`
++	Consent    string            `json:"consent"`
++	Device     string            `json:"device"`
++	Validation map[string]string `json:"validation"`
++	Evidence   *evidence         `json:"evidence"`
++	Response   *signResponse     `json:"response"`
++	Error      string            `json:"error"`
+ }
+ 
+ type stateResponse struct {
+@@ -395,6 +442,16 @@ 	record.Device = input.Device
+ 	record.Evidence = input.Evidence
+ 	selected := findContract(input.ContractID)
+ 	record.Contract = selected
++	record.Validation = map[string]string{
++		"tpmAkSignature":             "pending",
++		"consent":                    "pending",
++		"u2fRegistrationAttestation": "not required",
++		"hostOsReport":               "not required",
++		"pcr11Profile":               "not required",
++		"freshNonce":                 "pending",
++		"singleUseNonce":             "pending",
++		"dailyLimit":                 "pending",
++	}
+ 	if selected == nil {
+ 		server.reject(writer, record, http.StatusBadRequest, errors.New("unknown contract"))
+ 		return
+@@ -408,9 +465,11 @@ 		server.reject(writer, record, http.StatusBadRequest, errors.New("unknown consent method"))
+ 		return
+ 	}
+ 	if !server.validNonce(input.Nonce, time.Now().UTC()) {
++		record.Validation["freshNonce"] = "rejected"
+ 		server.reject(writer, record, http.StatusForbidden, errors.New("challenge nonce is expired or unknown"))
+ 		return
+ 	}
++	record.Validation["freshNonce"] = "accepted"
+ 	canonicalContract, err := json.Marshal(selected)
+ 	if err != nil {
+ 		server.reject(writer, record, http.StatusInternalServerError, err)
+@@ -423,15 +482,12 @@ 			server.reject(writer, record, http.StatusForbidden, errors.New("host consent requires an empty consent proof"))
+ 			return
+ 		}
+ 	} else if input.Consent == "fido2" {
+-		message, err := json.Marshal(consentMessage{Nonce: input.Nonce, ContractID: input.ContractID, ContractSHA256: contractDigest, Method: input.Consent})
+-		if err != nil {
+-			server.reject(writer, record, http.StatusInternalServerError, err)
+-			return
+-		}
+-		if err := server.verifyFido2Consent(input, message, contractDigest); err != nil {
++		record.Validation["u2fRegistrationAttestation"] = "pending"
++		if err := server.verifyFido2Consent(input, contractDigest); err != nil {
+ 			server.reject(writer, record, http.StatusForbidden, err)
+ 			return
+ 		}
++		record.Validation["u2fRegistrationAttestation"] = "accepted"
+ 	} else {
+ 		proof, err := base64.RawURLEncoding.DecodeString(input.ConsentProof)
+ 		if err != nil || len(proof) == 0 {
+@@ -449,7 +505,16 @@ 			server.reject(writer, record, http.StatusForbidden, err)
+ 			return
+ 		}
+ 	}
++	if selected.Tier == 0 {
++		record.Validation["consent"] = "not required for Tier 0"
++	} else {
++		record.Validation["consent"] = "accepted"
++	}
+ 	requiresEvidence := selected.Tier == 1 || (selected.Tier == 2 && input.Consent == "host")
++	if requiresEvidence {
++		record.Validation["hostOsReport"] = "pending"
++		record.Validation["pcr11Profile"] = "pending"
++	}
+ 	attestationNonce := ""
+ 	attestationToken := ""
+ 	reportDigest := ""
+@@ -496,15 +561,18 @@ 	if err := verifySignature(server.keyFile, message, signature); err != nil {
+ 		server.reject(writer, record, http.StatusForbidden, err)
+ 		return
+ 	}
++	record.Validation["tpmAkSignature"] = "accepted"
+ 	if requiresEvidence {
+ 		if err := server.forwardReport(report, input.Evidence); err != nil {
+ 			server.reject(writer, record, http.StatusForbidden, err)
+ 			return
+ 		}
++		record.Validation["hostOsReport"] = "accepted"
+ 		if !server.profileMatches(selected.Tier, input.Evidence) {
+ 			server.reject(writer, record, http.StatusForbidden, errors.New("OS report PCR 11 does not match the required profile"))
+ 			return
+ 		}
++		record.Validation["pcr11Profile"] = "accepted"
+ 	}
+ 	now := time.Now().UTC()
+ 	day := now.Format("2006-01-02")
+@@ -538,6 +606,12 @@ 	}
+ 	server.usage[usageKey] = response.DailyUsedCents
+ 	delete(server.nonces, input.Nonce)
+ 	server.mutex.Unlock()
++	record.Validation["singleUseNonce"] = "consumed"
++	if selected.DailyLimitCents > 0 {
++		record.Validation["dailyLimit"] = "accepted"
++	} else {
++		record.Validation["dailyLimit"] = "not required"
++	}
+ 	record.Response = &response
+ 	server.record(record)
+ 	writeJSON(writer, http.StatusOK, response)
+@@ -573,13 +647,18 @@ 	}
+ 	writer.Header().Set("Content-Type", "text/html; charset=utf-8")
+ 	_, _ = io.WriteString(writer, `<!doctype html>
+ <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Wallet contract signing</title></head>
+-<body><h1>Wallet contract signing</h1><p><button id="refresh" type="button">Refresh</button> <a href="/api/state">JSON state</a></p>
+-<details open><summary>Latest sign request</summary><div id="latest">No sign requests</div></details>
+-<details open><summary>Sign-request history</summary><div id="history">No sign requests</div></details>
++<body><h1>Wallet contract signing</h1><p><button id="refresh" type="button">Refresh</button> <span id="status">Loading</span></p>
++<details open><summary>Latest request</summary><div id="latest">Loading</div></details>
++<details open><summary>Previous requests</summary><div id="history">Loading</div></details>
+ <script>
+-function fill(parent,item){parent.replaceChildren();function add(name,value){const label=document.createElement('p');label.textContent=name;const body=document.createElement('pre');body.textContent=value;parent.append(label,body)}add('Raw request body base64',item.bodyBase64||'');add('Contract',JSON.stringify(item.contract||null,null,2));add('Contract body',item.contract?item.contract.body:'');add('Consent',item.consent||'');add('Device',item.device||'');add('Evidence',JSON.stringify(item.evidence||null,null,2));add('Response',JSON.stringify(item.response||null,null,2));add('Error',item.error||'');const raw=document.createElement('details');const summary=document.createElement('summary');summary.textContent='Raw JSON';const pre=document.createElement('pre');pre.textContent=JSON.stringify(item,null,2);raw.append(summary,pre);parent.append(raw)}
+-function historyEntry(item){const details=document.createElement('details');const summary=document.createElement('summary');summary.textContent=(item.at||'Unknown time')+' '+((item.contract&&item.contract.id)||'Unknown contract')+' '+((item.response&&item.response.status)||item.error||'rejected');fill(details,item);details.prepend(summary);return details}
+-async function refresh(){const data=await fetch('/api/state').then(response=>response.json());const latest=document.getElementById('latest');if(data.latest){fill(latest,data.latest)}else{latest.textContent='No sign requests'}const history=document.getElementById('history');if((data.history||[]).length){history.replaceChildren(...data.history.map(historyEntry))}else{history.textContent='No sign requests'}}
++function label(key){const names={at:'Time',bodyBase64:'Request body base64',contractId:'Contract ID',pcr11:'PCR 11',hostOsReport:'Host OS report',tpmAkSignature:'TPM AK signature',freshNonce:'Fresh nonce',singleUseNonce:'Single-use nonce',dailyLimit:'Daily limit'};if(names[key])return names[key];const text=key.replace(/([a-z0-9])([A-Z])/g,'$1 $2').replace(/_/g,' ');return text.charAt(0).toUpperCase()+text.slice(1)}
++function scalar(value){if(value===null||value===undefined)return 'None';if(typeof value==='boolean')return value?'Yes':'No';if(value==='')return 'None';return String(value)}
++function render(name,value,expand){if(value===null||typeof value!=='object'){const content=scalar(value);if(content.length>160){const details=document.createElement('details');const summary=document.createElement('summary');summary.textContent=name+' ('+content.length+' characters)';const pre=document.createElement('pre');pre.textContent=content;details.append(summary,pre);return details}return document.createTextNode(content)}const array=Array.isArray(value);const entries=array?value.map((entry,index)=>[String(index+1),entry]):Object.entries(value);if(!entries.length)return document.createTextNode('None');const details=document.createElement('details');details.open=Boolean(expand);const summary=document.createElement('summary');summary.textContent=name+' ('+entries.length+(array?' items':' fields')+')';const table=document.createElement('table');const body=document.createElement('tbody');for(const [key,entry] of entries){const row=document.createElement('tr');const heading=document.createElement('th');heading.scope='row';heading.textContent=array?'Item '+key:label(key);const cell=document.createElement('td');cell.append(render(array?'Item '+key:label(key),entry,false));row.append(heading,cell);body.append(row)}table.append(body);details.append(summary,table);return details}
++function fields(item){const table=document.createElement('table');const body=document.createElement('tbody');for(const [key,value] of Object.entries(item||{})){const row=document.createElement('tr');const heading=document.createElement('th');heading.scope='row';heading.textContent=label(key);const cell=document.createElement('td');cell.append(render(label(key),value,true));row.append(heading,cell);body.append(row)}table.append(body);return table}
++function raw(item){const details=document.createElement('details');const summary=document.createElement('summary');summary.textContent='Raw JSON';const pre=document.createElement('pre');pre.textContent=JSON.stringify(item,null,2);details.append(summary,pre);return details}
++function summary(item){const tier=item.contract?'Tier '+item.contract.tier:'Unknown tier';return (item.at||'Unknown time')+' | '+tier+' | '+((item.contract&&item.contract.id)||'Unknown contract')+' | '+(item.consent||'Unknown consent')+' | '+(item.device||'Unknown device')+' | '+((item.response&&item.response.status)||item.error||'rejected')}
++function entry(item){const details=document.createElement('details');const heading=document.createElement('summary');heading.textContent=summary(item);details.append(heading,fields(item),raw(item));return details}
++async function refresh(){const status=document.getElementById('status');status.textContent='Loading';try{const response=await fetch('/api/state');if(!response.ok)throw new Error(response.statusText);const data=await response.json();const latest=document.getElementById('latest');if(data.latest){latest.replaceChildren(fields(data.latest),raw(data.latest))}else{latest.textContent='No requests'}const history=data.history||[];const previous=data.latest?history.slice(1):history;const container=document.getElementById('history');if(previous.length){container.replaceChildren(...previous.map(entry))}else{container.textContent='No previous requests'}status.textContent=data.latest?'Updated '+data.latest.at:'No requests'}catch(error){status.textContent='Refresh failed: '+error.message}}
+ document.getElementById('refresh').onclick=refresh;refresh()
+ </script></body></html>`)
+ }
+diff --git a/buildroot/qemu/scripts/wallet-server_test.go b/buildroot/qemu/scripts/wallet-server_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..d6824709e3fed4e7a1bd8dd67154c7e762aacef6
+--- /dev/null
++++ b/buildroot/qemu/scripts/wallet-server_test.go
+@@ -0,0 +1,133 @@
++package main
++
++import (
++	"crypto/ecdsa"
++	"crypto/elliptic"
++	"crypto/rand"
++	"crypto/sha256"
++	"crypto/x509"
++	"crypto/x509/pkix"
++	"encoding/base64"
++	"encoding/binary"
++	"encoding/hex"
++	"encoding/json"
++	"encoding/pem"
++	"math/big"
++	"os"
++	"path/filepath"
++	"testing"
++	"time"
++)
++
++func TestVerifyFido2ConsentRegistrationAttestation(t *testing.T) {
++	attestationKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
++	if err != nil {
++		t.Fatal(err)
++	}
++	consentKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
++	if err != nil {
++		t.Fatal(err)
++	}
++	now := time.Now()
++	template := &x509.Certificate{SerialNumber: big.NewInt(1), Subject: pkix.Name{CommonName: "U2F test"}, NotBefore: now.Add(-time.Hour), NotAfter: now.Add(time.Hour)}
++	certificateDER, err := x509.CreateCertificate(rand.Reader, template, template, &attestationKey.PublicKey, attestationKey)
++	if err != nil {
++		t.Fatal(err)
++	}
++	directory := t.TempDir()
++	if err := os.Mkdir(filepath.Join(directory, "u2f"), 0o700); err != nil {
++		t.Fatal(err)
++	}
++	certificatePEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: certificateDER})
++	if err := os.WriteFile(filepath.Join(directory, "u2f", "certificate.pem"), certificatePEM, 0o600); err != nil {
++		t.Fatal(err)
++	}
++	application := make([]byte, 32)
++	if _, err := rand.Read(application); err != nil {
++		t.Fatal(err)
++	}
++	registrationChallenge := make([]byte, 32)
++	if _, err := rand.Read(registrationChallenge); err != nil {
++		t.Fatal(err)
++	}
++	keyHandle := make([]byte, 48)
++	if _, err := rand.Read(keyHandle); err != nil {
++		t.Fatal(err)
++	}
++	publicDER, err := x509.MarshalPKIXPublicKey(&consentKey.PublicKey)
++	if err != nil {
++		t.Fatal(err)
++	}
++	publicPEM := pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: publicDER})
++	publicBytes := make([]byte, 65)
++	publicBytes[0] = 4
++	consentKey.X.FillBytes(publicBytes[1:33])
++	consentKey.Y.FillBytes(publicBytes[33:65])
++	registrationMessage := []byte{0}
++	registrationMessage = append(registrationMessage, application...)
++	registrationMessage = append(registrationMessage, registrationChallenge...)
++	registrationMessage = append(registrationMessage, keyHandle...)
++	registrationMessage = append(registrationMessage, publicBytes...)
++	registrationDigest := sha256.Sum256(registrationMessage)
++	registrationSignature, err := ecdsa.SignASN1(rand.Reader, attestationKey, registrationDigest[:])
++	if err != nil {
++		t.Fatal(err)
++	}
++	nonce := make([]byte, 32)
++	if _, err := rand.Read(nonce); err != nil {
++		t.Fatal(err)
++	}
++	counter := make([]byte, 4)
++	binary.BigEndian.PutUint32(counter, 7)
++	consentMessage := append([]byte{}, application...)
++	consentMessage = append(consentMessage, 1)
++	consentMessage = append(consentMessage, counter...)
++	consentMessage = append(consentMessage, nonce...)
++	consentDigest := sha256.Sum256(consentMessage)
++	consentSignature, err := ecdsa.SignASN1(rand.Reader, consentKey, consentDigest[:])
++	if err != nil {
++		t.Fatal(err)
++	}
++	proof := u2fConsent{
++		PublicKey:             string(publicPEM),
++		Certificate:           base64.RawURLEncoding.EncodeToString(certificateDER),
++		KeyHandle:             base64.RawURLEncoding.EncodeToString(keyHandle),
++		RegistrationChallenge: base64.RawURLEncoding.EncodeToString(registrationChallenge),
++		RegistrationSignature: base64.RawURLEncoding.EncodeToString(registrationSignature),
++		Signature:             base64.RawURLEncoding.EncodeToString(consentSignature),
++		Counter:               7,
++	}
++	encoded, err := json.Marshal(proof)
++	if err != nil {
++		t.Fatal(err)
++	}
++	server := &walletServer{consentDir: directory}
++	input := signRequest{Nonce: base64.RawURLEncoding.EncodeToString(nonce), ConsentProof: base64.RawURLEncoding.EncodeToString(encoded)}
++	contractDigest := hex.EncodeToString(application)
++	if err := server.verifyFido2Consent(input, contractDigest); err != nil {
++		t.Fatal(err)
++	}
++	registrationSignature[len(registrationSignature)-1] ^= 1
++	proof.RegistrationSignature = base64.RawURLEncoding.EncodeToString(registrationSignature)
++	encoded, err = json.Marshal(proof)
++	if err != nil {
++		t.Fatal(err)
++	}
++	input.ConsentProof = base64.RawURLEncoding.EncodeToString(encoded)
++	if err := server.verifyFido2Consent(input, contractDigest); err == nil {
++		t.Fatal("forged registration attestation signature passed")
++	}
++	proof.RegistrationSignature = base64.RawURLEncoding.EncodeToString(registrationSignature)
++	registrationSignature[len(registrationSignature)-1] ^= 1
++	proof.RegistrationSignature = base64.RawURLEncoding.EncodeToString(registrationSignature)
++	consentSignature[len(consentSignature)-1] ^= 1
++	proof.Signature = base64.RawURLEncoding.EncodeToString(consentSignature)
++	encoded, err = json.Marshal(proof)
++	if err != nil {
++		t.Fatal(err)
++	}
++	input.ConsentProof = base64.RawURLEncoding.EncodeToString(encoded)
++	if err := server.verifyFido2Consent(input, contractDigest); err == nil {
++		t.Fatal("forged consent signature passed")
++	}
++}
+
