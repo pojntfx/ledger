@@ -1,0 +1,2787 @@
+From a2a3aec7dd72772b1e06dd16b0af48b882b33305 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Tue, 03 Nov 2026 23:33:24 -0700
+Subject: [PATCH] feat: Add PoC Go attestation servers and clients and example wallet
+---
+diff --git a/buildroot/qemu/scripts/attested-client.go b/buildroot/qemu/scripts/attested-client.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..9bdbb997e363f587b92c6f3aae2ecc30c7efae03
+--- /dev/null
++++ b/buildroot/qemu/scripts/attested-client.go
+@@ -0,0 +1,212 @@
++package main
++
++import (
++	"bytes"
++	"encoding/base64"
++	"encoding/binary"
++	"encoding/json"
++	"errors"
++	"fmt"
++	"io"
++	"net/http"
++	"os"
++	"os/exec"
++	"strings"
++	"time"
++)
++
++type challengeResponse struct {
++	Nonce     string    `json:"nonce"`
++	ExpiresAt time.Time `json:"expiresAt"`
++}
++
++func readBody(path string) ([]byte, error) {
++	return os.ReadFile(path)
++}
++
++func getChallenge(client *http.Client, baseURL string) (challengeResponse, error) {
++	var response challengeResponse
++	request, err := http.NewRequest(http.MethodGet, baseURL+"/v1/challenge", nil)
++	if err != nil {
++		return response, err
++	}
++	result, err := client.Do(request)
++	if err != nil {
++		return response, err
++	}
++	defer result.Body.Close()
++	if result.StatusCode != http.StatusOK {
++		return response, fmt.Errorf("challenge failed with %s", result.Status)
++	}
++	if err := json.NewDecoder(result.Body).Decode(&response); err != nil {
++		return response, err
++	}
++	return response, nil
++}
++
++func uploadReport(client *http.Client, baseURL string, challenge challengeResponse) error {
++	nonce, err := base64.RawURLEncoding.DecodeString(challenge.Nonce)
++	if err != nil {
++		return err
++	}
++	handler := func(writer http.ResponseWriter, request *http.Request) {
++		report, err := io.ReadAll(request.Body)
++		if err != nil {
++			http.Error(writer, err.Error(), http.StatusBadRequest)
++			return
++		}
++		token, err := tokenFor(nonce, report)
++		if err != nil {
++			http.Error(writer, err.Error(), http.StatusInternalServerError)
++			return
++		}
++		if err := os.WriteFile("/tmp/rva23-attested-body", report, 0o600); err != nil {
++			http.Error(writer, err.Error(), http.StatusInternalServerError)
++			return
++		}
++		if err := os.WriteFile("/tmp/rva23-attested-nonce", []byte(challenge.Nonce), 0o600); err != nil {
++			http.Error(writer, err.Error(), http.StatusInternalServerError)
++			return
++		}
++		if err := os.WriteFile("/tmp/rva23-attested-token", []byte(token), 0o600); err != nil {
++			http.Error(writer, err.Error(), http.StatusInternalServerError)
++			return
++		}
++		if os.Getenv("RVA23_ATTESTATION_CAPTURE") == "1" {
++			writer.WriteHeader(http.StatusOK)
++			return
++		}
++		if err := postAttestation(client, baseURL, challenge.Nonce, token, report); err != nil {
++			http.Error(writer, err.Error(), http.StatusForbidden)
++			return
++		}
++		writer.WriteHeader(http.StatusOK)
++	}
++	server := &http.Server{Addr: "127.0.0.1:18080", Handler: http.HandlerFunc(handler)}
++	go func() {
++		_ = server.ListenAndServe()
++	}()
++	defer server.Close()
++	time.Sleep(100 * time.Millisecond)
++	command := exec.Command("/usr/lib/systemd/systemd-report", "upload", "--url=http://127.0.0.1:18080/v1/attest", "--sign=require-one")
++	if result, err := command.CombinedOutput(); err != nil {
++		return fmt.Errorf("upload report: %s", result)
++	}
++	return nil
++}
++
++func tokenFor(nonce, report []byte) (string, error) {
++	input, err := os.CreateTemp("", "rva23-attestation-")
++	if err != nil {
++		return "", err
++	}
++	path := input.Name()
++	defer os.Remove(path)
++	if _, err := input.Write(nonce); err != nil {
++		input.Close()
++		return "", err
++	}
++	if _, err := input.Write(report); err != nil {
++		input.Close()
++		return "", err
++	}
++	if err := input.Close(); err != nil {
++		return "", err
++	}
++	handle, err := os.ReadFile("/var/lib/systemd/report.sign.tpm2/default.key")
++	if err != nil {
++		return "", err
++	}
++	var keyData struct {
++		Handle string `json:"handle"`
++	}
++	if err := json.Unmarshal(handle, &keyData); err != nil {
++		return "", err
++	}
++	serialized, err := base64.StdEncoding.DecodeString(keyData.Handle)
++	if err != nil || len(serialized) < 4 {
++		return "", errors.New("invalid persistent AK handle")
++	}
++	handleID := fmt.Sprintf("0x%08x", binary.BigEndian.Uint32(serialized[:4]))
++	output, err := os.CreateTemp("", "rva23-token-")
++	if err != nil {
++		return "", err
++	}
++	tokenPath := output.Name()
++	output.Close()
++	defer os.Remove(tokenPath)
++	command := exec.Command("tpm2_sign", "-c", handleID, "-g", "sha256", "-s", "rsassa", "-o", tokenPath, path)
++	if result, err := command.CombinedOutput(); err != nil {
++		return "", fmt.Errorf("tpm2_sign: %s", result)
++	}
++	token, err := os.ReadFile(tokenPath)
++	if err != nil {
++		return "", err
++	}
++	if len(token) < 256 {
++		return "", errors.New("short TPM token signature")
++	}
++	return base64.RawURLEncoding.EncodeToString(token[len(token)-256:]), nil
++}
++
++func postAttestation(client *http.Client, baseURL, nonce, token string, report []byte) error {
++	request, err := http.NewRequest(http.MethodPost, baseURL+"/v1/attest", bytes.NewReader(report))
++	if err != nil {
++		return err
++	}
++	request.Header.Set("Content-Type", "application/json")
++	request.Header.Set("X-Attestation-Nonce", nonce)
++	request.Header.Set("X-Attestation-Token", token)
++	result, err := client.Do(request)
++	if err != nil {
++		return err
++	}
++	defer result.Body.Close()
++	body, err := io.ReadAll(result.Body)
++	if err != nil {
++		return err
++	}
++	if result.StatusCode < 200 || result.StatusCode >= 300 {
++		return fmt.Errorf("attestation failed with %s: %s", result.Status, body)
++	}
++	fmt.Println(string(body))
++	return nil
++}
++
++func run() error {
++	baseURL := os.Getenv("RVA23_ATTESTATION_URL")
++	if baseURL == "" {
++		baseURL = "http://10.0.2.2:8080"
++	}
++	client := &http.Client{Timeout: 30 * time.Second}
++	if len(os.Args) > 1 && os.Args[1] == "--replay" {
++		report, err := readBody("/tmp/rva23-attested-body")
++		if err != nil {
++			return err
++		}
++		nonce, err := readBody("/tmp/rva23-attested-nonce")
++		if err != nil {
++			return err
++		}
++		token, err := readBody("/tmp/rva23-attested-token")
++		if err != nil {
++			return err
++		}
++		return postAttestation(client, baseURL, strings.TrimSpace(string(nonce)), strings.TrimSpace(string(token)), report)
++	}
++	challenge, err := getChallenge(client, baseURL)
++	if err != nil {
++		return fmt.Errorf("challenge: %w", err)
++	}
++	if time.Now().After(challenge.ExpiresAt) {
++		return errors.New("attestation challenge expired")
++	}
++	return uploadReport(client, baseURL, challenge)
++}
++
++func main() {
++	if err := run(); err != nil {
++		fmt.Fprintln(os.Stderr, err)
++		os.Exit(1)
++	}
++}
+diff --git a/buildroot/qemu/scripts/consent-emulator.go b/buildroot/qemu/scripts/consent-emulator.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..15d1769848bba0cf3566f038fb4c56c66c6a28ef
+--- /dev/null
++++ b/buildroot/qemu/scripts/consent-emulator.go
+@@ -0,0 +1,221 @@
++package main
++
++import (
++	"crypto"
++	"crypto/rand"
++	"crypto/rsa"
++	"crypto/sha256"
++	"crypto/x509"
++	"encoding/base64"
++	"encoding/json"
++	"encoding/pem"
++	"errors"
++	"flag"
++	"fmt"
++	"io"
++	"log"
++	"net/http"
++	"os"
++	"sync"
++	"time"
++)
++
++type signRequest struct {
++	Nonce          string `json:"nonce"`
++	ContractID     string `json:"contractId"`
++	ContractSHA256 string `json:"contractSha256"`
++	Method         string `json:"method"`
++}
++
++type lastRequest struct {
++	Method         string `json:"method"`
++	Nonce          string `json:"nonce"`
++	ContractID     string `json:"contractId"`
++	ContractSHA256 string `json:"contractSha256"`
++	Time           string `json:"time"`
++}
++
++type requestState struct {
++	mu   sync.RWMutex
++	last lastRequest
++}
++
++func main() {
++	listen := flag.String("listen", "127.0.0.1:8082", "HTTP listen address")
++	keyPath := flag.String("key", "", "private RSA PEM path")
++	publicPath := flag.String("public", "", "public RSA PEM path")
++	kind := flag.String("kind", "smartcard", "consent method kind")
++	flag.Parse()
++	if *keyPath == "" {
++		log.Fatal("cannot sign request without a private RSA PEM path")
++	}
++	if *kind != "smartcard" && *kind != "fido2" {
++		log.Fatal("-kind must be smartcard or fido2")
++	}
++	privateKey, err := readPrivateKey(*keyPath)
++	if err != nil {
++		log.Fatal(err)
++	}
++	publicKey := &privateKey.PublicKey
++	if *publicPath != "" {
++		publicKey, err = readPublicKey(*publicPath)
++		if err != nil {
++			log.Fatal(err)
++		}
++		if publicKey.N.Cmp(privateKey.PublicKey.N) != 0 || publicKey.E != privateKey.PublicKey.E {
++			log.Fatal("public and private RSA keys do not match")
++		}
++	}
++	encodedPublic, err := x509.MarshalPKIXPublicKey(publicKey)
++	if err != nil {
++		log.Fatal(err)
++	}
++	publicPEM := pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: encodedPublic})
++	state := &requestState{}
++	mux := http.NewServeMux()
++	mux.HandleFunc("/public-key", func(writer http.ResponseWriter, request *http.Request) {
++		if request.Method != http.MethodGet {
++			writer.Header().Set("Allow", http.MethodGet)
++			writeJSON(writer, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
++			return
++		}
++		writer.Header().Set("Content-Type", "application/x-pem-file")
++		_, _ = writer.Write(publicPEM)
++	})
++	mux.HandleFunc("/", func(writer http.ResponseWriter, request *http.Request) {
++		if request.URL.Path != "/" {
++			writeJSON(writer, http.StatusNotFound, map[string]string{"error": "not found"})
++			return
++		}
++		if request.Method != http.MethodGet {
++			writer.Header().Set("Allow", http.MethodGet)
++			writeJSON(writer, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
++			return
++		}
++		writeJSON(writer, http.StatusOK, map[string]string{"kind": *kind, "status": "ok"})
++	})
++	mux.HandleFunc("/sign", func(writer http.ResponseWriter, request *http.Request) {
++		if request.Method != http.MethodPost {
++			writer.Header().Set("Allow", http.MethodPost)
++			writeJSON(writer, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
++			return
++		}
++		decoder := json.NewDecoder(http.MaxBytesReader(writer, request.Body, 1024*1024))
++		decoder.DisallowUnknownFields()
++		var input signRequest
++		if err := decoder.Decode(&input); err != nil {
++			writeJSON(writer, http.StatusBadRequest, map[string]string{"error": "invalid JSON request"})
++			return
++		}
++		if err := decoder.Decode(&struct{}{}); err != io.EOF {
++			writeJSON(writer, http.StatusBadRequest, map[string]string{"error": "multiple JSON values are not allowed"})
++			return
++		}
++		if input.Nonce == "" || input.ContractID == "" || input.ContractSHA256 == "" || input.Method == "" {
++			writeJSON(writer, http.StatusBadRequest, map[string]string{"error": "nonce, contractId, contractSha256, and method are required"})
++			return
++		}
++		message, err := json.Marshal(input)
++		if err != nil {
++			writeJSON(writer, http.StatusInternalServerError, map[string]string{"error": "cannot sign request"})
++			return
++		}
++		digest := sha256.Sum256(message)
++		signature, err := rsa.SignPKCS1v15(rand.Reader, privateKey, crypto.SHA256, digest[:])
++		if err != nil {
++			writeJSON(writer, http.StatusInternalServerError, map[string]string{"error": "cannot sign request"})
++			return
++		}
++		state.mu.Lock()
++		state.last = lastRequest{
++			Method:         input.Method,
++			Nonce:          input.Nonce,
++			ContractID:     input.ContractID,
++			ContractSHA256: input.ContractSHA256,
++			Time:           time.Now().UTC().Format(time.RFC3339Nano),
++		}
++		state.mu.Unlock()
++		writeJSON(writer, http.StatusOK, map[string]string{"signature": base64.RawURLEncoding.EncodeToString(signature)})
++	})
++	mux.HandleFunc("/status", func(writer http.ResponseWriter, request *http.Request) {
++		if request.Method != http.MethodGet {
++			writer.Header().Set("Allow", http.MethodGet)
++			writeJSON(writer, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
++			return
++		}
++		state.mu.RLock()
++		last := state.last
++		state.mu.RUnlock()
++		writeJSON(writer, http.StatusOK, last)
++	})
++	server := &http.Server{
++		Addr:              *listen,
++		Handler:           mux,
++		ReadHeaderTimeout: 5 * time.Second,
++		ReadTimeout:       10 * time.Second,
++		WriteTimeout:      10 * time.Second,
++		IdleTimeout:       60 * time.Second,
++	}
++	log.Printf("consent emulator listening on %s", *listen)
++	log.Fatal(server.ListenAndServe())
++}
++
++func readPrivateKey(path string) (*rsa.PrivateKey, error) {
++	data, err := os.ReadFile(path)
++	if err != nil {
++		return nil, fmt.Errorf("read private key: %w", err)
++	}
++	block, _ := pem.Decode(data)
++	if block == nil {
++		return nil, errors.New("private key is not PEM")
++	}
++	privateKey, err := x509.ParsePKCS1PrivateKey(block.Bytes)
++	if err == nil {
++		if err := privateKey.Validate(); err != nil {
++			return nil, fmt.Errorf("validate private key: %w", err)
++		}
++		return privateKey, nil
++	}
++	parsed, err := x509.ParsePKCS8PrivateKey(block.Bytes)
++	if err != nil {
++		return nil, fmt.Errorf("parse private key: %w", err)
++	}
++	privateKey, ok := parsed.(*rsa.PrivateKey)
++	if !ok {
++		return nil, errors.New("private key is not RSA")
++	}
++	if err := privateKey.Validate(); err != nil {
++		return nil, fmt.Errorf("validate private key: %w", err)
++	}
++	return privateKey, nil
++}
++
++func readPublicKey(path string) (*rsa.PublicKey, error) {
++	data, err := os.ReadFile(path)
++	if err != nil {
++		return nil, fmt.Errorf("read public key: %w", err)
++	}
++	block, _ := pem.Decode(data)
++	if block == nil {
++		return nil, errors.New("public key is not PEM")
++	}
++	publicKey, err := x509.ParsePKCS1PublicKey(block.Bytes)
++	if err == nil {
++		return publicKey, nil
++	}
++	parsed, err := x509.ParsePKIXPublicKey(block.Bytes)
++	if err != nil {
++		return nil, fmt.Errorf("parse public key: %w", err)
++	}
++	publicKey, ok := parsed.(*rsa.PublicKey)
++	if !ok {
++		return nil, errors.New("public key is not RSA")
++	}
++	return publicKey, nil
++}
++
++func writeJSON(writer http.ResponseWriter, status int, value any) {
++	writer.Header().Set("Content-Type", "application/json")
++	writer.WriteHeader(status)
++	_ = json.NewEncoder(writer).Encode(value)
++}
+diff --git a/buildroot/qemu/scripts/go.mod b/buildroot/qemu/scripts/go.mod
+new file mode 100644
+index 0000000000000000000000000000000000000000..2f0262c7c51eacf3605aa26d6549c8ff5d58a7e0
+--- /dev/null
++++ b/buildroot/qemu/scripts/go.mod
+@@ -0,0 +1,3 @@
++module rva23/scripts
++
++go 1.26
+diff --git a/buildroot/qemu/scripts/report-receiver.go b/buildroot/qemu/scripts/report-receiver.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..8cf611b3a95c6081e9ef3fe61ed4328269e19984
+--- /dev/null
++++ b/buildroot/qemu/scripts/report-receiver.go
+@@ -0,0 +1,668 @@
++package main
++
++import (
++	"crypto/rand"
++	"crypto/sha256"
++	"encoding/base64"
++	"encoding/binary"
++	"encoding/hex"
++	"encoding/json"
++	"errors"
++	"fmt"
++	"io"
++	"net/http"
++	"os"
++	"os/exec"
++	"path/filepath"
++	"strings"
++	"sync"
++	"time"
++	"unicode/utf16"
++)
++
++type clockInfo struct {
++	Clock        uint64 `json:"clock"`
++	ResetCount   uint32 `json:"resetCount"`
++	RestartCount uint32 `json:"restartCount"`
++	Safe         string `json:"safe"`
++}
++
++type pcrSelection struct {
++	Hash      string   `json:"hash"`
++	PCRSelect []uint32 `json:"pcrSelect"`
++}
++
++type attestedFields struct {
++	PCRSelect        []pcrSelection `json:"pcrSelect"`
++	PCRDigest        string         `json:"pcrDigest"`
++	IndexName        string         `json:"indexName"`
++	Offset           uint16         `json:"offset"`
++	NVContents       string         `json:"nvContents"`
++	ExclusiveSession string         `json:"exclusiveSession"`
++	SessionDigest    string         `json:"sessionDigest"`
++}
++
++type attestation struct {
++	Magic           string         `json:"magic"`
++	Type            string         `json:"type"`
++	QualifiedSigner string         `json:"qualifiedSigner"`
++	ExtraData       string         `json:"extraData"`
++	ClockInfo       clockInfo      `json:"clockInfo"`
++	FirmwareVersion uint64         `json:"firmwareVersion"`
++	Attested        attestedFields `json:"attested"`
++}
++
++type attestInfo struct {
++	Scheme json.RawMessage `json:"sig_scheme"`
++	Attest attestation     `json:"attest"`
++}
++
++type signatureData struct {
++	SigAlg string `json:"sigAlg"`
++	Inner  struct {
++		Sig string `json:"sig"`
++	} `json:"signature"`
++}
++
++type component struct {
++	Type      string        `json:"type"`
++	Attest    attestInfo    `json:"attestInfo"`
++	Signature signatureData `json:"signature"`
++}
++
++type reportSignature struct {
++	MediaType string `json:"mediaType"`
++	Mechanism string `json:"mechanism"`
++	SHA256    string `json:"sha256"`
++	Data      struct {
++		EventLog     []json.RawMessage `json:"eventLog"`
++		PublicKeyPEM string            `json:"publicKeyPEM"`
++		Components   []component       `json:"components"`
++	} `json:"data"`
++}
++
++type uploadResponse struct {
++	Status             string `json:"status"`
++	ComponentsVerified int    `json:"componentsVerified"`
++	EventLogRecords    int    `json:"eventLogRecords"`
++}
++
++type tokenFile struct {
++	KeyID  string `json:"keyId"`
++	Secret string `json:"secret"`
++}
++
++type tokenStore struct {
++	KeyID  string
++	Secret []byte
++	Nonces map[string]time.Time
++	Mutex  sync.Mutex
++}
++
++type requestSnapshot struct {
++	At         time.Time         `json:"at"`
++	Path       string            `json:"path"`
++	Headers    map[string]string `json:"headers"`
++	Body       string            `json:"bodyBase64"`
++	Nonce      string            `json:"nonce"`
++	Token      string            `json:"token"`
++	Report     json.RawMessage   `json:"report"`
++	Signatures json.RawMessage   `json:"signatures"`
++	Response   json.RawMessage   `json:"response"`
++	Sysext     []json.RawMessage `json:"sysext"`
++	Error      string            `json:"error"`
++}
++
++type receiverState struct {
++	Mutex    sync.RWMutex
++	Snapshot requestSnapshot
++	History  []requestSnapshot
++}
++
++var state receiverState
++
++func sysextRecords(signatures []reportSignature) []json.RawMessage {
++	if len(signatures) == 0 {
++		return nil
++	}
++	var records []json.RawMessage
++	for _, encoded := range signatures[0].Data.EventLog {
++		var record struct {
++			PCR         int    `json:"pcr"`
++			ContentType string `json:"content_type"`
++			Content     struct {
++				EventData string `json:"event_data"`
++			} `json:"content"`
++		}
++		if err := json.Unmarshal(encoded, &record); err != nil || record.PCR != 13 || record.ContentType != "pcclient_std" {
++			continue
++		}
++		data, err := hex.DecodeString(record.Content.EventData)
++		if err != nil || len(data)%2 != 0 {
++			continue
++		}
++		units := make([]uint16, len(data)/2)
++		for index := range units {
++			units[index] = binary.LittleEndian.Uint16(data[index*2:])
++		}
++		if strings.Contains(string(utf16.Decode(units)), "Global system extension initrd") {
++			records = append(records, encoded)
++		}
++	}
++	return records
++}
++
++func recordRequest(request *http.Request, raw, report []byte, signatures []reportSignature) {
++	encodedSignatures, _ := json.Marshal(signatures)
++	headers := make(map[string]string)
++	for key, values := range request.Header {
++		headers[key] = strings.Join(values, ", ")
++	}
++	state.Mutex.Lock()
++	state.Snapshot = requestSnapshot{
++		At: time.Now(), Path: request.URL.Path, Headers: headers,
++		Body:       base64.StdEncoding.EncodeToString(raw),
++		Nonce:      request.Header.Get("X-Attestation-Nonce"),
++		Token:      request.Header.Get("X-Attestation-Token"),
++		Report:     append(json.RawMessage(nil), report...),
++		Signatures: encodedSignatures,
++		Sysext:     sysextRecords(signatures),
++	}
++	state.History = append([]requestSnapshot{state.Snapshot}, state.History...)
++	if len(state.History) > 32 {
++		state.History = state.History[:32]
++	}
++	state.Mutex.Unlock()
++}
++
++func recordResult(response uploadResponse, err error) {
++	state.Mutex.Lock()
++	defer state.Mutex.Unlock()
++	if err != nil {
++		state.Snapshot.Error = err.Error()
++	} else {
++		state.Snapshot.Response, _ = json.Marshal(response)
++		state.Snapshot.Error = ""
++	}
++	if len(state.History) > 0 {
++		state.History[0].Response = state.Snapshot.Response
++		state.History[0].Error = state.Snapshot.Error
++	}
++}
++
++func stateHandler(writer http.ResponseWriter, request *http.Request) {
++	state.Mutex.RLock()
++	response := struct {
++		Latest  requestSnapshot   `json:"latest"`
++		History []requestSnapshot `json:"history"`
++	}{state.Snapshot, append([]requestSnapshot(nil), state.History...)}
++	state.Mutex.RUnlock()
++	writer.Header().Set("Content-Type", "application/json")
++	_ = json.NewEncoder(writer).Encode(response)
++}
++
++type challengeResponse struct {
++	Nonce     string    `json:"nonce"`
++	ExpiresAt time.Time `json:"expiresAt"`
++}
++
++func loadTokenStore(path string) (*tokenStore, error) {
++	data, err := os.ReadFile(path)
++	if err != nil {
++		return nil, err
++	}
++	var document tokenFile
++	if err := json.Unmarshal(data, &document); err != nil {
++		return nil, err
++	}
++	secret, err := base64.StdEncoding.DecodeString(document.Secret)
++	if err != nil {
++		return nil, err
++	}
++	if len(secret) != 32 {
++		return nil, errors.New("attestation token secret must contain 32 bytes")
++	}
++	return &tokenStore{KeyID: document.KeyID, Secret: secret, Nonces: make(map[string]time.Time)}, nil
++}
++
++func newNonce(store *tokenStore) (challengeResponse, error) {
++	var response challengeResponse
++	var nonce [32]byte
++	if _, err := rand.Read(nonce[:]); err != nil {
++		return response, err
++	}
++	encoded := base64.RawURLEncoding.EncodeToString(nonce[:])
++	store.Mutex.Lock()
++	defer store.Mutex.Unlock()
++	now := time.Now()
++	for key, expiry := range store.Nonces {
++		if now.After(expiry) {
++			delete(store.Nonces, key)
++		}
++	}
++	if len(store.Nonces) >= 128 {
++		return response, errors.New("too many outstanding attestation challenges")
++	}
++	response.Nonce = encoded
++	response.ExpiresAt = now.Add(60 * time.Second)
++	store.Nonces[encoded] = response.ExpiresAt
++	return response, nil
++}
++
++func verifyTokenSignature(publicKeyPath, messagePath, signaturePath string) error {
++	result, err := exec.Command("openssl", "dgst", "-sha256", "-verify", publicKeyPath, "-signature", signaturePath, messagePath).CombinedOutput()
++	if err != nil {
++		return fmt.Errorf("token signature verification failed: %s", strings.TrimSpace(string(result)))
++	}
++	return nil
++}
++
++func putU16(buf []byte, value uint16) []byte {
++	var b [2]byte
++	binary.BigEndian.PutUint16(b[:], value)
++	return append(buf, b[:]...)
++}
++
++func putU32(buf []byte, value uint32) []byte {
++	var b [4]byte
++	binary.BigEndian.PutUint32(b[:], value)
++	return append(buf, b[:]...)
++}
++
++func putU64(buf []byte, value uint64) []byte {
++	var b [8]byte
++	binary.BigEndian.PutUint64(b[:], value)
++	return append(buf, b[:]...)
++}
++
++func putBytes(buf []byte, value string) ([]byte, error) {
++	decoded, err := hex.DecodeString(value)
++	if err != nil {
++		return nil, err
++	}
++	if len(decoded) > 65535 {
++		return nil, errors.New("TPM2B value is too long")
++	}
++	buf = putU16(buf, uint16(len(decoded)))
++	return append(buf, decoded...), nil
++}
++
++func attestType(value string) (uint16, error) {
++	switch value {
++	case "ATTEST_NV":
++		return 0x8014, nil
++	case "ATTEST_SESSION_AUDIT":
++		return 0x8016, nil
++	case "ATTEST_QUOTE":
++		return 0x8018, nil
++	default:
++		return 0, fmt.Errorf("unsupported attestation type %q", value)
++	}
++}
++
++func hashAlgorithm(value string) (uint16, error) {
++	switch value {
++	case "SHA1":
++		return 0x0004, nil
++	case "SHA256":
++		return 0x000b, nil
++	case "SHA384":
++		return 0x000c, nil
++	case "SHA512":
++		return 0x000d, nil
++	default:
++		return 0, fmt.Errorf("unsupported hash algorithm %q", value)
++	}
++}
++
++func marshalAttestation(value attestation) ([]byte, error) {
++	typeID, err := attestType(value.Type)
++	if err != nil {
++		return nil, err
++	}
++	buf := putU32(nil, 0xff544347)
++	buf = putU16(buf, typeID)
++	if buf, err = putBytes(buf, value.QualifiedSigner); err != nil {
++		return nil, err
++	}
++	if buf, err = putBytes(buf, value.ExtraData); err != nil {
++		return nil, err
++	}
++	buf = putU64(buf, value.ClockInfo.Clock)
++	buf = putU32(buf, value.ClockInfo.ResetCount)
++	buf = putU32(buf, value.ClockInfo.RestartCount)
++	if value.ClockInfo.Safe == "YES" {
++		buf = append(buf, 1)
++	} else {
++		buf = append(buf, 0)
++	}
++	buf = putU64(buf, value.FirmwareVersion)
++
++	switch typeID {
++	case 0x8018:
++		buf = putU32(buf, uint32(len(value.Attested.PCRSelect)))
++		for _, selection := range value.Attested.PCRSelect {
++			algorithm, err := hashAlgorithm(selection.Hash)
++			if err != nil {
++				return nil, err
++			}
++			buf = putU16(buf, algorithm)
++			const size = 3
++			for _, pcr := range selection.PCRSelect {
++				if pcr >= size*8 {
++					return nil, errors.New("PCR index is out of range")
++				}
++			}
++			buf = append(buf, byte(size))
++			bitmap := make([]byte, size)
++			for _, pcr := range selection.PCRSelect {
++				bitmap[pcr/8] |= 1 << (pcr % 8)
++			}
++			buf = append(buf, bitmap...)
++		}
++		if buf, err = putBytes(buf, value.Attested.PCRDigest); err != nil {
++			return nil, err
++		}
++	case 0x8014:
++		if buf, err = putBytes(buf, value.Attested.IndexName); err != nil {
++			return nil, err
++		}
++		buf = putU16(buf, value.Attested.Offset)
++		if buf, err = putBytes(buf, value.Attested.NVContents); err != nil {
++			return nil, err
++		}
++	case 0x8016:
++		if value.Attested.ExclusiveSession == "YES" {
++			buf = append(buf, 1)
++		} else {
++			buf = append(buf, 0)
++		}
++		if buf, err = putBytes(buf, value.Attested.SessionDigest); err != nil {
++			return nil, err
++		}
++	}
++	return buf, nil
++}
++
++func decodeRecords(body io.Reader) ([]byte, []byte, []reportSignature, error) {
++	data, err := io.ReadAll(io.LimitReader(body, 16*1024*1024))
++	if err != nil {
++		return nil, nil, nil, err
++	}
++	parts := strings.Split(string(data), "\x1e")
++	if len(parts) < 2 {
++		return nil, nil, nil, errors.New("signed report requires JSON-SEQ records")
++	}
++	report := []byte(parts[1])
++	var signatures []reportSignature
++	for _, part := range parts[2:] {
++		part = strings.TrimSpace(part)
++		if part == "" {
++			continue
++		}
++		var signature reportSignature
++		if err := json.Unmarshal([]byte(part), &signature); err != nil {
++			return nil, nil, nil, err
++		}
++		signatures = append(signatures, signature)
++	}
++	return data, report, signatures, nil
++}
++
++func verifySignatures(report []byte, signatures []reportSignature, output string) (uploadResponse, error) {
++	var response uploadResponse
++	if len(signatures) == 0 {
++		return response, errors.New("report contains no signatures")
++	}
++	if err := os.MkdirAll(output, 0o700); err != nil {
++		return response, err
++	}
++	if err := os.WriteFile(filepath.Join(output, "report.json"), report, 0o600); err != nil {
++		return response, err
++	}
++	encodedSignature, err := json.Marshal(signatures[0])
++	if err != nil {
++		return response, err
++	}
++	if err := os.WriteFile(filepath.Join(output, "signature.json"), encodedSignature, 0o600); err != nil {
++		return response, err
++	}
++	digest := fmt.Sprintf("%x", sha256.Sum256(append([]byte{0x1e}, report...)))
++	if digest != signatures[0].SHA256 {
++		return response, fmt.Errorf("report digest %s does not match signature %s", digest, signatures[0].SHA256)
++	}
++	if signatures[0].Mechanism != "tpm2" {
++		return response, fmt.Errorf("unsupported signing mechanism %q", signatures[0].Mechanism)
++	}
++	if len(signatures[0].Data.Components) == 0 {
++		return response, errors.New("TPM report contains no components")
++	}
++	if err := os.MkdirAll(output, 0o700); err != nil {
++		return response, err
++	}
++	publicKey := filepath.Join(output, "public-key.pem")
++	if err := os.WriteFile(publicKey, []byte(signatures[0].Data.PublicKeyPEM), 0o600); err != nil {
++		return response, err
++	}
++	for index, component := range signatures[0].Data.Components {
++		if component.Signature.SigAlg != "RSASSA" {
++			return response, fmt.Errorf("unsupported signature algorithm %q", component.Signature.SigAlg)
++		}
++		message, err := marshalAttestation(component.Attest.Attest)
++		if err != nil {
++			return response, err
++		}
++		messagePath := filepath.Join(output, fmt.Sprintf("component-%d-attest.bin", index))
++		if err := os.WriteFile(messagePath, message, 0o600); err != nil {
++			return response, err
++		}
++		signature, err := hex.DecodeString(component.Signature.Inner.Sig)
++		if err != nil {
++			return response, err
++		}
++		signaturePath := filepath.Join(output, fmt.Sprintf("component-%d-signature.bin", index))
++		if err := os.WriteFile(signaturePath, signature, 0o600); err != nil {
++			return response, err
++		}
++		result, err := exec.Command("openssl", "dgst", "-sha256", "-verify", publicKey, "-signature", signaturePath, messagePath).CombinedOutput()
++		if err != nil {
++			return response, fmt.Errorf("TPM signature %d failed: %s", index, strings.TrimSpace(string(result)))
++		}
++		response.ComponentsVerified++
++	}
++	response.EventLogRecords = len(signatures[0].Data.EventLog)
++	if response.EventLogRecords == 0 {
++		return response, errors.New("TPM event log is empty")
++	}
++	for index, record := range signatures[0].Data.EventLog {
++		if len(record) == 0 || string(record) == "null" {
++			return response, fmt.Errorf("event log record %d is empty", index)
++		}
++	}
++	response.Status = "accepted"
++	return response, nil
++}
++
++func handler(output string) http.HandlerFunc {
++	return func(writer http.ResponseWriter, request *http.Request) {
++		writer.Header().Set("Content-Type", "application/json")
++		if request.Method != http.MethodPost && request.Method != http.MethodPut {
++			writer.WriteHeader(http.StatusMethodNotAllowed)
++			return
++		}
++		raw, report, signatures, err := decodeRecords(request.Body)
++		if err != nil {
++			writer.WriteHeader(http.StatusBadRequest)
++			_ = json.NewEncoder(writer).Encode(map[string]string{"error": err.Error()})
++			return
++		}
++		recordRequest(request, raw, report, signatures)
++		response, err := verifySignatures(report, signatures, output)
++		recordResult(response, err)
++		if err != nil {
++			writer.WriteHeader(http.StatusForbidden)
++			_ = json.NewEncoder(writer).Encode(map[string]string{"error": err.Error()})
++			return
++		}
++		if err := os.WriteFile(filepath.Join(output, "report.json"), report, 0o600); err != nil {
++			writer.WriteHeader(http.StatusInternalServerError)
++			return
++		}
++		encodedResponse, err := json.Marshal(response)
++		if err != nil {
++			writer.WriteHeader(http.StatusInternalServerError)
++			return
++		}
++		if err := os.WriteFile(filepath.Join(output, "response.json"), append(encodedResponse, '\n'), 0o600); err != nil {
++			writer.WriteHeader(http.StatusInternalServerError)
++			return
++		}
++		writer.WriteHeader(http.StatusOK)
++		_ = json.NewEncoder(writer).Encode(response)
++	}
++}
++
++func challengeHandler(store *tokenStore) http.HandlerFunc {
++	return func(writer http.ResponseWriter, request *http.Request) {
++		writer.Header().Set("Content-Type", "application/json")
++		if request.Method != http.MethodGet {
++			writer.WriteHeader(http.StatusMethodNotAllowed)
++			return
++		}
++		if store == nil {
++			writer.WriteHeader(http.StatusServiceUnavailable)
++			return
++		}
++		response, err := newNonce(store)
++		if err != nil {
++			writer.WriteHeader(http.StatusInternalServerError)
++			_ = json.NewEncoder(writer).Encode(map[string]string{"error": err.Error()})
++			return
++		}
++		_ = json.NewEncoder(writer).Encode(response)
++	}
++}
++
++func attestHandler(output string, store *tokenStore) http.HandlerFunc {
++	return func(writer http.ResponseWriter, request *http.Request) {
++		writer.Header().Set("Content-Type", "application/json")
++		if request.Method != http.MethodPost {
++			writer.WriteHeader(http.StatusMethodNotAllowed)
++			return
++		}
++		if store == nil {
++			writer.WriteHeader(http.StatusServiceUnavailable)
++			return
++		}
++		raw, report, signatures, err := decodeRecords(request.Body)
++		if err != nil {
++			writer.WriteHeader(http.StatusBadRequest)
++			_ = json.NewEncoder(writer).Encode(map[string]string{"error": err.Error()})
++			return
++		}
++		recordRequest(request, raw, report, signatures)
++		response, err := verifySignatures(report, signatures, output)
++		recordResult(response, err)
++		if err != nil {
++			writer.WriteHeader(http.StatusForbidden)
++			_ = json.NewEncoder(writer).Encode(map[string]string{"error": err.Error()})
++			return
++		}
++		nonce := request.Header.Get("X-Attestation-Nonce")
++		nonceBytes, err := base64.RawURLEncoding.DecodeString(nonce)
++		if err != nil || len(nonceBytes) != 32 {
++			writer.WriteHeader(http.StatusForbidden)
++			_ = json.NewEncoder(writer).Encode(map[string]string{"error": "invalid attestation nonce"})
++			return
++		}
++		provided, err := base64.RawURLEncoding.DecodeString(request.Header.Get("X-Attestation-Token"))
++		if err != nil || len(provided) != 256 {
++			writer.WriteHeader(http.StatusForbidden)
++			_ = json.NewEncoder(writer).Encode(map[string]string{"error": "invalid attestation token"})
++			return
++		}
++		store.Mutex.Lock()
++		defer store.Mutex.Unlock()
++		expires, ok := store.Nonces[nonce]
++		if !ok || time.Now().After(expires) {
++			writer.WriteHeader(http.StatusForbidden)
++			_ = json.NewEncoder(writer).Encode(map[string]string{"error": "attestation nonce is expired or already used"})
++			return
++		}
++		messagePath := filepath.Join(output, "attestation-message.bin")
++		message := append(nonceBytes, raw...)
++		if err := os.WriteFile(messagePath, message, 0o600); err != nil {
++			writer.WriteHeader(http.StatusInternalServerError)
++			return
++		}
++		signaturePath := filepath.Join(output, "attestation-token.bin")
++		if err := os.WriteFile(signaturePath, provided, 0o600); err != nil {
++			writer.WriteHeader(http.StatusInternalServerError)
++			return
++		}
++		publicKey := filepath.Join(output, "public-key.pem")
++		if err := verifyTokenSignature(publicKey, messagePath, signaturePath); err != nil {
++			recordResult(uploadResponse{}, err)
++			writer.WriteHeader(http.StatusForbidden)
++			_ = json.NewEncoder(writer).Encode(map[string]string{"error": err.Error()})
++			return
++		}
++		delete(store.Nonces, nonce)
++		encodedResponse, err := json.Marshal(response)
++		if err != nil {
++			writer.WriteHeader(http.StatusInternalServerError)
++			return
++		}
++		if err := os.WriteFile(filepath.Join(output, "response.json"), append(encodedResponse, '\n'), 0o600); err != nil {
++			writer.WriteHeader(http.StatusInternalServerError)
++			return
++		}
++		writer.WriteHeader(http.StatusOK)
++		_ = json.NewEncoder(writer).Encode(response)
++	}
++}
++
++func main() {
++	output := os.Getenv("RVA23_ATTESTATION_DIR")
++	if output == "" {
++		output = "output/rva23/host-attestation"
++	}
++	var store *tokenStore
++	if tokenPath := os.Getenv("RVA23_TOKEN_FILE"); tokenPath != "" {
++		var err error
++		store, err = loadTokenStore(tokenPath)
++		if err != nil {
++			panic(err)
++		}
++	}
++	server := &http.Server{
++		Addr:              "127.0.0.1:8080",
++		ReadHeaderTimeout: 5 * time.Second,
++		ReadTimeout:       30 * time.Second,
++		WriteTimeout:      30 * time.Second,
++		IdleTimeout:       60 * time.Second,
++		MaxHeaderBytes:    64 * 1024,
++	}
++	mux := http.NewServeMux()
++	mux.HandleFunc("/reports", handler(output))
++	mux.HandleFunc("/v1/challenge", challengeHandler(store))
++	mux.HandleFunc("/v1/attest", attestHandler(output, store))
++	mux.HandleFunc("/api/state", stateHandler)
++	mux.HandleFunc("/", func(writer http.ResponseWriter, request *http.Request) {
++		writer.Header().Set("Content-Type", "text/html; charset=utf-8")
++		_, _ = io.WriteString(writer, `<!doctype html>
++<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Attestation receiver</title></head>
++<body><h1>Attestation receiver</h1><p>Latest request: <span id="updated">No request yet</span>. <a href="/api/state">JSON state</a>. <button id="refresh" type="button">Refresh</button></p>
++<p>The Go client in the VM sends <code>POST /v1/attest</code> through its local upload proxy. Expand a <code>/v1/attest</code> history entry to see its headers, nonce, token, and full JSON-SEQ body.</p>
++<p>systemd measures signed system extensions into PCR 13 as <code>Global system extension initrd</code>. Expand Sysext attestation to see those records. The history retains both <code>/reports</code> and <code>/v1/attest</code> requests in server memory.</p>
++<p><a href="https://www.freedesktop.org/software/systemd/man/latest/systemd-sysext.html">systemd-sysext documentation</a>. <a href="https://www.freedesktop.org/software/systemd/man/latest/systemd-report.html">systemd-report documentation</a>.</p>
++<details open><summary>Latest request</summary><div id="state">Loading…</div></details>
++<details open><summary>Sysext attestation</summary><div id="sysext">Loading…</div></details>
++<details open><summary>Request history</summary><div id="history">Loading…</div></details>
++<script>function render(item){const fragment=document.createDocumentFragment();for(const [name,value] of Object.entries(item||{}){const details=document.createElement('details');const summary=document.createElement('summary');summary.textContent=name;const pre=document.createElement('pre');pre.textContent=JSON.stringify(value,null,2);details.append(summary,pre);fragment.append(details)}const raw=document.createElement('details');const summary=document.createElement('summary');summary.textContent='Raw JSON';const pre=document.createElement('pre');pre.textContent=JSON.stringify(item,null,2);raw.append(summary,pre);fragment.append(raw);return fragment}async function refresh(){const data=await fetch('/api/state').then(response=>response.json());const latest=data.latest||{};document.getElementById('updated').textContent=latest.at||'No request yet';document.getElementById('state').replaceChildren(render(latest));document.getElementById('sysext').replaceChildren(render({records:latest.sysext||[]}));document.getElementById('history').replaceChildren(...(data.history||[]).map(item=>{const details=document.createElement('details');const summary=document.createElement('summary');summary.textContent=(item.at||'Unknown time')+' '+item.path+' '+((item.response&&item.response.status)||item.error||'pending');details.append(summary,render(item));return details}))}document.getElementById('refresh').onclick=refresh;refresh()</script></body></html>`)
++	})
++	server.Handler = mux
++	if err := server.ListenAndServe(); err != nil {
++		panic(err)
++	}
++}
+diff --git a/buildroot/qemu/scripts/report-receiver_test.go b/buildroot/qemu/scripts/report-receiver_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..44687f1a36fc7fdc929df8393ef955fd53b772ed
+--- /dev/null
++++ b/buildroot/qemu/scripts/report-receiver_test.go
+@@ -0,0 +1,98 @@
++package main
++
++import (
++	"encoding/binary"
++	"encoding/hex"
++	"encoding/json"
++	"strings"
++	"testing"
++	"unicode/utf16"
++)
++
++func TestMarshalAttestation(t *testing.T) {
++	value := attestation{
++		Magic:           "VALUE",
++		Type:            "ATTEST_QUOTE",
++		QualifiedSigner: "0011",
++		ExtraData:       "aabb",
++		ClockInfo: clockInfo{
++			Clock:        1,
++			ResetCount:   2,
++			RestartCount: 3,
++			Safe:         "YES",
++		},
++		FirmwareVersion: 4,
++		Attested: attestedFields{
++			PCRSelect: []pcrSelection{{Hash: "SHA256", PCRSelect: []uint32{11}}},
++			PCRDigest: "0000000000000000000000000000000000000000000000000000000000000000",
++		},
++	}
++	result, err := marshalAttestation(value)
++	if err != nil {
++		t.Fatal(err)
++	}
++	expected := "ff5443478018000200110002aabb0000000000000001000000020000000301000000000000000400000001000b0300080000200000000000000000000000000000000000000000000000000000000000000000"
++	if hex.EncodeToString(result) != expected {
++		t.Fatalf("unexpected attestation: %x", result)
++	}
++}
++
++func TestMarshalSessionAuditAttestation(t *testing.T) {
++	value := attestation{
++		Magic:           "VALUE",
++		Type:            "ATTEST_SESSION_AUDIT",
++		QualifiedSigner: "0011",
++		ExtraData:       "aabb",
++		ClockInfo: clockInfo{
++			Clock:        1,
++			ResetCount:   2,
++			RestartCount: 3,
++			Safe:         "YES",
++		},
++		FirmwareVersion: 4,
++		Attested: attestedFields{
++			ExclusiveSession: "YES",
++			SessionDigest:    "aabb",
++		},
++	}
++	result, err := marshalAttestation(value)
++	if err != nil {
++		t.Fatal(err)
++	}
++	expected := "ff5443478016000200110002aabb00000000000000010000000200000003010000000000000004010002aabb"
++	if hex.EncodeToString(result) != expected {
++		t.Fatalf("unexpected attestation: %x", result)
++	}
++}
++
++func TestSysextRecords(t *testing.T) {
++	text := utf16.Encode([]rune("Global system extension initrd"))
++	data := make([]byte, len(text)*2)
++	for index, value := range text {
++		binary.LittleEndian.PutUint16(data[index*2:], value)
++	}
++	record, err := json.Marshal(map[string]any{"pcr": 13, "content_type": "pcclient_std", "content": map[string]string{"event_data": hex.EncodeToString(data)}})
++	if err != nil {
++		t.Fatal(err)
++	}
++	signatures := []reportSignature{{}}
++	signatures[0].Data.EventLog = []json.RawMessage{record}
++	if len(sysextRecords(signatures)) != 1 {
++		t.Fatal("sysext event was not decoded")
++	}
++}
++
++func TestDecodeRecordsEventLog(t *testing.T) {
++	input := "\x1e{}\n\x1e{\"data\":{\"eventLog\":[{\"recnum\":1,\"digests\":[]}]}}\n"
++	_, _, signatures, err := decodeRecords(strings.NewReader(input))
++	if err != nil {
++		t.Fatal(err)
++	}
++	if len(signatures) != 1 || len(signatures[0].Data.EventLog) != 1 {
++		t.Fatal("event log record was not decoded")
++	}
++	expected := `{"recnum":1,"digests":[]}`
++	if string(signatures[0].Data.EventLog[0]) != expected {
++		t.Fatalf("unexpected event log record: %s", signatures[0].Data.EventLog[0])
++	}
++}
+diff --git a/buildroot/qemu/scripts/u2f.go b/buildroot/qemu/scripts/u2f.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..4040fed4dc56a39703931406799255bff263e9aa
+--- /dev/null
++++ b/buildroot/qemu/scripts/u2f.go
+@@ -0,0 +1,520 @@
++package main
++
++import (
++	"crypto/ecdsa"
++	"crypto/elliptic"
++	"crypto/rand"
++	"crypto/x509"
++	"encoding/asn1"
++	"encoding/base64"
++	"encoding/binary"
++	"encoding/json"
++	"encoding/pem"
++	"errors"
++	"fmt"
++	"io"
++	"math/big"
++	"os"
++	"path/filepath"
++	"sync"
++	"syscall"
++	"time"
++)
++
++const (
++	u2fHIDMSG         = 0x83
++	u2fHIDINIT        = 0x86
++	u2fHIDKEEPALIVE   = 0xbb
++	u2fHIDERROR       = 0xbf
++	u2fBroadcastCID   = 0xffffffff
++	u2fFrameSize      = 64
++	u2fInitialPayload = 57
++	u2fNextPayload    = 59
++	u2fCachePath      = "/var/lib/rva23-wallet/fido2.json"
++)
++
++type U2FConsent struct {
++	PublicKey   string `json:"publicKey"`
++	Certificate string `json:"certificate"`
++	Signature   string `json:"signature"`
++	Counter     uint32 `json:"counter"`
++}
++
++type u2fRegistration struct {
++	KeyHandle   string `json:"keyHandle"`
++	PublicKey   string `json:"publicKey"`
++	Certificate string `json:"certificate"`
++}
++
++type u2fDevice struct {
++	file *os.File
++	cid  uint32
++}
++
++var u2fConsentMutex sync.Mutex
++
++func Fido2Consent(challenge, application []byte) (U2FConsent, error) {
++	u2fConsentMutex.Lock()
++	defer u2fConsentMutex.Unlock()
++	if len(challenge) != 32 {
++		return U2FConsent{}, fmt.Errorf("U2F challenge must contain 32 bytes, got %d", len(challenge))
++	}
++	if len(application) != 32 {
++		return U2FConsent{}, fmt.Errorf("U2F application parameter must contain 32 bytes, got %d", len(application))
++	}
++	registration, err := u2fReadRegistration()
++	if err != nil {
++		return U2FConsent{}, err
++	}
++	device, err := u2fOpen()
++	if err != nil {
++		return U2FConsent{}, err
++	}
++	defer device.file.Close()
++	if registration == nil {
++		registration, err = u2fRegister(device, challenge, application)
++		if err != nil {
++			return U2FConsent{}, err
++		}
++		if err := u2fWriteRegistration(registration); err != nil {
++			return U2FConsent{}, err
++		}
++	}
++	keyHandle, err := base64.RawURLEncoding.DecodeString(registration.KeyHandle)
++	if err != nil {
++		return U2FConsent{}, fmt.Errorf("decode cached U2F key handle: %w", err)
++	}
++	signature, counter, err := u2fAuthenticate(device, challenge, application, keyHandle)
++	if err != nil {
++		return U2FConsent{}, err
++	}
++	return U2FConsent{
++		PublicKey:   registration.PublicKey,
++		Certificate: registration.Certificate,
++		Signature:   base64.RawURLEncoding.EncodeToString(signature),
++		Counter:     counter,
++	}, nil
++}
++
++func u2fOpen() (*u2fDevice, error) {
++	paths, err := filepath.Glob("/dev/hidraw*")
++	if err != nil {
++		return nil, err
++	}
++	var failures []error
++	for _, path := range paths {
++		file, err := os.OpenFile(path, os.O_RDWR, 0)
++		if err != nil {
++			failures = append(failures, fmt.Errorf("open %s: %w", path, err))
++			continue
++		}
++		device := &u2fDevice{file: file, cid: u2fBroadcastCID}
++		nonce := make([]byte, 8)
++		if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
++			file.Close()
++			return nil, fmt.Errorf("create U2F HID nonce: %w", err)
++		}
++		response, err := device.transact(u2fHIDINIT, nonce, 3*time.Second)
++		if err != nil {
++			file.Close()
++			failures = append(failures, fmt.Errorf("initialize %s: %w", path, err))
++			continue
++		}
++		if len(response) < 12 || !equalU2FBytes(response[:8], nonce) {
++			file.Close()
++			failures = append(failures, fmt.Errorf("initialize %s: invalid U2F HID INIT response", path))
++			continue
++		}
++		device.cid = binary.BigEndian.Uint32(response[8:12])
++		if device.cid == 0 || device.cid == u2fBroadcastCID {
++			file.Close()
++			failures = append(failures, fmt.Errorf("initialize %s: invalid allocated channel 0x%08x", path, device.cid))
++			continue
++		}
++		return device, nil
++	}
++	if len(failures) > 0 {
++		return nil, fmt.Errorf("no usable U2F HID device: %w", errors.Join(failures...))
++	}
++	return nil, errors.New("no U2F HID device found")
++}
++
++func equalU2FBytes(left, right []byte) bool {
++	if len(left) != len(right) {
++		return false
++	}
++	var difference byte
++	for index := range left {
++		difference |= left[index] ^ right[index]
++	}
++	return difference == 0
++}
++
++func (device *u2fDevice) transact(command byte, payload []byte, timeout time.Duration) ([]byte, error) {
++	deadline := time.Now().Add(timeout)
++	if err := device.writeMessage(command, payload, deadline); err != nil {
++		return nil, err
++	}
++	for {
++		responseCommand, response, err := device.readMessage(deadline)
++		if err != nil {
++			return nil, err
++		}
++		switch responseCommand {
++		case command:
++			return response, nil
++		case u2fHIDKEEPALIVE:
++			if len(response) != 1 {
++				return nil, fmt.Errorf("invalid U2F HID KEEPALIVE payload length %d", len(response))
++			}
++		case u2fHIDERROR:
++			if len(response) == 1 {
++				return nil, fmt.Errorf("U2F HID error 0x%02x", response[0])
++			}
++			return nil, errors.New("invalid U2F HID ERROR response")
++		default:
++			return nil, fmt.Errorf("unexpected U2F HID command 0x%02x", responseCommand)
++		}
++	}
++}
++
++func (device *u2fDevice) writeMessage(command byte, payload []byte, deadline time.Time) error {
++	if len(payload) > 0xffff {
++		return fmt.Errorf("U2F HID payload is too large: %d", len(payload))
++	}
++	var frame [u2fFrameSize]byte
++	binary.BigEndian.PutUint32(frame[0:4], device.cid)
++	frame[4] = command
++	binary.BigEndian.PutUint16(frame[5:7], uint16(len(payload)))
++	firstLength := len(payload)
++	if firstLength > u2fInitialPayload {
++		firstLength = u2fInitialPayload
++	}
++	copy(frame[7:], payload[:firstLength])
++	if err := device.writeFrame(frame, deadline); err != nil {
++		return err
++	}
++	offset := firstLength
++	for sequence := byte(0); offset < len(payload); sequence++ {
++		clear(frame[:])
++		binary.BigEndian.PutUint32(frame[0:4], device.cid)
++		frame[4] = sequence
++		length := len(payload) - offset
++		if length > u2fNextPayload {
++			length = u2fNextPayload
++		}
++		copy(frame[5:], payload[offset:offset+length])
++		if err := device.writeFrame(frame, deadline); err != nil {
++			return err
++		}
++		offset += length
++		if sequence == 0x7f && offset < len(payload) {
++			return errors.New("U2F HID continuation sequence exhausted")
++		}
++	}
++	return nil
++}
++
++func (device *u2fDevice) readMessage(deadline time.Time) (byte, []byte, error) {
++	for {
++		frame, err := device.readFrame(deadline)
++		if err != nil {
++			return 0, nil, err
++		}
++		if binary.BigEndian.Uint32(frame[0:4]) != device.cid {
++			continue
++		}
++		command := frame[4]
++		if command&0x80 == 0 {
++			return 0, nil, fmt.Errorf("unexpected U2F HID continuation frame %d", command)
++		}
++		length := int(binary.BigEndian.Uint16(frame[5:7]))
++		payload := make([]byte, length)
++		firstLength := length
++		if firstLength > u2fInitialPayload {
++			firstLength = u2fInitialPayload
++		}
++		copy(payload, frame[7:7+firstLength])
++		offset := firstLength
++		for sequence := byte(0); offset < length; sequence++ {
++			frame, err = device.readFrame(deadline)
++			if err != nil {
++				return 0, nil, err
++			}
++			if binary.BigEndian.Uint32(frame[0:4]) != device.cid {
++				return 0, nil, errors.New("U2F HID continuation channel mismatch")
++			}
++			if frame[4] != sequence {
++				return 0, nil, fmt.Errorf("U2F HID continuation sequence %d does not match expected %d", frame[4], sequence)
++			}
++			count := length - offset
++			if count > u2fNextPayload {
++				count = u2fNextPayload
++			}
++			copy(payload[offset:], frame[5:5+count])
++			offset += count
++			if sequence == 0x7f && offset < length {
++				return 0, nil, errors.New("U2F HID response continuation sequence exhausted")
++			}
++		}
++		return command, payload, nil
++	}
++}
++
++func (device *u2fDevice) writeFrame(frame [u2fFrameSize]byte, deadline time.Time) error {
++	if err := u2fWait(device.file, true, deadline); err != nil {
++		return err
++	}
++	written, err := device.file.Write(frame[:])
++	if err != nil {
++		return fmt.Errorf("write U2F HID frame: %w", err)
++	}
++	if written != u2fFrameSize {
++		return fmt.Errorf("write U2F HID frame: %w", io.ErrShortWrite)
++	}
++	return nil
++}
++
++func (device *u2fDevice) readFrame(deadline time.Time) ([u2fFrameSize]byte, error) {
++	var frame [u2fFrameSize]byte
++	if err := u2fWait(device.file, false, deadline); err != nil {
++		return frame, err
++	}
++	read, err := device.file.Read(frame[:])
++	if err != nil {
++		return frame, fmt.Errorf("read U2F HID frame: %w", err)
++	}
++	if read != u2fFrameSize {
++		return frame, fmt.Errorf("read U2F HID frame of %d bytes, expected %d", read, u2fFrameSize)
++	}
++	return frame, nil
++}
++
++func u2fWait(file *os.File, write bool, deadline time.Time) error {
++	fd := int(file.Fd())
++	if fd < 0 || fd >= 1024 {
++		return fmt.Errorf("U2F HID file descriptor %d is outside select range", fd)
++	}
++	for {
++		remaining := time.Until(deadline)
++		if remaining <= 0 {
++			return os.ErrDeadlineExceeded
++		}
++		var readSet, writeSet syscall.FdSet
++		set := &readSet
++		if write {
++			set = &writeSet
++		}
++		set.Bits[fd/64] |= 1 << uint(fd%64)
++		timeout := syscall.NsecToTimeval(remaining.Nanoseconds())
++		ready, err := syscall.Select(fd+1, &readSet, &writeSet, nil, &timeout)
++		if errors.Is(err, syscall.EINTR) {
++			continue
++		}
++		if err != nil {
++			return fmt.Errorf("select U2F HID device: %w", err)
++		}
++		if ready == 0 {
++			return os.ErrDeadlineExceeded
++		}
++		return nil
++	}
++}
++
++func u2fRegister(device *u2fDevice, challenge, application []byte) (*u2fRegistration, error) {
++	data := make([]byte, 0, 64)
++	data = append(data, challenge...)
++	data = append(data, application...)
++	payload, err := device.transact(u2fHIDMSG, u2fAPDU(0x01, 0x00, data), 2*time.Minute)
++	if err != nil {
++		return nil, fmt.Errorf("U2F_REGISTER: %w", err)
++	}
++	response, err := u2fAPDUResponse(payload)
++	if err != nil {
++		return nil, fmt.Errorf("U2F_REGISTER: %w", err)
++	}
++	if len(response) < 67 || response[0] != 0x05 {
++		return nil, errors.New("U2F_REGISTER returned an invalid response header")
++	}
++	publicKeyBytes := response[1:66]
++	if len(publicKeyBytes) != 65 || publicKeyBytes[0] != 0x04 {
++		return nil, errors.New("U2F_REGISTER returned an invalid SEC1 public key")
++	}
++	keyHandleLength := int(response[66])
++	if keyHandleLength == 0 || len(response) < 67+keyHandleLength {
++		return nil, errors.New("U2F_REGISTER returned an invalid key handle length")
++	}
++	keyHandle := response[67 : 67+keyHandleLength]
++	certificateAndSignature := response[67+keyHandleLength:]
++	var certificateValue asn1.RawValue
++	signature, err := asn1.Unmarshal(certificateAndSignature, &certificateValue)
++	if err != nil || len(certificateValue.FullBytes) == 0 {
++		return nil, errors.New("U2F_REGISTER returned an invalid DER certificate")
++	}
++	certificate := certificateValue.FullBytes
++	if _, err := x509.ParseCertificate(certificate); err != nil {
++		return nil, fmt.Errorf("parse U2F_REGISTER DER certificate: %w", err)
++	}
++	if err := u2fValidateSignature(signature); err != nil {
++		return nil, fmt.Errorf("U2F_REGISTER returned an invalid DER signature: %w", err)
++	}
++	x, y := elliptic.Unmarshal(elliptic.P256(), publicKeyBytes)
++	if x == nil {
++		return nil, errors.New("U2F_REGISTER public key is not on P-256")
++	}
++	publicKeyDER, err := x509.MarshalPKIXPublicKey(&ecdsa.PublicKey{Curve: elliptic.P256(), X: x, Y: y})
++	if err != nil {
++		return nil, fmt.Errorf("marshal U2F public key: %w", err)
++	}
++	publicKeyPEM := pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: publicKeyDER})
++	if len(publicKeyPEM) == 0 {
++		return nil, errors.New("encode U2F public key PEM")
++	}
++	return &u2fRegistration{
++		KeyHandle:   base64.RawURLEncoding.EncodeToString(keyHandle),
++		PublicKey:   string(publicKeyPEM),
++		Certificate: base64.RawURLEncoding.EncodeToString(certificate),
++	}, nil
++}
++
++func u2fAuthenticate(device *u2fDevice, challenge, application, keyHandle []byte) ([]byte, uint32, error) {
++	if len(keyHandle) == 0 || len(keyHandle) > 255 {
++		return nil, 0, fmt.Errorf("U2F key handle length %d is invalid", len(keyHandle))
++	}
++	data := make([]byte, 0, 65+len(keyHandle))
++	data = append(data, challenge...)
++	data = append(data, application...)
++	data = append(data, byte(len(keyHandle)))
++	data = append(data, keyHandle...)
++	payload, err := device.transact(u2fHIDMSG, u2fAPDU(0x02, 0x03, data), 2*time.Minute)
++	if err != nil {
++		return nil, 0, fmt.Errorf("U2F_AUTHENTICATE: %w", err)
++	}
++	response, err := u2fAPDUResponse(payload)
++	if err != nil {
++		return nil, 0, fmt.Errorf("U2F_AUTHENTICATE: %w", err)
++	}
++	if len(response) < 7 {
++		return nil, 0, errors.New("U2F_AUTHENTICATE returned a short response")
++	}
++	if response[0]&0x01 == 0 {
++		return nil, 0, errors.New("U2F_AUTHENTICATE did not confirm user presence")
++	}
++	if err := u2fValidateSignature(response[5:]); err != nil {
++		return nil, 0, fmt.Errorf("U2F_AUTHENTICATE returned an invalid DER signature: %w", err)
++	}
++	return response[5:], binary.BigEndian.Uint32(response[1:5]), nil
++}
++
++func u2fAPDU(instruction, control byte, data []byte) []byte {
++	if len(data) > 0xffff {
++		return nil
++	}
++	request := make([]byte, 7, 9+len(data))
++	request[1] = instruction
++	request[2] = control
++	binary.BigEndian.PutUint16(request[5:7], uint16(len(data)))
++	request = append(request, data...)
++	request = append(request, 0, 0)
++	return request
++}
++
++func u2fAPDUResponse(response []byte) ([]byte, error) {
++	if len(response) < 2 {
++		return nil, errors.New("short APDU response")
++	}
++	status := binary.BigEndian.Uint16(response[len(response)-2:])
++	if status != 0x9000 {
++		return nil, fmt.Errorf("APDU status 0x%04x", status)
++	}
++	return response[:len(response)-2], nil
++}
++
++func u2fValidateSignature(encoded []byte) error {
++	var signature struct {
++		R *big.Int
++		S *big.Int
++	}
++	rest, err := asn1.Unmarshal(encoded, &signature)
++	if err != nil {
++		return err
++	}
++	if len(rest) != 0 || signature.R == nil || signature.S == nil || signature.R.Sign() <= 0 || signature.S.Sign() <= 0 {
++		return errors.New("invalid ECDSA signature")
++	}
++	return nil
++}
++
++func u2fReadRegistration() (*u2fRegistration, error) {
++	encoded, err := os.ReadFile(u2fCachePath)
++	if errors.Is(err, os.ErrNotExist) {
++		return nil, nil
++	}
++	if err != nil {
++		return nil, fmt.Errorf("read U2F registration cache: %w", err)
++	}
++	var registration u2fRegistration
++	if err := json.Unmarshal(encoded, &registration); err != nil {
++		return nil, fmt.Errorf("decode U2F registration cache: %w", err)
++	}
++	keyHandle, err := base64.RawURLEncoding.DecodeString(registration.KeyHandle)
++	if err != nil || len(keyHandle) == 0 || len(keyHandle) > 255 {
++		return nil, errors.New("U2F registration cache contains an invalid key handle")
++	}
++	certificate, err := base64.RawURLEncoding.DecodeString(registration.Certificate)
++	if err != nil {
++		return nil, errors.New("U2F registration cache contains an invalid certificate encoding")
++	}
++	if _, err := x509.ParseCertificate(certificate); err != nil {
++		return nil, fmt.Errorf("U2F registration cache contains an invalid certificate: %w", err)
++	}
++	block, rest := pem.Decode([]byte(registration.PublicKey))
++	if block == nil || block.Type != "PUBLIC KEY" || len(rest) != 0 {
++		return nil, errors.New("U2F registration cache contains an invalid public key PEM")
++	}
++	publicKey, err := x509.ParsePKIXPublicKey(block.Bytes)
++	if err != nil {
++		return nil, fmt.Errorf("U2F registration cache contains an invalid public key: %w", err)
++	}
++	ecdsaKey, ok := publicKey.(*ecdsa.PublicKey)
++	if !ok || ecdsaKey.Curve != elliptic.P256() {
++		return nil, errors.New("U2F registration cache public key is not P-256")
++	}
++	return &registration, nil
++}
++
++func u2fWriteRegistration(registration *u2fRegistration) error {
++	encoded, err := json.Marshal(registration)
++	if err != nil {
++		return fmt.Errorf("encode U2F registration cache: %w", err)
++	}
++	directory := filepath.Dir(u2fCachePath)
++	if err := os.MkdirAll(directory, 0o750); err != nil {
++		return fmt.Errorf("create U2F registration directory: %w", err)
++	}
++	file, err := os.CreateTemp(directory, ".fido2-")
++	if err != nil {
++		return fmt.Errorf("create U2F registration cache: %w", err)
++	}
++	path := file.Name()
++	defer os.Remove(path)
++	if err := file.Chmod(0o600); err != nil {
++		file.Close()
++		return fmt.Errorf("set U2F registration cache permissions: %w", err)
++	}
++	if _, err := file.Write(encoded); err != nil {
++		file.Close()
++		return fmt.Errorf("write U2F registration cache: %w", err)
++	}
++	if err := file.Sync(); err != nil {
++		file.Close()
++		return fmt.Errorf("sync U2F registration cache: %w", err)
++	}
++	if err := file.Close(); err != nil {
++		return fmt.Errorf("close U2F registration cache: %w", err)
++	}
++	if err := os.Rename(path, u2fCachePath); err != nil {
++		return fmt.Errorf("install U2F registration cache: %w", err)
++	}
++	return nil
++}
+diff --git a/buildroot/qemu/scripts/wallet-client.go b/buildroot/qemu/scripts/wallet-client.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..2fa1cac317c7c2b3f752c4e221f7811ff9b8d1c8
+--- /dev/null
++++ b/buildroot/qemu/scripts/wallet-client.go
+@@ -0,0 +1,390 @@
++package main
++
++import (
++	"bytes"
++	"crypto/sha256"
++	"encoding/base64"
++	"encoding/binary"
++	"encoding/hex"
++	"encoding/json"
++	"errors"
++	"fmt"
++	"io"
++	"net/http"
++	"os"
++	"os/exec"
++	"strings"
++	"time"
++)
++
++type contract struct {
++	ID              string `json:"id"`
++	Tier            int    `json:"tier"`
++	Title           string `json:"title"`
++	Body            string `json:"body"`
++	AmountCents     int64  `json:"amountCents"`
++	DailyLimitCents int64  `json:"dailyLimitCents"`
++}
++
++type challenge struct {
++	Nonce     string    `json:"nonce"`
++	ExpiresAt time.Time `json:"expiresAt"`
++}
++
++type evidence struct {
++	Report string `json:"report"`
++	Nonce  string `json:"nonce"`
++	Token  string `json:"token"`
++	PCR11  string `json:"pcr11"`
++}
++
++type signRequest struct {
++	ContractID   string    `json:"contractId"`
++	Consent      string    `json:"consent"`
++	Approved     bool      `json:"approved"`
++	Nonce        string    `json:"nonce"`
++	ConsentProof string    `json:"consentProof"`
++	Signature    string    `json:"signature"`
++	Evidence     *evidence `json:"evidence,omitempty"`
++	Device       string    `json:"device"`
++}
++
++type consentMessage struct {
++	Nonce          string `json:"nonce"`
++	ContractID     string `json:"contractId"`
++	ContractSHA256 string `json:"contractSha256"`
++	Method         string `json:"method"`
++}
++
++type signatureMessage struct {
++	Nonce            string `json:"nonce"`
++	ContractID       string `json:"contractId"`
++	ContractSHA256   string `json:"contractSha256"`
++	ConsentMethod    string `json:"consentMethod"`
++	ConsentProof     string `json:"consentProof"`
++	AttestationNonce string `json:"attestationNonce"`
++	AttestationToken string `json:"attestationToken"`
++	ReportSHA256     string `json:"reportSha256"`
++	PCR11            string `json:"pcr11"`
++}
++
++func postJSON(client *http.Client, url string, input any) ([]byte, int, error) {
++	body, err := json.Marshal(input)
++	if err != nil {
++		return nil, 0, err
++	}
++	request, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(body))
++	if err != nil {
++		return nil, 0, err
++	}
++	request.Header.Set("Content-Type", "application/json")
++	response, err := client.Do(request)
++	if err != nil {
++		return nil, 0, err
++	}
++	defer response.Body.Close()
++	result, err := io.ReadAll(response.Body)
++	return result, response.StatusCode, err
++}
++
++func getJSON(client *http.Client, url string, output any) error {
++	response, err := client.Get(url)
++	if err != nil {
++		return err
++	}
++	defer response.Body.Close()
++	if response.StatusCode != http.StatusOK {
++		return fmt.Errorf("request failed with %s", response.Status)
++	}
++	return json.NewDecoder(response.Body).Decode(output)
++}
++
++func signTPM(message []byte) (string, error) {
++	input, err := os.CreateTemp("", "wallet-message-")
++	if err != nil {
++		return "", err
++	}
++	path := input.Name()
++	defer os.Remove(path)
++	if _, err := input.Write(message); err != nil {
++		input.Close()
++		return "", err
++	}
++	if err := input.Close(); err != nil {
++		return "", err
++	}
++	handle, err := os.ReadFile("/var/lib/systemd/report.sign.tpm2/default.key")
++	if err != nil {
++		return "", err
++	}
++	var keyData struct {
++		Handle string `json:"handle"`
++	}
++	if err := json.Unmarshal(handle, &keyData); err != nil {
++		return "", err
++	}
++	serialized, err := base64.StdEncoding.DecodeString(keyData.Handle)
++	if err != nil || len(serialized) < 4 {
++		return "", errors.New("invalid persistent AK handle")
++	}
++	handleID := fmt.Sprintf("0x%08x", binary.BigEndian.Uint32(serialized[:4]))
++	output, err := os.CreateTemp("", "wallet-signature-")
++	if err != nil {
++		return "", err
++	}
++	signaturePath := output.Name()
++	output.Close()
++	defer os.Remove(signaturePath)
++	command := exec.Command("tpm2_sign", "-c", handleID, "-g", "sha256", "-s", "rsassa", "-o", signaturePath, path)
++	if result, err := command.CombinedOutput(); err != nil {
++		return "", fmt.Errorf("tpm2_sign: %s", result)
++	}
++	signature, err := os.ReadFile(signaturePath)
++	if err != nil {
++		return "", err
++	}
++	if len(signature) < 256 {
++		return "", errors.New("short TPM signature")
++	}
++	return base64.RawURLEncoding.EncodeToString(signature[len(signature)-256:]), nil
++}
++
++func signSmartcard(message []byte) (string, error) {
++	input, err := os.CreateTemp("", "smartcard-message-")
++	if err != nil {
++		return "", err
++	}
++	path := input.Name()
++	defer os.Remove(path)
++	if _, err := input.Write(message); err != nil {
++		input.Close()
++		return "", err
++	}
++	if err := input.Close(); err != nil {
++		return "", err
++	}
++	output, err := os.CreateTemp("", "smartcard-signature-")
++	if err != nil {
++		return "", err
++	}
++	signaturePath := output.Name()
++	output.Close()
++	defer os.Remove(signaturePath)
++	command := exec.Command("pkcs11-tool", "--sign", "--id", "02", "--mechanism", "SHA256-RSA-PKCS", "--login", "--pin", "77777777", "--input-file", path, "--output-file", signaturePath)
++	if result, err := command.CombinedOutput(); err != nil {
++		return "", fmt.Errorf("pkcs11-tool: %s", result)
++	}
++	signature, err := os.ReadFile(signaturePath)
++	if err != nil {
++		return "", err
++	}
++	return base64.RawURLEncoding.EncodeToString(signature), nil
++}
++
++func attest() (*evidence, error) {
++	if result, err := exec.Command("systemctl", "start", "systemd-pcrlock.socket").CombinedOutput(); err != nil {
++		return nil, fmt.Errorf("systemd-pcrlock.socket: %s", result)
++	}
++	if result, err := exec.Command("systemctl", "restart", "systemd-report-sign-tpm2.socket").CombinedOutput(); err != nil {
++		return nil, fmt.Errorf("systemd-report-sign-tpm2.socket: %s", result)
++	}
++	command := exec.Command("attested-client")
++	command.Env = append(os.Environ(), "RVA23_ATTESTATION_CAPTURE=1")
++	if result, err := command.CombinedOutput(); err != nil {
++		return nil, fmt.Errorf("attested-client: %s", result)
++	}
++	report, err := os.ReadFile("/tmp/rva23-attested-body")
++	if err != nil {
++		return nil, err
++	}
++	nonce, err := os.ReadFile("/tmp/rva23-attested-nonce")
++	if err != nil {
++		return nil, err
++	}
++	token, err := os.ReadFile("/tmp/rva23-attested-token")
++	if err != nil {
++		return nil, err
++	}
++	if result, err := exec.Command("tpm2_pcrread", "sha256:11", "-o", "/tmp/rva23-pcr11.bin").CombinedOutput(); err != nil {
++		return nil, fmt.Errorf("tpm2_pcrread: %s", result)
++	}
++	pcr11, err := os.ReadFile("/tmp/rva23-pcr11.bin")
++	if err != nil {
++		return nil, err
++	}
++	return &evidence{
++		Report: base64.RawURLEncoding.EncodeToString(report),
++		Nonce:  strings.TrimSpace(string(nonce)),
++		Token:  strings.TrimSpace(string(token)),
++		PCR11:  hex.EncodeToString(pcr11),
++	}, nil
++}
++
++func run() error {
++	baseURL := os.Getenv("RVA23_WALLET_URL")
++	if baseURL == "" {
++		baseURL = "http://10.0.2.2:8081"
++	}
++	client := &http.Client{Timeout: 120 * time.Second}
++	if len(os.Args) > 1 && os.Args[1] == "--replay" {
++		body, err := os.ReadFile("/tmp/rva23-wallet-request.json")
++		if err != nil {
++			return err
++		}
++		request, err := http.NewRequest(http.MethodPost, baseURL+"/v1/sign", bytes.NewReader(body))
++		if err != nil {
++			return err
++		}
++		request.Header.Set("Content-Type", "application/json")
++		response, err := client.Do(request)
++		if err != nil {
++			return err
++		}
++		defer response.Body.Close()
++		result, err := io.ReadAll(response.Body)
++		if err != nil {
++			return err
++		}
++		fmt.Println(string(result))
++		if response.StatusCode < 200 || response.StatusCode >= 300 {
++			return fmt.Errorf("wallet signing failed with %s", response.Status)
++		}
++		return nil
++	}
++	var contractID, consent string
++	approved := false
++	for _, argument := range os.Args[1:] {
++		switch {
++		case strings.HasPrefix(argument, "--contract="):
++			contractID = strings.TrimPrefix(argument, "--contract=")
++		case strings.HasPrefix(argument, "--consent="):
++			consent = strings.TrimPrefix(argument, "--consent=")
++		case argument == "--approve":
++			approved = true
++		}
++	}
++	if contractID == "" || consent == "" || !approved {
++		return errors.New("use --contract=ID --consent=host|smartcard|fido2 --approve")
++	}
++	var contracts []contract
++	if err := getJSON(client, baseURL+"/v1/contracts", &contracts); err != nil {
++		return fmt.Errorf("contracts: %w", err)
++	}
++	var selected *contract
++	for index := range contracts {
++		if contracts[index].ID == contractID {
++			selected = &contracts[index]
++			break
++		}
++	}
++	if selected == nil {
++		return errors.New("unknown contract")
++	}
++	var currentChallenge challenge
++	if err := getJSON(client, baseURL+"/v1/challenge", &currentChallenge); err != nil {
++		return fmt.Errorf("challenge: %w", err)
++	}
++	contractBytes, err := json.Marshal(selected)
++	if err != nil {
++		return err
++	}
++	contractDigest := fmt.Sprintf("%x", sha256Sum(contractBytes))
++	consentProof := ""
++	if consent == "fido2" {
++		nonceBytes, err := base64.RawURLEncoding.DecodeString(currentChallenge.Nonce)
++		if err != nil {
++			return err
++		}
++		application, err := hex.DecodeString(contractDigest)
++		if err != nil {
++			return err
++		}
++		proof, err := Fido2Consent(nonceBytes, application)
++		if err != nil {
++			return fmt.Errorf("fido2 consent: %w", err)
++		}
++		encoded, err := json.Marshal(proof)
++		if err != nil {
++			return err
++		}
++		consentProof = base64.RawURLEncoding.EncodeToString(encoded)
++	} else if consent == "smartcard" {
++		message := consentMessage{Nonce: currentChallenge.Nonce, ContractID: selected.ID, ContractSHA256: contractDigest, Method: consent}
++		encoded, err := json.Marshal(message)
++		if err != nil {
++			return err
++		}
++		consentProof, err = signSmartcard(encoded)
++		if err != nil {
++			return err
++		}
++	}
++	var currentEvidence *evidence
++	if selected.Tier == 1 || (selected.Tier == 2 && consent == "host") {
++		currentEvidence, err = attest()
++		if err != nil {
++			return fmt.Errorf("attestation: %w", err)
++		}
++	}
++	reportDigest := ""
++	attestationNonce := ""
++	attestationToken := ""
++	pcr11Value := ""
++	if currentEvidence != nil {
++		reportBytes, err := base64.RawURLEncoding.DecodeString(currentEvidence.Report)
++		if err != nil {
++			return err
++		}
++		reportDigest = fmt.Sprintf("%x", sha256Sum(reportBytes))
++		attestationNonce = currentEvidence.Nonce
++		attestationToken = currentEvidence.Token
++		pcr11Value = currentEvidence.PCR11
++	}
++	message := signatureMessage{
++		Nonce: currentChallenge.Nonce, ContractID: selected.ID, ContractSHA256: contractDigest,
++		ConsentMethod: consent, ConsentProof: consentProof,
++		AttestationNonce: attestationNonce, AttestationToken: attestationToken, ReportSHA256: reportDigest,
++		PCR11: pcr11Value,
++	}
++	messageBytes, err := json.Marshal(message)
++	if err != nil {
++		return err
++	}
++	signature, err := signTPM(messageBytes)
++	if err != nil {
++		return fmt.Errorf("TPM signature: %w", err)
++	}
++	requestBody := signRequest{
++		ContractID: selected.ID, Consent: consent, Approved: approved, Nonce: currentChallenge.Nonce,
++		ConsentProof: consentProof, Signature: signature, Evidence: currentEvidence,
++		Device: map[string]string{"host": "trusted-host-os", "smartcard": "qemu-ccid-card-emulated", "fido2": "qemu-u2f-emulated"}[consent],
++	}
++	encodedRequest, err := json.Marshal(requestBody)
++	if err != nil {
++		return err
++	}
++	if err := os.WriteFile("/tmp/rva23-wallet-request.json", encodedRequest, 0o600); err != nil {
++		return err
++	}
++	var request any = requestBody
++	result, status, err := postJSON(client, baseURL+"/v1/sign", &request)
++	if err != nil {
++		return fmt.Errorf("sign request: %w", err)
++	}
++	fmt.Println(string(result))
++	if status < 200 || status >= 300 {
++		return fmt.Errorf("wallet signing failed with %d", status)
++	}
++	return nil
++}
++
++func sha256Sum(data []byte) [32]byte {
++	return sha256.Sum256(data)
++}
++
++func main() {
++	if err := run(); err != nil {
++		fmt.Fprintln(os.Stderr, err)
++		os.Exit(1)
++	}
++}
+diff --git a/buildroot/qemu/scripts/wallet-server.go b/buildroot/qemu/scripts/wallet-server.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..88841eb39e712140eb9d8698fd5ab930376a1e06
+--- /dev/null
++++ b/buildroot/qemu/scripts/wallet-server.go
+@@ -0,0 +1,621 @@
++package main
++
++import (
++	"bytes"
++	"crypto/rand"
++	"crypto/sha256"
++	"encoding/base64"
++	"encoding/binary"
++	"encoding/hex"
++	"encoding/json"
++	"encoding/pem"
++	"errors"
++	"fmt"
++	"io"
++	"net/http"
++	"os"
++	"os/exec"
++	"path/filepath"
++	"strings"
++	"sync"
++	"time"
++)
++
++type contract struct {
++	ID              string `json:"id"`
++	Tier            int    `json:"tier"`
++	Title           string `json:"title"`
++	Body            string `json:"body"`
++	AmountCents     int64  `json:"amountCents"`
++	DailyLimitCents int64  `json:"dailyLimitCents"`
++}
++
++type challengeResponse struct {
++	Nonce     string    `json:"nonce"`
++	ExpiresAt time.Time `json:"expiresAt"`
++}
++
++type evidence struct {
++	Report string `json:"report"`
++	Nonce  string `json:"nonce"`
++	Token  string `json:"token"`
++	PCR11  string `json:"pcr11"`
++}
++
++type signRequest struct {
++	ContractID   string    `json:"contractId"`
++	Consent      string    `json:"consent"`
++	Approved     bool      `json:"approved"`
++	Nonce        string    `json:"nonce"`
++	ConsentProof string    `json:"consentProof"`
++	Signature    string    `json:"signature"`
++	Evidence     *evidence `json:"evidence"`
++	Device       string    `json:"device"`
++}
++
++type consentMessage struct {
++	Nonce          string `json:"nonce"`
++	ContractID     string `json:"contractId"`
++	ContractSHA256 string `json:"contractSha256"`
++	Method         string `json:"method"`
++}
++
++type u2fConsent struct {
++	PublicKey   string `json:"publicKey"`
++	Certificate string `json:"certificate"`
++	Signature   string `json:"signature"`
++	Counter     uint32 `json:"counter"`
++}
++
++func (server *walletServer) verifyFido2Consent(input signRequest, message []byte, contractDigest string) error {
++	encoded, err := base64.RawURLEncoding.DecodeString(input.ConsentProof)
++	if err != nil {
++		return errors.New("invalid U2F consent encoding")
++	}
++	var proof u2fConsent
++	if err := json.Unmarshal(encoded, &proof); err != nil {
++		return errors.New("invalid U2F consent JSON")
++	}
++	certificate, err := base64.RawURLEncoding.DecodeString(proof.Certificate)
++	if err != nil {
++		return errors.New("invalid U2F certificate encoding")
++	}
++	expected, err := os.ReadFile(filepath.Join(server.consentDir, "u2f", "certificate.pem"))
++	if err != nil {
++		return err
++	}
++	block, _ := pem.Decode(expected)
++	if block == nil || !bytes.Equal(block.Bytes, certificate) {
++		return errors.New("U2F attestation certificate is not allowlisted")
++	}
++	signature, err := base64.RawURLEncoding.DecodeString(proof.Signature)
++	if err != nil {
++		return errors.New("invalid U2F signature encoding")
++	}
++	directory, err := os.MkdirTemp("", "rva23-u2f-public-")
++	if err != nil {
++		return err
++	}
++	defer os.RemoveAll(directory)
++	publicKey := filepath.Join(directory, "public.pem")
++	if err := os.WriteFile(publicKey, []byte(proof.PublicKey), 0o600); err != nil {
++		return err
++	}
++	application, err := hex.DecodeString(contractDigest)
++	if err != nil {
++		return err
++	}
++	nonce, err := base64.RawURLEncoding.DecodeString(input.Nonce)
++	if err != nil {
++		return err
++	}
++	counter := make([]byte, 4)
++	binary.BigEndian.PutUint32(counter, proof.Counter)
++	signed := append(application, 1)
++	signed = append(signed, counter...)
++	signed = append(signed, nonce...)
++	return verifySignature(publicKey, signed, signature)
++}
++
++type signatureMessage struct {
++	Nonce            string `json:"nonce"`
++	ContractID       string `json:"contractId"`
++	ContractSHA256   string `json:"contractSha256"`
++	ConsentMethod    string `json:"consentMethod"`
++	ConsentProof     string `json:"consentProof"`
++	AttestationNonce string `json:"attestationNonce"`
++	AttestationToken string `json:"attestationToken"`
++	ReportSHA256     string `json:"reportSha256"`
++	PCR11            string `json:"pcr11"`
++}
++
++type signResponse struct {
++	Status         string `json:"status"`
++	ContractID     string `json:"contractId"`
++	Tier           int    `json:"tier"`
++	AmountCents    int64  `json:"amountCents"`
++	DailyUsedCents int64  `json:"dailyUsedCents"`
++	Consent        string `json:"consent"`
++}
++
++type requestRecord struct {
++	At         time.Time     `json:"at"`
++	BodyBase64 string        `json:"bodyBase64"`
++	Contract   *contract     `json:"contract"`
++	Consent    string        `json:"consent"`
++	Device     string        `json:"device"`
++	Evidence   *evidence     `json:"evidence"`
++	Response   *signResponse `json:"response"`
++	Error      string        `json:"error"`
++}
++
++type stateResponse struct {
++	Latest  *requestRecord  `json:"latest"`
++	History []requestRecord `json:"history"`
++}
++
++type walletServer struct {
++	walletDir      string
++	attestationURL string
++	keyFile        string
++	consentDir     string
++	profiles       map[string]string
++	client         *http.Client
++	mutex          sync.Mutex
++	nonces         map[string]time.Time
++	usage          map[string]int64
++	stateMutex     sync.RWMutex
++	latest         *requestRecord
++	history        []requestRecord
++}
++
++var contracts = []contract{
++	{
++		ID:              "small-payment",
++		Tier:            0,
++		Title:           "Small payment",
++		Body:            "Authorize a payment of 20000 cents with a daily limit of 25000 cents.",
++		AmountCents:     20000,
++		DailyLimitCents: 25000,
++	},
++	{
++		ID:              "development-payment",
++		Tier:            1,
++		Title:           "Development payment",
++		Body:            "Authorize a payment of 30000 cents with a daily limit of 100000 cents.",
++		AmountCents:     30000,
++		DailyLimitCents: 100000,
++	},
++	{
++		ID:              "mortgage",
++		Tier:            2,
++		Title:           "Mortgage",
++		Body:            "Authorize the mortgage agreement without a payment or a daily limit.",
++		AmountCents:     0,
++		DailyLimitCents: 0,
++	},
++}
++
++func environment(name, fallback string) string {
++	if value := os.Getenv(name); value != "" {
++		return value
++	}
++	return fallback
++}
++
++func sha256Hex(data []byte) string {
++	digest := sha256.Sum256(data)
++	return hex.EncodeToString(digest[:])
++}
++
++func findContract(id string) *contract {
++	for index := range contracts {
++		if contracts[index].ID == id {
++			selected := contracts[index]
++			return &selected
++		}
++	}
++	return nil
++}
++
++func loadProfiles(path string) (map[string]string, error) {
++	data, err := os.ReadFile(path)
++	if err != nil {
++		return nil, err
++	}
++	var profiles map[string]string
++	if err := json.Unmarshal(data, &profiles); err != nil {
++		return nil, err
++	}
++	return profiles, nil
++}
++
++func (server *walletServer) profileMatches(tier int, currentEvidence *evidence) bool {
++	expected := server.profiles["development"]
++	if tier == 2 {
++		expected = server.profiles["production"]
++	}
++	return currentEvidence != nil && strings.EqualFold(currentEvidence.PCR11, expected)
++}
++
++func writeJSON(writer http.ResponseWriter, status int, value any) {
++	writer.Header().Set("Content-Type", "application/json")
++	writer.WriteHeader(status)
++	_ = json.NewEncoder(writer).Encode(value)
++}
++
++func methodNotAllowed(writer http.ResponseWriter, method string) {
++	writer.Header().Set("Allow", method)
++	writeJSON(writer, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
++}
++
++func verifySignature(publicKey string, message, signature []byte) error {
++	directory, err := os.MkdirTemp("", "rva23-wallet-verify-")
++	if err != nil {
++		return err
++	}
++	defer os.RemoveAll(directory)
++	messagePath := filepath.Join(directory, "message.bin")
++	signaturePath := filepath.Join(directory, "sig.bin")
++	if err := os.WriteFile(messagePath, message, 0o600); err != nil {
++		return err
++	}
++	if err := os.WriteFile(signaturePath, signature, 0o600); err != nil {
++		return err
++	}
++	command := exec.Command("openssl", "dgst", "-sha256", "-verify", publicKey, "-signature", signaturePath, messagePath)
++	output, err := command.CombinedOutput()
++	if err != nil {
++		if text := strings.TrimSpace(string(output)); text != "" {
++			return fmt.Errorf("signature verification failed: %s", text)
++		}
++		return fmt.Errorf("signature verification failed: %w", err)
++	}
++	return nil
++}
++
++func (server *walletServer) record(record requestRecord) {
++	server.stateMutex.Lock()
++	defer server.stateMutex.Unlock()
++	latest := record
++	server.latest = &latest
++	server.history = append([]requestRecord{record}, server.history...)
++	if len(server.history) > 32 {
++		server.history = server.history[:32]
++	}
++}
++
++func (server *walletServer) reject(writer http.ResponseWriter, record requestRecord, status int, err error) {
++	record.Error = err.Error()
++	server.record(record)
++	writeJSON(writer, status, map[string]string{"error": err.Error()})
++}
++
++func (server *walletServer) validNonce(nonce string, now time.Time) bool {
++	server.mutex.Lock()
++	defer server.mutex.Unlock()
++	expiresAt, ok := server.nonces[nonce]
++	return ok && now.Before(expiresAt)
++}
++
++func (server *walletServer) contractsHandler(writer http.ResponseWriter, request *http.Request) {
++	if request.Method != http.MethodGet {
++		methodNotAllowed(writer, http.MethodGet)
++		return
++	}
++	writeJSON(writer, http.StatusOK, contracts)
++}
++
++func (server *walletServer) challengeHandler(writer http.ResponseWriter, request *http.Request) {
++	if request.Method != http.MethodGet {
++		methodNotAllowed(writer, http.MethodGet)
++		return
++	}
++	nonce := make([]byte, 32)
++	if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
++		writeJSON(writer, http.StatusInternalServerError, map[string]string{"error": err.Error()})
++		return
++	}
++	now := time.Now().UTC()
++	response := challengeResponse{
++		Nonce:     base64.RawURLEncoding.EncodeToString(nonce),
++		ExpiresAt: now.Add(time.Minute),
++	}
++	server.mutex.Lock()
++	for value, expiresAt := range server.nonces {
++		if !now.Before(expiresAt) {
++			delete(server.nonces, value)
++		}
++	}
++	if len(server.nonces) >= 1024 {
++		server.mutex.Unlock()
++		writeJSON(writer, http.StatusServiceUnavailable, map[string]string{"error": "too many outstanding challenges"})
++		return
++	}
++	server.nonces[response.Nonce] = response.ExpiresAt
++	server.mutex.Unlock()
++	writeJSON(writer, http.StatusOK, response)
++}
++
++func (server *walletServer) forwardReport(report []byte, currentEvidence *evidence) error {
++	request, err := http.NewRequest(http.MethodPost, server.attestationURL, bytes.NewReader(report))
++	if err != nil {
++		return err
++	}
++	request.Header.Set("Content-Type", "application/json")
++	request.Header.Set("X-Attestation-Nonce", currentEvidence.Nonce)
++	request.Header.Set("X-Attestation-Token", currentEvidence.Token)
++	response, err := server.client.Do(request)
++	if err != nil {
++		return fmt.Errorf("attestation request failed: %w", err)
++	}
++	defer response.Body.Close()
++	body, err := io.ReadAll(io.LimitReader(response.Body, 64*1024))
++	if err != nil {
++		return fmt.Errorf("attestation response failed: %w", err)
++	}
++	if response.StatusCode < 200 || response.StatusCode >= 300 {
++		return fmt.Errorf("attestation service returned %s: %s", response.Status, strings.TrimSpace(string(body)))
++	}
++	return nil
++}
++
++func (server *walletServer) saveResponse(response signResponse) error {
++	if err := os.MkdirAll(server.walletDir, 0o700); err != nil {
++		return err
++	}
++	encoded, err := json.Marshal(response)
++	if err != nil {
++		return err
++	}
++	return os.WriteFile(filepath.Join(server.walletDir, "response.json"), append(encoded, '\n'), 0o600)
++}
++
++func (server *walletServer) signHandler(writer http.ResponseWriter, request *http.Request) {
++	if request.Method != http.MethodPost {
++		methodNotAllowed(writer, http.MethodPost)
++		return
++	}
++	raw, readErr := io.ReadAll(http.MaxBytesReader(writer, request.Body, 16*1024*1024))
++	record := requestRecord{
++		At:         time.Now().UTC(),
++		BodyBase64: base64.StdEncoding.EncodeToString(raw),
++	}
++	if readErr != nil {
++		server.reject(writer, record, http.StatusBadRequest, fmt.Errorf("invalid request body: %w", readErr))
++		return
++	}
++	var input signRequest
++	if err := json.Unmarshal(raw, &input); err != nil {
++		server.reject(writer, record, http.StatusBadRequest, fmt.Errorf("invalid request JSON: %w", err))
++		return
++	}
++	record.Consent = input.Consent
++	record.Device = input.Device
++	record.Evidence = input.Evidence
++	selected := findContract(input.ContractID)
++	record.Contract = selected
++	if selected == nil {
++		server.reject(writer, record, http.StatusBadRequest, errors.New("unknown contract"))
++		return
++	}
++	if !input.Approved {
++		server.reject(writer, record, http.StatusForbidden, errors.New("approval is required"))
++		return
++	}
++	if input.Consent != "host" && input.Consent != "smartcard" && input.Consent != "fido2" {
++		server.reject(writer, record, http.StatusBadRequest, errors.New("unknown consent method"))
++		return
++	}
++	if !server.validNonce(input.Nonce, time.Now().UTC()) {
++		server.reject(writer, record, http.StatusForbidden, errors.New("challenge nonce is expired or unknown"))
++		return
++	}
++	canonicalContract, err := json.Marshal(selected)
++	if err != nil {
++		server.reject(writer, record, http.StatusInternalServerError, err)
++		return
++	}
++	contractDigest := sha256Hex(canonicalContract)
++	if input.Consent == "host" {
++		if input.ConsentProof != "" {
++			server.reject(writer, record, http.StatusForbidden, errors.New("host consent requires an empty consent proof"))
++			return
++		}
++	} else if input.Consent == "fido2" {
++		message, err := json.Marshal(consentMessage{Nonce: input.Nonce, ContractID: input.ContractID, ContractSHA256: contractDigest, Method: input.Consent})
++		if err != nil {
++			server.reject(writer, record, http.StatusInternalServerError, err)
++			return
++		}
++		if err := server.verifyFido2Consent(input, message, contractDigest); err != nil {
++			server.reject(writer, record, http.StatusForbidden, err)
++			return
++		}
++	} else {
++		proof, err := base64.RawURLEncoding.DecodeString(input.ConsentProof)
++		if err != nil || len(proof) == 0 {
++			server.reject(writer, record, http.StatusForbidden, errors.New("invalid external consent proof"))
++			return
++		}
++		message, err := json.Marshal(consentMessage{Nonce: input.Nonce, ContractID: input.ContractID, ContractSHA256: contractDigest, Method: input.Consent})
++		if err != nil {
++			server.reject(writer, record, http.StatusInternalServerError, err)
++			return
++		}
++		publicKey := filepath.Join(server.consentDir, input.Consent+"-public.pem")
++		if err := verifySignature(publicKey, message, proof); err != nil {
++			server.reject(writer, record, http.StatusForbidden, err)
++			return
++		}
++	}
++	requiresEvidence := selected.Tier == 1 || (selected.Tier == 2 && input.Consent == "host")
++	attestationNonce := ""
++	attestationToken := ""
++	reportDigest := ""
++	pcr11Value := ""
++	var report []byte
++	if requiresEvidence {
++		if input.Evidence == nil || input.Evidence.Nonce == "" || input.Evidence.Token == "" || input.Evidence.Report == "" || input.Evidence.PCR11 == "" {
++			server.reject(writer, record, http.StatusForbidden, errors.New("full OS evidence is required"))
++			return
++		}
++		report, err = base64.RawURLEncoding.DecodeString(input.Evidence.Report)
++		if err != nil || len(report) == 0 {
++			server.reject(writer, record, http.StatusBadRequest, errors.New("invalid OS report encoding"))
++			return
++		}
++		attestationNonce = input.Evidence.Nonce
++		attestationToken = input.Evidence.Token
++		reportDigest = sha256Hex(report)
++	}
++	if input.Evidence != nil {
++		pcr11Value = input.Evidence.PCR11
++	}
++	message, err := json.Marshal(signatureMessage{
++		Nonce:            input.Nonce,
++		ContractID:       input.ContractID,
++		ContractSHA256:   contractDigest,
++		ConsentMethod:    input.Consent,
++		ConsentProof:     input.ConsentProof,
++		AttestationNonce: attestationNonce,
++		AttestationToken: attestationToken,
++		ReportSHA256:     reportDigest,
++		PCR11:            pcr11Value,
++	})
++	if err != nil {
++		server.reject(writer, record, http.StatusInternalServerError, err)
++		return
++	}
++	signature, err := base64.RawURLEncoding.DecodeString(input.Signature)
++	if err != nil || len(signature) != 256 {
++		server.reject(writer, record, http.StatusForbidden, errors.New("invalid AK signature encoding or length"))
++		return
++	}
++	if err := verifySignature(server.keyFile, message, signature); err != nil {
++		server.reject(writer, record, http.StatusForbidden, err)
++		return
++	}
++	if requiresEvidence {
++		if err := server.forwardReport(report, input.Evidence); err != nil {
++			server.reject(writer, record, http.StatusForbidden, err)
++			return
++		}
++		if !server.profileMatches(selected.Tier, input.Evidence) {
++			server.reject(writer, record, http.StatusForbidden, errors.New("OS report PCR 11 does not match the required profile"))
++			return
++		}
++	}
++	now := time.Now().UTC()
++	day := now.Format("2006-01-02")
++	usageKey := selected.ID + "\x00" + day
++	server.mutex.Lock()
++	expiresAt, ok := server.nonces[input.Nonce]
++	if !ok || !now.Before(expiresAt) {
++		server.mutex.Unlock()
++		server.reject(writer, record, http.StatusForbidden, errors.New("challenge nonce is expired or already used"))
++		return
++	}
++	used := server.usage[usageKey]
++	if selected.DailyLimitCents > 0 && used+selected.AmountCents > selected.DailyLimitCents {
++		server.mutex.Unlock()
++		server.reject(writer, record, http.StatusConflict, fmt.Errorf("daily limit exceeded with %d cents used", used))
++		return
++	}
++	response := signResponse{
++		Status:         "accepted",
++		ContractID:     selected.ID,
++		Tier:           selected.Tier,
++		AmountCents:    selected.AmountCents,
++		DailyUsedCents: used + selected.AmountCents,
++		Consent:        input.Consent,
++	}
++	if err := server.saveResponse(response); err != nil {
++		server.mutex.Unlock()
++		server.reject(writer, record, http.StatusInternalServerError, err)
++		return
++	}
++	server.usage[usageKey] = response.DailyUsedCents
++	delete(server.nonces, input.Nonce)
++	server.mutex.Unlock()
++	record.Response = &response
++	server.record(record)
++	writeJSON(writer, http.StatusOK, response)
++}
++
++func (server *walletServer) stateHandler(writer http.ResponseWriter, request *http.Request) {
++	if request.Method != http.MethodGet {
++		methodNotAllowed(writer, http.MethodGet)
++		return
++	}
++	server.stateMutex.RLock()
++	response := stateResponse{History: append([]requestRecord(nil), server.history...)}
++	if server.latest != nil {
++		latest := *server.latest
++		response.Latest = &latest
++	}
++	server.stateMutex.RUnlock()
++	if response.History == nil {
++		response.History = []requestRecord{}
++	}
++	writeJSON(writer, http.StatusOK, response)
++}
++
++func uiHandler(writer http.ResponseWriter, request *http.Request) {
++	if request.URL.Path != "/" {
++		http.NotFound(writer, request)
++		return
++	}
++	if request.Method != http.MethodGet {
++		methodNotAllowed(writer, http.MethodGet)
++		return
++	}
++	writer.Header().Set("Content-Type", "text/html; charset=utf-8")
++	_, _ = io.WriteString(writer, `<!doctype html>
++<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Wallet contract signing</title></head>
++<body><h1>Wallet contract signing</h1><p><button id="refresh" type="button">Refresh</button> <a href="/api/state">JSON state</a></p>
++<details open><summary>Latest sign request</summary><div id="latest">No sign requests</div></details>
++<details open><summary>Sign-request history</summary><div id="history">No sign requests</div></details>
++<script>
++function fill(parent,item){parent.replaceChildren();function add(name,value){const label=document.createElement('p');label.textContent=name;const body=document.createElement('pre');body.textContent=value;parent.append(label,body)}add('Raw request body base64',item.bodyBase64||'');add('Contract',JSON.stringify(item.contract||null,null,2));add('Contract body',item.contract?item.contract.body:'');add('Consent',item.consent||'');add('Device',item.device||'');add('Evidence',JSON.stringify(item.evidence||null,null,2));add('Response',JSON.stringify(item.response||null,null,2));add('Error',item.error||'');const raw=document.createElement('details');const summary=document.createElement('summary');summary.textContent='Raw JSON';const pre=document.createElement('pre');pre.textContent=JSON.stringify(item,null,2);raw.append(summary,pre);parent.append(raw)}
++function historyEntry(item){const details=document.createElement('details');const summary=document.createElement('summary');summary.textContent=(item.at||'Unknown time')+' '+((item.contract&&item.contract.id)||'Unknown contract')+' '+((item.response&&item.response.status)||item.error||'rejected');fill(details,item);details.prepend(summary);return details}
++async function refresh(){const data=await fetch('/api/state').then(response=>response.json());const latest=document.getElementById('latest');if(data.latest){fill(latest,data.latest)}else{latest.textContent='No sign requests'}const history=document.getElementById('history');if((data.history||[]).length){history.replaceChildren(...data.history.map(historyEntry))}else{history.textContent='No sign requests'}}
++document.getElementById('refresh').onclick=refresh;refresh()
++</script></body></html>`)
++}
++
++func main() {
++	profiles, err := loadProfiles(environment("RVA23_WALLET_PROFILE_FILE", "output/rva23/wallet/profiles.json"))
++	if err != nil {
++		panic(err)
++	}
++	server := &walletServer{
++		walletDir:      environment("RVA23_WALLET_DIR", "output/rva23/wallet"),
++		attestationURL: environment("RVA23_WALLET_ATTESTATION_URL", "http://127.0.0.1:8080/v1/attest"),
++		keyFile:        environment("RVA23_WALLET_KEY_FILE", "output/rva23/host-attestation/public-key.pem"),
++		consentDir:     environment("RVA23_WALLET_CONSENT_DIR", "output/rva23/wallet"),
++		profiles:       profiles,
++		client:         &http.Client{Timeout: 60 * time.Second},
++		nonces:         make(map[string]time.Time),
++		usage:          make(map[string]int64),
++		history:        make([]requestRecord, 0),
++	}
++	mux := http.NewServeMux()
++	mux.HandleFunc("/v1/contracts", server.contractsHandler)
++	mux.HandleFunc("/v1/challenge", server.challengeHandler)
++	mux.HandleFunc("/v1/sign", server.signHandler)
++	mux.HandleFunc("/api/state", server.stateHandler)
++	mux.HandleFunc("/", uiHandler)
++	httpServer := &http.Server{
++		Addr:              "127.0.0.1:8081",
++		Handler:           mux,
++		ReadHeaderTimeout: 5 * time.Second,
++		ReadTimeout:       60 * time.Second,
++		WriteTimeout:      60 * time.Second,
++		IdleTimeout:       60 * time.Second,
++		MaxHeaderBytes:    64 * 1024,
++	}
++	if err := httpServer.ListenAndServe(); err != nil {
++		panic(err)
++	}
++}
+
