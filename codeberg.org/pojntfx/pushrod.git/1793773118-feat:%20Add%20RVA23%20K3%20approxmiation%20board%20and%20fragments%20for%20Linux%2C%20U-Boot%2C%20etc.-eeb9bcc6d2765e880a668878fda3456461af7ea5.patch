@@ -1,0 +1,254 @@
+From eeb9bcc6d2765e880a668878fda3456461af7ea5 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Tue, 03 Nov 2026 23:18:38 -0700
+Subject: [PATCH] feat: Add RVA23 K3 approxmiation board and fragments for Linux, U-Boot, etc.
+---
+diff --git a/buildroot/qemu/board/rva23-qemu/dracut.conf b/buildroot/qemu/board/rva23-qemu/dracut.conf
+new file mode 100644
+index 0000000000000000000000000000000000000000..18f305a7950add6021bb9b3649f60a9eca36b35d
+--- /dev/null
++++ b/buildroot/qemu/board/rva23-qemu/dracut.conf
+@@ -0,0 +1,8 @@
++show_modules=yes
++hostonly=no
++hostonly_cmdline=no
++use_fstab=no
++early_microcode=no
++do_strip=no
++add_dracutmodules+=" bash busybox systemd dracut-systemd kernel-modules rootfs-block systemd-veritysetup systemd-repart systemd-sysext systemd-cryptsetup systemd-pcrextend systemd-tmpfiles securityfs crypt dm tpm2-tss rva23 "
++omit_dracutmodules+=" busybox-init network network-legacy network-wicked wicked nfs iscsi fcoe fcoe-uefi nbd multipath dmsquash-live-ntfs "
+diff --git a/buildroot/qemu/board/rva23-qemu/early-tpm-overlay.dts b/buildroot/qemu/board/rva23-qemu/early-tpm-overlay.dts
+new file mode 100644
+index 0000000000000000000000000000000000000000..8e1ed5a79928ebdb00544563e8cf1c82074e3a61
+--- /dev/null
++++ b/buildroot/qemu/board/rva23-qemu/early-tpm-overlay.dts
+@@ -0,0 +1,25 @@
++/dts-v1/;
++/plugin/;
++/ {
++	fragment@0 {
++		target-path = "/";
++		__overlay__ {
++			reserved-memory {
++				#address-cells = <2>;
++				#size-cells = <2>;
++				ranges;
++				early_tpm_log: early-tpm-log@88000000 {
++					reg = <0x0 0x88000000 0x0 0x100000>;
++					no-map;
++				};
++			};
++		};
++	};
++	fragment@1 {
++		target-path = "/platform-bus@4000000/tpm_tis@0";
++		__overlay__ {
++			memory-region = <&early_tpm_log>;
++			u-boot,dm-pre-reloc;
++		};
++	};
++};
+diff --git a/buildroot/qemu/board/rva23-qemu/firmware.its b/buildroot/qemu/board/rva23-qemu/firmware.its
+new file mode 100644
+index 0000000000000000000000000000000000000000..b1609245f8fb054904fda892ead34322a3c7c430
+--- /dev/null
++++ b/buildroot/qemu/board/rva23-qemu/firmware.its
+@@ -0,0 +1,62 @@
++/dts-v1/;
++
++/ {
++	description = "RVA23 QEMU signed firmware";
++	#address-cells = <1>;
++
++	images {
++		opensbi {
++			description = "OpenSBI";
++			data = /incbin/("fw_dynamic.bin");
++			type = "firmware";
++			arch = "riscv";
++			os = "opensbi";
++			compression = "none";
++			load = <0x80100000>;
++			entry = <0x80100000>;
++			signature-1 {
++				algo = "sha256,rsa2048";
++				key-name-hint = "dev";
++			};
++		};
++
++		edk2 {
++			description = "EDK2 in pflash";
++			data = /incbin/("RISCV_VIRT_CODE.fd");
++			type = "kernel_noload";
++			arch = "riscv";
++			os = "efi";
++			compression = "none";
++			load = <0x80200000>;
++			entry = <0x20000000>;
++			signature-1 {
++				algo = "sha256,rsa2048";
++				key-name-hint = "dev";
++			};
++		};
++
++		qemu {
++			description = "QEMU control DTB";
++			data = /incbin/("qemu-control-measured.dtb");
++			type = "flat_dt";
++			arch = "riscv";
++			compression = "none";
++			load = <0x81000000>;
++			signature-1 {
++				algo = "sha256,rsa2048";
++				key-name-hint = "dev";
++			};
++		};
++	};
++
++	configurations {
++		default = "conf";
++		conf {
++			description = "OpenSBI and pflash EDK2";
++			firmware = "opensbi";
++			kernel = "edk2";
++			loadables = "opensbi", "edk2";
++			fdt = "qemu";
++		};
++	};
++};
+diff --git a/buildroot/qemu/board/rva23-qemu/genimage.cfg b/buildroot/qemu/board/rva23-qemu/genimage.cfg
+new file mode 100644
+index 0000000000000000000000000000000000000000..83607d5a42d8341653d740eb34314e9196685325
+--- /dev/null
++++ b/buildroot/qemu/board/rva23-qemu/genimage.cfg
+@@ -0,0 +1,46 @@
++image efi-part.vfat {
++	vfat {
++		file EFI {
++			image = "efi-part/EFI"
++		}
++
++		file loader {
++			image = "efi-part/loader"
++		}
++	}
++
++	size = 1G
++}
++
++image disk.img {
++	hdimage {
++		partition-table-type = "gpt"
++	}
++
++	size = 4G
++
++	partition esp {
++		image = "efi-part.vfat"
++		partition-type-uuid = U
++		offset = 1M
++		bootable = true
++	}
++
++	partition rva23_1 {
++		image = "usr-a.erofs"
++		partition-type-uuid = usr-riscv64
++		read-only = true
++	}
++
++	partition rva23_1_verity {
++		image = "usr-a.verity"
++		partition-type-uuid = usr-riscv64-verity
++		read-only = true
++	}
++
++	partition rva23_1_verity_sig {
++		image = "usr-a.verity-sig"
++		partition-type-uuid = usr-riscv64-verity-sig
++		read-only = true
++	}
++}
+diff --git a/buildroot/qemu/board/rva23-qemu/ipe-boot.policy b/buildroot/qemu/board/rva23-qemu/ipe-boot.policy
+new file mode 100644
+index 0000000000000000000000000000000000000000..fdbb40ff396fe9e1d0e0de88c8a17bb6706b6386
+--- /dev/null
++++ b/buildroot/qemu/board/rva23-qemu/ipe-boot.policy
+@@ -0,0 +1,5 @@
++policy_name=RVA23_DMV policy_version=1.0.0
++DEFAULT action=ALLOW
++DEFAULT op=EXECUTE action=DENY
++op=EXECUTE boot_verified=TRUE action=ALLOW
++op=EXECUTE dmverity_signature=TRUE action=ALLOW
+diff --git a/buildroot/qemu/board/rva23-qemu/linux.fragment b/buildroot/qemu/board/rva23-qemu/linux.fragment
+new file mode 100644
+index 0000000000000000000000000000000000000000..5d03e312622da92be04ad1ff074bebcf940d5d2a
+--- /dev/null
++++ b/buildroot/qemu/board/rva23-qemu/linux.fragment
+@@ -0,0 +1,31 @@
++CONFIG_EFI=y
++CONFIG_EFI_STUB=y
++CONFIG_EFI_ZBOOT=y
++CONFIG_VIRTIO_PCI=y
++CONFIG_VIRTIO_BLK=y
++CONFIG_VIRTIO_MMIO=y
++CONFIG_DRM=y
++CONFIG_DRM_VIRTIO_GPU=y
++CONFIG_DRM_FBDEV_EMULATION=y
++CONFIG_EXT4_FS=y
++CONFIG_EROFS_FS=y
++CONFIG_EROFS_FS_ZIP=y
++CONFIG_BLK_DEV_DM=y
++CONFIG_DM_CRYPT=y
++CONFIG_DM_VERITY=y
++CONFIG_DM_VERITY_VERIFY_ROOTHASH_SIG=y
++CONFIG_DM_VERITY_VERIFY_ROOTHASH_SIG_SECONDARY_KEYRING=y
++CONFIG_CRYPTO_AES=y
++CONFIG_CRYPTO_XTS=y
++CONFIG_CRYPTO_SHA256=y
++CONFIG_TCG_TPM=y
++CONFIG_TCG_TIS=y
++CONFIG_SECURITYFS=y
++CONFIG_SECURITY_IPE=y
++CONFIG_HIDRAW=y
++CONFIG_KEYS=y
++CONFIG_SYSTEM_TRUSTED_KEYRING=y
++CONFIG_SECONDARY_TRUSTED_KEYRING=y
++CONFIG_ASYMMETRIC_KEY_TYPE=y
++CONFIG_X509_CERTIFICATE_PARSER=y
++CONFIG_PKCS7_MESSAGE_PARSER=y
+diff --git a/buildroot/qemu/board/rva23-qemu/uboot.fragment b/buildroot/qemu/board/rva23-qemu/uboot.fragment
+new file mode 100644
+index 0000000000000000000000000000000000000000..4f96c41c9520cc909cdbc7e1a4dcd0660c285805
+--- /dev/null
++++ b/buildroot/qemu/board/rva23-qemu/uboot.fragment
+@@ -0,0 +1,29 @@
++CONFIG_SPL_LOAD_FIT=y
++CONFIG_SPL_OPENSBI=y
++CONFIG_SPL_RISCV_MMODE=y
++CONFIG_SPL_OPENSBI_LOAD_ADDR=0x80100000
++CONFIG_SPL_OPENSBI_SCRATCH_OPTIONS=0x0
++CONFIG_SPL_FIT_SIGNATURE=y
++CONFIG_SPL_FIT_SIGNATURE_MAX_SIZE=0x10000000
++CONFIG_FIT_SIGNATURE_MAX_SIZE=0x10000000
++CONFIG_RSA=y
++CONFIG_RSA_VERIFY=y
++CONFIG_SPL_RSA=y
++CONFIG_SPL_RSA_VERIFY=y
++CONFIG_RSA_SOFTWARE_EXP=y
++CONFIG_SHA256=y
++CONFIG_SPL_SHA256=y
++# CONFIG_SPL_RAW_IMAGE_SUPPORT is not set
++# CONFIG_SPL_LEGACY_IMAGE_FORMAT is not set
++# CONFIG_LEGACY_IMAGE_FORMAT is not set
++# CONFIG_SPL_LOAD_FIT_OPENSBI_OS_BOOT is not set
++CONFIG_TPM=y
++CONFIG_SPL_TPM=y
++CONFIG_TPM_V2=y
++CONFIG_TPM2_MMIO=y
++CONFIG_TPM2_EVENT_LOG_SIZE=1048576
++# CONFIG_TPM_RNG is not set
++CONFIG_SPL_MEASURED_BOOT=y
++CONFIG_SPL_OF_TRANSLATE=y
++CONFIG_MEASURED_BOOT=y
++CONFIG_MEASURE_IGNORE_LOG=y
+
