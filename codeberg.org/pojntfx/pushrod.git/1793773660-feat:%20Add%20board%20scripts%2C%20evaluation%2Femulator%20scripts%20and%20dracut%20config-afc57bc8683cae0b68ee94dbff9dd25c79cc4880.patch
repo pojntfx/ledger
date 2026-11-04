@@ -1,0 +1,503 @@
+From afc57bc8683cae0b68ee94dbff9dd25c79cc4880 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Tue, 03 Nov 2026 23:27:40 -0700
+Subject: [PATCH] feat: Add board scripts, evaluation/emulator scripts and dracut config
+---
+diff --git a/buildroot/qemu/board/rva23-qemu/build-firmware.sh b/buildroot/qemu/board/rva23-qemu/build-firmware.sh
+new file mode 100755
+index 0000000000000000000000000000000000000000..8bb929e0a1b61fdbf65ad5f06ffb8c707ee876d6
+--- /dev/null
++++ b/buildroot/qemu/board/rva23-qemu/build-firmware.sh
+@@ -0,0 +1,53 @@
++#!/bin/sh
++
++set -eu
++
++BOARD_DIR=$(dirname "$0")
++KEY_DIR=${RVA23_KEY_DIR:?}
++
++mkdir -p "${KEY_DIR}"
++if [ ! -f "${KEY_DIR}/dev.key" ]; then
++	openssl genpkey -algorithm RSA -out "${KEY_DIR}/dev.key" \
++		-pkeyopt rsa_keygen_bits:2048 -pkeyopt rsa_keygen_pubexp:65537
++fi
++if [ ! -f "${KEY_DIR}/dev.crt" ]; then
++	openssl req -batch -new -x509 -key "${KEY_DIR}/dev.key" -out "${KEY_DIR}/dev.crt"
++fi
++chmod 600 "${KEY_DIR}/dev.key"
++
++TPM_STATE="${BINARIES_DIR}/firmware-swtpm"
++mkdir -p "${TPM_STATE}"
++rm -f "${TPM_STATE}/swtpm.sock"
++"${HOST_DIR}/bin/swtpm" socket --tpm2 --tpmstate dir="${TPM_STATE}",mode=0600,lock \
++	--ctrl type=unixio,path="${TPM_STATE}/swtpm.sock",mode=0600,terminate \
++	--flags not-need-init,startup-clear --log file="${TPM_STATE}/swtpm.log" &
++SWTPM_PID=$!
++trap 'kill "${SWTPM_PID}" 2>/dev/null || true; wait "${SWTPM_PID}" 2>/dev/null || true' EXIT INT TERM
++while [ ! -S "${TPM_STATE}/swtpm.sock" ]; do
++	sleep 0.1
++done
++
++"${HOST_DIR}/bin/qemu-system-riscv64" \
++	-M virt,pflash0=pflash0,pflash1=pflash1,acpi=off,dumpdtb="${BINARIES_DIR}/qemu-control-base.dtb" \
++	-accel tcg \
++	-cpu rva23s64 \
++	-smp 4 \
++	-m 2048 \
++	-blockdev node-name=pflash0,driver=file,read-only=on,filename="${BINARIES_DIR}/RISCV_VIRT_CODE.fd" \
++	-blockdev node-name=pflash1,driver=file,filename="${BINARIES_DIR}/RISCV_VIRT_VARS.fd" \
++	-device virtio-gpu-pci \
++	-device qemu-xhci \
++	-device usb-kbd \
++	-device usb-tablet \
++	-chardev socket,id=chrtpm,path="${TPM_STATE}/swtpm.sock" \
++	-tpmdev emulator,id=tpm0,chardev=chrtpm \
++	-device tpm-tis-device,tpmdev=tpm0 \
++	-display none
++
++cd "${BINARIES_DIR}"
++"${HOST_DIR}/bin/dtc" -@ -I dts -O dtb -o early-tpm-overlay.dtbo "${BOARD_DIR}/early-tpm-overlay.dts"
++"${HOST_DIR}/bin/fdtoverlay" -i qemu-control-base.dtb -o qemu-control-measured.dtb early-tpm-overlay.dtbo
++cp qemu-control-measured.dtb qemu-control.dtb
++"${HOST_DIR}/bin/mkimage" -f "${BOARD_DIR}/firmware.its" -E -p 0x10000 \
++	-D "-I dts -O dtb -p 0x1000 -i ${BINARIES_DIR}" \
++	-K qemu-control.dtb -k "${KEY_DIR}" -r firmware.itb
+diff --git a/buildroot/qemu/board/rva23-qemu/dracut/99rva23/module-setup.sh b/buildroot/qemu/board/rva23-qemu/dracut/99rva23/module-setup.sh
+new file mode 100755
+index 0000000000000000000000000000000000000000..6cbfe3a2e9c2bf58f2f2b96475571ef33f6b5e60
+--- /dev/null
++++ b/buildroot/qemu/board/rva23-qemu/dracut/99rva23/module-setup.sh
+@@ -0,0 +1,22 @@
++#!/bin/bash
++check() {
++    require_binaries systemd-repart mkswap || return 1
++    return 0
++}
++depends() {
++    echo systemd-repart
++    return 0
++}
++install() {
++    inst_multiple mkswap bootctl
++    mkdir -p "${initdir}/etc"
++    printf 'root::::::::\n' > "${initdir}/etc/shadow"
++    ln_r /usr/bin/busybox /usr/bin/stat
++    ln_r /usr/bin/busybox /usr/bin/timeout
++    rm -f "$initdir/usr/bin/dracut-util"
++    inst_script "$moddir/rva23-dracut-util.sh" /usr/bin/dracut-util
++    inst_simple "$moddir/rva23-factory-reset.service" "$systemdsystemunitdir/rva23-factory-reset.service"
++    mkdir -p "$initdir/usr/share/factory"
++    cp -a "$dracutsysrootdir/usr/share/factory/." "$initdir/usr/share/factory/"
++    $SYSTEMCTL -q --root "$initdir" add-wants initrd.target dracut-initqueue.service
++}
+diff --git a/buildroot/qemu/board/rva23-qemu/dracut/99rva23/rva23-dracut-util.sh b/buildroot/qemu/board/rva23-qemu/dracut/99rva23/rva23-dracut-util.sh
+new file mode 100755
+index 0000000000000000000000000000000000000000..7460e6bb8ff8b311cc88fd303f7c9405aa53f481
+--- /dev/null
++++ b/buildroot/qemu/board/rva23-qemu/dracut/99rva23/rva23-dracut-util.sh
+@@ -0,0 +1,31 @@
++#!/bin/bash
++key=${1:?}
++prefix=${key%=}
++all=0
++case $0 in
++    *getargs) all=1 ;;
++esac
++found=0
++value=
++for argument in $(cat /proc/cmdline); do
++    case $argument in
++        "$prefix"=*)
++            found=1
++            value=${argument#*=}
++            if [ "$all" = 1 ]; then
++                printf '%s\n' "$value"
++            fi
++            ;;
++        "$prefix")
++            found=1
++            value=
++            if [ "$all" = 1 ]; then
++                printf '\n'
++            fi
++            ;;
++    esac
++done
++if [ "$all" = 0 ] && [ "$found" = 1 ]; then
++    printf '%s\n' "$value"
++fi
++exit $((1 - found))
+diff --git a/buildroot/qemu/board/rva23-qemu/dracut/99rva23/rva23-factory-reset.service b/buildroot/qemu/board/rva23-qemu/dracut/99rva23/rva23-factory-reset.service
+new file mode 100644
+index 0000000000000000000000000000000000000000..4b5a350bacbceb7210f5d3f2e3ce20b2b8c203ce
+--- /dev/null
++++ b/buildroot/qemu/board/rva23-qemu/dracut/99rva23/rva23-factory-reset.service
+@@ -0,0 +1,17 @@
++[Unit]
++Description=Reset RVA23 local storage and reboot
++DefaultDependencies=no
++After=systemd-udevd.service systemd-tpm2-setup-early.service
++Wants=systemd-udevd.service systemd-tpm2-setup-early.service
++
++[Service]
++Type=oneshot
++StandardOutput=console
++StandardError=console
++ExecStartPre=/usr/bin/mkdir -p /boot /sysroot/usr
++ExecStartPre=/usr/bin/mount -t vfat /dev/vda1 /boot
++ExecStartPre=/usr/bin/mount -t erofs -o ro /dev/vda2 /sysroot/usr
++ExecStart=/usr/bin/sh -c '/usr/bin/systemd-repart --dry-run=no --tpm2-pcrs= --tpm2-public-key-pcrs= --factory-reset=yes --definitions=/usr/lib/repart.d /dev/vda > /dev/ttyS0 2>&1'
++ExecStartPost=/usr/bin/bootctl set-default 'rva23_?.efi'
++ExecStartPost=/usr/bin/sh -c 'printf "default rva23_?.efi\ntimeout 0\neditor no\n" > /boot/loader/loader.conf'
++ExecStartPost=/usr/bin/systemctl reboot
+diff --git a/buildroot/qemu/board/rva23-qemu/edk2/PlatformTpm.c b/buildroot/qemu/board/rva23-qemu/edk2/PlatformTpm.c
+new file mode 100644
+index 0000000000000000000000000000000000000000..87296e3c6afb1f89ea528d89968fdefc2c4a2541
+--- /dev/null
++++ b/buildroot/qemu/board/rva23-qemu/edk2/PlatformTpm.c
+@@ -0,0 +1,89 @@
++#include "PlatformSecLib.h"
++
++VOID
++SecSetupTpmResources (
++  VOID  *FdtBase
++  )
++{
++  INT32         Node, Prev;
++  INT32         Parent, Depth;
++  CONST CHAR8   *Compatible;
++  CONST CHAR8   *CompItem;
++  INT32         Len;
++  INT32         RangesLen;
++  CONST UINT8   *RegProp;
++  CONST UINT32  *RangesProp;
++  UINT64        TpmBase;
++  UINT64        TpmBaseSize;
++
++  Parent = 0;
++  TpmBase = 0;
++  TpmBaseSize = 0;
++
++  for (Prev = Depth = 0; ; Prev = Node) {
++    Node = FdtNextNode (FdtBase, Prev, &Depth);
++    if (Node < 0) {
++      break;
++    }
++
++    if (Depth == 1) {
++      Parent = Node;
++    }
++
++    Compatible = FdtGetProp (FdtBase, Node, "compatible", &Len);
++    for (CompItem = Compatible; CompItem != NULL && CompItem < Compatible + Len;
++         CompItem += 1 + AsciiStrLen (CompItem))
++    {
++      if (AsciiStrCmp (CompItem, "tcg,tpm-tis-mmio") == 0) {
++        RegProp = FdtGetProp (FdtBase, Node, "reg", &Len);
++        ASSERT (Len == 8 || Len == 16);
++        if (Len == 8) {
++          TpmBase     = Fdt32ToCpu (*(UINT32 *)RegProp);
++          TpmBaseSize = Fdt32ToCpu (*(UINT32 *)((UINT8 *)RegProp + 4));
++        } else if (Len == 16) {
++          TpmBase     = Fdt64ToCpu (ReadUnaligned64 ((UINT64 *)RegProp));
++          TpmBaseSize = Fdt64ToCpu (ReadUnaligned64 ((UINT64 *)((UINT8 *)RegProp + 8)));
++        }
++
++        if (Depth > 1) {
++          RangesProp = FdtGetProp (FdtBase, Parent, "ranges", &RangesLen);
++          ASSERT (RangesProp != NULL);
++          if (RangesLen != 0) {
++            if (RangesLen != Len + 2 * sizeof (UINT32)) {
++              DEBUG ((
++                DEBUG_WARN,
++                "%a: 'ranges' property has unexpected size %d\n",
++                __func__,
++                RangesLen
++                ));
++              break;
++            }
++
++            if (Len == 8) {
++              TpmBase -= Fdt32ToCpu (RangesProp[0]);
++            } else {
++              TpmBase -= Fdt64ToCpu (ReadUnaligned64 ((UINT64 *)RangesProp));
++            }
++
++            RangesProp = (UINT32 *)((UINT8 *)RangesProp + Len / 2);
++            TpmBase   += Fdt64ToCpu (ReadUnaligned64 ((UINT64 *)RangesProp));
++          }
++        }
++
++        break;
++      }
++    }
++  }
++
++  if (TpmBase) {
++    BuildResourceDescriptorHob (
++      EFI_RESOURCE_MEMORY_MAPPED_IO,
++      EFI_RESOURCE_ATTRIBUTE_PRESENT     |
++      EFI_RESOURCE_ATTRIBUTE_INITIALIZED |
++      EFI_RESOURCE_ATTRIBUTE_UNCACHEABLE |
++      EFI_RESOURCE_ATTRIBUTE_TESTED,
++      TpmBase,
++      ALIGN_VALUE (TpmBaseSize, EFI_PAGE_SIZE)
++      );
++  }
++}
+diff --git a/buildroot/qemu/board/rva23-qemu/edk2/Rva23SecureBootEnroll/Rva23SecureBootEnroll.c b/buildroot/qemu/board/rva23-qemu/edk2/Rva23SecureBootEnroll/Rva23SecureBootEnroll.c
+new file mode 100644
+index 0000000000000000000000000000000000000000..581352d60a596d36176c76d11bf966dd6c136ed1
+--- /dev/null
++++ b/buildroot/qemu/board/rva23-qemu/edk2/Rva23SecureBootEnroll/Rva23SecureBootEnroll.c
+@@ -0,0 +1,63 @@
++#include <Uefi.h>
++#include <Uefi/UefiMultiPhase.h>
++#include <UefiSecureBoot.h>
++#include <Guid/GlobalVariable.h>
++#include <Guid/ImageAuthentication.h>
++#include <Guid/AuthenticatedVariableFormat.h>
++#include <Library/DebugLib.h>
++#include <Library/SecureBootVariableLib.h>
++#include <Library/SecureBootVariableProvisionLib.h>
++#include <Library/UefiLib.h>
++#include <Library/UefiRuntimeServicesTableLib.h>
++
++EFI_STATUS
++EFIAPI
++Rva23SecureBootEnrollEntry (
++  IN EFI_HANDLE        ImageHandle,
++  IN EFI_SYSTEM_TABLE  *SystemTable
++  )
++{
++  EFI_STATUS  Status;
++  UINT8       SetupMode;
++  UINT8       Enable;
++
++  Status = GetSetupMode (&SetupMode);
++  if (EFI_ERROR (Status) || (SetupMode == USER_MODE)) {
++    return Status;
++  }
++
++  Status = SetSecureBootMode (CUSTOM_SECURE_BOOT_MODE);
++  if (EFI_ERROR (Status)) {
++    return Status;
++  }
++
++  Status = EnrollDbFromDefault ();
++  if (EFI_ERROR (Status)) {
++    return Status;
++  }
++
++  Status = EnrollKEKFromDefault ();
++  if (EFI_ERROR (Status)) {
++    return Status;
++  }
++
++  Status = EnrollPKFromDefault ();
++  if (EFI_ERROR (Status)) {
++    return Status;
++  }
++
++  Status = SetSecureBootMode (STANDARD_SECURE_BOOT_MODE);
++  if (EFI_ERROR (Status)) {
++    return Status;
++  }
++
++  Enable = SECURE_BOOT_ENABLE;
++  return gRT->SetVariable (
++                EFI_SECURE_BOOT_ENABLE_NAME,
++                &gEfiSecureBootEnableDisableGuid,
++                EFI_VARIABLE_NON_VOLATILE |
++                EFI_VARIABLE_BOOTSERVICE_ACCESS,
++                sizeof Enable,
++                &Enable
++                );
++}
+diff --git a/buildroot/qemu/board/rva23-qemu/edk2/Rva23SecureBootEnroll/Rva23SecureBootEnroll.inf b/buildroot/qemu/board/rva23-qemu/edk2/Rva23SecureBootEnroll/Rva23SecureBootEnroll.inf
+new file mode 100644
+index 0000000000000000000000000000000000000000..7911254e75e9e1e67f69f1da8ab38b31371e5545
+--- /dev/null
++++ b/buildroot/qemu/board/rva23-qemu/edk2/Rva23SecureBootEnroll/Rva23SecureBootEnroll.inf
+@@ -0,0 +1,30 @@
++[Defines]
++  INF_VERSION                    = 1.28
++  BASE_NAME                      = Rva23SecureBootEnroll
++  FILE_GUID                      = 6d74f6de-3b35-4f5e-9f21-4f4f4d29d8a4
++  MODULE_TYPE                    = UEFI_DRIVER
++  VERSION_STRING                 = 1.0
++  ENTRY_POINT                    = Rva23SecureBootEnrollEntry
++
++[Sources]
++  Rva23SecureBootEnroll.c
++
++[Packages]
++  MdePkg/MdePkg.dec
++  MdeModulePkg/MdeModulePkg.dec
++  SecurityPkg/SecurityPkg.dec
++
++[Guids]
++  gEfiCertPkcs7Guid
++  gEfiGlobalVariableGuid
++  gEfiSecureBootEnableDisableGuid
++
++[LibraryClasses]
++  BaseMemoryLib
++  DebugLib
++  MemoryAllocationLib
++  PrintLib
++  UefiBootServicesTableLib
++  UefiDriverEntryPoint
++  UefiLib
++  UefiRuntimeServicesTableLib
+diff --git a/buildroot/qemu/board/rva23-qemu/post-image.sh b/buildroot/qemu/board/rva23-qemu/post-image.sh
+new file mode 100755
+index 0000000000000000000000000000000000000000..56c11c6b46ce6db239bebe7d9482dc692f9bec67
+--- /dev/null
++++ b/buildroot/qemu/board/rva23-qemu/post-image.sh
+@@ -0,0 +1,9 @@
++#!/bin/sh
++
++set -eu
++
++"${HOST_DIR}/bin/fakeroot" -- "$(dirname "$0")/../../scripts/build-os-images.py"
++rm -rf "${BINARIES_DIR}/efi-part/loader/entries"
++truncate -s 32M "${BINARIES_DIR}/RISCV_VIRT_CODE.fd"
++truncate -s 32M "${BINARIES_DIR}/RISCV_VIRT_VARS.fd"
++"$(dirname "$0")/build-firmware.sh"
+diff --git a/buildroot/qemu/board/rva23-qemu/run-firmware.sh b/buildroot/qemu/board/rva23-qemu/run-firmware.sh
+new file mode 100755
+index 0000000000000000000000000000000000000000..46c9135c082ab5f1c439d1a4036c436db566e108
+--- /dev/null
++++ b/buildroot/qemu/board/rva23-qemu/run-firmware.sh
+@@ -0,0 +1,64 @@
++#!/bin/sh
++
++set -eu
++
++IMAGES_DIR=$(realpath "${1}")
++QEMU=${QEMU:-"${IMAGES_DIR}/../host/bin/qemu-system-riscv64"}
++FIRMWARE_FIT=${FIRMWARE_FIT:-"${IMAGES_DIR}/firmware.itb"}
++FIRMWARE_DTB=${FIRMWARE_DTB:-"${IMAGES_DIR}/qemu-control.dtb"}
++SWTPM=${SWTPM:-"${IMAGES_DIR}/../host/bin/swtpm"}
++TPM_STATE=${RVA23_TPM_STATE:-"${IMAGES_DIR}/../firmware-swtpm"}
++mkdir -p "${TPM_STATE}"
++rm -f "${TPM_STATE}/swtpm.sock" "${TPM_STATE}/swtpm.lock" "${TPM_STATE}/.lock" "${IMAGES_DIR}/firmware-monitor.sock"
++"${SWTPM}" socket --tpm2 --tpmstate dir="${TPM_STATE}",mode=0600,lock \
++	--ctrl type=unixio,path="${TPM_STATE}/swtpm.sock",mode=0600,terminate \
++	--flags not-need-init,startup-clear --log file="${TPM_STATE}/swtpm.log" &
++SWTPM_PID=$!
++trap 'kill "${SWTPM_PID}" 2>/dev/null || true; wait "${SWTPM_PID}" 2>/dev/null || true' EXIT INT TERM
++while [ ! -S "${TPM_STATE}/swtpm.sock" ]; do
++	sleep 0.1
++done
++
++if [ -f "${IMAGES_DIR}/secure-boot-oem.txt" ]; then
++	set -- -smbios "type=11,value=$(cat "${IMAGES_DIR}/secure-boot-oem.txt")"
++fi
++if [ "${QEMU_VNC:-0}" = 1 ]; then
++	set -- -vnc 127.0.0.1:0
++else
++	set -- -display none
++fi
++if [ -n "${RVA23_UPDATE_IMAGE:-}" ]; then
++	set -- "$@" -drive file="${RVA23_UPDATE_IMAGE}",format=raw,if=virtio
++fi
++if [ -n "${RVA23_FIDO2_DIR:-}" ]; then
++	set -- "$@" -device "u2f-emulated,dir=${RVA23_FIDO2_DIR}"
++fi
++if [ -n "${RVA23_SMARTCARD_DIR:-}" ]; then
++	set -- "$@" -device "usb-ccid" -device "ccid-card-emulated,debug=3,backend=certificates,db=sql:${RVA23_SMARTCARD_DIR},cert1=id-cert,cert2=signing-cert,cert3=encryption-cert"
++fi
++
++exec "${QEMU}" \
++	-M virt,pflash0=pflash0,pflash1=pflash1,acpi=off \
++	-accel tcg \
++	-cpu rva23s64 \
++	-smp 4 \
++	-m 2048 \
++	-bios "${IMAGES_DIR}/u-boot-spl.bin" \
++	-dtb "${FIRMWARE_DTB}" \
++	-device loader,file="${FIRMWARE_FIT}",addr=0x80200000 \
++	-device loader,file="${FIRMWARE_FIT}",addr=0x90000000 \
++	-blockdev node-name=pflash0,driver=file,read-only=on,filename="${IMAGES_DIR}/RISCV_VIRT_CODE.fd" \
++	-blockdev node-name=pflash1,driver=file,filename="${IMAGES_DIR}/RISCV_VIRT_VARS.fd" \
++	-drive file="${IMAGES_DIR}/disk.img",format=raw,if=virtio \
++	-device virtio-gpu-pci \
++	-device qemu-xhci \
++	-device usb-kbd \
++	-device usb-tablet \
++	-chardev socket,id=chrtpm,path="${TPM_STATE}/swtpm.sock" \
++	-tpmdev emulator,id=tpm0,chardev=chrtpm \
++	-device tpm-tis-device,tpmdev=tpm0 \
++	-netdev user,id=net0 \
++	-device virtio-net-pci,netdev=net0 \
++	-monitor unix:"${IMAGES_DIR}/firmware-monitor.sock",server=on,wait=off \
++	"$@" \
++	-serial stdio
+diff --git a/buildroot/qemu/board/rva23-qemu/run-qemu.sh b/buildroot/qemu/board/rva23-qemu/run-qemu.sh
+new file mode 100755
+index 0000000000000000000000000000000000000000..c2a4bd5c37409f116f91a2ed07f41bd7d8075c54
+--- /dev/null
++++ b/buildroot/qemu/board/rva23-qemu/run-qemu.sh
+@@ -0,0 +1,59 @@
++#!/bin/sh
++
++set -eu
++
++IMAGES_DIR=$(realpath "${1}")
++QEMU=${QEMU:-"${IMAGES_DIR}/../host/bin/qemu-system-riscv64"}
++DISK_IMAGE=${RVA23_DISK:-"${IMAGES_DIR}/disk.img"}
++SWTPM=${SWTPM:-"${IMAGES_DIR}/../host/bin/swtpm"}
++TPM_STATE=${RVA23_TPM_STATE:-"${IMAGES_DIR}/../swtpm"}
++mkdir -p "${TPM_STATE}"
++rm -f "${TPM_STATE}/swtpm.sock" "${TPM_STATE}/swtpm.lock" "${TPM_STATE}/.lock"
++"${SWTPM}" socket --tpm2 --tpmstate dir="${TPM_STATE}",mode=0600,lock \
++	--ctrl type=unixio,path="${TPM_STATE}/swtpm.sock",mode=0600,terminate \
++	--flags not-need-init,startup-clear --log file="${TPM_STATE}/swtpm.log" &
++SWTPM_PID=$!
++trap 'kill "${SWTPM_PID}" 2>/dev/null || true; wait "${SWTPM_PID}" 2>/dev/null || true' EXIT INT TERM
++while [ ! -S "${TPM_STATE}/swtpm.sock" ]; do
++	sleep 0.1
++done
++
++if [ -f "${IMAGES_DIR}/secure-boot-oem.txt" ]; then
++	set -- -smbios "type=11,value=$(cat "${IMAGES_DIR}/secure-boot-oem.txt")"
++fi
++if [ "${QEMU_VNC:-0}" = 1 ]; then
++	set -- -vnc 127.0.0.1:0
++else
++	set -- -display none
++fi
++if [ -n "${RVA23_UPDATE_IMAGE:-}" ]; then
++	set -- "$@" -drive file="${RVA23_UPDATE_IMAGE}",format=raw,if=virtio
++fi
++if [ -n "${RVA23_FIDO2_DIR:-}" ]; then
++	set -- "$@" -device "u2f-emulated,dir=${RVA23_FIDO2_DIR}"
++fi
++if [ -n "${RVA23_SMARTCARD_DIR:-}" ]; then
++	set -- "$@" -device "usb-ccid,attached=on" -device "ccid-card-emulated,backend=certificates,db=sql:${RVA23_SMARTCARD_DIR},cert1=id-cert,cert2=signing-cert,cert3=encryption-cert"
++fi
++
++exec "${QEMU}" \
++	-M virt,pflash0=pflash0,pflash1=pflash1,acpi=off \
++	-accel tcg \
++	-cpu rva23s64 \
++	-smp 4 \
++	-m 2048 \
++	-bios "${IMAGES_DIR}/fw_dynamic.bin" \
++	-blockdev node-name=pflash0,driver=file,read-only=on,filename="${IMAGES_DIR}/RISCV_VIRT_CODE.fd" \
++	-blockdev node-name=pflash1,driver=file,filename="${IMAGES_DIR}/RISCV_VIRT_VARS.fd" \
++	-drive file="${DISK_IMAGE}",format=raw,if=virtio \
++	-netdev user,id=net0 \
++	-device virtio-net-pci,netdev=net0 \
++	-device virtio-gpu-pci \
++	-device qemu-xhci \
++	-device usb-kbd \
++	-device usb-tablet \
++	-chardev socket,id=chrtpm,path="${TPM_STATE}/swtpm.sock" \
++	-tpmdev emulator,id=tpm0,chardev=chrtpm \
++	-device tpm-tis-device,tpmdev=tpm0 \
++	"$@" \
++	-serial stdio
+
