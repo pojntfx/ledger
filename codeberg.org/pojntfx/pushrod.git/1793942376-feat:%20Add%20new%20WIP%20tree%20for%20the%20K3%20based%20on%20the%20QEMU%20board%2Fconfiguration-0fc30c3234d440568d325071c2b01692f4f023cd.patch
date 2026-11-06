@@ -1,0 +1,1487 @@
+From 0fc30c3234d440568d325071c2b01692f4f023cd Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Thu, 05 Nov 2026 22:19:36 -0700
+Subject: [PATCH] feat: Add new WIP tree for the K3 based on the QEMU board/configuration
+---
+diff --git a/buildroot/qemu/Config.in b/buildroot/qemu/Config.in
+index b5fbb19de22a64fe270a4a247cc4448f041158a5..dd6b7aceb894fd8b33ea4aa7f08648ecc70e4217 100644
+--- a/buildroot/qemu/Config.in
++++ b/buildroot/qemu/Config.in
+@@ -2,3 +2,4 @@ source "$BR2_EXTERNAL_RVA23_QEMU_PATH/package/sbsigntools/Config.in.host"
+ source "$BR2_EXTERNAL_RVA23_QEMU_PATH/package/tpm2-tss/Config.in.host"
+ source "$BR2_EXTERNAL_RVA23_QEMU_PATH/package/k3s/Config.in"
+ source "$BR2_EXTERNAL_RVA23_QEMU_PATH/package/rva23-criu/Config.in"
++source "$BR2_EXTERNAL_RVA23_QEMU_PATH/package/edk2-spacemit/Config.in"
+diff --git a/buildroot/qemu/Makefile b/buildroot/qemu/Makefile
+index bb3324cf127524517d51c6338ad646746661b962..83ba2a6890185b6496d92279e39f334b62167c52 100644
+--- a/buildroot/qemu/Makefile
++++ b/buildroot/qemu/Makefile
+@@ -10,9 +10,13 @@ RVA23_KEY_DIR ?= $(abspath $(THIS_EXTERNAL_PATH)/../buildroot-qemu-keys)
+ export RVA23_TPM_STATE := $(OUTPUT_DIR)/swtpm
+ 
+ MAKE_BUILDROOT = $(MAKE) -C $(BUILDROOT_DIR) O=$(OUTPUT_DIR) BR2_EXTERNAL=$(THIS_EXTERNAL_PATH) BR2_DL_DIR=$(BR2_DL_DIR) BR2_CCACHE_DIR=$(BR2_CCACHE_DIR) UBOOT_OVERRIDE_SRCDIR=$(UBOOT_OVERRIDE_SRCDIR) RVA23_KEY_DIR=$(RVA23_KEY_DIR)
++K3_OUTPUT_DIR ?= $(abspath $(THIS_EXTERNAL_PATH)/../buildroot-k3-clean/build)
++K3_SOURCE_DIR ?= $(abspath $(THIS_EXTERNAL_PATH)/../buildroot-k3-clean/src)
++K3_LINUX_FIRMWARE_DIR ?= $(K3_SOURCE_DIR)/linux-firmware/powervr
++MAKE_BUILDROOT_K3 = $(MAKE) -C $(BUILDROOT_DIR) O=$(K3_OUTPUT_DIR) BR2_EXTERNAL=$(THIS_EXTERNAL_PATH) BR2_DL_DIR=$(BR2_DL_DIR) BR2_CCACHE_DIR=$(BR2_CCACHE_DIR) LINUX_OVERRIDE_SRCDIR=$(K3_SOURCE_DIR)/linux OPENSBI_OVERRIDE_SRCDIR=$(K3_SOURCE_DIR)/opensbi EDK2_SPACEMIT_OVERRIDE_SRCDIR=$(K3_SOURCE_DIR)/edk2-spacemit BINUTILS_OVERRIDE_SRCDIR=$(K3_SOURCE_DIR)/binutils HOST_GCC_INITIAL_OVERRIDE_SRCDIR=$(K3_SOURCE_DIR)/gcc HOST_GCC_FINAL_OVERRIDE_SRCDIR=$(K3_SOURCE_DIR)/gcc K3_LINUX_FIRMWARE_DIR=$(K3_LINUX_FIRMWARE_DIR)
+ BUILDROOT_PATCHES = $(sort $(wildcard $(THIS_EXTERNAL_PATH)/patches/buildroot/*.patch))
+ 
+-.PHONY: all configure build clean registry verify verify-image verify-boot verify-firmware verify-attestation verify-report verify-update verify-security verify-hardening verify-podman verify-k3s verify-attested-app verify-wallet verify-migration verify-mutual-migration boot boot-display boot-firmware
++.PHONY: all configure build clean registry verify verify-image verify-boot verify-firmware verify-attestation verify-report verify-update verify-security verify-hardening verify-podman verify-k3s verify-attested-app verify-wallet verify-migration verify-mutual-migration boot boot-display boot-firmware k3-configure k3-build
+ 
+ all: build
+ 
+@@ -22,6 +26,13 @@ 	$(MAKE_BUILDROOT) rva23_defconfig
+ 
+ build: configure
+ 	$(MAKE_BUILDROOT)
++
++k3-configure:
++	for patch in $(BUILDROOT_PATCHES); do git -C $(BUILDROOT_DIR) apply --reverse --check "$$patch" || exit 1; done
++	$(MAKE_BUILDROOT_K3) k3_uefi_defconfig
++
++k3-build: k3-configure
++	$(MAKE_BUILDROOT_K3) -j14
+ 
+ clean:
+ 	$(MAKE_BUILDROOT) clean
+diff --git a/buildroot/qemu/board/spacemit/k3-uefi/env.bin b/buildroot/qemu/board/spacemit/k3-uefi/env.bin
+new file mode 100644
+index 0000000000000000000000000000000000000000..1f3462e0eb330956f63d89207e4b40eb903d97aa
+Binary files /dev/null and b/buildroot/qemu/board/spacemit/k3-uefi/env.bin differ
+diff --git a/buildroot/qemu/board/spacemit/k3-uefi/esos.itb b/buildroot/qemu/board/spacemit/k3-uefi/esos.itb
+new file mode 100644
+index 0000000000000000000000000000000000000000..e3da7ea18df41039e25fb8133143245c3f980ba3
+Binary files /dev/null and b/buildroot/qemu/board/spacemit/k3-uefi/esos.itb differ
+diff --git a/buildroot/qemu/board/spacemit/k3-uefi/factory/FSBL.bin b/buildroot/qemu/board/spacemit/k3-uefi/factory/FSBL.bin
+new file mode 100644
+index 0000000000000000000000000000000000000000..453afa83997a3970a80311841df686748f56fa2e
+Binary files /dev/null and b/buildroot/qemu/board/spacemit/k3-uefi/factory/FSBL.bin differ
+diff --git a/buildroot/qemu/board/spacemit/k3-uefi/factory/bootinfo_block.bin b/buildroot/qemu/board/spacemit/k3-uefi/factory/bootinfo_block.bin
+new file mode 100644
+index 0000000000000000000000000000000000000000..a17320cad39184be733d3ba54ee7be16af6c841a
+Binary files /dev/null and b/buildroot/qemu/board/spacemit/k3-uefi/factory/bootinfo_block.bin differ
+diff --git a/buildroot/qemu/board/spacemit/k3-uefi/factory/bootinfo_spinand.bin b/buildroot/qemu/board/spacemit/k3-uefi/factory/bootinfo_spinand.bin
+new file mode 100644
+index 0000000000000000000000000000000000000000..363a0eda93f3a254ff3d338043053386abbeb355
+Binary files /dev/null and b/buildroot/qemu/board/spacemit/k3-uefi/factory/bootinfo_spinand.bin differ
+diff --git a/buildroot/qemu/board/spacemit/k3-uefi/factory/bootinfo_spinor.bin b/buildroot/qemu/board/spacemit/k3-uefi/factory/bootinfo_spinor.bin
+new file mode 100644
+index 0000000000000000000000000000000000000000..dfffc729c36063207e1b1ac8b93ec4baf074bfa1
+Binary files /dev/null and b/buildroot/qemu/board/spacemit/k3-uefi/factory/bootinfo_spinor.bin differ
+diff --git a/buildroot/qemu/board/spacemit/k3-uefi/flasher-u-boot.itb b/buildroot/qemu/board/spacemit/k3-uefi/flasher-u-boot.itb
+new file mode 100644
+index 0000000000000000000000000000000000000000..9b3ba2a19de5e286cc864457202401d0ede37a4b
+Binary files /dev/null and b/buildroot/qemu/board/spacemit/k3-uefi/flasher-u-boot.itb differ
+diff --git a/buildroot/qemu/board/spacemit/k3-uefi/fw_dynamic.its b/buildroot/qemu/board/spacemit/k3-uefi/fw_dynamic.its
+new file mode 100644
+index 0000000000000000000000000000000000000000..0876ad54f17a89f9e1ad90b8b4c150539ce83686
+--- /dev/null
++++ b/buildroot/qemu/board/spacemit/k3-uefi/fw_dynamic.its
+@@ -0,0 +1,24 @@
++/dts-v1/;
++/ {
++	description = "K3 OpenSBI firmware";
++	#address-cells = <2>;
++	images {
++		fw_dynamic {
++			description = "OpenSBI fw_dynamic";
++			data = /incbin/("fw_dynamic.bin");
++			type = "firmware";
++			arch = "riscv";
++			os = "opensbi";
++			compression = "none";
++			load = <0x1 0x00000000>;
++			entry = <0x1 0x00000000>;
++		};
++	};
++	configurations {
++		default = "conf";
++		conf {
++			description = "K3 OpenSBI";
++			firmware = "fw_dynamic";
++		};
++	};
++};
+diff --git a/buildroot/qemu/board/spacemit/k3-uefi/linux.fragment b/buildroot/qemu/board/spacemit/k3-uefi/linux.fragment
+new file mode 100644
+index 0000000000000000000000000000000000000000..d00a2b36014bb1afe51be8753b94629803f4d7cf
+--- /dev/null
++++ b/buildroot/qemu/board/spacemit/k3-uefi/linux.fragment
+@@ -0,0 +1,14 @@
++CONFIG_EFI=y
++CONFIG_EFI_STUB=y
++CONFIG_EFIVAR_FS=y
++CONFIG_EFI_PARTITION=y
++CONFIG_CMDLINE=""
++CONFIG_DRM_POWERVR=m
++CONFIG_INITRAMFS_SOURCE=""
++CONFIG_PHYS_RAM_BASE_FIXED=y
++CONFIG_PHYS_RAM_BASE=0x102000000
++CONFIG_DRM_FBDEV_EMULATION=y
++CONFIG_FW_LOADER=y
++CONFIG_VT=y
++CONFIG_VT_CONSOLE=y
++CONFIG_UNIX98_PTYS=y
+diff --git a/buildroot/qemu/board/spacemit/k3-uefi/partition_4M.json b/buildroot/qemu/board/spacemit/k3-uefi/partition_4M.json
+new file mode 100644
+index 0000000000000000000000000000000000000000..137f8b8fbd72c3225864b0b9620cd8ef66ba5be0
+--- /dev/null
++++ b/buildroot/qemu/board/spacemit/k3-uefi/partition_4M.json
+@@ -0,0 +1,48 @@
++{
++  "version": "1.0",
++  "format": "mtd",
++  "partitions": [
++    {
++      "name": "bootinfo",
++      "hidden": true,
++      "offset": "0",
++      "size": "128K",
++      "image": "factory/bootinfo_spinor.bin"
++    },
++    {
++      "name": "fsbl",
++      "hidden": true,
++      "offset": "128K",
++      "size": "512K",
++      "image": "factory/FSBL.bin"
++    },
++    {
++      "name": "env",
++      "hidden": true,
++      "offset": "640K",
++      "size": "64K",
++      "image": "env.bin"
++    },
++    {
++      "name": "esos",
++      "hidden": true,
++      "offset": "704K",
++      "size": "1M",
++      "image": "esos.itb"
++    },
++    {
++      "name": "opensbi",
++      "hidden": true,
++      "offset": "1728K",
++      "size": "384K",
++      "image": "fw_dynamic.itb"
++    },
++    {
++      "name": "uboot",
++      "hidden": true,
++      "offset": "2112K",
++      "size": "-",
++      "image": "edk2.itb"
++    }
++  ]
++}
+diff --git a/buildroot/qemu/board/spacemit/k3-uefi/partition_64M.json b/buildroot/qemu/board/spacemit/k3-uefi/partition_64M.json
+new file mode 100644
+index 0000000000000000000000000000000000000000..c8da2968bfec3b4837355dc83cd37b27a12dde8e
+--- /dev/null
++++ b/buildroot/qemu/board/spacemit/k3-uefi/partition_64M.json
+@@ -0,0 +1,48 @@
++{
++  "version": "1.0",
++  "format": "mtd",
++  "partitions": [
++    {
++      "name": "bootinfo",
++      "hidden": true,
++      "offset": "0",
++      "size": "128K",
++      "image": "factory/bootinfo_spinand.bin"
++    },
++    {
++      "name": "fsbl",
++      "hidden": true,
++      "offset": "128K",
++      "size": "512K",
++      "image": "factory/FSBL.bin"
++    },
++    {
++      "name": "env",
++      "hidden": true,
++      "offset": "640K",
++      "size": "64K",
++      "image": "env.bin"
++    },
++    {
++      "name": "esos",
++      "hidden": true,
++      "offset": "704K",
++      "size": "1M",
++      "image": "esos.itb"
++    },
++    {
++      "name": "opensbi",
++      "hidden": true,
++      "offset": "1728K",
++      "size": "384K",
++      "image": "fw_dynamic.itb"
++    },
++    {
++      "name": "uboot",
++      "hidden": true,
++      "offset": "2112K",
++      "size": "3008K",
++      "image": "edk2.itb"
++    }
++  ]
++}
+diff --git a/buildroot/qemu/board/spacemit/k3-uefi/partition_8M.json b/buildroot/qemu/board/spacemit/k3-uefi/partition_8M.json
+new file mode 100644
+index 0000000000000000000000000000000000000000..137f8b8fbd72c3225864b0b9620cd8ef66ba5be0
+--- /dev/null
++++ b/buildroot/qemu/board/spacemit/k3-uefi/partition_8M.json
+@@ -0,0 +1,48 @@
++{
++  "version": "1.0",
++  "format": "mtd",
++  "partitions": [
++    {
++      "name": "bootinfo",
++      "hidden": true,
++      "offset": "0",
++      "size": "128K",
++      "image": "factory/bootinfo_spinor.bin"
++    },
++    {
++      "name": "fsbl",
++      "hidden": true,
++      "offset": "128K",
++      "size": "512K",
++      "image": "factory/FSBL.bin"
++    },
++    {
++      "name": "env",
++      "hidden": true,
++      "offset": "640K",
++      "size": "64K",
++      "image": "env.bin"
++    },
++    {
++      "name": "esos",
++      "hidden": true,
++      "offset": "704K",
++      "size": "1M",
++      "image": "esos.itb"
++    },
++    {
++      "name": "opensbi",
++      "hidden": true,
++      "offset": "1728K",
++      "size": "384K",
++      "image": "fw_dynamic.itb"
++    },
++    {
++      "name": "uboot",
++      "hidden": true,
++      "offset": "2112K",
++      "size": "-",
++      "image": "edk2.itb"
++    }
++  ]
++}
+diff --git a/buildroot/qemu/board/spacemit/k3-uefi/partition_universal.json b/buildroot/qemu/board/spacemit/k3-uefi/partition_universal.json
+new file mode 100644
+index 0000000000000000000000000000000000000000..7d41bffe8005a68003a29529093da7d0a24e061d
+--- /dev/null
++++ b/buildroot/qemu/board/spacemit/k3-uefi/partition_universal.json
+@@ -0,0 +1,63 @@
++{
++  "version": "1.0",
++  "format": "gpt",
++  "partitions": [
++    {
++      "name": "env",
++      "hidden": true,
++      "offset": "640K",
++      "size": "64K",
++      "image": "env.bin"
++    },
++    {
++      "name": "bootinfo",
++      "hidden": true,
++      "offset": "1M",
++      "size": "128K",
++      "image": "factory/bootinfo_block.bin"
++    },
++    {
++      "name": "fsbl",
++      "hidden": true,
++      "offset": "1536K",
++      "size": "512K",
++      "image": "factory/FSBL.bin"
++    },
++    {
++      "name": "esos",
++      "hidden": true,
++      "offset": "4M",
++      "size": "3M",
++      "image": "esos.itb"
++    },
++    {
++      "name": "opensbi",
++      "hidden": true,
++      "offset": "7M",
++      "size": "1M",
++      "image": "fw_dynamic.itb"
++    },
++    {
++      "name": "uboot",
++      "hidden": true,
++      "offset": "8M",
++      "size": "4M",
++      "image": "edk2.itb"
++    },
++    {
++      "name": "bootfs",
++      "offset": "12M",
++      "size": "256M",
++      "image": "bootfs.img",
++      "compress": "gzip-5"
++    },
++    {
++      "name": "rootfs",
++      "offset": "268M",
++      "size": "121867M",
++      "image": "rootfs.ext4",
++      "type": "ext4",
++      "compress": "gzip-5"
++    }
++  ]
++}
+diff --git a/buildroot/qemu/board/spacemit/k3-uefi/patches/linux/0001-k3-hardware-bringup.patch b/buildroot/qemu/board/spacemit/k3-uefi/patches/linux/0001-k3-hardware-bringup.patch
+new file mode 100644
+index 0000000000000000000000000000000000000000..4e58bb391e865530ca3b2655163596ba8e0e218e
+--- /dev/null
++++ b/buildroot/qemu/board/spacemit/k3-uefi/patches/linux/0001-k3-hardware-bringup.patch
+@@ -0,0 +1,289 @@
++--- a/arch/riscv/boot/dts/spacemit/k3.dtsi
+++++ b/arch/riscv/boot/dts/spacemit/k3.dtsi
++@@ -127,13 +127,13 @@
++ 
++ 		/* used for rcpu0 code & data & bss space */
++ 		rcpu0_pwr: rcpu0_pwr@100200000 {
++-			reg = <0x1 0x200000 0x0 0x200000>;
+++			reg = <0x1 0x200000 0x0 0x300000>;
++ 			no-map;
++ 		};
++ 
++ 		/* rcpu0's heap */
++-		rcpu0_heap: rcpu0_heap@100400000 {
++-			reg = <0x1 0x400000 0x0 0x200000>;
+++		rcpu0_heap: rcpu0_heap@100500000 {
+++			reg = <0x1 0x500000 0x0 0x200000>;
++ 			no-map;
++ 		};
++ 
++@@ -149,35 +149,35 @@
++ 			no-map;
++ 		};
++ 
++-		/* rcpu0 misc-used */
++-		rcpu0_misc_used: rcpu0_misc-used@c087c000 {
++-			reg = <0x0 0xc087c000 0x0 0x4000>;
+++		/* vring2 */
+++		rcpu0_vdev0vring2: vdev0vring2@c087c000 {
+++			reg = <0x0 0xc087c000 0x0 0x1000>;
++ 			no-map;
++ 		};
++ 
++ 		/* the rcpu0's share memory buffer */
++-		rcpu0_vdev0buffer: vdev0buffer@100600000 {
+++		rcpu0_vdev0buffer: vdev0buffer@100700000 {
++ 			compatible = "shared-dma-pool";
++-			reg = <0x1 0x600000 0x0 0xfc000>;
+++			reg = <0x1 0x700000 0x0 0xfc000>;
++ 			no-map;
++ 		};
++ 
++ 		/* the rcpu0's resource table */
++-		rcpu0_rsc_table: rcpu0_rsc_table@1006fc000 {
++-			reg = <0x1 0x6fc000 0x0 0x4000>;
+++		rcpu0_rsc_table: rcpu0_rsc_table@1007fc000 {
+++			reg = <0x1 0x7fc000 0x0 0x4000>;
++ 			no-map;
++ 		};
++ 
++ 		/*****************rcpu1**********************/
++ 		/* used for rcp1 code & data & bss space */
++ 		rcpu1_runtime: rcpu1_runtime@100800000 {
++-			reg = <0x1 0x800000 0x0 0x200000>;
+++			reg = <0x1 0x800000 0x0 0x300000>;
++ 			no-map;
++ 		};
++ 
++ 		/* rcpu1's heap */
++-		rcpu1_heap: rcpu1_heap@100a00000 {
++-			reg = <0x1 0xa00000 0x0 0x200000>;
+++		rcpu1_heap: rcpu1_heap@100B00000 {
+++			reg = <0x1 0xb00000 0x0 0x200000>;
++ 			no-map;
++ 		};
++ 
++@@ -193,27 +193,16 @@
++ 			no-map;
++ 		};
++ 
++-		/* rcpu1 misc-used */
++-		rcpu1_misc_used: rcpu1_misc-used@c0872000 {
++-			reg = <0x0 0xc0872000 0x0 0x4000>;
++-			no-map;
++-		};
++-
++-		sram_for_tcm: sram_for_tcm@c0868000 {
++-			reg = <0x0 0xc0868000 0x0 0x4000>;
++-			no-map;
++-		};
++-
++ 		/* the rcpu1's share memory buffer */
++-		rcpu1_vdev0buffer: vdev0buffer@100c00000 {
+++		rcpu1_vdev0buffer: vdev0buffer@100d00000 {
++ 			compatible = "shared-dma-pool";
++-			reg = <0x1 0xc00000 0x0 0xfc000>;
+++			reg = <0x1 0xd00000 0x0 0xfc000>;
++ 			no-map;
++ 		};
++ 
++ 		/* the rcpu1's resource table */
++-		rcpu1_rsc_table: rcpu1_rsc_table@100cfc000 {
++-			reg = <0x1 0xcfc000 0x0 0x4000>;
+++		rcpu1_rsc_table: rcpu1_rsc_table@100dfc000 {
+++			reg = <0x1 0xdfc000 0x0 0x4000>;
++ 			no-map;
++ 		};
++ 
++@@ -225,37 +214,9 @@
++ 
++ 		/* reseved rpmi for feture use */
++ 
++-		/* reserve 1M for rcpu's dtb space */
++-		rcpu_dtb_table: rcpu_dtb_table@100d00000 {
++-			reg = <0x1 0xd00000 0x0 0x100000>;
++-			no-map;
++-		};
++-
++-		/*
++-		 * Merged no-map region for rcpu hibernation misc state.
++-		 * Owner: k3-rproc driver (rcpu1 probe path), referenced via
++-		 * hibernation_snap[0] and rcpu1 memory-region.
++-		 * Firmware ABI (must stay in sync with OpenSBI and rcpu firmware):
++-		 *   +0x000000 (0x000400): rcpu_hiber_rtsp — rcpu hibernate runtime stack pointer
++-		 *   +0x000400 (0x001000): hiber_apuse     — AP persistent state (survives image restore)
++-		 *   +0x001400 (0x084000): snap_srrpi      — SRAM + RPMI snapshots
++-		 */
++-		hibernation_nomap: hibernation_nomap@100700000 {
++-			reg = <0x1 0x700000 0x0 0x85400>;
++-			no-map;
++-		};
++-
++-		/*
++-		 * Contiguous snapshot storage for rcpu DRAM and OpenSBI.
++-		 * Owner: k3-rproc driver (rcpu1 probe path), referenced via
++-		 * hibernation_snap[1] and rcpu1 memory-region.
++-		 * Firmware ABI (must stay in sync with rcpu firmware):
++-		 *   +0x000000 (0x500000): rcpu0 DRAM snapshot — 5 MiB
++-		 *   +0x500000 (0x500000): rcpu1 DRAM snapshot — 5 MiB
++-		 *   +0xa00000 (0x200000): OpenSBI snapshot     — 2 MiB
++-		 */
++-		hibernation_snap_rcpu: hibernation_snap_rcpu@100f00000 {
++-			reg = <0x1 0xf00000 0x0 0xc00000>;
+++		/* reserve 3M for rcpu's dtb space */
+++		rcpu_dtb_table: rcpu_dtb_table@100f00000 {
+++			reg = <0x1 0xf00000 0x0 0x300000>;
++ 			no-map;
++ 		};
++ 
++@@ -1316,7 +1277,6 @@
++ 			firmware-name = "rt24_os1_rcpu.elf";
++ 			memory-region = <&rcpu1_runtime>, <&rcpu1_heap>, <&rcpu1_vdev0vring0>, <&rcpu1_vdev0buffer>,
++ 					<&rcpu1_vdev0vring1>, <&rcpu1_rsc_table>;
++-			hibernation_snap = <&hibernation_nomap>, <&hibernation_snap_rcpu>;
++ 			status = "okay";
++ 		};
++ 
++@@ -1360,6 +1320,7 @@
++ 			#address-cells = <2>;
++ 			#size-cells = <2>;
++ 			ranges;
+++			status = "disabled";
++ 
++ 			power: power-controller {
++ 				compatible = "spacemit,power-controller";
++@@ -1367,7 +1328,7 @@
++ 				#power-domain-cells = <1>;
++ 				#address-cells = <1>;
++ 				#size-cells = <0>;
++-				status = "okay";
+++				status = "disabled";
++ 
++ 				vpu: vpu@0 {
++ 					#power-domain-cells = <0>;
++@@ -1726,7 +1687,7 @@
++ 		};
++ 
++ 		imggpu: imggpu@cac00000 {
++-			compatible = "img,rgx";
+++			compatible = "img,img-rogue";
++ 			interrupt-names = "rgxirq";
++ 			interrupt-parent = <&saplic>;
++ 			interrupts = <75 IRQ_TYPE_LEVEL_HIGH>;
++@@ -1734,11 +1695,12 @@
++ 			reg-names = "rgxregs";
++ 			power-domains = <&power K3_PMU_GPU_PWR_DOMAIN>;
++ 			clocks = <&syscon_apmu CLK_APMU_GPU>;
++-			clock-names = "clk_rgx";
+++			clock-names = "core";
++ 			resets = <&syscon_apmu RESET_APMU_GPU>;
++ 			operating-points-v2 = <&imggpu_opp_table>;
++ 			#cooling-cells = <2>;
++ 			thermal-zone = "thermal_gpu";
+++			img,core-clock-rate-hz = <1228000000>;
++ 			status = "okay";
++ 
++ 			imggpu_opp_table: opp-table {
++@@ -2767,3 +2729,53 @@
++ 		};
++ 	};
++ };
+++
+++/ {
+++	rpmi_mbox: rpmi-mbox@100e00000 {
+++		compatible = "riscv,rpmi-shmem-mbox";
+++		reg = <0x1 0x00e00000 0x0 0x1000>,
+++		      <0x1 0x00e01000 0x0 0x1000>,
+++		      <0x1 0x00e02000 0x0 0x1000>,
+++		      <0x1 0x00e03000 0x0 0x1000>,
+++		      <0x0 0xcac90c00 0x0 0x100>;
+++		reg-names = "a2p-req", "p2a-ack", "p2a-req", "a2p-ack", "a2p-doorbell";
+++		#mbox-cells = <1>;
+++		riscv,slot-size = <256>;
+++	};
+++
+++	rpmi_clock: rpmi-clock@0 {
+++		compatible = "riscv,rpmi-mpxy-clock";
+++		mboxes = <&rpmi_mbox 0x8>;
+++		riscv,sbi-mpxy-channel-id = <8>;
+++	};
+++
+++	rpmi_logging: rpmi-logging@0 {
+++		compatible = "riscv,rpmi-mpxy-logging";
+++		mboxes = <&rpmi_mbox 0xe>;
+++		riscv,sbi-mpxy-channel-id = <14>;
+++	};
+++
+++	rpmi_sysmsi: rpmi-system-msi@0 {
+++		compatible = "riscv,rpmi-mpxy-system-msi";
+++		mboxes = <&rpmi_mbox 0x2>;
+++		riscv,sbi-mpxy-channel-id = <2>;
+++	};
+++
+++	rpmi_voltage: rpmi-voltage@0 {
+++		compatible = "riscv,rpmi-mpxy-voltage";
+++		mboxes = <&rpmi_mbox 0x7>;
+++		riscv,sbi-mpxy-channel-id = <7>;
+++	};
+++
+++	rpmi_performance: rpmi-performance@0 {
+++		compatible = "riscv,rpmi-mpxy-performance";
+++		mboxes = <&rpmi_mbox 0xa>;
+++		riscv,sbi-mpxy-channel-id = <10>;
+++	};
+++
+++	rpmi_mm: rpmi-mm@0 {
+++		compatible = "riscv,rpmi-mpxy-mm";
+++		mboxes = <&rpmi_mbox 0xb>;
+++		riscv,sbi-mpxy-channel-id = <11>;
+++	};
+++};
++--- a/drivers/gpu/drm/imagination/pvr_device.c
+++++ b/drivers/gpu/drm/imagination/pvr_device.c
++@@ -99,6 +99,9 @@
++ 	struct clk *core_clk;
++ 	struct clk *sys_clk;
++ 	struct clk *mem_clk;
+++	struct device *dev = drm_dev->dev;
+++	u32 core_clk_rate = PVR_CORE_CLK_RATE_HZ;
+++	int err;
++ 
++ 	core_clk = devm_clk_get(drm_dev->dev, "core");
++ 	if (IS_ERR(core_clk))
++@@ -115,6 +118,15 @@
++ 		return dev_err_probe(drm_dev->dev, PTR_ERR(mem_clk),
++ 				     "failed to get mem clock\n");
++ 
+++	of_property_read_u32(dev->of_node, "img,core-clock-rate-hz", &core_clk_rate);
+++	if (core_clk_rate > 0) {
+++		err = clk_set_rate(core_clk, core_clk_rate);
+++		if (err)
+++			return dev_err_probe(dev, err,
+++					     "failed to set core clock rate (%u Hz)\n",
+++					     core_clk_rate);
+++	}
+++
++ 	pvr_dev->core_clk = core_clk;
++ 	pvr_dev->sys_clk = sys_clk;
++ 	pvr_dev->mem_clk = mem_clk;
++--- a/drivers/gpu/drm/imagination/pvr_device.h
+++++ b/drivers/gpu/drm/imagination/pvr_device.h
++@@ -68,6 +68,10 @@
++ 	const struct pvr_power_sequence_ops *pwr_ops;
++ };
++ 
+++#ifndef PVR_CORE_CLK_RATE_HZ
+++#define PVR_CORE_CLK_RATE_HZ (1228 * 1000 * 1000U)
+++#endif
+++
++ /**
++  * struct pvr_device - powervr-specific wrapper for &struct drm_device
++  */
++--- a/drivers/gpu/drm/imagination/pvr_drv.c
+++++ b/drivers/gpu/drm/imagination/pvr_drv.c
++@@ -1532,4 +1532,5 @@
++ MODULE_IMPORT_NS("DMA_BUF");
++ MODULE_FIRMWARE("powervr/rogue_33.15.11.3_v1.fw");
++ MODULE_FIRMWARE("powervr/rogue_36.52.104.182_v1.fw");
+++MODULE_FIRMWARE("powervr/rogue_36.56.104.183_v1.fw");
++ MODULE_FIRMWARE("powervr/rogue_36.53.104.796_v1.fw");
+diff --git a/buildroot/qemu/board/spacemit/k3-uefi/patches/linux/0002-Remove-EFI-stub-debug-sections.patch b/buildroot/qemu/board/spacemit/k3-uefi/patches/linux/0002-Remove-EFI-stub-debug-sections.patch
+new file mode 100644
+index 0000000000000000000000000000000000000000..142fd916ea7074148d6abb9d35bc022d72db103e
+--- /dev/null
++++ b/buildroot/qemu/board/spacemit/k3-uefi/patches/linux/0002-Remove-EFI-stub-debug-sections.patch
+@@ -0,0 +1,11 @@
++--- a/drivers/firmware/efi/libstub/Makefile
+++++ b/drivers/firmware/efi/libstub/Makefile
++@@ -164,7 +164,7 @@ $(obj)/%.stub.o: $(obj)/%.o FORCE
++ #
++ quiet_cmd_stubcopy = STUBCPY $@
++       cmd_stubcopy =							\
++-	$(STRIP) --strip-debug -o $@ $<;				\
+++	$(OBJCOPY) --remove-section=.debug\* $< $@;			\
++ 	if $(OBJDUMP) -r $@ | grep $(STUBCOPY_RELOC-y); then		\
++ 		echo "$@: absolute symbol references not allowed in the EFI stub" >&2; \
++ 		/bin/false;						\
+diff --git a/buildroot/qemu/board/spacemit/k3-uefi/patches/mesa3d/0001-orc-static-cast.patch b/buildroot/qemu/board/spacemit/k3-uefi/patches/mesa3d/0001-orc-static-cast.patch
+new file mode 100644
+index 0000000000000000000000000000000000000000..d33c4bdc8684dbbe5255d1aa99eb369e1dea64df
+--- /dev/null
++++ b/buildroot/qemu/board/spacemit/k3-uefi/patches/mesa3d/0001-orc-static-cast.patch
+@@ -0,0 +1,11 @@
++--- a/src/gallium/auxiliary/gallivm/lp_bld_init_orc.cpp
+++++ b/src/gallium/auxiliary/gallivm/lp_bld_init_orc.cpp
++@@ -243,7 +243,7 @@
++       LPJit* jit = get_instance();
++       auto &ircl = jit->lljit->getIRCompileLayer();
++       auto &irc = ircl.getCompiler();
++-      auto &sc = dynamic_cast<llvm::orc::SimpleCompiler &>(irc);
+++      auto &sc = static_cast<llvm::orc::SimpleCompiler &>(irc);
++       jit->lookup_mutex.lock();
++       sc.setObjectCache(objcache);
++       auto func = ExitOnErr(jit->lljit->lookup(*JD, func_name));
+diff --git a/buildroot/qemu/board/spacemit/k3-uefi/patches/mesa3d/0002-powervr-linear-filter.patch b/buildroot/qemu/board/spacemit/k3-uefi/patches/mesa3d/0002-powervr-linear-filter.patch
+new file mode 100644
+index 0000000000000000000000000000000000000000..568a20a80ee2914d24302e8124d4f3adaddaf654
+--- /dev/null
++++ b/buildroot/qemu/board/spacemit/k3-uefi/patches/mesa3d/0002-powervr-linear-filter.patch
+@@ -0,0 +1,31 @@
++--- a/src/imagination/vulkan/pvr_formats.c
+++++ b/src/imagination/vulkan/pvr_formats.c
++@@ -262,12 +262,10 @@
++       vk_format_get_ycbcr_info(vk_format);
++ 
++    if (pvr_format->bind & PVR_BIND_SAMPLER_VIEW) {
++-      if (vk_tiling == VK_IMAGE_TILING_OPTIMAL) {
++-         const uint32_t first_component_size =
++-            vk_format_get_component_bits(vk_format,
++-                                         UTIL_FORMAT_COLORSPACE_RGB,
++-                                         0);
+++      const uint32_t first_component_size =
+++         vk_format_get_component_bits(vk_format, UTIL_FORMAT_COLORSPACE_RGB, 0);
++ 
+++      if (vk_tiling == VK_IMAGE_TILING_OPTIMAL) {
++          flags |= VK_FORMAT_FEATURE_2_SAMPLED_IMAGE_BIT |
++                   VK_FORMAT_FEATURE_2_TRANSFER_SRC_BIT |
++                   VK_FORMAT_FEATURE_2_TRANSFER_DST_BIT;
++@@ -289,6 +287,12 @@
++                   VK_FORMAT_FEATURE_2_TRANSFER_SRC_BIT |
++                   VK_FORMAT_FEATURE_2_TRANSFER_DST_BIT;
++ 
+++         if (!vk_format_is_int(vk_format) &&
+++             !vk_format_is_depth_or_stencil(vk_format) &&
+++             first_component_size < 32) {
+++            flags |= VK_FORMAT_FEATURE_2_SAMPLED_IMAGE_FILTER_LINEAR_BIT;
+++         }
+++
++          if (ycbcr_info) {
++             flags |= VK_FORMAT_FEATURE_2_COSITED_CHROMA_SAMPLES_BIT;
++          } else {
+diff --git a/buildroot/qemu/board/spacemit/k3-uefi/patches/opensbi/0001-k3-platform-config.patch b/buildroot/qemu/board/spacemit/k3-uefi/patches/opensbi/0001-k3-platform-config.patch
+new file mode 100644
+index 0000000000000000000000000000000000000000..27e897713b1cf667c2b702e36707b15e0a92434b
+--- /dev/null
++++ b/buildroot/qemu/board/spacemit/k3-uefi/patches/opensbi/0001-k3-platform-config.patch
+@@ -0,0 +1,18 @@
++--- /dev/null
+++++ b/platform/generic/configs/k3
++@@ -0,0 +1,15 @@
+++CONFIG_PLATFORM_SPACEMIT_K3=y
+++CONFIG_FDT=y
+++CONFIG_RPMI_MAILBOX=y
+++CONFIG_FDT_MAILBOX=y
+++CONFIG_FDT_MAILBOX_RPMI_SHMEM=y
+++CONFIG_SBI_ECALL_MPXY=y
+++CONFIG_FDT_MPXY=y
+++CONFIG_FDT_MPXY_RPMI_MBOX=y
+++CONFIG_FDT_MPXY_RPMI_CLOCK=y
+++CONFIG_FDT_MPXY_RPMI_LOGGING=y
+++CONFIG_FDT_MPXY_RPMI_SYSMSI=y
+++CONFIG_FDT_MPXY_RPMI_VOLTAGE=y
+++CONFIG_FDT_MPXY_RPMI_DEVICE_POWER=y
+++CONFIG_FDT_MPXY_RPMI_PERFORMANCE=y
+++CONFIG_FDT_MPXY_RPMI_MM=y
+diff --git a/buildroot/qemu/board/spacemit/k3-uefi/patches/opensbi/0002-k3-rpmi-doorbell.patch b/buildroot/qemu/board/spacemit/k3-uefi/patches/opensbi/0002-k3-rpmi-doorbell.patch
+new file mode 100644
+index 0000000000000000000000000000000000000000..b41de54f5cc9e1f353551ac9dc1bb4252a9cfada
+--- /dev/null
++++ b/buildroot/qemu/board/spacemit/k3-uefi/patches/opensbi/0002-k3-rpmi-doorbell.patch
+@@ -0,0 +1,15 @@
++--- a/lib/utils/mailbox/fdt_mailbox_rpmi_shmem.c
+++++ b/lib/utils/mailbox/fdt_mailbox_rpmi_shmem.c
++@@ -684,7 +684,12 @@
++ 	ret = fdt_get_node_addr_size(fdt, nodeoff, qid, &reg_addr,
++ 				       &reg_size);
++ 	if (!ret && !(strncmp(name, "a2p-doorbell", strlen("a2p-doorbell")))) {
+++#ifdef CONFIG_PLATFORM_SPACEMIT_K3
+++		mctl->mb_regs = (void *)((unsigned long)reg_addr + 0x40);
+++		writel(1, (void *)(((unsigned long)reg_addr) + 0x118));
+++#else
++ 		mctl->mb_regs = (void *)(unsigned long)reg_addr;
+++#endif
++ 		ret = sbi_domain_root_add_memrange(reg_addr, reg_size, reg_size,
++ 						   (SBI_DOMAIN_MEMREGION_MMIO |
++ 						    SBI_DOMAIN_MEMREGION_M_READABLE |
+diff --git a/buildroot/qemu/board/spacemit/k3-uefi/patches/opensbi/0003-k3-vendor-init.patch b/buildroot/qemu/board/spacemit/k3-uefi/patches/opensbi/0003-k3-vendor-init.patch
+new file mode 100644
+index 0000000000000000000000000000000000000000..cc1cdf5b4f9426b9354d150eee348b63b0c7944b
+--- /dev/null
++++ b/buildroot/qemu/board/spacemit/k3-uefi/patches/opensbi/0003-k3-vendor-init.patch
+@@ -0,0 +1,40 @@
++diff --git a/platform/generic/spacemit/k3.c b/platform/generic/spacemit/k3.c
++index 967d09b..5793006 100644
++--- a/platform/generic/spacemit/k3.c
+++++ b/platform/generic/spacemit/k3.c
++@@ -50,7 +50,6 @@ static void spacemit_k3_hart_init(u32 hartid)
++ 	csr_set(CSR_MSETUP, MSETUP_BOOT_FLAGS);
++ 
++ 	if (hartid < PLATFORM_A100_FIRST_ID) {
++-		/* MISA.H is writable on X100 and not implemented on A100. */
++ 		csr_set(CSR_MISA, MISA_EXT_H);
++ 		__sbi_hfence_gvma_all();
++ 	}
++@@ -71,7 +70,7 @@ static void spacemit_k3_keep_boot_hart_powered(void)
++ }
++ 
++ /* Program global state before the HSM starts any secondary hart. */
++-static void spacemit_k3_pre_init(void)
+++static int spacemit_k3_pre_init(void)
++ {
++ 	unsigned long entry = (unsigned long)&_spacemit_k3_warm_start;
++ 	int i;
++@@ -92,12 +91,16 @@ static void spacemit_k3_pre_init(void)
++ 		cci_enable_snoop_dvm_reqs(cci_map, i);
++ 
++ 	spacemit_k3_keep_boot_hart_powered();
+++	return 0;
++ }
++ 
++ static int spacemit_k3_early_init(bool cold_boot)
++ {
++-	if (cold_boot)
++-		spacemit_k3_pre_init();
+++	if (cold_boot) {
+++		int rc = spacemit_k3_pre_init();
+++		if (rc)
+++			return rc;
+++	}
++ 
++ 	return generic_early_init(cold_boot);
++ }
+diff --git a/buildroot/qemu/board/spacemit/k3-uefi/patches/pixman/0001-hwprobe-wrapper.patch b/buildroot/qemu/board/spacemit/k3-uefi/patches/pixman/0001-hwprobe-wrapper.patch
+new file mode 100644
+index 0000000000000000000000000000000000000000..30185bf745d106a909d9be071ed5d0fcc7836498
+--- /dev/null
++++ b/buildroot/qemu/board/spacemit/k3-uefi/patches/pixman/0001-hwprobe-wrapper.patch
+@@ -0,0 +1,40 @@
++--- a/meson.build
+++++ b/meson.build
++@@ -372,7 +372,7 @@
++   if host_machine.cpu_family() == 'riscv64'
++     if cc.compiles('''
++         #include <riscv_vector.h>
++-        #include <asm/hwprobe.h>
+++        #include <sys/hwprobe.h>
++         #include <linux/version.h>
++         #include <sys/auxv.h>
++         #include <sys/syscall.h>
++@@ -386,7 +386,7 @@
++         #endif
++         int main() {
++             struct riscv_hwprobe pair = {RISCV_HWPROBE_KEY_IMA_EXT_0, 0};
++-            long result = sys_riscv_hwprobe (&pair, 1, 0, 0, 0);
+++            long result = __riscv_hwprobe (&pair, 1, 0, 0, 0);
++             vfloat32m1_t tmp1; /* added in gcc-13 */
++             vfloat32m1x4_t tmp2; /* added in gcc-14 */
++             return 0;
++--- a/pixman/pixman-riscv.c
+++++ b/pixman/pixman-riscv.c
++@@ -30,7 +30,7 @@
++ #ifdef USE_RVV
++ 
++ #if defined(__linux__)
++-#include <asm/hwprobe.h>
+++#include <sys/hwprobe.h>
++ #include <sys/auxv.h>
++ #include <sys/syscall.h>
++ #include <unistd.h>
++@@ -39,7 +39,7 @@
++ is_rvv_1_0_available ()
++ {
++     struct riscv_hwprobe pair = {RISCV_HWPROBE_KEY_IMA_EXT_0, 0};
++-    if (sys_riscv_hwprobe (&pair, 1, 0, 0, 0) < 0)
+++    if (__riscv_hwprobe (&pair, 1, 0, 0, 0) < 0)
++     {
++ 	return 0;
++     }
+diff --git a/buildroot/qemu/board/spacemit/k3-uefi/patches/weston/0001-vulkan-direct-display.patch b/buildroot/qemu/board/spacemit/k3-uefi/patches/weston/0001-vulkan-direct-display.patch
+new file mode 100644
+index 0000000000000000000000000000000000000000..f9e61f02d023b6609e44d04411a7b9a5f94be240
+--- /dev/null
++++ b/buildroot/qemu/board/spacemit/k3-uefi/patches/weston/0001-vulkan-direct-display.patch
+@@ -0,0 +1,19 @@
++--- a/libweston/backend-drm/drm-gbm.c
+++++ b/libweston/backend-drm/drm-gbm.c
++@@ -825,6 +825,7 @@
++ 	struct drm_device *device = output->device;
++ 	struct linux_dmabuf_memory *dmabuf;
++ 	struct drm_fb *ret;
+++	uint32_t failure_reasons = 0;
++ 
++ 	output->base.compositor->renderer->repaint_output(&output->base,
++ 							  damage,
++@@ -840,7 +841,7 @@
++ 	 * the client. */
++ 	ret = drm_fb_get_from_dmabuf_attributes(dmabuf->attributes, device,
++ 						!output->format->opaque_substitute,
++-						false, true, NULL);
+++						true, true, &failure_reasons);
++ 	if (!ret) {
++ 		weston_log("failed to get drm_fb for dmabuf\n");
++ 		return NULL;
+diff --git a/buildroot/qemu/board/spacemit/k3-uefi/post-build.sh b/buildroot/qemu/board/spacemit/k3-uefi/post-build.sh
+new file mode 100755
+index 0000000000000000000000000000000000000000..7d56c35fa02738feb771ee91a6a437f97daa8caf
+--- /dev/null
++++ b/buildroot/qemu/board/spacemit/k3-uefi/post-build.sh
+@@ -0,0 +1,14 @@
++#!/bin/sh
++set -eu
++TARGET_DIR="$1"
++BOARD_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
++KEY_DIR="$BUILD_DIR/k3-keys"
++FIRMWARE_DIR="${K3_LINUX_FIRMWARE_DIR:-$BOARD_DIR/../../../../buildroot-k3-clean/src/linux-firmware/powervr}"
++mkdir -p "$KEY_DIR"
++if [ ! -f "$KEY_DIR/root_ed25519" ]; then
++	ssh-keygen -q -t ed25519 -N '' -C 'k3-root' -f "$KEY_DIR/root_ed25519"
++fi
++install -d -m 0700 "$TARGET_DIR/root/.ssh"
++install -m 0600 "$KEY_DIR/root_ed25519.pub" "$TARGET_DIR/root/.ssh/authorized_keys"
++install -d -m 0755 "$TARGET_DIR/lib/firmware/powervr"
++install -m 0644 "$FIRMWARE_DIR"/*.fw "$TARGET_DIR/lib/firmware/powervr/"
+diff --git a/buildroot/qemu/board/spacemit/k3-uefi/post-image.sh b/buildroot/qemu/board/spacemit/k3-uefi/post-image.sh
+new file mode 100755
+index 0000000000000000000000000000000000000000..9f2a46eb69d72ae6250c4bd6dc6d092f7ecfd9f1
+--- /dev/null
++++ b/buildroot/qemu/board/spacemit/k3-uefi/post-image.sh
+@@ -0,0 +1,31 @@
++#!/bin/sh
++set -eu
++: "${BUILD_DIR:?}"
++: "${HOST_DIR:?}"
++BINARIES_DIR="$1"
++BOARD_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
++RVA23_BOARD=k3-uefi "${HOST_DIR}/bin/fakeroot" -- "${BOARD_DIR}/../../../scripts/build-os-images.py"
++rm -rf "${BINARIES_DIR}/efi-part/loader/entries"
++install -m 0644 "${BOARD_DIR}/startup.nsh" "${BINARIES_DIR}/efi-part/startup.nsh"
++rm -f "${BINARIES_DIR}/bootfs.img"
++truncate -s 256M "${BINARIES_DIR}/bootfs.img"
++"${HOST_DIR}/sbin/mkfs.vfat" -F 16 -S 4096 -n ESP "${BINARIES_DIR}/bootfs.img"
++"${HOST_DIR}/bin/mcopy" -s -i "${BINARIES_DIR}/bootfs.img" "${BINARIES_DIR}/efi-part/EFI" "${BINARIES_DIR}/efi-part/loader" "${BINARIES_DIR}/efi-part/startup.nsh" ::
++cd "${BINARIES_DIR}"
++install -m 0644 "${BUILD_DIR}/edk2-spacemit-custom/fitimage/MUSE-Pico/MUSE-Pico.itb" "${BINARIES_DIR}/edk2.itb"
++install -m 0644 "${BOARD_DIR}/fw_dynamic.its" fw_dynamic.its
++"${HOST_DIR}/bin/mkimage" -f fw_dynamic.its fw_dynamic.itb
++install -m 0644 "${BOARD_DIR}/env.bin" env.bin
++install -m 0644 "${BOARD_DIR}/esos.itb" esos.itb
++install -m 0644 "${BOARD_DIR}/flasher-u-boot.itb" u-boot.itb
++install -d -m 0755 factory
++install -m 0644 "${BOARD_DIR}/factory/FSBL.bin" factory/FSBL.bin
++install -m 0644 "${BOARD_DIR}/factory/bootinfo_block.bin" factory/bootinfo_block.bin
++install -m 0644 "${BOARD_DIR}/factory/bootinfo_spinor.bin" factory/bootinfo_spinor.bin
++install -m 0644 "${BOARD_DIR}/factory/bootinfo_spinand.bin" factory/bootinfo_spinand.bin
++install -m 0644 "${BOARD_DIR}/partition_universal.json" partition_universal.json
++install -m 0644 "${BOARD_DIR}/partition_4M.json" partition_4M.json
++install -m 0644 "${BOARD_DIR}/partition_8M.json" partition_8M.json
++install -m 0644 "${BOARD_DIR}/partition_64M.json" partition_64M.json
++rm -f k3-uefi-pushrod.zip
++python3 -m zipfile -c k3-uefi-pushrod.zip partition_universal.json partition_4M.json partition_8M.json partition_64M.json env.bin factory/FSBL.bin factory/bootinfo_block.bin factory/bootinfo_spinor.bin factory/bootinfo_spinand.bin esos.itb fw_dynamic.itb edk2.itb u-boot.itb bootfs.img rootfs.ext4
+diff --git a/buildroot/qemu/board/spacemit/k3-uefi/rootfs-overlay/etc/fstab b/buildroot/qemu/board/spacemit/k3-uefi/rootfs-overlay/etc/fstab
+new file mode 100644
+index 0000000000000000000000000000000000000000..63cbd266baa3d005652f2ce2842bf457fcf09fbb
+--- /dev/null
++++ b/buildroot/qemu/board/spacemit/k3-uefi/rootfs-overlay/etc/fstab
+@@ -0,0 +1 @@
++/dev/sda1 /boot vfat defaults 0 0
+diff --git a/buildroot/qemu/board/spacemit/k3-uefi/rootfs-overlay/etc/network/interfaces b/buildroot/qemu/board/spacemit/k3-uefi/rootfs-overlay/etc/network/interfaces
+new file mode 100644
+index 0000000000000000000000000000000000000000..59955b9b18da7d079c96f8b4df604b41cffbb505
+--- /dev/null
++++ b/buildroot/qemu/board/spacemit/k3-uefi/rootfs-overlay/etc/network/interfaces
+@@ -0,0 +1,8 @@
++auto lo
++iface lo inet loopback
++
++auto eth0 eth1 eth2 enP2p1s0
++iface eth0 inet dhcp
++iface eth1 inet dhcp
++iface eth2 inet dhcp
++iface enP2p1s0 inet dhcp
+diff --git a/buildroot/qemu/board/spacemit/k3-uefi/rootfs-overlay/etc/profile.d/powervr.sh b/buildroot/qemu/board/spacemit/k3-uefi/rootfs-overlay/etc/profile.d/powervr.sh
+new file mode 100644
+index 0000000000000000000000000000000000000000..446c9454f07bcf4499e2fdbf890743336e2c51f5
+--- /dev/null
++++ b/buildroot/qemu/board/spacemit/k3-uefi/rootfs-overlay/etc/profile.d/powervr.sh
+@@ -0,0 +1 @@
++export PVR_I_WANT_A_BROKEN_VULKAN_DRIVER=1
+diff --git a/buildroot/qemu/board/spacemit/k3-uefi/rootfs-overlay/etc/ssh/sshd_config.d/k3.conf b/buildroot/qemu/board/spacemit/k3-uefi/rootfs-overlay/etc/ssh/sshd_config.d/k3.conf
+new file mode 100644
+index 0000000000000000000000000000000000000000..2256f25fa87c3f598149c13ffc42831626ddba2c
+--- /dev/null
++++ b/buildroot/qemu/board/spacemit/k3-uefi/rootfs-overlay/etc/ssh/sshd_config.d/k3.conf
+@@ -0,0 +1,5 @@
++PermitRootLogin prohibit-password
++PasswordAuthentication no
++KbdInteractiveAuthentication no
++ChallengeResponseAuthentication no
++PermitEmptyPasswords no
+diff --git a/buildroot/qemu/board/spacemit/k3-uefi/rootfs-overlay/etc/systemd/network/20-wired.network b/buildroot/qemu/board/spacemit/k3-uefi/rootfs-overlay/etc/systemd/network/20-wired.network
+new file mode 100644
+index 0000000000000000000000000000000000000000..93dc1c5db27abb4af5e7b8577241990d1607bff5
+--- /dev/null
++++ b/buildroot/qemu/board/spacemit/k3-uefi/rootfs-overlay/etc/systemd/network/20-wired.network
+@@ -0,0 +1,5 @@
++[Match]
++Name=eth*
++
++[Network]
++DHCP=yes
+diff --git a/buildroot/qemu/board/spacemit/k3-uefi/rootfs-overlay/etc/systemd/system/multi-user.target.wants/systemd-networkd.service b/buildroot/qemu/board/spacemit/k3-uefi/rootfs-overlay/etc/systemd/system/multi-user.target.wants/systemd-networkd.service
+new file mode 120000
+index 0000000000000000000000000000000000000000..4c158e62e19939d13d5ac981b16408e9b67aaefa
+--- /dev/null
++++ b/buildroot/qemu/board/spacemit/k3-uefi/rootfs-overlay/etc/systemd/system/multi-user.target.wants/systemd-networkd.service
+@@ -0,0 +1 @@
++/usr/lib/systemd/system/systemd-networkd.service
+\ No newline at end of file
+diff --git a/buildroot/qemu/board/spacemit/k3-uefi/rootfs-overlay/etc/systemd/system/weston.service b/buildroot/qemu/board/spacemit/k3-uefi/rootfs-overlay/etc/systemd/system/weston.service
+new file mode 100644
+index 0000000000000000000000000000000000000000..d0013bff7dff8b9139307d8bef536d52997d68f3
+--- /dev/null
++++ b/buildroot/qemu/board/spacemit/k3-uefi/rootfs-overlay/etc/systemd/system/weston.service
+@@ -0,0 +1,19 @@
++[Unit]
++Description=Weston
++After=systemd-udevd.service
++RequiresMountsFor=/run
++
++[Service]
++Type=simple
++Environment=XDG_RUNTIME_DIR=/run/weston
++Environment=PVR_I_WANT_A_BROKEN_VULKAN_DRIVER=1
++Environment=MESA_LOADER_DRIVER_OVERRIDE=zink
++Environment=GALLIUM_DRIVER=zink
++RuntimeDirectory=weston
++RuntimeDirectoryMode=0700
++ExecStartPre=/sbin/modprobe powervr
++ExecStart=/usr/bin/k3-weston
++Restart=on-failure
++
++[Install]
++WantedBy=graphical.target
+diff --git a/buildroot/qemu/board/spacemit/k3-uefi/rootfs-overlay/etc/weston.ini b/buildroot/qemu/board/spacemit/k3-uefi/rootfs-overlay/etc/weston.ini
+new file mode 100644
+index 0000000000000000000000000000000000000000..843aa93637a7a116ba4276c1e4729bd1df5b06d8
+--- /dev/null
++++ b/buildroot/qemu/board/spacemit/k3-uefi/rootfs-overlay/etc/weston.ini
+@@ -0,0 +1,11 @@
++[core]
++renderer=vulkan
++idle-time=0
++
++[launcher]
++icon=/usr/share/weston/icon_terminal.png
++path=/usr/bin/weston-terminal
++
++[launcher]
++icon=/usr/share/weston/icon_flower.png
++path=/usr/bin/es2gears_wayland
+diff --git a/buildroot/qemu/board/spacemit/k3-uefi/rootfs-overlay/usr/bin/k3-weston b/buildroot/qemu/board/spacemit/k3-uefi/rootfs-overlay/usr/bin/k3-weston
+new file mode 100755
+index 0000000000000000000000000000000000000000..d67bab1afb6e19ba43313a7f3dfbc25b5f43c7b9
+--- /dev/null
++++ b/buildroot/qemu/board/spacemit/k3-uefi/rootfs-overlay/usr/bin/k3-weston
+@@ -0,0 +1,11 @@
++#!/bin/sh
++set -eu
++DRM_DEVICE=card1
++for status in /sys/class/drm/card*-*/status; do
++	[ -e "$status" ] || continue
++	if [ "$(cat "$status" 2>/dev/null)" = connected ]; then
++		DRM_DEVICE=$(basename "$(dirname "$status")" | cut -d- -f1)
++		break
++	fi
++done
++exec /usr/bin/weston --config=/etc/weston.ini --drm-device="$DRM_DEVICE" --renderer=vulkan --idle-time=0 --continue-without-input --log=/run/weston/weston.log
+diff --git a/buildroot/qemu/board/spacemit/k3-uefi/rootfs-overlay/usr/lib/firmware/powervr/rogue_36.56.104.183_v1.fw b/buildroot/qemu/board/spacemit/k3-uefi/rootfs-overlay/usr/lib/firmware/powervr/rogue_36.56.104.183_v1.fw
+new file mode 100644
+index 0000000000000000000000000000000000000000..ba5466bd6d085d7a9745d877e90dc77018d149d1
+Binary files /dev/null and b/buildroot/qemu/board/spacemit/k3-uefi/rootfs-overlay/usr/lib/firmware/powervr/rogue_36.56.104.183_v1.fw differ
+diff --git a/buildroot/qemu/board/spacemit/k3-uefi/rootfs-overlay/usr/lib/firmware/rt24_os0_rcpu.elf b/buildroot/qemu/board/spacemit/k3-uefi/rootfs-overlay/usr/lib/firmware/rt24_os0_rcpu.elf
+new file mode 100755
+index 0000000000000000000000000000000000000000..a39b7f249a77d709c9c9d351d41e2a067924c147
+Binary files /dev/null and b/buildroot/qemu/board/spacemit/k3-uefi/rootfs-overlay/usr/lib/firmware/rt24_os0_rcpu.elf differ
+diff --git a/buildroot/qemu/board/spacemit/k3-uefi/rootfs-overlay/usr/lib/firmware/rt24_os1_rcpu.elf b/buildroot/qemu/board/spacemit/k3-uefi/rootfs-overlay/usr/lib/firmware/rt24_os1_rcpu.elf
+new file mode 100755
+index 0000000000000000000000000000000000000000..7f6025091a14089bd7da368504b45f170544dd40
+Binary files /dev/null and b/buildroot/qemu/board/spacemit/k3-uefi/rootfs-overlay/usr/lib/firmware/rt24_os1_rcpu.elf differ
+diff --git a/buildroot/qemu/board/spacemit/k3-uefi/startup.nsh b/buildroot/qemu/board/spacemit/k3-uefi/startup.nsh
+new file mode 100644
+index 0000000000000000000000000000000000000000..9a4a08d78cc60ed37e280c94c8b8216cb84c13fc
+--- /dev/null
++++ b/buildroot/qemu/board/spacemit/k3-uefi/startup.nsh
+@@ -0,0 +1 @@
++fs0:\EFI\BOOT\BOOTRISCV64.EFI
+diff --git a/buildroot/qemu/configs/k3_uefi_defconfig b/buildroot/qemu/configs/k3_uefi_defconfig
+new file mode 100644
+index 0000000000000000000000000000000000000000..fb2c5ac2adc9ab520bdc7b481b0c44cb8f9804f9
+--- /dev/null
++++ b/buildroot/qemu/configs/k3_uefi_defconfig
+@@ -0,0 +1,96 @@
++BR2_riscv=y
++BR2_riscv_custom=y
++BR2_RISCV_ISA_RVM=y
++BR2_RISCV_ISA_RVA=y
++BR2_RISCV_ISA_RVF=y
++BR2_RISCV_ISA_RVD=y
++BR2_RISCV_ISA_RVC=y
++BR2_RISCV_ISA_RVV=y
++BR2_RISCV_64=y
++BR2_RISCV_ABI_LP64D=y
++BR2_CCACHE=y
++BR2_TOOLCHAIN_BUILDROOT=y
++BR2_TOOLCHAIN_BUILDROOT_GLIBC=y
++BR2_TOOLCHAIN_BUILDROOT_CXX=y
++BR2_TOOLCHAIN_BUILDROOT_WCHAR=y
++BR2_KERNEL_HEADERS_AS_KERNEL=y
++BR2_PACKAGE_HOST_LINUX_HEADERS_CUSTOM_6_18=y
++BR2_GCC_VERSION_16_X=y
++BR2_TARGET_OPTIMIZATION="-mcpu=spacemit-x100"
++BR2_TARGET_GENERIC_HOSTNAME="k3"
++BR2_INIT_SYSTEMD=y
++BR2_ROOTFS_MERGED_USR=y
++BR2_ROOTFS_MERGED_BIN=y
++BR2_PACKAGE_SYSTEMD_DEFAULT_TARGET="graphical.target"
++BR2_PACKAGE_SYSTEMD_BOOT=y
++BR2_TARGET_GENERIC_GETTY=y
++BR2_TARGET_GENERIC_GETTY_PORT="ttyS0"
++BR2_TARGET_GENERIC_GETTY_BAUDRATE_115200=y
++BR2_TARGET_GENERIC_GETTY_TERM="vt100"
++BR2_ROOTFS_OVERLAY="$(BR2_EXTERNAL_RVA23_QEMU_PATH)/board/spacemit/k3-uefi/rootfs-overlay"
++BR2_ROOTFS_POST_BUILD_SCRIPT="$(BR2_EXTERNAL_RVA23_QEMU_PATH)/board/spacemit/k3-uefi/post-build.sh"
++BR2_ROOTFS_POST_IMAGE_SCRIPT="$(BR2_EXTERNAL_RVA23_QEMU_PATH)/board/spacemit/k3-uefi/post-image.sh"
++BR2_LINUX_KERNEL=y
++BR2_LINUX_KERNEL_CUSTOM_GIT=y
++BR2_LINUX_KERNEL_CUSTOM_REPO_URL="https://github.com/spacemit-com/linux-6.18.git"
++BR2_LINUX_KERNEL_CUSTOM_REPO_VERSION="7d17e358c660f1046eb1f27f26eea33955813afd"
++BR2_LINUX_KERNEL_USE_DEFCONFIG=y
++BR2_LINUX_KERNEL_DEFCONFIG="k3"
++BR2_LINUX_KERNEL_CONFIG_FRAGMENT_FILES="$(BR2_EXTERNAL_RVA23_QEMU_PATH)/board/spacemit/k3-uefi/linux.fragment"
++BR2_LINUX_KERNEL_PATCH="$(BR2_EXTERNAL_RVA23_QEMU_PATH)/board/spacemit/k3-uefi/patches/linux"
++BR2_LINUX_KERNEL_IMAGE=y
++BR2_LINUX_KERNEL_DTS_SUPPORT=y
++BR2_LINUX_KERNEL_INTREE_DTS_NAME="spacemit/k3-pico-itx"
++BR2_GLOBAL_PATCH_DIR="$(BR2_EXTERNAL_RVA23_QEMU_PATH)/board/spacemit/k3-uefi/patches"
++BR2_PACKAGE_EDK2_SPACEMIT=y
++BR2_TARGET_OPENSBI=y
++BR2_TARGET_OPENSBI_CUSTOM_GIT=y
++BR2_TARGET_OPENSBI_CUSTOM_REPO_URL="https://github.com/spacemit-com/opensbi-upstream.git"
++BR2_TARGET_OPENSBI_CUSTOM_REPO_VERSION="13a401f8ce4963b1e20d7685b806086bb8f5c4c8"
++BR2_TARGET_OPENSBI_PLAT="generic"
++BR2_TARGET_OPENSBI_INSTALL_DYNAMIC_IMG=y
++BR2_TARGET_OPENSBI_ADDITIONAL_VARIABLES="FW_TEXT_START=0x100000000 PLATFORM_DEFCONFIG=k3"
++BR2_PACKAGE_MESA3D=y
++BR2_PACKAGE_LLVM_RTTI=y
++BR2_PACKAGE_MESA3D_LLVM=y
++BR2_PACKAGE_MESA3D_GALLIUM_DRIVER_ZINK=y
++BR2_PACKAGE_MESA3D_VULKAN_DRIVER_IMAGINATION=y
++BR2_PACKAGE_MESA3D_NEEDS_PRECOMP_COMPILER=y
++BR2_PACKAGE_SPIRV_LLVM_TRANSLATOR=y
++BR2_PACKAGE_SPIRV_TOOLS=y
++BR2_PACKAGE_CLANG=y
++BR2_PACKAGE_MESA3D_GBM=y
++BR2_PACKAGE_MESA3D_OPENGL_EGL=y
++BR2_PACKAGE_MESA3D_OPENGL_ES=y
++BR2_PACKAGE_VULKAN_LOADER=y
++BR2_PACKAGE_VULKAN_TOOLS=y
++BR2_PACKAGE_MESA3D_DEMOS=y
++BR2_PACKAGE_LIBDECOR=y
++BR2_PACKAGE_WAYLAND=y
++BR2_PACKAGE_WAYLAND_PROTOCOLS=y
++BR2_PACKAGE_WESTON=y
++BR2_PACKAGE_WESTON_DEFAULT_DRM=y
++BR2_PACKAGE_WESTON_DRM=y
++BR2_PACKAGE_WESTON_VULKAN=y
++BR2_PACKAGE_WESTON_SHELL_DESKTOP=y
++BR2_PACKAGE_WESTON_DEMO_CLIENTS=y
++BR2_PACKAGE_WESTON_SIMPLE_CLIENTS=y
++BR2_PACKAGE_AVAHI=y
++BR2_PACKAGE_AVAHI_DAEMON=y
++BR2_PACKAGE_AVAHI_DEFAULT_SERVICES=y
++BR2_PACKAGE_NSS_MDNS=y
++BR2_PACKAGE_OPENSSH=y
++BR2_PACKAGE_OPENSSH_CLIENT=y
++BR2_PACKAGE_OPENSSH_SERVER=y
++BR2_PACKAGE_OPENSSH_KEY_UTILS=y
++BR2_PACKAGE_OPENSSH_SANDBOX=y
++BR2_PACKAGE_GETENT=y
++BR2_PACKAGE_LIBDRM_INSTALL_TESTS=y
++BR2_PACKAGE_HOST_UBOOT_TOOLS=y
++BR2_PACKAGE_HOST_UBOOT_TOOLS_FIT_SUPPORT=y
++BR2_PACKAGE_HOST_DOSFSTOOLS=y
++BR2_PACKAGE_HOST_MTOOLS=y
++BR2_TARGET_ROOTFS_EXT2=y
++BR2_TARGET_ROOTFS_EXT2_4=y
++BR2_TARGET_ROOTFS_EXT2_SIZE="2G"
++BR2_TARGET_ROOTFS_EXT2_NONE=y
+diff --git a/buildroot/qemu/external.mk b/buildroot/qemu/external.mk
+index 966171d475b05f71cf013088512be7e0ccc529f7..497ba27efcf50febfd055b1d407c8c0ab8e00f9c 100644
+--- a/buildroot/qemu/external.mk
++++ b/buildroot/qemu/external.mk
+@@ -1,3 +1,49 @@
++ifeq ($(BR2_PACKAGE_EDK2_SPACEMIT),y)
++LINUX_OVERRIDE_SRCDIR = $(abspath $(BR2_EXTERNAL_RVA23_QEMU_PATH)/../buildroot-k3-clean/src/linux)
++OPENSBI_OVERRIDE_SRCDIR = $(abspath $(BR2_EXTERNAL_RVA23_QEMU_PATH)/../buildroot-k3-clean/src/opensbi)
++HOST_SYSTEMD_DEPENDENCIES := $(filter-out host-tpm2-tss,$(HOST_SYSTEMD_DEPENDENCIES))
++define LINUX_APPLY_CUSTOM_DIR_PATCHES
++	@for p in $(call qstrip,$(BR2_LINUX_KERNEL_PATCH)); do \
++		[ -d "$$p" ] || continue; \
++		for f in $$p/*.patch; do \
++			[ -f "$$f" ] || continue; \
++			if patch -p1 -N --dry-run -d $(@D) < "$$f" >/dev/null 2>&1; then \
++				patch -p1 -N -d $(@D) < "$$f" || exit 1; \
++			fi; \
++		done; \
++	done
++endef
++LINUX_POST_RSYNC_HOOKS += LINUX_APPLY_CUSTOM_DIR_PATCHES
++define OPENSBI_APPLY_CUSTOM_DIR_PATCHES
++	@for f in $(BR2_EXTERNAL_RVA23_QEMU_PATH)/board/spacemit/k3-uefi/patches/opensbi/*.patch; do \
++		[ -f "$$f" ] || continue; \
++		if patch -p1 -N --dry-run -d $(@D) < "$$f" >/dev/null 2>&1; then \
++			patch -p1 -N -d $(@D) < "$$f" || exit 1; \
++		fi; \
++	done
++endef
++OPENSBI_POST_RSYNC_HOOKS += OPENSBI_APPLY_CUSTOM_DIR_PATCHES
++MESA3D_DEPENDENCIES += spirv-llvm-translator spirv-tools clang
++MESA3D_CONF_OPTS += -Dcpp_rtti=true
++HOST_CLANG_POST_INSTALL_HOOKS += K3_USE_REAL_CLANG
++define K3_USE_REAL_CLANG
++	ln -sf clang.br_real $(HOST_DIR)/bin/clang
++	ln -sf clang.br_real $(HOST_DIR)/bin/clang-22
++	ln -sf clang++.br_real $(HOST_DIR)/bin/clang++
++	ln -sf clang-cpp.br_real $(HOST_DIR)/bin/clang-cpp
++endef
++HOST_MESA3D_DEPENDENCIES += host-spirv-llvm-translator
++HOST_MESA3D_CONF_OPTS += -Dcpp_rtti=true
++HOST_MESA3D_POST_INSTALL_HOOKS += K3_INSTALL_PCO_CLC
++define K3_INSTALL_PCO_CLC
++	$(INSTALL) -D -m 0755 $(@D)/buildroot-build/src/imagination/pco/uscgen/pco_clc $(HOST_DIR)/bin/pco_clc
++endef
++HOST_GCC_INITIAL_POST_INSTALL_HOOKS += K3_GCC_INITIAL_ATOMIC_ASNEEDED
++define K3_GCC_INITIAL_ATOMIC_ASNEEDED
++	$(HOST_DIR)/bin/$(GNU_TARGET_NAME)-ar rcs $(HOST_DIR)/lib/gcc/$(GNU_TARGET_NAME)/17.0.0/libatomic_asneeded.a
++endef
++endif
++
+ define RVA23_APPLY_UBOOT_PATCHES
+ 	for patch in $(BR2_EXTERNAL_RVA23_QEMU_PATH)/patches/uboot/*.patch; do \
+ 		patch -p1 -d $(@D) < "$$patch" || exit 1; \
+@@ -9,6 +55,7 @@ include $(BR2_EXTERNAL_RVA23_QEMU_PATH)/package/sbsigntools/sbsigntools.mk
+ include $(BR2_EXTERNAL_RVA23_QEMU_PATH)/package/tpm2-tss/tpm2-tss.mk
+ include $(BR2_EXTERNAL_RVA23_QEMU_PATH)/package/k3s/k3s.mk
+ include $(BR2_EXTERNAL_RVA23_QEMU_PATH)/package/rva23-criu/criu.mk
++include $(BR2_EXTERNAL_RVA23_QEMU_PATH)/package/edk2-spacemit/edk2-spacemit.mk
+ 
+ define RVA23_PROVISION_EDK2_KEYS
+ 	$(HOST_DIR)/bin/python3 $(BR2_EXTERNAL_RVA23_QEMU_PATH)/scripts/provision-keys.py $(RVA23_KEY_DIR) $(@D)
+@@ -16,6 +63,7 @@ 	$(HOST_DIR)/bin/python3 $(BR2_EXTERNAL_RVA23_QEMU_PATH)/scripts/provision-edk2.py $(@D)
+ endef
+ EDK2_PRE_BUILD_HOOKS += RVA23_PROVISION_EDK2_KEYS
+ 
++ifneq ($(BR2_PACKAGE_EDK2_SPACEMIT),y)
+ define RVA23_PROVISION_LINUX_KEYS
+ 	$(HOST_DIR)/bin/python3 $(BR2_EXTERNAL_RVA23_QEMU_PATH)/scripts/provision-keys.py $(RVA23_KEY_DIR)
+ 	$(@D)/scripts/config --file $(@D)/.config --set-str SYSTEM_TRUSTED_KEYS "$(RVA23_KEY_DIR)/trusted.pem"
+@@ -29,3 +77,4 @@ HOST_SYSTEMD_DEPENDENCIES += host-libcurl host-openssl host-tpm2-tss
+ HOST_LIBCURL_CONF_OPTS += --without-brotli
+ HOST_QEMU_OPTS += --enable-u2f --enable-smartcard
+ LIBNL_MAKE = $(MAKE) -j1
++endif
+diff --git a/buildroot/qemu/package/edk2-spacemit/0001-Add-K3-UFS-support.patch b/buildroot/qemu/package/edk2-spacemit/0001-Add-K3-UFS-support.patch
+new file mode 100644
+index 0000000000000000000000000000000000000000..f83db09c9357ca1b3894e9129972d224e761ea7c
+--- /dev/null
++++ b/buildroot/qemu/package/edk2-spacemit/0001-Add-K3-UFS-support.patch
+@@ -0,0 +1,89 @@
++--- a/edk2-platforms/Platform/Spacemit/K3/DeviceTree/K3.dtsi
+++++ b/edk2-platforms/Platform/Spacemit/K3/DeviceTree/K3.dtsi
++@@ -9,6 +9,50 @@
++ 	compatible = "spacemit,k3", "riscv";
++ 	#address-cells = <2>;
++ 	#size-cells = <2>;
+++
+++	clocks {
+++		vctcxo_1m: clock-1m {
+++			compatible = "fixed-clock";
+++			clock-frequency = <1000000>;
+++			clock-output-names = "vctcxo_1m";
+++			#clock-cells = <0>;
+++		};
+++
+++		vctcxo_24m: clock-24m {
+++			compatible = "fixed-clock";
+++			clock-frequency = <24000000>;
+++			clock-output-names = "vctcxo_24m";
+++			#clock-cells = <0>;
+++		};
+++
+++		vctcxo_3m: clock-3m {
+++			compatible = "fixed-clock";
+++			clock-frequency = <3000000>;
+++			clock-output-names = "vctcxo_3m";
+++			#clock-cells = <0>;
+++		};
+++
+++		osc_32k: clock-32k {
+++			compatible = "fixed-clock";
+++			clock-frequency = <32768>;
+++			clock-output-names = "osc_32k";
+++			#clock-cells = <0>;
+++		};
+++
+++		reserved_clk: clock-reserved {
+++			compatible = "fixed-clock";
+++			clock-frequency = <0>;
+++			clock-output-names = "reserved_clk";
+++			#clock-cells = <0>;
+++		};
+++
+++		external_clk: clock-external {
+++			compatible = "fixed-clock";
+++			clock-frequency = <0>;
+++			clock-output-names = "external_clk";
+++			#clock-cells = <0>;
+++		};
+++	};
++ 
++ 	chosen {
++ 		stdout-path = "uart0:115200";
++@@ -188,6 +232,35 @@
++ 			 *   A100: no valid vs-level interrupt files.
++ 			 */
++ 			riscv,guest-index-bits = <6>;
+++			status = "okay";
+++		};
+++
+++		syscon_apmu: system-controller@d4282800 {
+++			compatible = "spacemit,k3-syscon-apmu";
+++			reg = <0x0 0xd4282800 0x0 0x400>;
+++			clocks = <&osc_32k>, <&vctcxo_1m>, <&vctcxo_3m>, <&vctcxo_24m>,
+++				 <&reserved_clk>, <&external_clk>;
+++			clock-names = "osc_32k", "vctcxo_1m", "vctcxo_3m", "vctcxo_24m",
+++				      "reserved_clk", "external_clk";
+++			#clock-cells = <1>;
+++			#power-domain-cells = <1>;
+++			#reset-cells = <1>;
+++		};
+++
+++		ufshc: ufshc@0xc0e00000 {
+++			#address-cells = <2>;
+++			#size-cells = <2>;
+++			compatible = "spacemit,k3-ufshcd";
+++			reg = <0x0 0xc0e00000 0x0 0x40000>;
+++			interrupt-parent = <&saplic>;
+++			interrupts = <135 0x4>;
+++			clocks = <&syscon_apmu 55>, <&syscon_apmu 56>;
+++			clock-names = "ufs-aclk", "ref_clk";
+++			resets = <&syscon_apmu 59>;
+++			reset-names = "ufs-aclk-rst";
+++			clock-freq = <491520000>;
+++			freq-table-hz = <491520000 491520000 19200000 19200000>;
+++			lanes-per-direction = <2>;
++ 			status = "okay";
++ 		};
++ 
+diff --git a/buildroot/qemu/package/edk2-spacemit/Config.in b/buildroot/qemu/package/edk2-spacemit/Config.in
+new file mode 100644
+index 0000000000000000000000000000000000000000..4c9e2e2f196174646e078704927f81dbe0ba1505
+--- /dev/null
++++ b/buildroot/qemu/package/edk2-spacemit/Config.in
+@@ -0,0 +1,11 @@
++config BR2_PACKAGE_EDK2_SPACEMIT
++	bool "edk2-spacemit"
++	depends on BR2_RISCV_64
++	depends on BR2_TOOLCHAIN_GCC_AT_LEAST_16
++	select BR2_PACKAGE_HOST_PYTHON3
++	select BR2_PACKAGE_HOST_UBOOT_TOOLS
++	select BR2_PACKAGE_HOST_UBOOT_TOOLS_FIT_SUPPORT
++	select BR2_PACKAGE_HOST_DTC
++	select BR2_PACKAGE_HOST_UTIL_LINUX
++	help
++	  Build the SpaceMiT K3 MUSE-Pico UEFI firmware FIT image.
+diff --git a/buildroot/qemu/package/edk2-spacemit/edk2-spacemit.mk b/buildroot/qemu/package/edk2-spacemit/edk2-spacemit.mk
+new file mode 100644
+index 0000000000000000000000000000000000000000..1df516f4cfb9cf5e6daeea29c7d4fb7d1a914082
+--- /dev/null
++++ b/buildroot/qemu/package/edk2-spacemit/edk2-spacemit.mk
+@@ -0,0 +1,45 @@
++EDK2_SPACEMIT_VERSION = c3ce74162ebeb2c3dbcaf2f430f4b9a00626d271
++EDK2_SPACEMIT_SITE = https://github.com/vhaudiquet/deb-edk2-spacemit.git
++EDK2_SPACEMIT_SITE_METHOD = git
++EDK2_SPACEMIT_LICENSE = BSD-2-Clause-Patent
++EDK2_SPACEMIT_LICENSE_FILES = edk2/License.txt edk2-platforms/License.txt
++EDK2_SPACEMIT_DEPENDENCIES = host-python3 host-uboot-tools host-dtc host-util-linux
++EDK2_SPACEMIT_INSTALL_TARGET = NO
++EDK2_SPACEMIT_INSTALL_IMAGES = YES
++
++define EDK2_SPACEMIT_APPLY_PATCHES
++	@for f in $(BR2_EXTERNAL_RVA23_QEMU_PATH)/package/edk2-spacemit/*.patch; do \
++		[ -f "$$f" ] || continue; \
++		if patch -p1 -N --dry-run -d $(@D) < "$$f" >/dev/null 2>&1; then \
++			patch -p1 -N -d $(@D) < "$$f" || exit 1; \
++		fi; \
++	done
++endef
++EDK2_SPACEMIT_POST_RSYNC_HOOKS += EDK2_SPACEMIT_APPLY_PATCHES
++
++EDK2_SPACEMIT_BUILD_ENV = \
++	MAKEFLAGS= \
++	WORKSPACE=$(@D) \
++	PACKAGES_PATH=$(@D)/edk2:$(@D)/edk2-platforms \
++	PYTHON_COMMAND=$(HOST_DIR)/bin/python3 \
++	PATH=$(HOST_DIR)/bin:$(HOST_DIR)/sbin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin \
++	GCC5_RISCV64_PREFIX=$(HOST_DIR)/bin/riscv64-buildroot-linux-gnu-
++
++EDK2_SPACEMIT_BASETOOLS_OPTS = \
++	EXTRA_OPTFLAGS="-I$(HOST_DIR)/include -Wno-error" \
++	EXTRA_LDFLAGS="-L$(HOST_DIR)/lib -Wl,-rpath,$(HOST_DIR)/lib"
++
++define EDK2_SPACEMIT_BUILD_CMDS
++	export $(EDK2_SPACEMIT_BUILD_ENV) && \
++	unset ARCH && \
++	source $(@D)/edk2/edksetup.sh && \
++	$(MAKE1) -C $(@D)/edk2/BaseTools -j$(PARALLEL_JOBS) $(EDK2_SPACEMIT_BASETOOLS_OPTS) && \
++	build -a RISCV64 -p Platform/Spacemit/K3/MUSE-Pico/MUSE-Pico.dsc \
++		-t GCC5 -b RELEASE -n 4
++endef
++
++define EDK2_SPACEMIT_INSTALL_IMAGES_CMDS
++	$(INSTALL) -D -m 0644 $(@D)/fitimage/MUSE-Pico/MUSE-Pico.itb $(BINARIES_DIR)/edk2.itb
++endef
++
++$(eval $(generic-package))
+diff --git a/buildroot/qemu/scripts/build-os-images.py b/buildroot/qemu/scripts/build-os-images.py
+index 6170c95317d3458946be9080f88fb39079891ef4..cfa604a365886b5262da6daaf4d2734a0ddbfd62 100755
+--- a/buildroot/qemu/scripts/build-os-images.py
++++ b/buildroot/qemu/scripts/build-os-images.py
+@@ -95,6 +95,31 @@     run(host / "bin/python3", host / "bin/ukify", "build", "--join-pcrsig", base, "--pcrsig", f"@{policy_file}", "--json=short", "--output", output)
+     base.unlink()
+ 
+ 
++def build_k3_images(host, binaries, target):
++    linux = binaries / "efi-part/EFI/Linux"
++    linux.mkdir(parents=True, exist_ok=True)
++    for old in linux.glob("*.efi"):
++        old.unlink()
++    output = linux / "k3_1.efi"
++    cmdline = "console=ttyS0,115200 root=/dev/sda2 rootwait rw"
++    (binaries / "k3_1.efi.cmdline").write_text(cmdline + "\n")
++    run(
++        host / "bin/python3",
++        host / "bin/ukify",
++        "build",
++        "--linux", binaries / "Image",
++        "--stub", target / "usr/lib/systemd/boot/efi/linuxriscv64.efi.stub",
++        "--efi-arch", "riscv64",
++        "--uname", "6.18.3",
++        "--cmdline", cmdline,
++        "--os-release", f"@{target / 'usr/lib/os-release'}",
++        "--output", output,
++    )
++    loader = binaries / "efi-part/loader"
++    loader.mkdir(parents=True, exist_ok=True)
++    (loader / "loader.conf").write_text("default k3_1.efi\ntimeout 0\neditor no\n")
++
++
+ def build_attested_client(host, binaries, usr):
+     environment = os.environ.copy()
+     environment.update({"GOOS": "linux", "GOARCH": "riscv64", "CGO_ENABLED": "0", "GOTOOLCHAIN": "local"})
+@@ -120,6 +145,9 @@ def main():
+     binaries = Path(os.environ["BINARIES_DIR"]).resolve()
+     target = Path(os.environ["TARGET_DIR"]).resolve()
+     host = Path(os.environ["HOST_DIR"]).resolve()
++    if os.environ.get("RVA23_BOARD") == "k3-uefi":
++        build_k3_images(host, binaries, target)
++        return
+     key_dir = Path(os.environ["RVA23_KEY_DIR"]).resolve()
+     version = os.environ.get("RVA23_VERSION", "1")
+     key_dir.mkdir(parents=True, exist_ok=True)
+diff --git a/buildroot/qemu/scripts/verify-wallet.py b/buildroot/qemu/scripts/verify-wallet.py
+index 4e2693d0a99430da09289d450e70ee40957fa8bb..358146cf5f99a5e41fd182371f55989d4d9bbfc8 100644
+--- a/buildroot/qemu/scripts/verify-wallet.py
++++ b/buildroot/qemu/scripts/verify-wallet.py
+@@ -6,6 +6,7 @@ import os
+ from pathlib import Path
+ import re
+ import secrets
++import shutil
+ import struct
+ import subprocess
+ import sys
+@@ -33,6 +34,10 @@     console.close()
+     loader = output / "wallet" / "loader.conf"
+     loader.write_text(f"default {profile}\ntimeout 0\neditor no\n")
+     subprocess.run([output / "host/bin/mcopy", "-o", "-i", f"{output / 'images/disk.img'}@@1048576", loader, "::/loader/loader.conf"], check=True)
++    initial = output / "build/edk2-edk2-stable202602/Build/RiscVVirtQemu/RELEASE_GCC5/FV/RISCV_VIRT_VARS.fd"
++    variables = output / "images/RISCV_VIRT_VARS.fd"
++    shutil.copyfile(initial, variables)
++    variables.write_bytes(variables.read_bytes().ljust(32 * 1024 * 1024, b"\0"))
+     return Console(output, "wallet.log", firmware=True)
+ 
+ 
+
