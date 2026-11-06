@@ -1,0 +1,64 @@
+From d4820e0e60c539ec5b63980821b56b3205c57c94 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Fri, 06 Nov 2026 12:31:10 -0700
+Subject: [PATCH] feat: Use from-source OpenSBI builds and drop previous verification services from images
+---
+diff --git a/buildroot/k3/board/spacemit/k3-uefi/post-build.sh b/buildroot/k3/board/spacemit/k3-uefi/post-build.sh
+index e018232d6aa8d3c3d1afe6a24481491432592ba4..1b105e1b55f06219217653c5fd395e49cfdd2367 100755
+--- a/buildroot/k3/board/spacemit/k3-uefi/post-build.sh
++++ b/buildroot/k3/board/spacemit/k3-uefi/post-build.sh
+@@ -17,4 +17,5 @@ rm -f "$TARGET_DIR/lib/firmware/rgx.sh.36.56.104.183"
+ rm -f "$TARGET_DIR/lib/firmware/powervr/rgx.fw.36.56.104.183"
+ rm -f "$TARGET_DIR/etc/systemd/system/k3-validation.service"
+ rm -f "$TARGET_DIR/etc/systemd/system/basic.target.wants/k3-validation.service"
++rm -f "$TARGET_DIR/etc/systemd/system/multi-user.target.wants/k3-validation.service"
+ K3_CLIENTS_ONLY=1 RVA23_BOARD=k3-uefi BINARIES_DIR="$BUILD_DIR/../images" TARGET_DIR="$TARGET_DIR" HOST_DIR="$BUILD_DIR/../host" "$BUILD_DIR/../host/bin/python3" "$BOARD_DIR/../../../scripts/build-os-images.py"
+diff --git a/buildroot/k3/board/spacemit/k3-uefi/rootfs-overlay/etc/systemd/system/k3-esp-type.service b/buildroot/k3/board/spacemit/k3-uefi/rootfs-overlay/etc/systemd/system/k3-esp-type.service
+index b01eeec98cfdb1287198c500482c4d8a5bb74ce8..b4ef47e230ae53a26caf5d0bb494b2fdc917abf7 100644
+--- a/buildroot/k3/board/spacemit/k3-uefi/rootfs-overlay/etc/systemd/system/k3-esp-type.service
++++ b/buildroot/k3/board/spacemit/k3-uefi/rootfs-overlay/etc/systemd/system/k3-esp-type.service
+@@ -1,10 +1,11 @@
+ [Unit]
+ Description=Set EFI System Partition type
+-Before=local-fs.target
++DefaultDependencies=no
++Before=boot.mount
+ 
+ [Service]
+ Type=oneshot
+ ExecStart=/bin/sh -c 'printf "\050\163\052\301\037\370\322\021\272\113\000\240\311\076\311\073" | dd of=/dev/sda bs=1 count=16 seek=4096 conv=notrunc'
+ 
+ [Install]
+-WantedBy=multi-user.target
++WantedBy=boot.mount
+diff --git a/buildroot/k3/board/spacemit/k3-uefi/rootfs-overlay/etc/systemd/system/multi-user.target.wants/k3-esp-type.service b/buildroot/k3/board/spacemit/k3-uefi/rootfs-overlay/etc/systemd/system/boot.mount.wants/k3-esp-type.service
+rename from buildroot/k3/board/spacemit/k3-uefi/rootfs-overlay/etc/systemd/system/multi-user.target.wants/k3-esp-type.service
+rename to buildroot/k3/board/spacemit/k3-uefi/rootfs-overlay/etc/systemd/system/boot.mount.wants/k3-esp-type.service
+diff --git a/buildroot/k3/board/spacemit/k3-uefi/rootfs-overlay/etc/systemd/system/swtpm.service b/buildroot/k3/board/spacemit/k3-uefi/rootfs-overlay/etc/systemd/system/swtpm.service
+index 6582a39749dacd8248ebdef4ab1ad529a4136c2b..bc439304e250414135138ae101d60d123cf72777 100644
+--- a/buildroot/k3/board/spacemit/k3-uefi/rootfs-overlay/etc/systemd/system/swtpm.service
++++ b/buildroot/k3/board/spacemit/k3-uefi/rootfs-overlay/etc/systemd/system/swtpm.service
+@@ -1,7 +1,7 @@
+ [Unit]
+ Description=K3 software TPM
+-After=local-fs.target
+-Before=systemd-report-sign-tpm2.socket
++DefaultDependencies=no
++Before=systemd-pcrlock.socket systemd-report-sign-tpm2.socket
+ 
+ [Service]
+ Type=simple
+diff --git a/buildroot/k3/configs/k3_uefi_defconfig b/buildroot/k3/configs/k3_uefi_defconfig
+index 60d551fecfd87ce01ebc91cee58db2ff08ac6979..395740927bc48ca2645812269fc619c5f40f88ac 100644
+--- a/buildroot/k3/configs/k3_uefi_defconfig
++++ b/buildroot/k3/configs/k3_uefi_defconfig
+@@ -45,7 +45,7 @@ BR2_PACKAGE_EDK2_SPACEMIT=y
+ BR2_TARGET_OPENSBI=y
+ BR2_TARGET_OPENSBI_CUSTOM_GIT=y
+ BR2_TARGET_OPENSBI_CUSTOM_REPO_URL="https://github.com/spacemit-com/opensbi.git"
+-BR2_TARGET_OPENSBI_CUSTOM_REPO_VERSION="742a8aec8662cb60c3ea49bec6dbbadd77ea833d"
++BR2_TARGET_OPENSBI_CUSTOM_REPO_VERSION="ad6091fd16c4d4a445168f6a479e1b8aadb4931c"
+ BR2_TARGET_OPENSBI_PLAT="generic"
+ BR2_TARGET_OPENSBI_INSTALL_DYNAMIC_IMG=y
+ BR2_TARGET_OPENSBI_ADDITIONAL_VARIABLES="FW_TEXT_START=0x100000000 PLATFORM_DEFCONFIG=k3_defconfig"
+
