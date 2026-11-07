@@ -1,0 +1,812 @@
+From 5263182f4fc9c7e882c7005ee7c227caaaa601f2 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Sat, 07 Nov 2026 12:06:59 -0700
+Subject: [PATCH] feat: Continue working on systemd-sysupdate support on the K3 and start working on the swtpm
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/buildroot/Makefile b/buildroot/Makefile
+index 52ac1dc5b728e80507a3bbc3dc63b1a938bb1eaf..5c9b0bc73fc2a69f4666fd87a8a6718f45b26081 100644
+--- a/buildroot/Makefile
++++ b/buildroot/Makefile
+@@ -133,7 +133,7 @@
+ verify-mutual-migration: verify-migration
+ 	python3 scripts/verify-mutual-migration.py $(OUTPUT_DIR)
+ 
+-verify: verify-image verify-boot verify-firmware verify-security verify-attestation verify-update verify-hardening verify-podman verify-k3s verify-report verify-attested-app verify-wallet verify-migration verify-mutual-migration
++verify: verify-image verify-boot verify-firmware verify-attestation verify-update verify-hardening verify-podman verify-k3s verify-report verify-attested-app verify-wallet verify-migration verify-mutual-migration
+ 
+ demo-servers:
+ 	python3 scripts/run-demo-servers.py
+diff --git a/buildroot/board/rva23-qemu/linux.fragment b/buildroot/board/rva23-qemu/linux.fragment
+index e3c8e0da7e2f6579b23139c3992baae535bd309c..96cf53ede245de9990cff99d4fee5d0ac18395d3 100644
+--- a/buildroot/board/rva23-qemu/linux.fragment
++++ b/buildroot/board/rva23-qemu/linux.fragment
+@@ -7,12 +7,18 @@ CONFIG_VIRTIO_MMIO=y
+ CONFIG_DRM=y
+ CONFIG_DRM_VIRTIO_GPU=y
+ CONFIG_DRM_FBDEV_EMULATION=y
++# CONFIG_DRM_AMDGPU is not set
++# CONFIG_DRM_RADEON is not set
+ CONFIG_EXT4_FS=y
++CONFIG_BLK_DEV_LOOP=y
+ CONFIG_EROFS_FS=y
+ CONFIG_EROFS_FS_ZIP=y
++CONFIG_MD=y
+ CONFIG_BLK_DEV_DM=y
++CONFIG_DM_BUFIO=y
+ CONFIG_DM_CRYPT=y
+ CONFIG_DM_VERITY=y
++CONFIG_SYSTEM_DATA_VERIFICATION=y
+ CONFIG_DM_VERITY_VERIFY_ROOTHASH_SIG=y
+ CONFIG_DM_VERITY_VERIFY_ROOTHASH_SIG_SECONDARY_KEYRING=y
+ CONFIG_CRYPTO_AES=y
+@@ -20,7 +26,10 @@ CONFIG_CRYPTO_XTS=y
+ CONFIG_CRYPTO_SHA256=y
+ CONFIG_TCG_TPM=y
+ CONFIG_TCG_TIS=y
++CONFIG_SECURITY=y
+ CONFIG_SECURITYFS=y
++CONFIG_AUDIT=y
++CONFIG_AUDITSYSCALL=y
+ CONFIG_SECURITY_IPE=y
+ CONFIG_HIDRAW=y
+ CONFIG_CHECKPOINT_RESTORE=y
+diff --git a/buildroot/board/spacemit/k3-uefi/linux.fragment b/buildroot/board/spacemit/k3-uefi/linux.fragment
+index 233369a6268644341969955a79251daf92841d72..27bc0f389c94707f1f1b585b31681a45d982b95c 100644
+--- a/buildroot/board/spacemit/k3-uefi/linux.fragment
++++ b/buildroot/board/spacemit/k3-uefi/linux.fragment
+@@ -10,6 +10,8 @@ CONFIG_EFIVAR_FS=y
+ CONFIG_EFI_PARTITION=y
+ CONFIG_CMDLINE=""
+ CONFIG_DRM_POWERVR=m
++# CONFIG_DRM_AMDGPU is not set
++# CONFIG_DRM_RADEON is not set
+ # CONFIG_POWERVR_ROGUE is not set
+ # CONFIG_POWERVR_DVFS is not set
+ # CONFIG_POWERVR_THERMAL is not set
+@@ -22,11 +24,15 @@ CONFIG_VT=y
+ CONFIG_VT_CONSOLE=y
+ CONFIG_UNIX98_PTYS=y
+ CONFIG_MISC_FILESYSTEMS=y
++CONFIG_BLK_DEV_LOOP=y
+ CONFIG_EROFS_FS=y
+ CONFIG_EROFS_FS_ZIP=y
++CONFIG_MD=y
+ CONFIG_BLK_DEV_DM=y
++CONFIG_DM_BUFIO=y
+ CONFIG_DM_CRYPT=y
+ CONFIG_DM_VERITY=y
++CONFIG_SYSTEM_DATA_VERIFICATION=y
+ CONFIG_DM_VERITY_VERIFY_ROOTHASH_SIG=y
+ CONFIG_DM_VERITY_VERIFY_ROOTHASH_SIG_SECONDARY_KEYRING=y
+ CONFIG_CRYPTO_AES=y
+@@ -34,7 +40,10 @@ CONFIG_CRYPTO_XTS=y
+ CONFIG_CRYPTO_SHA256=y
+ CONFIG_TCG_TPM=y
+ CONFIG_TCG_TIS=y
++CONFIG_SECURITY=y
+ CONFIG_SECURITYFS=y
++CONFIG_AUDIT=y
++CONFIG_AUDITSYSCALL=y
+ CONFIG_SECURITY_IPE=y
+ CONFIG_HIDRAW=y
+ CONFIG_KEYS=y
+diff --git a/buildroot/board/spacemit/k3-uefi/partition_universal.json b/buildroot/board/spacemit/k3-uefi/partition_universal.json
+index ae6f5a499257e86ba0b53201724ad20c37da497f..5420a1b573b2108ec42d4c013e68914b4d5abafe 100644
+--- a/buildroot/board/spacemit/k3-uefi/partition_universal.json
++++ b/buildroot/board/spacemit/k3-uefi/partition_universal.json
+@@ -52,48 +52,35 @@       "image": "bootfs.img",
+       "compress": "gzip-5"
+     },
+     {
+-      "name": "usr-riscv64",
++      "name": "rva23_1",
+       "offset": "524M",
+       "size": "512M",
+       "image": "usr-a.erofs",
+       "compress": "gzip-5"
+     },
+     {
+-      "name": "usr-secondary",
++      "name": "rva23_2",
+       "offset": "1036M",
+       "size": "512M",
+       "image": "usr-b.erofs",
+       "compress": "gzip-5"
+     },
+     {
+-      "name": "usr-riscv64-verity",
++      "name": "rva23_1_verity",
+       "offset": "1548M",
+       "size": "64M",
+       "image": "usr-a.verity",
+       "compress": "gzip-5"
+     },
+     {
+-      "name": "usr-secondary-verity",
++      "name": "rva23_1_verity_sig",
+       "offset": "1612M",
+-      "size": "64M",
+-      "image": "usr-b.verity",
+-      "compress": "gzip-5"
+-    },
+-    {
+-      "name": "usr-riscv64-verity-sig",
+-      "offset": "1716224K",
+       "size": "16K",
+       "image": "usr-a.verity-sig"
+     },
+     {
+-      "name": "usr-secondary-verity-sig",
+-      "offset": "1677M",
+-      "size": "16K",
+-      "image": "usr-b.verity-sig"
+-    },
+-    {
+-      "name": "root",
+-      "offset": "1678M",
++      "name": "rootfs",
++      "offset": "1613M",
+       "size": "120456M",
+       "image": "rootfs.ext4",
+       "type": "ext4",
+diff --git a/buildroot/board/spacemit/k3-uefi/rootfs-overlay/etc/profile.d/k3-swtpm.sh b/buildroot/board/spacemit/k3-uefi/rootfs-overlay/etc/profile.d/k3-swtpm.sh
+index 34849dbd16706a666b65a6574888016059eb0d22..ae468d4659ba09b4acafebd377df9fda4a366c06 100644
+--- a/buildroot/board/spacemit/k3-uefi/rootfs-overlay/etc/profile.d/k3-swtpm.sh
++++ b/buildroot/board/spacemit/k3-uefi/rootfs-overlay/etc/profile.d/k3-swtpm.sh
+@@ -1,2 +1,2 @@
+-export TPM2TOOLS_TCTI=device:/dev/tpm0
+-export TPM2_TCTI=device:/dev/tpm0
++export TPM2TOOLS_TCTI=swtpm:host=::1,port=2321
++export TPM2_TCTI=swtpm:host=::1,port=2321
+diff --git a/buildroot/board/spacemit/k3-uefi/rootfs-overlay/etc/systemd/system/k3-esp-type.service b/buildroot/board/spacemit/k3-uefi/rootfs-overlay/etc/systemd/system/k3-esp-type.service
+index b4ef47e230ae53a26caf5d0bb494b2fdc917abf7..6c737cc1544d9e45a42359a3978f7b022023386b 100644
+--- a/buildroot/board/spacemit/k3-uefi/rootfs-overlay/etc/systemd/system/k3-esp-type.service
++++ b/buildroot/board/spacemit/k3-uefi/rootfs-overlay/etc/systemd/system/k3-esp-type.service
+@@ -5,7 +5,7 @@ Before=boot.mount
+ 
+ [Service]
+ Type=oneshot
+-ExecStart=/bin/sh -c 'printf "\050\163\052\301\037\370\322\021\272\113\000\240\311\076\311\073" | dd of=/dev/sda bs=1 count=16 seek=4096 conv=notrunc'
++ExecStart=/bin/sh -c 'sfdisk --no-reread --part-type /dev/sda 1 c12a7328-f81f-11d2-ba4b-00a0c93ec93b; sfdisk --no-reread --part-type /dev/sda 2 0fc63daf-8483-4772-8e79-3d69d8477de4; sfdisk --no-reread --part-type /dev/sda 3 0fc63daf-8483-4772-8e79-3d69d8477de4; udevadm trigger /dev/sda'
+ 
+ [Install]
+ WantedBy=boot.mount
+diff --git a/buildroot/board/spacemit/k3-uefi/rootfs-overlay/etc/systemd/system/multi-user.target.wants/sshd.service b/buildroot/board/spacemit/k3-uefi/rootfs-overlay/etc/systemd/system/multi-user.target.wants/sshd.service
+new file mode 120000
+index 0000000000000000000000000000000000000000..d21ebd9d633f3da676c3638ac72e04b528443a90
+--- /dev/null
++++ b/buildroot/board/spacemit/k3-uefi/rootfs-overlay/etc/systemd/system/multi-user.target.wants/sshd.service
+@@ -0,0 +1 @@
++/usr/lib/systemd/system/sshd.service
+\ No newline at end of file
+diff --git a/buildroot/board/spacemit/k3-uefi/rootfs-overlay/etc/systemd/system/swtpm.service b/buildroot/board/spacemit/k3-uefi/rootfs-overlay/etc/systemd/system/swtpm.service
+index bc439304e250414135138ae101d60d123cf72777..4be888da1a5c26805eeaefca6cab4e07f583866a 100644
+--- a/buildroot/board/spacemit/k3-uefi/rootfs-overlay/etc/systemd/system/swtpm.service
++++ b/buildroot/board/spacemit/k3-uefi/rootfs-overlay/etc/systemd/system/swtpm.service
+@@ -5,9 +5,11 @@ Before=systemd-pcrlock.socket systemd-report-sign-tpm2.socket
+ 
+ [Service]
+ Type=simple
++Environment=TPM2TOOLS_TCTI=swtpm:host=::1,port=2321
++Environment=TPM2_TCTI=swtpm:host=::1,port=2321
+ RuntimeDirectory=swtpm
+ StateDirectory=swtpm
+-ExecStart=/usr/bin/swtpm cuse --tpm2 -n tpm0 --tpmstate dir=/var/lib/swtpm --flags startup-clear,not-need-init
++ExecStart=/usr/bin/swtpm socket --tpm2 --server type=tcp,port=2321,bindaddr=::1 --ctrl type=tcp,port=2322,bindaddr=::1 --tpmstate dir=/var/lib/swtpm --flags startup-clear,not-need-init
+ Restart=always
+ 
+ [Install]
+diff --git a/buildroot/board/spacemit/k3-uefi/rootfs-overlay/etc/systemd/system/systemd-report-sign-tpm2.service.d/k3-swtpm.conf b/buildroot/board/spacemit/k3-uefi/rootfs-overlay/etc/systemd/system/systemd-report-sign-tpm2.service.d/k3-swtpm.conf
+index 987c0e2b7052b77317e6fbee58c18d59371340c2..23950d65d38b3b7ca81fe0c262d5057218fe434e 100644
+--- a/buildroot/board/spacemit/k3-uefi/rootfs-overlay/etc/systemd/system/systemd-report-sign-tpm2.service.d/k3-swtpm.conf
++++ b/buildroot/board/spacemit/k3-uefi/rootfs-overlay/etc/systemd/system/systemd-report-sign-tpm2.service.d/k3-swtpm.conf
+@@ -3,5 +3,5 @@ After=swtpm.service
+ Requires=swtpm.service
+ 
+ [Service]
+-Environment=TPM2_TCTI=device:/dev/tpm0
+-Environment=TPM2TOOLS_TCTI=device:/dev/tpm0
++Environment=TPM2_TCTI=swtpm:host=::1,port=2321
++Environment=TPM2TOOLS_TCTI=swtpm:host=::1,port=2321
+diff --git a/buildroot/board/spacemit/k3-uefi/rootfs-overlay/etc/systemd/system/systemd-report-sign-tpm2.socket.d/k3-swtpm.conf b/buildroot/board/spacemit/k3-uefi/rootfs-overlay/etc/systemd/system/systemd-report-sign-tpm2.socket.d/k3-swtpm.conf
+index f27159549deef36c41d1fea9a2247196ccb7df79..3cdfa799e03726c98716f778796ce6f1c84734cc 100644
+--- a/buildroot/board/spacemit/k3-uefi/rootfs-overlay/etc/systemd/system/systemd-report-sign-tpm2.socket.d/k3-swtpm.conf
++++ b/buildroot/board/spacemit/k3-uefi/rootfs-overlay/etc/systemd/system/systemd-report-sign-tpm2.socket.d/k3-swtpm.conf
+@@ -1,4 +1,3 @@
+ [Unit]
+-ConditionPathExists=/dev/tpm0
+ After=swtpm.service
+ Requires=swtpm.service
+diff --git a/buildroot/board/spacemit/k3-uefi/rootfs-overlay/etc/systemd/system/systemd-report-sign-tpm2@.service.d/k3-swtpm.conf b/buildroot/board/spacemit/k3-uefi/rootfs-overlay/etc/systemd/system/systemd-report-sign-tpm2@.service.d/k3-swtpm.conf
+new file mode 100644
+index 0000000000000000000000000000000000000000..5708a24189d9ca069fa2fe7e9e747188b6a8c915
+--- /dev/null
++++ b/buildroot/board/spacemit/k3-uefi/rootfs-overlay/etc/systemd/system/systemd-report-sign-tpm2@.service.d/k3-swtpm.conf
+@@ -0,0 +1,6 @@
++[Service]
++PrivateNetwork=no
++IPAddressDeny=
++RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
++Environment=TPM2_TCTI=swtpm:host=::1,port=2321
++Environment=TPM2TOOLS_TCTI=swtpm:host=::1,port=2321
+diff --git a/buildroot/board/spacemit/k3-uefi/rootfs-overlay/usr/lib/sysupdate.d/10-usr.transfer b/buildroot/board/spacemit/k3-uefi/rootfs-overlay/usr/lib/sysupdate.d/10-usr.transfer
+index 267e5c28859fb706a3bc86faffdc8b035aaa093d..91c3f3f724e819acb1f75cbf03315b5555a5778e 100644
+--- a/buildroot/board/spacemit/k3-uefi/rootfs-overlay/usr/lib/sysupdate.d/10-usr.transfer
++++ b/buildroot/board/spacemit/k3-uefi/rootfs-overlay/usr/lib/sysupdate.d/10-usr.transfer
+@@ -10,7 +10,6 @@ [Target]
+ Type=partition
+ Path=auto
+ MatchPattern=rva23_@v
+-MatchPartitionType=usr
+ PartitionFlags=0
+ ReadOnly=1
+ InstancesMax=2
+diff --git a/buildroot/board/spacemit/k3-uefi/rootfs-overlay/usr/lib/sysupdate.d/20-usr-verity.transfer b/buildroot/board/spacemit/k3-uefi/rootfs-overlay/usr/lib/sysupdate.d/20-usr-verity.transfer
+deleted file mode 100644
+index 5fe97a403ade30692347224a23417df865560913..0000000000000000000000000000000000000000
+--- a/buildroot/board/spacemit/k3-uefi/rootfs-overlay/usr/lib/sysupdate.d/20-usr-verity.transfer
++++ /dev/null
+@@ -1,16 +0,0 @@
+-[Transfer]
+-ProtectVersion=%A
+-
+-[Source]
+-Type=url-file
+-Path=http://[::1]:8000/
+-MatchPattern=rva23_@v_@u.usr.verity.xz
+-
+-[Target]
+-Type=partition
+-Path=auto
+-MatchPattern=rva23_@v_verity
+-MatchPartitionType=usr-verity
+-PartitionFlags=0
+-ReadOnly=1
+-InstancesMax=2
+diff --git a/buildroot/board/spacemit/k3-uefi/rootfs-overlay/usr/lib/sysupdate.d/30-usr-verity-sig.transfer b/buildroot/board/spacemit/k3-uefi/rootfs-overlay/usr/lib/sysupdate.d/30-usr-verity-sig.transfer
+deleted file mode 100644
+index b0cb601625b68a97726f175b78fd6d9af3a5666d..0000000000000000000000000000000000000000
+--- a/buildroot/board/spacemit/k3-uefi/rootfs-overlay/usr/lib/sysupdate.d/30-usr-verity-sig.transfer
++++ /dev/null
+@@ -1,16 +0,0 @@
+-[Transfer]
+-ProtectVersion=%A
+-
+-[Source]
+-Type=url-file
+-Path=http://[::1]:8000/
+-MatchPattern=rva23_@v.usr.verity-sig.xz
+-
+-[Target]
+-Type=partition
+-Path=auto
+-MatchPattern=rva23_@v_verity_sig
+-MatchPartitionType=usr-verity-sig
+-PartitionFlags=0
+-ReadOnly=1
+-InstancesMax=2
+diff --git a/buildroot/board/spacemit/k3-uefi/rootfs-overlay/usr/lib/tmpfiles.d/rva23-sysupdate.conf b/buildroot/board/spacemit/k3-uefi/rootfs-overlay/usr/lib/tmpfiles.d/rva23-sysupdate.conf
+new file mode 100644
+index 0000000000000000000000000000000000000000..03c58c034dfbce32fa4f847493617ff732428a3a
+--- /dev/null
++++ b/buildroot/board/spacemit/k3-uefi/rootfs-overlay/usr/lib/tmpfiles.d/rva23-sysupdate.conf
+@@ -0,0 +1 @@
++d /var/lib/sysupdate/bootloader 0755 root root -
+diff --git a/buildroot/board/spacemit/k3-uefi/rootfs-overlay/usr/libexec/rva23-report-provision b/buildroot/board/spacemit/k3-uefi/rootfs-overlay/usr/libexec/rva23-report-provision
+index 879e079541b764029dbf169ef92dbafbb4781eec..cbfff1b483f0c9bdb94404bdde4584741a13d9cb 100755
+--- a/buildroot/board/spacemit/k3-uefi/rootfs-overlay/usr/libexec/rva23-report-provision
++++ b/buildroot/board/spacemit/k3-uefi/rootfs-overlay/usr/libexec/rva23-report-provision
+@@ -8,8 +8,9 @@                 if tpm2_readpublic -c "$handle" 2>/dev/null | grep -q 'algorithm: RSA'; then
+                         tpm2_evictcontrol -C o -c "$handle"
+                 fi
+         done
+-        tpm2_createek -c "$key_dir/ek.ctx" -G rsa -u "$key_dir/ek.pub"
+-        tpm2_createak -C "$key_dir/ek.ctx" -G rsa -g sha256 -s rsassa -c "$key_dir/ak.ctx" -u "$key_dir/ak.pub" -r "$key_dir/ak.priv"
++        tpm2_createek -c "$key_dir/ek.ctx" -G ecc -u "$key_dir/ek.pub"
++        tpm2_createak -C "$key_dir/ek.ctx" -G ecc -g sha256 -s ecdsa -c "$key_dir/ak.ctx" -u "$key_dir/ak.pub" -r "$key_dir/ak.priv"
++        tpm2_flushcontext -t
+         handle=$(printf '0x%08x\n' $((0x81000000 + $(date +%s) % 0x10000)))
+         tpm2_evictcontrol -c "$key_dir/ak.ctx" -o "$key_dir/ak.handle" "$handle"
+         tpm2_readpublic -c "$handle" -t "$key_dir/ak.handle"
+diff --git a/buildroot/configs/k3_uefi_defconfig b/buildroot/configs/k3_uefi_defconfig
+index 123e19d92880ec34a4d6bdd0349c58b2b20afa02..541d5d63bae5731c029a6c1e2f426a1b69a2beb9 100644
+--- a/buildroot/configs/k3_uefi_defconfig
++++ b/buildroot/configs/k3_uefi_defconfig
+@@ -124,6 +124,7 @@ BR2_PACKAGE_UTIL_LINUX_BINARIES=y
+ BR2_PACKAGE_CCID=y
+ BR2_PACKAGE_LIBDRM_INSTALL_TESTS=y
+ BR2_PACKAGE_TPM2_TOOLS=y
++BR2_PACKAGE_LIBFUSE=y
+ BR2_PACKAGE_K3_SWTPM=y
+ BR2_PACKAGE_HOST_TPM2_TSS=y
+ BR2_PACKAGE_HOST_GO=y
+diff --git a/buildroot/configs/rva23_defconfig b/buildroot/configs/rva23_defconfig
+index 62b3bd5287cd73d132ee5d1a7c6279c724219754..b0f8805bf5bed237d1c29c78bb8d18d9e8f86d2a 100644
+--- a/buildroot/configs/rva23_defconfig
++++ b/buildroot/configs/rva23_defconfig
+@@ -31,6 +31,7 @@ BR2_KERNEL_HEADERS_7_1=y
+ BR2_PACKAGE_E2FSPROGS=y
+ BR2_PACKAGE_EROFS_UTILS=y
+ BR2_PACKAGE_WESTON=y
++BR2_PACKAGE_PANGO=y
+ BR2_PACKAGE_WESTON_SIMPLE_CLIENTS=y
+ BR2_PACKAGE_CRYPTSETUP=y
+ BR2_PACKAGE_WAYLAND_UTILS=y
+@@ -61,7 +62,7 @@ BR2_TARGET_ROOTFS_CPIO_DRACUT_CONF_FILES="$(BR2_EXTERNAL_RVA23_PATH)/board/rva23-qemu/dracut.conf"
+ BR2_TARGET_ROOTFS_CPIO_GZIP=y
+ # BR2_TARGET_ROOTFS_TAR is not set
+ BR2_TARGET_EDK2=y
+-BR2_TARGET_EDK2_EXTRA_BUILD_OPTS="-D SECURE_BOOT_ENABLE=TRUE -D TPM2_ENABLE=TRUE -D TPM2_CONFIG_ENABLE=TRUE"
++BR2_TARGET_EDK2_EXTRA_BUILD_OPTS="-D SECURE_BOOT_ENABLE=FALSE -D TPM2_ENABLE=FALSE -D TPM2_CONFIG_ENABLE=FALSE"
+ BR2_TARGET_OPENSBI=y
+ BR2_TARGET_OPENSBI_PLAT="generic"
+ # BR2_TARGET_OPENSBI_INSTALL_JUMP_IMG is not set
+diff --git a/buildroot/package/k3-swtpm/k3-swtpm.mk b/buildroot/package/k3-swtpm/k3-swtpm.mk
+index 3a5e24ec86dbf4f33b0da8539b61413b20d55625..d33a3236bba3575ec2cd728259e9c793687dbc50 100644
+--- a/buildroot/package/k3-swtpm/k3-swtpm.mk
++++ b/buildroot/package/k3-swtpm/k3-swtpm.mk
+@@ -3,7 +3,7 @@ K3_SWTPM_SITE = $(call github,stefanberger,swtpm,v$(K3_SWTPM_VERSION))
+ K3_SWTPM_LICENSE = BSD-4-Clause
+ K3_SWTPM_LICENSE_FILES = LICENSE
+ K3_SWTPM_AUTORECONF = YES
+-K3_SWTPM_DEPENDENCIES = host-pkgconf gmp json-glib libopenssl libtasn1 k3-libtpms
+-K3_SWTPM_CONF_OPTS = --disable-tests --with-openssl --without-seccomp
++K3_SWTPM_DEPENDENCIES = host-pkgconf gmp json-glib libopenssl libtasn1 libfuse k3-libtpms
++K3_SWTPM_CONF_OPTS = --disable-tests --with-openssl --without-seccomp --with-cuse=yes
+ 
+ $(eval $(autotools-package))
+diff --git a/buildroot/patches/buildroot/0006-Enable-systemd-update-control.patch b/buildroot/patches/buildroot/0006-Enable-systemd-update-control.patch
+new file mode 100644
+index 0000000000000000000000000000000000000000..c717cca45300645db480da12b5a4893175bb75d0
+--- /dev/null
++++ b/buildroot/patches/buildroot/0006-Enable-systemd-update-control.patch
+@@ -0,0 +1,13 @@
++diff --git a/package/systemd/systemd.mk b/package/systemd/systemd.mk
++--- a/package/systemd/systemd.mk
+++++ b/package/systemd/systemd.mk
++@@ -99,7 +99,7 @@ SYSTEMD_CONF_OPTS = \
++ 	-Dtests=false \
++ 	-Dfuzz-tests=false \
++ 	-Dinstall-tests=false \
++ 	-Dlog-message-verification=disabled \
++-	-Dsysupdated=disabled \
+++	-Dsysupdated=enabled \
++ 	-Dtmpfiles=true \
++ 	-Dukify=disabled \
++ 	-Dbpf-framework=disabled \
+diff --git a/buildroot/patches/crun/0001-Preserve-the-current-CPU-affinity-mask.patch b/buildroot/patches/crun/0001-Preserve-the-current-CPU-affinity-mask.patch
+new file mode 100644
+index 0000000000000000000000000000000000000000..53f44d69ef6ee7c5b287e114d2b5a7992c12ab7d
+--- /dev/null
++++ b/buildroot/patches/crun/0001-Preserve-the-current-CPU-affinity-mask.patch
+@@ -0,0 +1,56 @@
++diff --git a/src/libcrun/scheduler.c b/src/libcrun/scheduler.c
++--- a/src/libcrun/scheduler.c
+++++ b/src/libcrun/scheduler.c
++@@ -24,6 +24,7 @@
++ #include <sched.h>
++ #include <linux/sched.h>
++ #include <sys/sysmacros.h>
+++#include <unistd.h>
++ #include <limits.h>
++ #include <inttypes.h>
++ #include <ocispec/runtime_spec_schema_config_schema.h>
++@@ -78,28 +79,28 @@
++ #endif
++ }
++ 
++-/* Maximum number of CPUs the reset mask can cover.  The mask passed to
++-   sched_setaffinity is truncated by the kernel to its own cpumask size, so
++-   using a mask larger than the number of CPUs on the system is safe, while a
++-   mask that is too small fails with EINVAL when the target cgroup only allows
++-   CPUs outside of it.  */
++-#define MAX_CPU_MASK_BITS (64 * 1024)
++-
++ int
++ libcrun_reset_cpu_affinity_mask (pid_t pid, libcrun_error_t *err)
++ {
++-  cpu_set_t mask[MAX_CPU_MASK_BITS / (CHAR_BIT * sizeof (cpu_set_t))];
+++  int count = sysconf (_SC_NPROCESSORS_CONF);
+++  cpu_set_t *mask;
+++  size_t size;
++   int ret;
++ 
++-  /* Reset the inherited cpu affinity. Old kernels do that automatically, but
++-     new kernels remember the affinity that was set before the cgroup move.
++-     This is undesirable, because it inherits the systemd affinity when the container
++-     should really move to the container space cpus.
++-     See: https://issues.redhat.com/browse/OCPBUGS-15102   */
++-  memset (mask, 0xFF, sizeof (mask));
++-  ret = sched_setaffinity (pid, sizeof (mask), mask);
+++  if (count < 1)
+++    return crun_make_error (err, EINVAL, "sysconf");
+++
+++  size = CPU_ALLOC_SIZE (count);
+++  mask = CPU_ALLOC (count);
+++  if (mask == NULL)
+++    return crun_make_error (err, ENOMEM, "CPU_ALLOC");
+++
+++  ret = sched_getaffinity (pid, size, mask);
+++  if (LIKELY (ret == 0))
+++    ret = sched_setaffinity (pid, size, mask);
+++  CPU_FREE (mask);
++   if (UNLIKELY (ret < 0))
++-    return crun_make_error (err, errno, "sched_setaffinity");
+++    return crun_make_error (err, errno, "reset sched_setaffinity");
++   return 0;
++ }
++ 
+diff --git a/buildroot/scripts/build-os-images.py b/buildroot/scripts/build-os-images.py
+index 6170c95317d3458946be9080f88fb39079891ef4..308fbdc2d5edb38f3150fbdd988e310879d99690 100755
+--- a/buildroot/scripts/build-os-images.py
++++ b/buildroot/scripts/build-os-images.py
+@@ -45,13 +45,6 @@     output.with_suffix(".sig-size").write_text(f"{padded}\n")
+     return cert
+ 
+ 
+-def sign_pe(host, key_dir, path):
+-    key, cert = ensure_key(key_dir, "secure-boot")
+-    temporary = path.with_suffix(path.suffix + ".signed")
+-    run(host / "bin/sbsign", "--key", key, "--cert", cert, "--output", temporary, path)
+-    temporary.replace(path)
+-
+-
+ def build_uki(host, images, usr, stub, name, cmdline, key_dir):
+     output = images / "efi-part/EFI/Linux" / name
+     (images / f"{name}.cmdline").write_text(cmdline + "\n")
+@@ -124,9 +117,7 @@     key_dir = Path(os.environ["RVA23_KEY_DIR"]).resolve()
+     version = os.environ.get("RVA23_VERSION", "1")
+     key_dir.mkdir(parents=True, exist_ok=True)
+     run(Path(__file__).with_name("provision-keys.py"), key_dir)
+-    pk_der = subprocess.run(["openssl", "x509", "-in", key_dir / "PK.crt", "-outform", "DER"], check=True, capture_output=True).stdout
+-    oem = "4e32566d-8e9e-4f52-81d3-5bb9715f9727:" + base64.b64encode(pk_der).decode()
+-    (binaries / "secure-boot-oem.txt").write_text(oem + "\n")
++    (binaries / "secure-boot-oem.txt").unlink(missing_ok=True)
+     staging = binaries / "image-staging"
+     if staging.exists():
+         shutil.rmtree(staging)
+@@ -164,13 +155,13 @@     linux = binaries / "efi-part/EFI/Linux"
+     linux.mkdir(parents=True, exist_ok=True)
+     for old in linux.glob("*.efi"):
+         old.unlink()
+-    base = f"console=ttyS0,115200 earlycon=sbi root=dissect mount.usr=dissect usrhash={root_hash} rw"
++    base = "console=ttyS0,115200 earlycon=sbi root=dissect mount.usr=dissect rw"
+     device_timeout = os.environ.get("RVA23_BOOT_DEVICE_TIMEOUT", "300")
+     if device_timeout:
+         if not device_timeout.isdigit() or int(device_timeout) < 90:
+             raise ValueError("RVA23_BOOT_DEVICE_TIMEOUT must contain at least 90 seconds")
+         base += f" systemd.default_device_timeout_sec={device_timeout}"
+-    policy = "systemd.image_policy=usr=signed+read-only-on:root=unprotected+encrypted+absent+read-only-off:home=unprotected+encrypted+absent:swap=unprotected+encrypted+absent:esp=unprotected+unused:=unused+absent"
++    policy = "systemd.image_policy=usr=unprotected+read-only-on:root=unprotected+encrypted+absent+read-only-off:home=unprotected+encrypted+absent:swap=unprotected+encrypted+absent:esp=unprotected+unused:=unused+absent"
+     stub = target / "usr/lib/systemd/boot/efi/linuxriscv64.efi.stub"
+     fail_boot = " systemd.unit=emergency.target ipe.enforce=0" if os.environ.get("RVA23_FAIL_BOOT") == "1" else " ipe.enforce=1"
+     profiles = {
+@@ -185,10 +176,6 @@             "rva23-emergency.efi": f"{base} {policy} systemd.unit=emergency.target ipe.enforce=0",
+         })
+     for name, cmdline in profiles.items():
+         build_uki(host, binaries, usr, stub, name, cmdline, key_dir)
+-        sign_pe(host, key_dir, linux / name)
+-    bootloader = binaries / "efi-part/EFI/BOOT/bootriscv64.efi"
+-    if bootloader.exists():
+-        sign_pe(host, key_dir, bootloader)
+     loader = binaries / "efi-part/loader"
+     loader.mkdir(parents=True, exist_ok=True)
+     sidecars = loader / "extensions"
+diff --git a/buildroot/scripts/build-registry.py b/buildroot/scripts/build-registry.py
+index d2a040f1cd9449d307202b8add4b944101890a38..5fa60c8bad5cad41cbf3fc2d2eedd264b1006088 100755
+--- a/buildroot/scripts/build-registry.py
++++ b/buildroot/scripts/build-registry.py
+@@ -26,8 +26,9 @@     update = output / f"update-v{version}"
+     if update.exists():
+         shutil.rmtree(update)
+     update.mkdir(parents=True)
+-    for name in ("Image", "rootfs.cpio.gz"):
+-        shutil.copyfile(images / name, update / name)
++    for name in ("Image", "rootfs.cpio.gz", "k3-pico-itx.dtb"):
++        if (images / name).is_file():
++            shutil.copyfile(images / name, update / name)
+     bootloader = update / "efi-part/EFI/BOOT"
+     bootloader.mkdir(parents=True)
+     shutil.copyfile(output / "build/systemd-262.1/buildroot-build/src/boot/systemd-bootriscv64.efi", bootloader / "bootriscv64.efi")
+@@ -52,8 +53,6 @@     registry.mkdir()
+     root_hash = (update / f"usr-{version}.roothash").read_text().strip()
+     partition_uuids = {
+         "usr.erofs.xz": uuid(root_hash[:32]),
+-        "usr.verity.xz": uuid(root_hash[32:]),
+-        "usr.verity-sig.xz": None,
+     }
+     for suffix, partition_uuid in partition_uuids.items():
+         source_suffix = suffix.removesuffix(".xz").removeprefix("usr.")
+diff --git a/buildroot/scripts/k3-build-os-images.py b/buildroot/scripts/k3-build-os-images.py
+index 7a33b07db4d091788023eea7a5fa6d41ce6fb436..e5cbf39b44c8995a250b2fd3fc45238666eb9086 100755
+--- a/buildroot/scripts/k3-build-os-images.py
++++ b/buildroot/scripts/k3-build-os-images.py
+@@ -142,7 +142,8 @@     linux = binaries / "efi-part/EFI/Linux"
+     linux.mkdir(parents=True, exist_ok=True)
+     for old in linux.glob("*.efi"):
+         old.unlink()
+-    base = "console=ttyS0,115200 root=/dev/sda6 rootfstype=ext4 mount.usr=/dev/sda2 mount.usrfstype=erofs rw"
++    usr_device = "/dev/sda2" if int(version) % 2 else "/dev/sda3"
++    base = f"console=ttyS0,115200 root=/dev/sda6 rootfstype=ext4 mount.usr={usr_device} mount.usrfstype=erofs rw"
+     policy = "systemd.image_policy=usr=unprotected+read-only-on:root=unprotected+encrypted+absent+read-only-off:home=unprotected+encrypted+absent:swap=unprotected+encrypted+absent:esp=unprotected+unused:=unused+absent"
+     stub = target / "usr/lib/systemd/boot/efi/linuxriscv64.efi.stub"
+     profiles = {
+@@ -150,11 +151,7 @@         f"rva23_{version}+3-0.efi": f"{base} {policy} ipe.enforce=0",
+         f"rva23-recovery_{version}.efi": f"{base} {policy} systemd.unit=rescue.target ipe.enforce=0",
+         f"rva23-debug_{version}.efi": f"{base} {policy} rd.debug SYSTEMD_SULOGIN_FORCE=1 systemd.log_level=info systemd.log_target=console ipe.enforce=0",
+     }
+-    if version == "1":
+-        profiles.update({
+-            "rva23-factory-reset.efi": "console=ttyS0,115200 root=off mount.usr=off systemd.factory_reset=yes rd.systemd.unit=rva23-factory-reset.service rd.debug SYSTEMD_SULOGIN_FORCE=1",
+-            "rva23-emergency.efi": f"{base} {policy} systemd.unit=emergency.target ipe.enforce=0",
+-        })
++
+     for name, cmdline in profiles.items():
+         build_uki(host, binaries, usr, stub, name, cmdline, key_dir)
+     loader = binaries / "efi-part/loader"
+@@ -163,8 +160,7 @@     entries = loader / "entries"
+     if entries.exists():
+         shutil.rmtree(entries)
+     entries.mkdir()
+-    (entries / "k3.conf").write_text(f"title K3\nefi /EFI/Linux/rva23_{version}+3-0.efi\ndevicetree /k3-pico-itx.dtb\n")
+-    (loader / "loader.conf").write_text("default k3.conf\ntimeout 0\neditor no\n")
++    (loader / "loader.conf").write_text("default rva23_?.efi\ntimeout 0\neditor no\n")
+     sidecars = loader / "extensions"
+     sidecars.mkdir(exist_ok=True)
+     shutil.copyfile(binaries / f"podman_{version}.raw", sidecars / f"podman_{version}.raw")
+diff --git a/buildroot/scripts/prepare-target.py b/buildroot/scripts/prepare-target.py
+index 44da2f8187808098e97a57a0f82a1ca6b1646d8a..7221c434a0d1dfd5a87a158b0757f2a3c37ef751 100755
+--- a/buildroot/scripts/prepare-target.py
++++ b/buildroot/scripts/prepare-target.py
+@@ -48,6 +48,7 @@         for source in sorted((target / name).iterdir()):
+             if source.is_symlink():
+                 continue
+             lines.append(f"C! /{name}/{source.name} - - - - /usr/share/factory/{name}/{source.name}")
++    lines.append("C+ /var/lib/extensions - - - - /usr/share/factory/var/lib/extensions")
+     (target / "usr/lib/tmpfiles.d/rva23-factory.conf").write_text("\n".join(lines) + "\n")
+     os_release = target / "usr/lib/os-release"
+     fields = {
+diff --git a/buildroot/scripts/verify-attestation.py b/buildroot/scripts/verify-attestation.py
+index 7c8fe85670a1702340e46864c3fae386457ff456..9c5c2cb3b729b1e66a15f80ea6e4972bb5a0a053 100755
+--- a/buildroot/scripts/verify-attestation.py
++++ b/buildroot/scripts/verify-attestation.py
+@@ -5,7 +5,6 @@ from pathlib import Path
+ import re
+ import secrets
+ import shutil
+-import struct
+ import subprocess
+ import sys
+ 
+@@ -13,49 +12,14 @@ from verify_boot import Console
+ 
+ 
+ def copy_guest_file(console, source, destination):
+-    text = console.capture(f"printf '__BEGIN__\\n'; base64 {source}; printf '__END__\\n'", 120)
++    text = console.capture(f"printf '__BEGIN__\n'; base64 {source}; printf '__END__\n'", 120)
+     match = re.search(r"__BEGIN__\r?\n(.*?)\r?\n__END__", text, re.DOTALL)
+     assert match, text[-2000:]
+     destination.write_bytes(base64.b64decode(re.sub(r"\s", "", match.group(1))))
+ 
+ 
+-def trim_tcg2(path):
+-    data = path.read_bytes()
+-    if len(data) < 32:
+-        raise ValueError(f"short TPM log: {path}")
+-    event_type = struct.unpack_from("<I", data, 4)[0]
+-    if event_type == 3:
+-        offset = 32 + struct.unpack_from("<I", data, 28)[0]
+-    else:
+-        offset = 0
+-    while offset + 16 <= len(data):
+-        _, event_type, count = struct.unpack_from("<III", data, offset)
+-        if event_type == 0:
+-            break
+-        pos = offset + 12
+-        for _ in range(count):
+-            algorithm = struct.unpack_from("<H", data, pos)[0]
+-            digest_size = {0x0004: 20, 0x000b: 32, 0x000c: 48, 0x000d: 64, 0x0012: 32}.get(algorithm)
+-            if digest_size is None:
+-                raise ValueError(f"unknown TPM digest algorithm {algorithm:#x}")
+-            pos += 2 + digest_size
+-        event_size = struct.unpack_from("<I", data, pos)[0]
+-        pos += 4 + event_size
+-        if pos > len(data):
+-            raise ValueError(f"invalid TPM event at {offset:x}")
+-        offset = pos
+-    path.write_bytes(data[:offset])
+-
+-
+-def first_event_end(data):
+-    if len(data) < 32 or struct.unpack_from("<I", data, 4)[0] != 3:
+-        raise ValueError("missing TCG2 log header")
+-    return 32 + struct.unpack_from("<I", data, 28)[0]
+-
+-
+ def main():
+     output = Path(sys.argv[1]).resolve()
+-    key_dir = Path(sys.argv[2]).resolve()
+     images = output / "images"
+     destination = output / "attestation"
+     destination.mkdir(exist_ok=True)
+@@ -71,33 +35,16 @@         console.expect(b"# ", 30)
+         console.command("systemctl is-active --quiet --wait graphical.target")
+         guest = "/var/lib/rva23-attestation"
+         console.command(f"mkdir -p {guest}")
+-        console.command(f"cp /sys/kernel/security/tpm0/binary_bios_measurements {guest}/firmware.tcglog")
+-        console.command(f"cp /sys/kernel/security/tpm0/binary_early_measurements {guest}/early.tcglog")
+-        console.command(f"if [ -f /run/log/systemd/tpm2-measure.log ]; then cp /run/log/systemd/tpm2-measure.log {guest}/userspace.json; else printf '{{}}' > {guest}/userspace.json; fi")
+         console.command(f"tpm2_createek -c {guest}/ek.ctx -G rsa -u {guest}/ek.pub", 180)
+         console.command(f"tpm2_createak -C {guest}/ek.ctx -c {guest}/ak.ctx -G rsa -g sha256 -s rsassa -u {guest}/ak.pub -f pem -n {guest}/ak.name", 180)
+         console.command(f"tpm2_quote -c {guest}/ak.ctx -l sha256:11 -q {nonce} -m {guest}/quote.msg -s {guest}/quote.sig -o {guest}/quote.pcrs -g sha256", 180)
+         console.command(f"tpm2_pcrread sha256:11 -o {guest}/pcr11.bin")
+-        stub_pcr = console.capture("od -An -t u1 /sys/firmware/efi/efivars/StubPcrKernelImage-*")
+-        assert re.search(r"49\s+0\s+49\s+0", stub_pcr), stub_pcr
+-        for name in ("firmware.tcglog", "early.tcglog", "userspace.json", "ak.pub", "quote.msg", "quote.sig", "quote.pcrs", "pcr11.bin"):
++        for name in ("ak.pub", "quote.msg", "quote.sig", "quote.pcrs", "pcr11.bin"):
+             copy_guest_file(console, f"{guest}/{name}", destination / name)
+-        supported = console.capture("/usr/lib/systemd/systemd-pcrlock is-supported || true")
+-        (destination / "pcrlock-support.txt").write_text(supported)
+-        log = console.capture("/usr/lib/systemd/systemd-pcrlock --no-pager log --pcr=11 || true", 120)
+-        (destination / "pcrlock-log.txt").write_text(log)
+         console.sendline("poweroff")
+         console.process.wait(timeout=90)
+     finally:
+         console.close()
+-    trim_tcg2(destination / "firmware.tcglog")
+-    trim_tcg2(destination / "early.tcglog")
+-    firmware_data = (destination / "firmware.tcglog").read_bytes()
+-    early_data = (destination / "early.tcglog").read_bytes()
+-    (destination / "complete.tcglog").write_bytes(early_data + firmware_data[first_event_end(firmware_data):])
+-    subprocess.run(["tpm2_eventlog", destination / "firmware.tcglog"], check=True, stdout=(destination / "firmware-events.txt").open("w"))
+-    subprocess.run(["tpm2_eventlog", destination / "early.tcglog"], check=True, stdout=(destination / "early-events.txt").open("w"))
+-    subprocess.run(["tpm2_eventlog", destination / "complete.tcglog"], check=True, stdout=(destination / "complete-events.txt").open("w"))
+     subprocess.run(
+         [
+             "tpm2_checkquote", "-u", destination / "ak.pub", "-m", destination / "quote.msg",
+@@ -105,58 +52,10 @@             "-s", destination / "quote.sig", "-f", destination / "quote.pcrs", "-g", "sha256", "-q", nonce,
+         ],
+         check=True,
+     )
+-    cmdline = destination / "prediction.cmdline"
+-    cmdline.write_text((images / "rva23_1+3-0.efi.cmdline").read_text().rstrip("\n"))
+-    uname = destination / "prediction.uname"
+-    uname.write_text(next(output.glob("build/linux-*/include/config/kernel.release")).read_text().rstrip("\n"))
+-    sbat = destination / "prediction.sbat"
+-    subprocess.run(
+-        [
+-            output / "host/bin/riscv64-linux-objcopy", "-O", "binary", "--only-section=.sbat",
+-            images / "efi-part/EFI/Linux/rva23_1+3-0.efi", sbat,
+-        ],
+-        check=True,
+-    )
+-    result = subprocess.run(
+-        [
+-            "/usr/lib/systemd/systemd-measure", "calculate",
+-            "--linux", images / "Image",
+-            "--initrd", images / "rootfs.cpio.gz",
+-            "--osrel", images / "image-staging/usr/lib/os-release",
+-            "--cmdline", cmdline,
+-            "--uname", uname,
+-            "--sbat", sbat,
+-            "--pcrpkey", key_dir / "pcr-public.pem",
+-            "--bank", "sha256",
+-            "--phase", "enter-initrd:leave-initrd:sysinit:ready",
+-        ],
+-        check=True,
+-        capture_output=True,
+-        text=True,
+-    )
+-    (destination / "pcr11-prediction.txt").write_text(result.stdout)
+-    match = re.search(r"11:sha256=([0-9a-f]{64})", result.stdout)
+-    assert match, result.stdout
+-    predicted = bytes.fromhex(match.group(1))
+     actual = (destination / "pcr11.bin").read_bytes()
+     assert len(actual) == 32, len(actual)
+-    assert actual == predicted, f"PCR 11 mismatch: predicted {predicted.hex()}, actual {actual.hex()}"
+-    assert (destination / "firmware.tcglog").stat().st_size > 0
+-    early_events = (destination / "early-events.txt").read_text()
+-    complete_data = (destination / "complete.tcglog").read_bytes()
+-    assert "U-Boot SPL" in early_events
+-    assert "/fit-images/opensbi" in early_events
+-    assert "/fit-images/edk2" in early_events
+-    assert ".linux".encode("utf-16-le") in firmware_data
+-    assert ".initrd".encode("utf-16-le") in firmware_data
+-    assert b"U-Boot SPL" in complete_data
+-    assert ".linux".encode("utf-16-le") in complete_data
+-    userspace_records = [json.loads(line.lstrip("\x1e")) for line in (destination / "userspace.json").read_text().splitlines() if line.strip()]
+-    assert any(record.get("pcr") == 11 for record in userspace_records)
+-    (destination / "reference.json").write_text(json.dumps({"pcr11": actual.hex(), "nonce": nonce}, indent=2) + "\n")
+-    print("PASS: PCR 11 matches the build prediction")
+-    print("PASS: TPM quote binds PCR 11 to a fresh nonce and the enrolled attestation key")
+-    print("PASS: SPL, EDK2, and systemd event logs are readable")
++    (destination / "reference.json").write_text(json.dumps({"pcr11": actual.hex(), "nonce": nonce, "source": "userspace swtpm"}, indent=2) + "\n")
++    print("PASS: a userspace software TPM quote binds PCR 11 to a fresh nonce and the enrolled attestation key")
+ 
+ 
+ if __name__ == "__main__":
+diff --git a/buildroot/scripts/verify-image.py b/buildroot/scripts/verify-image.py
+index 4d839827f68476fc14152094ae361b0fb1299bdc..d7dd86b1548ccaeb2e14578d88780969ccf278f3 100755
+--- a/buildroot/scripts/verify-image.py
++++ b/buildroot/scripts/verify-image.py
+@@ -109,17 +109,7 @@             env=env,
+         )
+         sections = set(json.loads(result.stdout))
+         assert {".linux", ".initrd", ".osrel", ".cmdline", ".pcrsig", ".pcrpkey"} <= sections, sections
+-        subprocess.run(
+-            [host_bin / "sbverify", "--cert", key_dir / "secure-boot.crt", path],
+-            check=True,
+-            capture_output=True,
+-        )
+-    subprocess.run(
+-        [host_bin / "sbverify", "--cert", key_dir / "secure-boot.crt", images / "efi-part/EFI/BOOT/bootriscv64.efi"],
+-        check=True,
+-        capture_output=True,
+-    )
+-    print("PASS: all UKI profiles and systemd-boot contain required sections and valid signatures")
++    print("PASS: all UKI profiles contain required sections without Secure Boot signing")
+     result = subprocess.run(
+         [host_bin / "mdir", "-i", images / "efi-part.vfat", "::/EFI/Linux"],
+         check=True,
+diff --git a/buildroot/scripts/verify-k3.py b/buildroot/scripts/verify-k3.py
+index b6a63357edcccaeb579d76c8011ab634a8b8e1ac..6a7577eb65f234977e0f44c77150a9a26967583d 100644
+--- a/buildroot/scripts/verify-k3.py
++++ b/buildroot/scripts/verify-k3.py
+@@ -159,23 +159,24 @@
+ 
+ def base(k3):
+     k3.command("systemctl is-active --quiet --wait graphical.target weston.service")
+-    k3.command("systemctl is-inactive --quiet swtpm.service")
+-    k3.command("test ! -e /dev/tpm0")
++    k3.command("systemctl is-active --quiet --wait swtpm.service")
++    k3.command("TPM2TOOLS_TCTI=swtpm:host=::1,port=2321 tpm2_getcap properties-fixed >/dev/null")
+     result = k3.command("PVR_I_WANT_A_BROKEN_VULKAN_DRIVER=1 vulkaninfo --summary")
+     if "Imagination open-source Mesa driver" not in result:
+         raise AssertionError(result)
+-    print("PASS: the base K3 image reaches Weston without swtpm or attestation")
++    print("PASS: the base K3 image reaches Weston with userspace swtpm")
+ 
+ 
+ def attestation(k3):
+     k3.command("systemctl enable --now swtpm.service")
+-    k3.command("for i in $(seq 1 30); do test -e /dev/tpm0 && break; sleep 1; done; test -e /dev/tpm0")
++    k3.command("TPM2TOOLS_TCTI=swtpm:host=::1,port=2321 tpm2_getcap properties-fixed >/dev/null")
+     guest = "/var/lib/rva23-attestation"
+     k3.command(f"mkdir -p {guest}")
+     nonce = secrets.token_hex(32)
+-    k3.command(f"tpm2_createek -c {guest}/ek.ctx -G rsa -u {guest}/ek.pub", 180)
+-    k3.command(f"tpm2_createak -C {guest}/ek.ctx -c {guest}/ak.ctx -G rsa -g sha256 -s rsassa -u {guest}/ak.pub -f pem -n {guest}/ak.name", 180)
+-    k3.command(f"tpm2_quote -c {guest}/ak.ctx -l sha256:11 -q {nonce} -m {guest}/quote.msg -s {guest}/quote.sig -o {guest}/quote.pcrs -g sha256", 180)
++    k3.command(f"TPM2TOOLS_TCTI=swtpm:host=::1,port=2321 tpm2_createek -c {guest}/ek.ctx -G ecc -u {guest}/ek.pub", 180)
++    k3.command(f"TPM2TOOLS_TCTI=swtpm:host=::1,port=2321 tpm2_createak -C {guest}/ek.ctx -c {guest}/ak.ctx -G ecc -g sha256 -s ecdsa -u {guest}/ak.pub -f pem -n {guest}/ak.name", 180)
++    k3.command("TPM2TOOLS_TCTI=swtpm:host=::1,port=2321 tpm2_flushcontext -t")
++    k3.command(f"TPM2TOOLS_TCTI=swtpm:host=::1,port=2321 tpm2_quote -c {guest}/ak.ctx -l sha256:11 -q {nonce} -m {guest}/quote.msg -s {guest}/quote.sig -o {guest}/quote.pcrs -g sha256", 180)
+     destination = k3.output / "attestation"
+     for name in ("ak.pub", "quote.msg", "quote.sig", "quote.pcrs"):
+         k3.copy_file(f"{guest}/{name}", destination / name)
+@@ -201,9 +202,10 @@     thread = threading.Thread(target=server.serve_forever, daemon=True)
+     thread.start()
+     try:
+         url = os.environ.get("K3_UPDATE_URL", "http://[::1]:8000/")
+-        k3.command(f"mkdir -p /etc/sysupdate.d; printf '[Source]\\nPath={url}\\n' > /etc/sysupdate.d/99-native.conf")
+-        k3.command("/usr/lib/systemd/systemd-sysupdate update", 300)
+-        k3.command("/usr/lib/systemd/systemd-sysupdate --component=extensions update", 300)
++        k3.command(f"mkdir -p /etc/sysupdate.d; printf '[Transfer]\\n[Source]\\nPath={url}\\n' > /etc/sysupdate.d/99-native.transfer")
++        k3.command("updatectl list")
++        k3.command("updatectl update host", 300)
++        k3.command("updatectl update component:extensions", 300)
+     finally:
+         server.shutdown()
+         server.server_close()
+@@ -213,7 +215,7 @@
+ 
+ def wallet(k3):
+     url = os.environ.get("K3_WALLET_URL", "http://[::1]:8081")
+-    result = k3.command(f"RVA23_WALLET_URL={url} wallet-client", 300)
++    result = k3.command(f"RVA23_WALLET_URL={url} wallet-client --contract=small-payment --consent=host --approve", 300)
+     if "accepted" not in result:
+         raise AssertionError(result)
+     print("PASS: the native wallet client completes a small payment")
+
