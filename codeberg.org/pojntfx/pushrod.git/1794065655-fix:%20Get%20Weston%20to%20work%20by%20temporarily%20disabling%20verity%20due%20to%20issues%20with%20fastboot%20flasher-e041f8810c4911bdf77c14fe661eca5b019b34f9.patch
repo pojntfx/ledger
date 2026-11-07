@@ -1,0 +1,350 @@
+From e041f8810c4911bdf77c14fe661eca5b019b34f9 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Sat, 07 Nov 2026 08:34:15 -0700
+Subject: [PATCH] fix: Get Weston to work by temporarily disabling verity due to issues with fastboot flasher
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/buildroot/board/rva23-qemu/dracut/99rva23/module-setup.sh b/buildroot/board/rva23-qemu/dracut/99rva23/module-setup.sh
+index 6cbfe3a2e9c2bf58f2f2b96475571ef33f6b5e60..659e4c6f8a7717c273958e6dcd387b5bca6c3472 100755
+--- a/buildroot/board/rva23-qemu/dracut/99rva23/module-setup.sh
++++ b/buildroot/board/rva23-qemu/dracut/99rva23/module-setup.sh
+@@ -8,7 +8,10 @@     echo systemd-repart
+     return 0
+ }
+ install() {
+-    inst_multiple mkswap bootctl
++    inst_multiple mkswap bootctl sfdisk
++    inst_script "$moddir/rva23-fix-gpt.sh" /usr/bin/rva23-fix-gpt
++    inst_simple "$moddir/rva23-fix-gpt.service" "$systemdsystemunitdir/rva23-fix-gpt.service"
++    $SYSTEMCTL -q --root "$initdir" add-wants initrd-root-fs.target rva23-fix-gpt.service
+     mkdir -p "${initdir}/etc"
+     printf 'root::::::::\n' > "${initdir}/etc/shadow"
+     ln_r /usr/bin/busybox /usr/bin/stat
+diff --git a/buildroot/board/rva23-qemu/dracut/99rva23/rva23-fix-gpt.service b/buildroot/board/rva23-qemu/dracut/99rva23/rva23-fix-gpt.service
+new file mode 100644
+index 0000000000000000000000000000000000000000..a65c2e3d9971d0e3835a271f07912664190e6758
+--- /dev/null
++++ b/buildroot/board/rva23-qemu/dracut/99rva23/rva23-fix-gpt.service
+@@ -0,0 +1,13 @@
++[Unit]
++Description=Align K3 GPT metadata with the verity root hash
++DefaultDependencies=no
++Before=systemd-veritysetup.service systemd-repart.service initrd-root-fs.target
++ConditionKernelCommandLine=usrhash
++
++[Service]
++Type=oneshot
++ExecStart=/bin/bash /usr/bin/rva23-fix-gpt
++RemainAfterExit=yes
++
++[Install]
++RequiredBy=initrd-root-fs.target
+diff --git a/buildroot/board/rva23-qemu/dracut/99rva23/rva23-fix-gpt.sh b/buildroot/board/rva23-qemu/dracut/99rva23/rva23-fix-gpt.sh
+new file mode 100644
+index 0000000000000000000000000000000000000000..65a4b4ec2f6de738dede9c02887cc423a0e1c8fc
+--- /dev/null
++++ b/buildroot/board/rva23-qemu/dracut/99rva23/rva23-fix-gpt.sh
+@@ -0,0 +1,56 @@
++#!/bin/bash
++set -eu
++hash="$(sed -n 's/.*usrhash=\([0-9a-f]*\).*/\1/p' /proc/cmdline)"
++[ -n "$hash" ] || exit 0
++fsuuid="${hash:0:8}-${hash:8:4}-${hash:12:4}-${hash:16:4}-${hash:20:12}"
++vuuid="${hash:32:8}-${hash:40:4}-${hash:44:4}-${hash:48:4}-${hash:52:12}"
++disk=""
++for candidate in /dev/sda /dev/vda; do
++    [ -b "$candidate" ] || continue
++    if sfdisk -d "$candidate" | grep -Eq 'usr-(riscv64|a)'; then
++        disk="$candidate"
++        break
++    fi
++done
++[ -n "$disk" ] || exit 0
++partition_by_name() {
++    sfdisk -d "$disk" | sed -n "s|/dev/[^0-9]*\([0-9][0-9]*\).*name=\"$1\".*|\1|p"
++}
++set_partition() {
++    local number="$1" label="$2" type="$3" uuid="${4:-}"
++    [ -n "$number" ] || return 0
++    sfdisk --part-label "$disk" "$number" "$label"
++    sfdisk --part-type "$disk" "$number" "$type"
++    if [ -n "$uuid" ]; then
++        sfdisk --part-uuid "$disk" "$number" "$uuid"
++    fi
++    sfdisk --part-attrs "$disk" "$number" 60
++}
++set_partition "$(partition_by_name usr-a)" usr-riscv64 beaec34b-8442-439b-a40b-984381ed097d "$fsuuid"
++set_partition "$(partition_by_name usr-riscv64)" usr-riscv64 beaec34b-8442-439b-a40b-984381ed097d "$fsuuid"
++set_partition "$(partition_by_name usr-b)" usr-secondary beaec34b-8442-439b-a40b-984381ed097d "$fsuuid"
++set_partition "$(partition_by_name usr-secondary)" usr-secondary beaec34b-8442-439b-a40b-984381ed097d "$fsuuid"
++set_partition "$(partition_by_name usr-a-verity)" usr-riscv64-verity 8f1056be-9b05-47c4-81d6-be53128e5b54 "$vuuid"
++set_partition "$(partition_by_name usr-riscv64-verity)" usr-riscv64-verity 8f1056be-9b05-47c4-81d6-be53128e5b54 "$vuuid"
++set_partition "$(partition_by_name usr-a-verity-sig)" usr-riscv64-verity-sig d2f9000a-7a18-453f-b5cd-4d32f77a7b32
++set_partition "$(partition_by_name usr-riscv64-verity-sig)" usr-riscv64-verity-sig d2f9000a-7a18-453f-b5cd-4d32f77a7b32
++root_number="$(partition_by_name rootfs)"
++[ -n "$root_number" ] || root_number="$(partition_by_name root)"
++if [ -n "$root_number" ]; then
++    sfdisk --part-label "$disk" "$root_number" root
++    sfdisk --part-type "$disk" "$root_number" 72ec70a6-cf74-40e6-bd49-4bda08e8f224
++fi
++boot_number="$(partition_by_name bootfs)"
++if [ -n "$boot_number" ]; then
++    sfdisk --part-type "$disk" "$boot_number" c12a7328-f81f-11d2-ba4b-00a0c93ec93b
++fi
++if ! sfdisk -d "$disk" | grep -q 'usr-secondary-verity"'; then
++    sfdisk --no-reread --sector-size 4096 --append "$disk" <<EOF
++start=412672, size=16384, type=8f1056be-9b05-47c4-81d6-be53128e5b54, name="usr-secondary-verity"
++start=429312, size=4, type=d2f9000a-7a18-453f-b5cd-4d32f77a7b32, name="usr-secondary-verity-sig"
++EOF
++fi
++set_partition "$(partition_by_name usr-secondary-verity)" usr-secondary-verity 8f1056be-9b05-47c4-81d6-be53128e5b54 "$vuuid"
++set_partition "$(partition_by_name usr-secondary-verity-sig)" usr-secondary-verity-sig d2f9000a-7a18-453f-b5cd-4d32f77a7b32
++udevadm trigger "$disk"
++udevadm settle
+diff --git a/buildroot/board/spacemit/k3-uefi/linux.fragment b/buildroot/board/spacemit/k3-uefi/linux.fragment
+index 3a0e0210559fd2795329c54f88c47f296f97a147..233369a6268644341969955a79251daf92841d72 100644
+--- a/buildroot/board/spacemit/k3-uefi/linux.fragment
++++ b/buildroot/board/spacemit/k3-uefi/linux.fragment
+@@ -1,6 +1,7 @@
+ CONFIG_EFI=y
+ CONFIG_EFI_STUB=y
+ CONFIG_CUSE=y
++# CONFIG_SPACEMIT_K3_CPUFREQ is not set
+ CONFIG_CHECKPOINT_RESTORE=y
+ CONFIG_UNIX_DIAG=y
+ CONFIG_PACKET_DIAG=y
+@@ -20,6 +21,7 @@ CONFIG_FW_LOADER=y
+ CONFIG_VT=y
+ CONFIG_VT_CONSOLE=y
+ CONFIG_UNIX98_PTYS=y
++CONFIG_MISC_FILESYSTEMS=y
+ CONFIG_EROFS_FS=y
+ CONFIG_EROFS_FS_ZIP=y
+ CONFIG_BLK_DEV_DM=y
+diff --git a/buildroot/board/spacemit/k3-uefi/partition_universal.json b/buildroot/board/spacemit/k3-uefi/partition_universal.json
+index 1f1e7b09b46c9d822474fb70ce19e374003056c7..ae6f5a499257e86ba0b53201724ad20c37da497f 100644
+--- a/buildroot/board/spacemit/k3-uefi/partition_universal.json
++++ b/buildroot/board/spacemit/k3-uefi/partition_universal.json
+@@ -52,49 +52,49 @@       "image": "bootfs.img",
+       "compress": "gzip-5"
+     },
+     {
+-      "name": "usr-a",
++      "name": "usr-riscv64",
+       "offset": "524M",
+       "size": "512M",
+       "image": "usr-a.erofs",
+       "compress": "gzip-5"
+     },
+     {
+-      "name": "usr-b",
++      "name": "usr-secondary",
+       "offset": "1036M",
+       "size": "512M",
+       "image": "usr-b.erofs",
+       "compress": "gzip-5"
+     },
+     {
+-      "name": "usr-a-verity",
++      "name": "usr-riscv64-verity",
+       "offset": "1548M",
+       "size": "64M",
+       "image": "usr-a.verity",
+       "compress": "gzip-5"
+     },
+     {
+-      "name": "usr-b-verity",
++      "name": "usr-secondary-verity",
+       "offset": "1612M",
+       "size": "64M",
+       "image": "usr-b.verity",
+       "compress": "gzip-5"
+     },
+     {
+-      "name": "usr-a-verity-sig",
++      "name": "usr-riscv64-verity-sig",
+       "offset": "1716224K",
+       "size": "16K",
+       "image": "usr-a.verity-sig"
+     },
+     {
+-      "name": "usr-b-verity-sig",
+-      "offset": "1716256K",
++      "name": "usr-secondary-verity-sig",
++      "offset": "1677M",
+       "size": "16K",
+       "image": "usr-b.verity-sig"
+     },
+     {
+       "name": "root",
+-      "offset": "1716288K",
+-      "size": "120459M",
++      "offset": "1678M",
++      "size": "120456M",
+       "image": "rootfs.ext4",
+       "type": "ext4",
+       "compress": "gzip-5"
+diff --git a/buildroot/board/spacemit/k3-uefi/rootfs-overlay/usr/lib/repart.d/20-usr-b.conf b/buildroot/board/spacemit/k3-uefi/rootfs-overlay/usr/lib/repart.d/20-usr-b.conf
+index 00d3fbafadda4ce3ae6ee8ca95d76d0dbb4eb9f0..7b8d8904f01bfdee0fcc69f919b1ba159f0d4aa4 100644
+--- a/buildroot/board/spacemit/k3-uefi/rootfs-overlay/usr/lib/repart.d/20-usr-b.conf
++++ b/buildroot/board/spacemit/k3-uefi/rootfs-overlay/usr/lib/repart.d/20-usr-b.conf
+@@ -1,6 +1,7 @@
+ [Partition]
+ Type=usr-riscv64
+ Label=_empty
++ReadOnly=yes
+ Format=empty
+ SizeMinBytes=512M
+ SizeMaxBytes=512M
+diff --git a/buildroot/board/spacemit/k3-uefi/rootfs-overlay/usr/lib/repart.d/30-usr-b-verity.conf b/buildroot/board/spacemit/k3-uefi/rootfs-overlay/usr/lib/repart.d/30-usr-b-verity.conf
+index 91b37680c59caeb36e89b4e394066f9870a90cc2..a4347daa95301d97d195adc5c25bc495fa97c8c0 100644
+--- a/buildroot/board/spacemit/k3-uefi/rootfs-overlay/usr/lib/repart.d/30-usr-b-verity.conf
++++ b/buildroot/board/spacemit/k3-uefi/rootfs-overlay/usr/lib/repart.d/30-usr-b-verity.conf
+@@ -1,6 +1,7 @@
+ [Partition]
+ Type=usr-riscv64-verity
+ Label=_empty
++ReadOnly=yes
+ Format=empty
+ SizeMinBytes=64M
+ SizeMaxBytes=64M
+diff --git a/buildroot/board/spacemit/k3-uefi/rootfs-overlay/usr/lib/repart.d/40-usr-b-verity-sig.conf b/buildroot/board/spacemit/k3-uefi/rootfs-overlay/usr/lib/repart.d/40-usr-b-verity-sig.conf
+index c7ca076581bc9562fc3300d0a14481b5a312e6b7..3fffdf6c4b9034844bb8b54072a3b55a36b4fe0f 100644
+--- a/buildroot/board/spacemit/k3-uefi/rootfs-overlay/usr/lib/repart.d/40-usr-b-verity-sig.conf
++++ b/buildroot/board/spacemit/k3-uefi/rootfs-overlay/usr/lib/repart.d/40-usr-b-verity-sig.conf
+@@ -1,6 +1,7 @@
+ [Partition]
+ Type=usr-riscv64-verity-sig
+ Label=_empty
++ReadOnly=yes
+ Format=empty
+ SizeMinBytes=16K
+ SizeMaxBytes=16K
+diff --git a/buildroot/package/edk2-spacemit/0001-Add-K3-UFS-support.patch b/buildroot/package/edk2-spacemit/0001-Add-K3-UFS-support.patch
+new file mode 100644
+index 0000000000000000000000000000000000000000..f83db09c9357ca1b3894e9129972d224e761ea7c
+--- /dev/null
++++ b/buildroot/package/edk2-spacemit/0001-Add-K3-UFS-support.patch
+@@ -0,0 +1,89 @@
++--- a/edk2-platforms/Platform/Spacemit/K3/DeviceTree/K3.dtsi
+++++ b/edk2-platforms/Platform/Spacemit/K3/DeviceTree/K3.dtsi
++@@ -9,6 +9,50 @@
++ 	compatible = "spacemit,k3", "riscv";
++ 	#address-cells = <2>;
++ 	#size-cells = <2>;
+++
+++	clocks {
+++		vctcxo_1m: clock-1m {
+++			compatible = "fixed-clock";
+++			clock-frequency = <1000000>;
+++			clock-output-names = "vctcxo_1m";
+++			#clock-cells = <0>;
+++		};
+++
+++		vctcxo_24m: clock-24m {
+++			compatible = "fixed-clock";
+++			clock-frequency = <24000000>;
+++			clock-output-names = "vctcxo_24m";
+++			#clock-cells = <0>;
+++		};
+++
+++		vctcxo_3m: clock-3m {
+++			compatible = "fixed-clock";
+++			clock-frequency = <3000000>;
+++			clock-output-names = "vctcxo_3m";
+++			#clock-cells = <0>;
+++		};
+++
+++		osc_32k: clock-32k {
+++			compatible = "fixed-clock";
+++			clock-frequency = <32768>;
+++			clock-output-names = "osc_32k";
+++			#clock-cells = <0>;
+++		};
+++
+++		reserved_clk: clock-reserved {
+++			compatible = "fixed-clock";
+++			clock-frequency = <0>;
+++			clock-output-names = "reserved_clk";
+++			#clock-cells = <0>;
+++		};
+++
+++		external_clk: clock-external {
+++			compatible = "fixed-clock";
+++			clock-frequency = <0>;
+++			clock-output-names = "external_clk";
+++			#clock-cells = <0>;
+++		};
+++	};
++ 
++ 	chosen {
++ 		stdout-path = "uart0:115200";
++@@ -188,6 +232,35 @@
++ 			 *   A100: no valid vs-level interrupt files.
++ 			 */
++ 			riscv,guest-index-bits = <6>;
+++			status = "okay";
+++		};
+++
+++		syscon_apmu: system-controller@d4282800 {
+++			compatible = "spacemit,k3-syscon-apmu";
+++			reg = <0x0 0xd4282800 0x0 0x400>;
+++			clocks = <&osc_32k>, <&vctcxo_1m>, <&vctcxo_3m>, <&vctcxo_24m>,
+++				 <&reserved_clk>, <&external_clk>;
+++			clock-names = "osc_32k", "vctcxo_1m", "vctcxo_3m", "vctcxo_24m",
+++				      "reserved_clk", "external_clk";
+++			#clock-cells = <1>;
+++			#power-domain-cells = <1>;
+++			#reset-cells = <1>;
+++		};
+++
+++		ufshc: ufshc@0xc0e00000 {
+++			#address-cells = <2>;
+++			#size-cells = <2>;
+++			compatible = "spacemit,k3-ufshcd";
+++			reg = <0x0 0xc0e00000 0x0 0x40000>;
+++			interrupt-parent = <&saplic>;
+++			interrupts = <135 0x4>;
+++			clocks = <&syscon_apmu 55>, <&syscon_apmu 56>;
+++			clock-names = "ufs-aclk", "ref_clk";
+++			resets = <&syscon_apmu 59>;
+++			reset-names = "ufs-aclk-rst";
+++			clock-freq = <491520000>;
+++			freq-table-hz = <491520000 491520000 19200000 19200000>;
+++			lanes-per-direction = <2>;
++ 			status = "okay";
++ 		};
++ 
+diff --git a/buildroot/scripts/k3-build-os-images.py b/buildroot/scripts/k3-build-os-images.py
+index b5323df79690e316ff13c2b9e61d36b2763ef62a..7a33b07db4d091788023eea7a5fa6d41ce6fb436 100755
+--- a/buildroot/scripts/k3-build-os-images.py
++++ b/buildroot/scripts/k3-build-os-images.py
+@@ -142,8 +142,8 @@     linux = binaries / "efi-part/EFI/Linux"
+     linux.mkdir(parents=True, exist_ok=True)
+     for old in linux.glob("*.efi"):
+         old.unlink()
+-    base = f"console=ttyS0,115200 root=dissect mount.usr=dissect usrhash={root_hash} rw"
+-    policy = "systemd.image_policy=usr=signed+read-only-on:root=unprotected+encrypted+absent+read-only-off:home=unprotected+encrypted+absent:swap=unprotected+encrypted+absent:esp=unprotected+unused:=unused+absent"
++    base = "console=ttyS0,115200 root=/dev/sda6 rootfstype=ext4 mount.usr=/dev/sda2 mount.usrfstype=erofs rw"
++    policy = "systemd.image_policy=usr=unprotected+read-only-on:root=unprotected+encrypted+absent+read-only-off:home=unprotected+encrypted+absent:swap=unprotected+encrypted+absent:esp=unprotected+unused:=unused+absent"
+     stub = target / "usr/lib/systemd/boot/efi/linuxriscv64.efi.stub"
+     profiles = {
+         f"rva23_{version}+3-0.efi": f"{base} {policy} ipe.enforce=0",
+@@ -250,13 +250,13 @@     linux = binaries / "efi-part/EFI/Linux"
+     linux.mkdir(parents=True, exist_ok=True)
+     for old in linux.glob("*.efi"):
+         old.unlink()
+-    base = f"console=ttyS0,115200 earlycon=sbi root=dissect mount.usr=dissect usrhash={root_hash} rw"
++    base = "console=ttyS0,115200 earlycon=sbi root=/dev/sda6 rootfstype=ext4 mount.usr=/dev/sda2 mount.usrfstype=erofs rw"
+     device_timeout = os.environ.get("RVA23_BOOT_DEVICE_TIMEOUT", "300")
+     if device_timeout:
+         if not device_timeout.isdigit() or int(device_timeout) < 90:
+             raise ValueError("RVA23_BOOT_DEVICE_TIMEOUT must contain at least 90 seconds")
+         base += f" systemd.default_device_timeout_sec={device_timeout}"
+-    policy = "systemd.image_policy=usr=signed+read-only-on:root=unprotected+encrypted+absent+read-only-off:home=unprotected+encrypted+absent:swap=unprotected+encrypted+absent:esp=unprotected+unused:=unused+absent"
++    policy = "systemd.image_policy=usr=unprotected+read-only-on:root=unprotected+encrypted+absent+read-only-off:home=unprotected+encrypted+absent:swap=unprotected+encrypted+absent:esp=unprotected+unused:=unused+absent"
+     stub = target / "usr/lib/systemd/boot/efi/linuxriscv64.efi.stub"
+     fail_boot = " systemd.unit=emergency.target ipe.enforce=0" if os.environ.get("RVA23_FAIL_BOOT") == "1" else " ipe.enforce=1"
+     profiles = {
+
