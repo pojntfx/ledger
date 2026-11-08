@@ -1,0 +1,132 @@
+From 23c3ab641c0607a5ed4495beaeba5caaf0ff37d2 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Sun, 08 Nov 2026 16:20:36 -0700
+Subject: [PATCH] feat: Make builds explicit for QEMU and enable VNC by default
+---
+diff --git a/buildroot/Makefile b/buildroot/Makefile
+index 7a74941e94578e386576f76cd58c4042155c26f8..e944df2d8a7c7329898bf48ebb8c3135ccff2e69 100644
+--- a/buildroot/Makefile
++++ b/buildroot/Makefile
+@@ -88,34 +88,34 @@ 	python3 scripts/verify-k3.py $(K3_OUTPUT_DIR) mutual
+ 
+ k3-verify: k3-verify-image k3-verify-base k3-verify-attestation k3-verify-report k3-verify-update k3-verify-hardening k3-verify-podman k3-verify-k3s k3-verify-wallet k3-verify-migration k3-verify-mutual-migration
+ 
+-verify-image: build
++verify-image:
+ 	python3 scripts/verify-image.py $(OUTPUT_DIR) $(BR2_DL_DIR) $(BR2_CCACHE_DIR) $(RVA23_KEY_DIR)
+ 
+-verify-boot: build
++verify-boot:
+ 	python3 scripts/verify-boot.py $(OUTPUT_DIR)
+ 
+-verify-firmware: build
++verify-firmware:
+ 	python3 scripts/verify-firmware.py $(OUTPUT_DIR)
+ 
+-registry: build
++registry:
+ 	python3 scripts/build-registry.py $(OUTPUT_DIR) $(RVA23_KEY_DIR) 2
+ 
+-verify-attestation: build
++verify-attestation:
+ 	python3 scripts/verify-attestation.py $(OUTPUT_DIR) $(RVA23_KEY_DIR)
+ 
+ verify-update: registry
+ 	python3 scripts/verify-update.py $(OUTPUT_DIR) $(RVA23_KEY_DIR)
+ 
+-verify-security: build
++verify-security:
+ 	python3 scripts/verify-security.py $(OUTPUT_DIR) $(RVA23_KEY_DIR)
+ 
+-verify-hardening: build
++verify-hardening:
+ 	python3 scripts/verify-hardening.py $(OUTPUT_DIR)
+ 
+-verify-podman: build
++verify-podman:
+ 	python3 scripts/verify-podman.py $(OUTPUT_DIR)
+ 
+-verify-k3s: build
++verify-k3s:
+ 	python3 scripts/verify-k3s.py $(OUTPUT_DIR)
+ 
+ verify-report: verify-attestation
+@@ -138,11 +138,11 @@
+ demo-servers:
+ 	python3 scripts/run-demo-servers.py
+ 
+-boot: build
++boot:
+ 	$(THIS_EXTERNAL_PATH)/board/rva23-qemu/run-qemu.sh $(OUTPUT_DIR)/images
+ 
+-boot-display: build
++boot-display:
+ 	QEMU_VNC=1 $(THIS_EXTERNAL_PATH)/board/rva23-qemu/run-qemu.sh $(OUTPUT_DIR)/images
+ 
+-boot-firmware: build
++boot-firmware:
+ 	$(THIS_EXTERNAL_PATH)/board/rva23-qemu/run-firmware.sh $(OUTPUT_DIR)/images
+diff --git a/buildroot/board/rva23-qemu/run-firmware.sh b/buildroot/board/rva23-qemu/run-firmware.sh
+index ee32efd62f0a3749c969a56d87186abe37972e92..a69250c4743c8f7d2b253bc6d9befba6c35e7fac 100755
+--- a/buildroot/board/rva23-qemu/run-firmware.sh
++++ b/buildroot/board/rva23-qemu/run-firmware.sh
+@@ -25,8 +25,8 @@
+ if [ -f "${IMAGES_DIR}/secure-boot-oem.txt" ]; then
+ 	set -- "$@" -smbios "type=11,value=$(cat "${IMAGES_DIR}/secure-boot-oem.txt")"
+ fi
+-if [ "${QEMU_VNC:-0}" = 1 ]; then
+-	set -- "$@" -vnc [::1]:0
++if [ "${QEMU_VNC:-0}" != 0 ]; then
++	set -- "$@" -vnc "[::1]:${QEMU_VNC_DISPLAY:-0}"
+ else
+ 	set -- "$@" -display none
+ fi
+diff --git a/buildroot/board/rva23-qemu/run-qemu.sh b/buildroot/board/rva23-qemu/run-qemu.sh
+index a7dafd38849d8eba8c94f7502cc50295c7b56afd..31f90be239ed96e18164e20151ec7be6bc8de631 100755
+--- a/buildroot/board/rva23-qemu/run-qemu.sh
++++ b/buildroot/board/rva23-qemu/run-qemu.sh
+@@ -22,8 +22,8 @@
+ if [ -f "${IMAGES_DIR}/secure-boot-oem.txt" ]; then
+ 	set -- -smbios "type=11,value=$(cat "${IMAGES_DIR}/secure-boot-oem.txt")"
+ fi
+-if [ "${QEMU_VNC:-0}" = 1 ]; then
+-	set -- -vnc [::1]:0
++if [ "${QEMU_VNC:-0}" != 0 ]; then
++	set -- -vnc "[::1]:${QEMU_VNC_DISPLAY:-0}"
+ else
+ 	set -- -display none
+ fi
+diff --git a/buildroot/scripts/verify-boot.py b/buildroot/scripts/verify-boot.py
+index f603c3c88191046db41e22ae161198a973d7d37d..618cfdf5d7665a612944176a0c540c1dd1880407 100755
+--- a/buildroot/scripts/verify-boot.py
++++ b/buildroot/scripts/verify-boot.py
+@@ -9,6 +9,8 @@ import time
+ 
+ 
+ class Console:
++    displays = 0
++
+     def __init__(self, output, log_name="boot.log", firmware=False):
+         self.output = output
+         self.log = (output / log_name).open("wb")
+@@ -17,12 +19,19 @@         self.last_consumed = b""
+         self.command_id = 0
+         script_name = "run-firmware.sh" if firmware else "run-qemu.sh"
+         script = output.parent.parent / "board/rva23-qemu" / script_name
++        environment = os.environ.copy()
++        environment.setdefault("QEMU_VNC", "1")
++        if environment["QEMU_VNC"] != "0":
++            environment["QEMU_VNC_DISPLAY"] = str(Console.displays)
++            print(f"VNC display {Console.displays} on [::1]:{5900 + Console.displays}", file=sys.stderr, flush=True)
++            Console.displays += 1
+         self.process = subprocess.Popen(
+             [script, output / "images"],
+             stdin=subprocess.PIPE,
+             stdout=subprocess.PIPE,
+             stderr=subprocess.STDOUT,
+             bufsize=0,
++            env=environment,
+         )
+ 
+     def expect(self, pattern, timeout):
+
