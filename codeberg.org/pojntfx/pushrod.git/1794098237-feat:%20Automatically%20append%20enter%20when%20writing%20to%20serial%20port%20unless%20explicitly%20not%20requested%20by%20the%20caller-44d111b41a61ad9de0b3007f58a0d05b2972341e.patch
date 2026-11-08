@@ -1,0 +1,55 @@
+From 44d111b41a61ad9de0b3007f58a0d05b2972341e Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Sat, 07 Nov 2026 17:37:17 -0700
+Subject: [PATCH] feat: Automatically append enter when writing to serial port unless explicitly not requested by the caller
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/pkg/svc/serial_write_to.go b/pkg/svc/serial_write_to.go
+index 312a7547c56629f292e47755bf691655fcbed12d..40464dae7905a4ca403bcba2db243a49932726e2 100644
+--- a/pkg/svc/serial_write_to.go
++++ b/pkg/svc/serial_write_to.go
+@@ -11,14 +11,15 @@ var (
+ 	WriteToTool = &mcp.Tool{
+ 		Name:        "serial.writeTo",
+ 		Title:       "Write to serial console",
+-		Description: "Write to a serial console and read back the output that follows, including output that no earlier call has returned",
++		Description: "Write to a serial console and read back the output, including output that no earlier call returned. Enter is appended when the data does not end with a newline, unless raw is set. Escapes such as \\u0003 send Ctrl-C",
+ 		Annotations: &mcp.ToolAnnotations{DestructiveHint: new(true)},
+ 	}
+ )
+ 
+ type WriteToInput struct {
+ 	Path   string `json:"path" jsonschema:"path that uniquely identifies the serial console until it gets unplugged"`
+-	Data   string `json:"data" jsonschema:"data to write to the console. This tool sends it unchanged. Use \n for Enter and \u0003 for Ctrl-C."`
++	Data   string `json:"data" jsonschema:"data to write to the console. The tool appends Enter when the data does not end with a newline."`
++	Raw    bool   `json:"raw,omitempty" jsonschema:"send the data unchanged instead of appending Enter, for password prompts and binary writes"`
+ 	WaitMs int    `json:"waitMs,omitempty" jsonschema:"how long to wait before reading back the output in milliseconds, so that the target has time to react to the write"`
+ }
+ 
+@@ -26,13 +27,23 @@ type WriteToOutput struct {
+ 	Output string `json:"output" jsonschema:"output that no earlier call has returned"`
+ }
+ 
++func submittedData(data string, raw bool) []byte {
++	buffer := []byte(data)
++
++	if raw || len(buffer) == 0 || buffer[len(buffer)-1] == '\n' {
++		return buffer
++	}
++
++	return append(buffer, '\n')
++}
++
+ func (s *Service) WriteTo(ctx context.Context, req *mcp.CallToolRequest, input WriteToInput) (*mcp.CallToolResult, *WriteToOutput, error) {
+ 	console, err := s.findConsole(input.Path)
+ 	if err != nil {
+ 		return nil, nil, err
+ 	}
+ 
+-	if err := s.writeConsole(console, []byte(input.Data)); err != nil {
++	if err := s.writeConsole(console, submittedData(input.Data, input.Raw)); err != nil {
+ 		return nil, nil, err
+ 	}
+ 
+
