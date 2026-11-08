@@ -1,0 +1,141 @@
+From a0e19f1214aff29601c07b73d0753da7bf5004c9 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Sun, 08 Nov 2026 15:32:36 -0700
+Subject: [PATCH] feat: Add patches to get build to work for QEMU with per-package directories
+---
+diff --git a/buildroot/external.mk b/buildroot/external.mk
+index c79628790112aed00bec786121d3347b795e7e41..2aa3698811d9d8e55b56e035d54e3083c1eeeb89 100644
+--- a/buildroot/external.mk
++++ b/buildroot/external.mk
+@@ -34,11 +34,6 @@ HOST_MESA3D_POST_INSTALL_HOOKS += K3_INSTALL_PCO_CLC
+ define K3_INSTALL_PCO_CLC
+ 	$(INSTALL) -D -m 0755 $(@D)/buildroot-build/src/imagination/pco/uscgen/pco_clc $(HOST_DIR)/bin/pco_clc
+ endef
+-HOST_GCC_INITIAL_POST_INSTALL_HOOKS += K3_GCC_INITIAL_ATOMIC_ASNEEDED
+-define K3_GCC_INITIAL_ATOMIC_ASNEEDED
+-	$(HOST_DIR)/bin/$(GNU_TARGET_NAME)-ar rcs $(HOST_DIR)/lib/gcc/$(GNU_TARGET_NAME)/17.0.0/libatomic_asneeded.a
+-endef
+-
+ include $(BR2_EXTERNAL_RVA23_PATH)/package/edk2-spacemit/edk2-spacemit.mk
+ include $(BR2_EXTERNAL_RVA23_PATH)/package/k3-libtpms/k3-libtpms.mk
+ include $(BR2_EXTERNAL_RVA23_PATH)/package/k3-swtpm/k3-swtpm.mk
+@@ -67,11 +62,17 @@ SYSTEMD_CONF_OPTS += -Dsysupdated=enabled
+ HOST_SYSTEMD_CONF_OPTS += -Dsysupdate=disabled -Dsysupdated=disabled -Dimportd=disabled -Dfdisk=enabled -Dlibcurl=disabled -Dopenssl=enabled -Dtpm2=enabled -Dzlib=enabled -Dxz=enabled -Defi=true -Dbootloader=enabled -Dblkid=enabled
+ HOST_SYSTEMD_DEPENDENCIES += host-libcurl host-openssl host-tpm2-tss host-python-pyelftools
+ HOST_LIBCURL_CONF_OPTS += --without-brotli
+-HOST_QEMU_DEPENDENCIES += host-libcacard host-u2f-emu
+ HOST_QEMU_OPTS += --enable-u2f --enable-smartcard
+ HOST_LIBCACARD_POST_EXTRACT_HOOKS += RVA23_LIBCACARD_VERSION
+ LIBNL_MAKE = $(MAKE) -j1
+ endif
++
++HOST_GCC_INITIAL_POST_INSTALL_HOOKS += RVA23_GCC_INITIAL_ATOMIC_ASNEEDED
++define RVA23_GCC_INITIAL_ATOMIC_ASNEEDED
++	for dir in $(HOST_DIR)/lib/gcc/$(GNU_TARGET_NAME)/*/; do \
++		$(HOST_DIR)/bin/$(GNU_TARGET_NAME)-ar rcs "$${dir}libatomic_asneeded.a" || exit 1; \
++	done
++endef
+ 
+ PIXMAN_CONF_OPTS += -Drvv=disabled
+ define HOST_DRACUT_APPLY_SHARED_PATCHES
+diff --git a/buildroot/patches/buildroot/0007-Normalize-output-dir-in-ccache-compiler-hash.patch b/buildroot/patches/buildroot/0007-Normalize-output-dir-in-ccache-compiler-hash.patch
+new file mode 100644
+index 0000000000000000000000000000000000000000..af83528ca70afac4ae6e78851ef610f0c59b7ade
+--- /dev/null
++++ b/buildroot/patches/buildroot/0007-Normalize-output-dir-in-ccache-compiler-hash.patch
+@@ -0,0 +1,16 @@
++diff --git a/package/gcc/gcc.mk b/package/gcc/gcc.mk
++index c183bf8848..3e71de5538 100644
++--- a/package/gcc/gcc.mk
+++++ b/package/gcc/gcc.mk
++@@ -330,8 +330,9 @@ endif
++ # and a reference to the Buildroot git revision (BR2_VERSION_FULL),
++ # so substitute those away.
++ HOST_GCC_COMMON_TOOLCHAIN_WRAPPER_ARGS += -DBR_CCACHE_HASH=\"`\
++-	printf '%s\n' $(subst $(HOST_DIR),@HOST_DIR@,\
++-		$(subst --with-pkgversion="Buildroot $(BR2_VERSION_FULL)",,$($(PKG)_CONF_OPTS))) \
+++	printf '%s\n' $(subst $(BASE_DIR),@BASE_DIR@,\
+++		$(subst $(HOST_DIR),@HOST_DIR@,\
+++		$(subst --with-pkgversion="Buildroot $(BR2_VERSION_FULL)",,$($(PKG)_CONF_OPTS)))) \
++ 		| sha256sum - $(HOST_GCC_COMMON_CCACHE_HASH_FILES) \
++ 		| cut -c -64 | tr -d '\n'`\"
++ endif # BR2_CCACHE
+diff --git a/buildroot/patches/buildroot/0008-Add-host-patchelf-to-host-genimage-dependencies.patch b/buildroot/patches/buildroot/0008-Add-host-patchelf-to-host-genimage-dependencies.patch
+new file mode 100644
+index 0000000000000000000000000000000000000000..88a4e79dcf89245007e3f1bff016809241c3170a
+--- /dev/null
++++ b/buildroot/patches/buildroot/0008-Add-host-patchelf-to-host-genimage-dependencies.patch
+@@ -0,0 +1,13 @@
++diff --git a/package/genimage/genimage.mk b/package/genimage/genimage.mk
++index cdb1e64f32..a539b4a43a 100644
++--- a/package/genimage/genimage.mk
+++++ b/package/genimage/genimage.mk
++@@ -7,7 +7,7 @@
++ GENIMAGE_VERSION = 20
++ GENIMAGE_SOURCE = genimage-$(GENIMAGE_VERSION).tar.xz
++ GENIMAGE_SITE = https://github.com/pengutronix/genimage/releases/download/v$(GENIMAGE_VERSION)
++-HOST_GENIMAGE_DEPENDENCIES = host-pkgconf host-libconfuse
+++HOST_GENIMAGE_DEPENDENCIES = host-pkgconf host-libconfuse host-patchelf
++ GENIMAGE_LICENSE = GPL-2.0
++ GENIMAGE_LICENSE_FILES = COPYING
++ 
+diff --git a/buildroot/patches/buildroot/0009-Add-host-libcacard-and-u2f-emu-to-qemu-dependencies.patch b/buildroot/patches/buildroot/0009-Add-host-libcacard-and-u2f-emu-to-qemu-dependencies.patch
+new file mode 100644
+index 0000000000000000000000000000000000000000..7bd9701c63b4ce81a3de110d4f12955ef49ac396
+--- /dev/null
++++ b/buildroot/patches/buildroot/0009-Add-host-libcacard-and-u2f-emu-to-qemu-dependencies.patch
+@@ -0,0 +1,20 @@
++diff --git a/package/qemu/qemu.mk b/package/qemu/qemu.mk
++index 4f4786532c..6988aefb84 100644
++--- a/package/qemu/qemu.mk
+++++ b/package/qemu/qemu.mk
++@@ -379,6 +379,7 @@ $(eval $(generic-package))
++ # Host-qemu
++ 
++ HOST_QEMU_DEPENDENCIES = \
+++	host-libcacard \
++ 	host-libglib2 \
++ 	host-meson \
++ 	host-pixman \
++@@ -388,6 +389,7 @@ HOST_QEMU_DEPENDENCIES = \
++ 	host-python-setuptools \
++ 	host-python-wheel \
++ 	host-slirp \
+++	host-u2f-emu \
++ 	host-zlib
++ 
++ #       BR ARCH         qemu
+diff --git a/buildroot/scripts/verify-ccache.sh b/buildroot/scripts/verify-ccache.sh
+new file mode 100755
+index 0000000000000000000000000000000000000000..5255ce8d975207d983af400764cf88524f8aa9f8
+--- /dev/null
++++ b/buildroot/scripts/verify-ccache.sh
+@@ -0,0 +1,27 @@
++#!/bin/sh
++set -eu
++
++root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
++cache="$root/ccache"
++ccache_bin="$root/output/rva23/per-package/host-gcc-final/host/bin/ccache"
++token=$(od -An -N4 -tx1 /dev/urandom | tr -d ' \n')
++
++probe() {
++	tree=$1
++	dir="$root/output/$tree/ccache-probe"
++	compiler="$root/output/$tree/per-package/host-gcc-final/host/bin/riscv64-buildroot-linux-gnu-gcc"
++	mkdir -p "$dir"
++	printf 'int probe_%s(void){return 42;}\n' "$token" > "$dir/probe.c"
++	(
++		cd "$dir" || exit 1
++		BR2_USE_CCACHE=1 CCACHE_DIR="$cache" "$compiler" -O2 -c probe.c -o probe.o
++	)
++}
++
++CCACHE_DIR="$cache" "$ccache_bin" -z >/dev/null
++probe rva23
++probe k3-uefi
++hits=$(CCACHE_DIR="$cache" "$ccache_bin" -s | awk '/^ +Hits:/{print $2; exit}')
++misses=$(CCACHE_DIR="$cache" "$ccache_bin" -s | awk '/^ +Misses:/{print $2; exit}')
++printf 'hits=%s misses=%s\n' "$hits" "$misses"
++[ "$hits" = 1 ] && [ "$misses" = 1 ]
+
