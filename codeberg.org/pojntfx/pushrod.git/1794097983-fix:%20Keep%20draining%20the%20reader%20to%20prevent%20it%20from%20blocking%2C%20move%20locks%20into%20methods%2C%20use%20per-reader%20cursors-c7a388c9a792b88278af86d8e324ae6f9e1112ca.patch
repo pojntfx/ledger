@@ -1,0 +1,359 @@
+From c7a388c9a792b88278af86d8e324ae6f9e1112ca Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Sat, 07 Nov 2026 17:33:03 -0700
+Subject: [PATCH] fix: Keep draining the reader to prevent it from blocking, move locks into methods, use per-reader cursors
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/pkg/svc/root.go b/pkg/svc/root.go
+index f0b317b7ea5cc492e8688fe4e5e05b90cd02da5d..0ad0d872c5bc05e35d071407a264a967dd5faed4 100644
+--- a/pkg/svc/root.go
++++ b/pkg/svc/root.go
+@@ -149,15 +149,7 @@ 		s.consolesLock.Lock()
+ 		defer s.consolesLock.Unlock()
+ 
+ 		for _, console := range s.consoles {
+-			func() {
+-				console.lock.Lock()
+-				defer console.lock.Unlock()
+-
+-				if console.port != nil {
+-					console.port.Close()
+-					console.port = nil
+-				}
+-			}()
++			console.close()
+ 		}
+ 	})
+ 
+diff --git a/pkg/svc/serial.go b/pkg/svc/serial.go
+index 24e620b78b61f4b5722896cfb743dbeb528f2047..25bc232fc173857db91643069cce6260d2a77b3a 100644
+--- a/pkg/svc/serial.go
++++ b/pkg/svc/serial.go
+@@ -19,40 +19,94 @@ type serialConsole struct {
+ 	path     string
+ 	identity USBIdentity
+ 
+-	port serial.Port
++	portLock *sync.Mutex
++	port     serial.Port
+ 
+-	buffer []byte
+-
+-	lock *sync.Mutex
++	bufferLock *sync.Mutex
++	buffer     []byte
++	cursor     int
+ }
+ 
+ func newSerialConsole(port *enumerator.PortDetails) *serialConsole {
+ 	return &serialConsole{
+-		path:     port.Name,
+-		identity: usbIdentityFromPort(port),
+-		lock:     &sync.Mutex{},
++		path:       port.Name,
++		identity:   usbIdentityFromPort(port),
++		portLock:   &sync.Mutex{},
++		bufferLock: &sync.Mutex{},
+ 	}
+ }
+ 
+ func (c *serialConsole) Write(data []byte) (int, error) {
+-	c.lock.Lock()
+-	defer c.lock.Unlock()
++	c.bufferLock.Lock()
++	defer c.bufferLock.Unlock()
+ 
+ 	c.buffer = append(c.buffer, data...)
+ 
+ 	if len(c.buffer) > maxConsoleBuffer {
+-		c.buffer = slices.Clone(c.buffer[len(c.buffer)-maxConsoleBuffer/2:])
++		overflow := len(c.buffer) - maxConsoleBuffer/2
++
++		c.buffer = slices.Clone(c.buffer[overflow:])
++		c.cursor = max(0, c.cursor-overflow)
+ 	}
+ 
+ 	return len(data), nil
+ }
+ 
+ func (c *serialConsole) state() Console {
++	c.portLock.Lock()
++	isBuffering := c.port != nil
++	c.portLock.Unlock()
++
+ 	return Console{
+ 		Path:          c.path,
+ 		USBIdentity:   c.identity,
+-		IsBuffering:   c.port != nil,
+-		BufferedBytes: len(c.buffer),
++		IsBuffering:   isBuffering,
++		BufferedBytes: c.bufferedBytes(),
++	}
++}
++
++func (c *serialConsole) bufferedBytes() int {
++	c.bufferLock.Lock()
++	defer c.bufferLock.Unlock()
++
++	return len(c.buffer)
++}
++
++func (c *serialConsole) output() string {
++	c.bufferLock.Lock()
++	defer c.bufferLock.Unlock()
++
++	c.cursor = len(c.buffer)
++
++	return string(c.buffer)
++}
++
++func (c *serialConsole) takeOutput() string {
++	c.bufferLock.Lock()
++	defer c.bufferLock.Unlock()
++
++	output := string(c.buffer[c.cursor:])
++
++	c.cursor = len(c.buffer)
++
++	return output
++}
++
++func (c *serialConsole) clearBuffer() {
++	c.bufferLock.Lock()
++	defer c.bufferLock.Unlock()
++
++	c.buffer = nil
++	c.cursor = 0
++}
++
++func (c *serialConsole) close() {
++	c.portLock.Lock()
++	defer c.portLock.Unlock()
++
++	if c.port != nil {
++		c.port.Close()
++		c.port = nil
+ 	}
+ }
+ 
+@@ -69,6 +123,13 @@
+ 	return console
+ }
+ 
++func (s *Service) openConsole(console *serialConsole) error {
++	console.portLock.Lock()
++	defer console.portLock.Unlock()
++
++	return s.openConsoleLocked(console)
++}
++
+ func (s *Service) openConsoleLocked(console *serialConsole) error {
+ 	if console.port != nil {
+ 		return nil
+@@ -88,20 +149,33 @@
+ 	return nil
+ }
+ 
++func (s *Service) writeConsole(console *serialConsole, data []byte) error {
++	console.portLock.Lock()
++	defer console.portLock.Unlock()
++
++	if err := s.openConsoleLocked(console); err != nil {
++		return err
++	}
++
++	_, err := console.port.Write(data)
++
++	return err
++}
++
+ func (s *Service) readLoop(console *serialConsole, port serial.Port) {
+ 	defer port.Close()
+ 
+ 	_, err := io.Copy(console, port)
+ 
+-	console.lock.Lock()
++	console.portLock.Lock()
+ 	if console.port != port {
+-		console.lock.Unlock()
++		console.portLock.Unlock()
+ 
+ 		return
+ 	}
+ 
+ 	console.port = nil
+-	console.lock.Unlock()
++	console.portLock.Unlock()
+ 
+ 	s.log.Error("Could not read from serial console, stopping buffering", "path", console.path, "err", err)
+ }
+diff --git a/pkg/svc/serial_clear_buffer.go b/pkg/svc/serial_clear_buffer.go
+index 4cb2562c60c441d6d8f05ced6dec1bb93efa15f5..a8a6e1119c9d0257f90b9e446772e0bb80cb40e0 100644
+--- a/pkg/svc/serial_clear_buffer.go
++++ b/pkg/svc/serial_clear_buffer.go
+@@ -25,10 +25,7 @@ 	if err != nil {
+ 		return nil, nil, err
+ 	}
+ 
+-	console.lock.Lock()
+-	defer console.lock.Unlock()
+-
+-	console.buffer = nil
++	console.clearBuffer()
+ 
+ 	return nil, &GetConsolesOutput{
+ 		Consoles: []Console{console.state()},
+diff --git a/pkg/svc/serial_get_consoles.go b/pkg/svc/serial_get_consoles.go
+index 5352055ac3a1af63a8b89a63575986110c190059..a65ec64d41186d7915fceaa426b6a2740fd16d83 100644
+--- a/pkg/svc/serial_get_consoles.go
++++ b/pkg/svc/serial_get_consoles.go
+@@ -47,11 +47,7 @@ 		enumerated[port.Name] = true
+ 
+ 		console := s.getConsole(port)
+ 
+-		console.lock.Lock()
+-		state := console.state()
+-		console.lock.Unlock()
+-
+-		consoles = append(consoles, state)
++		consoles = append(consoles, console.state())
+ 	}
+ 
+ 	s.pruneConsoles(enumerated)
+@@ -68,9 +64,9 @@ 		if enumerated[path] {
+ 			continue
+ 		}
+ 
+-		console.lock.Lock()
++		console.portLock.Lock()
+ 		stopped := console.port == nil
+-		console.lock.Unlock()
++		console.portLock.Unlock()
+ 
+ 		if stopped {
+ 			delete(s.consoles, path)
+diff --git a/pkg/svc/serial_read_from.go b/pkg/svc/serial_read_from.go
+index 349efc6215d1f0e83289d0ad567388d7195a59df..58a79ee2ff78de2603259f92a8cd27f49c3ff7ca 100644
+--- a/pkg/svc/serial_read_from.go
++++ b/pkg/svc/serial_read_from.go
+@@ -10,7 +10,7 @@ var (
+ 	ReadFromTool = &mcp.Tool{
+ 		Name:        "serial.readFrom",
+ 		Title:       "Read from serial console",
+-		Description: "Read the captured output of a serial console",
++		Description: "Read the captured output of a serial console. A later writeTo call does not repeat output that this tool already returned",
+ 		Annotations: &mcp.ToolAnnotations{DestructiveHint: new(false)},
+ 	}
+ )
+@@ -29,11 +29,8 @@ 	if err != nil {
+ 		return nil, nil, err
+ 	}
+ 
+-	console.lock.Lock()
+-	defer console.lock.Unlock()
+-
+-	if err := s.openConsoleLocked(console); err != nil {
+-		if len(console.buffer) == 0 {
++	if err := s.openConsole(console); err != nil {
++		if console.bufferedBytes() == 0 {
+ 			// Without history we return the error since we can't fall back to returning the captured history
+ 			return nil, nil, err
+ 		}
+@@ -42,6 +39,6 @@ 		s.log.Warn("Could not open serial console, returning the captured history", "path", console.path, "err", err)
+ 	}
+ 
+ 	return nil, &ReadFromOutput{
+-		Output: string(console.buffer),
++		Output: console.output(),
+ 	}, nil
+ }
+diff --git a/pkg/svc/serial_start_buffering.go b/pkg/svc/serial_start_buffering.go
+index 033c76e693ca6171abcb6207e8e161d91f1d6e3d..b0b8b9b4e1fb1a5767bb8d17dbb47dc282334fbc 100644
+--- a/pkg/svc/serial_start_buffering.go
++++ b/pkg/svc/serial_start_buffering.go
+@@ -25,10 +25,7 @@ 	if err != nil {
+ 		return nil, nil, err
+ 	}
+ 
+-	console.lock.Lock()
+-	defer console.lock.Unlock()
+-
+-	if err := s.openConsoleLocked(console); err != nil {
++	if err := s.openConsole(console); err != nil {
+ 		return nil, nil, err
+ 	}
+ 
+diff --git a/pkg/svc/serial_stop_buffering.go b/pkg/svc/serial_stop_buffering.go
+index 32bd64f73d1bfe9bf0f75b6409c4037c92efcfad..fbdc5e8119ca0b01f1cbb2abfee554aa0b8c6d93 100644
+--- a/pkg/svc/serial_stop_buffering.go
++++ b/pkg/svc/serial_stop_buffering.go
+@@ -25,13 +25,7 @@ 	if err != nil {
+ 		return nil, nil, err
+ 	}
+ 
+-	console.lock.Lock()
+-	defer console.lock.Unlock()
+-
+-	if console.port != nil {
+-		console.port.Close()
+-		console.port = nil
+-	}
++	console.close()
+ 
+ 	return nil, &GetConsolesOutput{
+ 		Consoles: []Console{console.state()},
+diff --git a/pkg/svc/serial_write_to.go b/pkg/svc/serial_write_to.go
+index 99f225f4baf33630f8bb6208c099ed1901e7143c..312a7547c56629f292e47755bf691655fcbed12d 100644
+--- a/pkg/svc/serial_write_to.go
++++ b/pkg/svc/serial_write_to.go
+@@ -11,7 +11,7 @@ var (
+ 	WriteToTool = &mcp.Tool{
+ 		Name:        "serial.writeTo",
+ 		Title:       "Write to serial console",
+-		Description: "Write to a serial console and read back the output that follows",
++		Description: "Write to a serial console and read back the output that follows, including output that no earlier call has returned",
+ 		Annotations: &mcp.ToolAnnotations{DestructiveHint: new(true)},
+ 	}
+ )
+@@ -23,7 +23,7 @@ 	WaitMs int    `json:"waitMs,omitempty" jsonschema:"how long to wait before reading back the output in milliseconds, so that the target has time to react to the write"`
+ }
+ 
+ type WriteToOutput struct {
+-	Output string `json:"output" jsonschema:"output that has arrived since the write"`
++	Output string `json:"output" jsonschema:"output that no earlier call has returned"`
+ }
+ 
+ func (s *Service) WriteTo(ctx context.Context, req *mcp.CallToolRequest, input WriteToInput) (*mcp.CallToolResult, *WriteToOutput, error) {
+@@ -32,28 +32,13 @@ 	if err != nil {
+ 		return nil, nil, err
+ 	}
+ 
+-	console.lock.Lock()
+-	if err := s.openConsoleLocked(console); err != nil {
+-		console.lock.Unlock()
+-
+-		return nil, nil, err
+-	}
+-
+-	mark := len(console.buffer)
+-
+-	// Write to the console, then release the lock so that the reader can keep capturing
+-	_, err = console.port.Write([]byte(input.Data))
+-	console.lock.Unlock()
+-	if err != nil {
++	if err := s.writeConsole(console, []byte(input.Data)); err != nil {
+ 		return nil, nil, err
+ 	}
+ 
+ 	time.Sleep(time.Duration(input.WaitMs) * time.Millisecond)
+ 
+-	console.lock.Lock()
+-	defer console.lock.Unlock()
+-
+ 	return nil, &WriteToOutput{
+-		Output: string(console.buffer[min(mark, len(console.buffer)):]),
++		Output: console.takeOutput(),
+ 	}, nil
+ }
+
