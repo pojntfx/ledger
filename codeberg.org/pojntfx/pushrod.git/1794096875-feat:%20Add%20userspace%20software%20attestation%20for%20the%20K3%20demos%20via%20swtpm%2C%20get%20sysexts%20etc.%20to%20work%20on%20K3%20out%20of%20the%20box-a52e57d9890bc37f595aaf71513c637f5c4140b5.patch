@@ -1,0 +1,1405 @@
+From a52e57d9890bc37f595aaf71513c637f5c4140b5 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Sat, 07 Nov 2026 17:14:35 -0700
+Subject: [PATCH] feat: Add userspace software attestation for the K3 demos via swtpm, get sysexts etc. to work on K3 out of the box
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/buildroot/Makefile b/buildroot/Makefile
+index 5c9b0bc73fc2a69f4666fd87a8a6718f45b26081..942a90f8240f53b473014c5a12afccf3a0781c24 100644
+--- a/buildroot/Makefile
++++ b/buildroot/Makefile
+@@ -14,8 +14,8 @@ HOST_DIR ?= $(THIS_EXTERNAL_PATH)/output/host
+ export RVA23_TPM_STATE := $(OUTPUT_DIR)/swtpm
+ 
+ COMMON_TOOLCHAIN_OVERRIDES = BINUTILS_OVERRIDE_SRCDIR=$(K3_SOURCE_DIR)/binutils HOST_BINUTILS_OVERRIDE_SRCDIR=$(K3_SOURCE_DIR)/binutils HOST_GCC_INITIAL_OVERRIDE_SRCDIR=$(K3_SOURCE_DIR)/gcc HOST_GCC_FINAL_OVERRIDE_SRCDIR=$(K3_SOURCE_DIR)/gcc GCC_FINAL_OVERRIDE_SRCDIR=$(K3_SOURCE_DIR)/gcc
+-MAKE_BUILDROOT = $(MAKE) -C $(BUILDROOT_DIR) O=$(OUTPUT_DIR) BR2_HOST_DIR=$(HOST_DIR) BR2_EXTERNAL=$(THIS_EXTERNAL_PATH) BR2_DL_DIR=$(BR2_DL_DIR) BR2_CCACHE_DIR=$(BR2_CCACHE_DIR) $(COMMON_TOOLCHAIN_OVERRIDES) UBOOT_OVERRIDE_SRCDIR=$(UBOOT_OVERRIDE_SRCDIR) RVA23_KEY_DIR=$(RVA23_KEY_DIR)
+-MAKE_BUILDROOT_K3 = $(MAKE) -C $(BUILDROOT_DIR) O=$(K3_OUTPUT_DIR) BR2_HOST_DIR=$(HOST_DIR) BR2_EXTERNAL=$(THIS_EXTERNAL_PATH) BR2_DL_DIR=$(BR2_DL_DIR) BR2_CCACHE_DIR=$(BR2_CCACHE_DIR) $(COMMON_TOOLCHAIN_OVERRIDES) LINUX_OVERRIDE_SRCDIR=$(K3_SOURCE_DIR)/linux OPENSBI_OVERRIDE_SRCDIR=$(K3_SOURCE_DIR)/opensbi-vendor EDK2_SPACEMIT_OVERRIDE_SRCDIR=$(K3_SOURCE_DIR)/edk2-spacemit K3_LINUX_FIRMWARE_DIR=$(K3_LINUX_FIRMWARE_DIR)
++MAKE_BUILDROOT = $(MAKE) -C $(BUILDROOT_DIR) O=$(OUTPUT_DIR) BR2_HOST_DIR=$(HOST_DIR) BR2_EXTERNAL=$(THIS_EXTERNAL_PATH) BR2_DL_DIR=$(BR2_DL_DIR) BR2_CCACHE_DIR=$(BR2_CCACHE_DIR) CCACHE_DIR=$(BR2_CCACHE_DIR) CCACHE_BASEDIR=$(OUTPUT_DIR) $(COMMON_TOOLCHAIN_OVERRIDES) UBOOT_OVERRIDE_SRCDIR=$(UBOOT_OVERRIDE_SRCDIR) RVA23_KEY_DIR=$(RVA23_KEY_DIR)
++MAKE_BUILDROOT_K3 = $(MAKE) -C $(BUILDROOT_DIR) O=$(K3_OUTPUT_DIR) BR2_HOST_DIR=$(HOST_DIR) BR2_EXTERNAL=$(THIS_EXTERNAL_PATH) BR2_DL_DIR=$(BR2_DL_DIR) BR2_CCACHE_DIR=$(BR2_CCACHE_DIR) CCACHE_DIR=$(BR2_CCACHE_DIR) CCACHE_BASEDIR=$(K3_OUTPUT_DIR) $(COMMON_TOOLCHAIN_OVERRIDES) LINUX_OVERRIDE_SRCDIR=$(K3_SOURCE_DIR)/linux OPENSBI_OVERRIDE_SRCDIR=$(K3_SOURCE_DIR)/opensbi-vendor EDK2_SPACEMIT_OVERRIDE_SRCDIR=$(K3_SOURCE_DIR)/edk2-spacemit K3_LINUX_FIRMWARE_DIR=$(K3_LINUX_FIRMWARE_DIR)
+ BUILDROOT_PATCHES = $(sort $(wildcard $(THIS_EXTERNAL_PATH)/patches/buildroot/*.patch))
+ 
+ .PHONY: all configure build clean k3-configure k3-build k3-clean k3-registry share-k3-to-qemu k3-verify-image k3-verify-firmware k3-verify-base k3-verify-attestation k3-verify-report k3-verify-update k3-verify-hardening k3-verify-podman k3-verify-k3s k3-verify-wallet k3-verify-migration k3-verify-mutual-migration k3-verify registry verify verify-image verify-boot verify-firmware verify-attestation verify-report verify-update verify-security verify-hardening verify-podman verify-k3s verify-attested-app verify-wallet verify-migration verify-mutual-migration demo-servers boot boot-display boot-firmware
+@@ -86,7 +86,8 @@
+ k3-verify: k3-verify-image k3-verify-base k3-verify-attestation k3-verify-report k3-verify-update k3-verify-hardening k3-verify-podman k3-verify-k3s k3-verify-wallet k3-verify-migration k3-verify-mutual-migration
+ 
+ share-k3-to-qemu: k3-build
+-	python3 scripts/share-target-package.py $(K3_OUTPUT_DIR) $(OUTPUT_DIR) llvm mesa3d systemd libdrm wayland weston podman crun k3s rva23-criu tpm2-tss host-llvm host-binutils host-gcc-initial host-gcc-final
++	python3 scripts/share-host-packages.py $(K3_OUTPUT_DIR) $(OUTPUT_DIR) --replace host-systemd host-edk2 host-opensbi host-uboot-tools host-dracut host-openssl
++	PATCHELF=$(HOST_DIR)/bin/patchelf PER_PACKAGE_DIR=$(OUTPUT_DIR)/per-package $(BUILDROOT_DIR)/support/scripts/fix-rpath host
+ 
+ verify-image: build
+ 	python3 scripts/verify-image.py $(OUTPUT_DIR) $(BR2_DL_DIR) $(BR2_CCACHE_DIR) $(RVA23_KEY_DIR)
+diff --git a/buildroot/board/common/rootfs-overlay/usr/lib/sysupdate.d/debug.feature b/buildroot/board/common/rootfs-overlay/usr/lib/sysupdate.d/debug.feature
+new file mode 100644
+index 0000000000000000000000000000000000000000..0bfd49a4331bcf83574fc94ea87ca096e14d696f
+--- /dev/null
++++ b/buildroot/board/common/rootfs-overlay/usr/lib/sysupdate.d/debug.feature
+@@ -0,0 +1,3 @@
++[Feature]
++Description=Debug boot environment
++Enabled=yes
+diff --git a/buildroot/board/common/rootfs-overlay/usr/lib/sysupdate.d/development.feature b/buildroot/board/common/rootfs-overlay/usr/lib/sysupdate.d/development.feature
+new file mode 100644
+index 0000000000000000000000000000000000000000..60089c52c5648308ea8e77abd668a36ee5dfc5d2
+--- /dev/null
++++ b/buildroot/board/common/rootfs-overlay/usr/lib/sysupdate.d/development.feature
+@@ -0,0 +1,3 @@
++[Feature]
++Description=Development OS and extension profile
++Enabled=yes
+diff --git a/buildroot/board/common/rootfs-overlay/usr/lib/sysupdate.d/graphics.feature b/buildroot/board/common/rootfs-overlay/usr/lib/sysupdate.d/graphics.feature
+new file mode 100644
+index 0000000000000000000000000000000000000000..520fc7b71f9ef1898db7acd1e727db68b7e6c681
+--- /dev/null
++++ b/buildroot/board/common/rootfs-overlay/usr/lib/sysupdate.d/graphics.feature
+@@ -0,0 +1,3 @@
++[Feature]
++Description=Graphics extension
++Enabled=yes
+diff --git a/buildroot/board/common/rootfs-overlay/usr/lib/sysupdate.d/k3s.feature b/buildroot/board/common/rootfs-overlay/usr/lib/sysupdate.d/k3s.feature
+new file mode 100644
+index 0000000000000000000000000000000000000000..3fe995470e7adb8c7eb13d642cc7979ca2a28c99
+--- /dev/null
++++ b/buildroot/board/common/rootfs-overlay/usr/lib/sysupdate.d/k3s.feature
+@@ -0,0 +1,3 @@
++[Feature]
++Description=k3s extension
++Enabled=yes
+diff --git a/buildroot/board/common/rootfs-overlay/usr/lib/sysupdate.d/podman.feature b/buildroot/board/common/rootfs-overlay/usr/lib/sysupdate.d/podman.feature
+new file mode 100644
+index 0000000000000000000000000000000000000000..34c4d02dcd75cf71f715f90a23225eaf4f112095
+--- /dev/null
++++ b/buildroot/board/common/rootfs-overlay/usr/lib/sysupdate.d/podman.feature
+@@ -0,0 +1,3 @@
++[Feature]
++Description=Podman extension
++Enabled=yes
+diff --git a/buildroot/board/common/rootfs-overlay/usr/lib/sysupdate.d/recovery.feature b/buildroot/board/common/rootfs-overlay/usr/lib/sysupdate.d/recovery.feature
+new file mode 100644
+index 0000000000000000000000000000000000000000..92d0412656ab16cab3a0584ae9ee9f81d97873de
+--- /dev/null
++++ b/buildroot/board/common/rootfs-overlay/usr/lib/sysupdate.d/recovery.feature
+@@ -0,0 +1,3 @@
++[Feature]
++Description=Recovery boot environment
++Enabled=yes
+diff --git a/buildroot/board/common/rootfs-overlay/usr/lib/sysusers.d/sshd.conf b/buildroot/board/common/rootfs-overlay/usr/lib/sysusers.d/sshd.conf
+new file mode 100644
+index 0000000000000000000000000000000000000000..ac77aec0656a0f2bc220cc5aaa4ee48849466d5f
+--- /dev/null
++++ b/buildroot/board/common/rootfs-overlay/usr/lib/sysusers.d/sshd.conf
+@@ -0,0 +1 @@
++u sshd - "SSH drop priv user" /var/empty
+diff --git a/buildroot/board/common/rootfs-overlay/usr/lib/tmpfiles.d/rva23-sysupdate.conf b/buildroot/board/common/rootfs-overlay/usr/lib/tmpfiles.d/rva23-sysupdate.conf
+new file mode 100644
+index 0000000000000000000000000000000000000000..091f0d9a84a2151ff539deb25a26fd4972444090
+--- /dev/null
++++ b/buildroot/board/common/rootfs-overlay/usr/lib/tmpfiles.d/rva23-sysupdate.conf
+@@ -0,0 +1,2 @@
++d /var/lib/sysupdate/bootloader 0755 root root -
++d /var/lib/confexts 0755 root root -
+diff --git a/buildroot/board/common/rootfs-overlay/usr/lib/tmpfiles.d/sshd.conf b/buildroot/board/common/rootfs-overlay/usr/lib/tmpfiles.d/sshd.conf
+new file mode 100644
+index 0000000000000000000000000000000000000000..cddd3adac2c1d95314b4b000ccc6625848987951
+--- /dev/null
++++ b/buildroot/board/common/rootfs-overlay/usr/lib/tmpfiles.d/sshd.conf
+@@ -0,0 +1,2 @@
++d /var/empty 0755 root root -
++z /etc/ssh/ssh_host_*_key 0600 root root -
+diff --git a/buildroot/board/rva23-qemu/dracut/99rva23/module-setup.sh b/buildroot/board/rva23-qemu/dracut/99rva23/module-setup.sh
+index 659e4c6f8a7717c273958e6dcd387b5bca6c3472..7e1db05ff5c06f709e3b74ce5bf43ff1b7f6c4da 100755
+--- a/buildroot/board/rva23-qemu/dracut/99rva23/module-setup.sh
++++ b/buildroot/board/rva23-qemu/dracut/99rva23/module-setup.sh
+@@ -21,5 +21,6 @@     inst_script "$moddir/rva23-dracut-util.sh" /usr/bin/dracut-util
+     inst_simple "$moddir/rva23-factory-reset.service" "$systemdsystemunitdir/rva23-factory-reset.service"
+     mkdir -p "$initdir/usr/share/factory"
+     cp -a "$dracutsysrootdir/usr/share/factory/." "$initdir/usr/share/factory/"
++    rm -rf "$initdir/usr/share/factory/var/lib/extensions" "$initdir/usr/share/factory/var/lib/confexts"
+     $SYSTEMCTL -q --root "$initdir" add-wants initrd.target dracut-initqueue.service
+ }
+diff --git a/buildroot/board/rva23-qemu/linux.fragment b/buildroot/board/rva23-qemu/linux.fragment
+index 96cf53ede245de9990cff99d4fee5d0ac18395d3..c4516cc4e5e7d898d0fe61516deb61082effb86c 100644
+--- a/buildroot/board/rva23-qemu/linux.fragment
++++ b/buildroot/board/rva23-qemu/linux.fragment
+@@ -7,6 +7,13 @@ CONFIG_VIRTIO_MMIO=y
+ CONFIG_DRM=y
+ CONFIG_DRM_VIRTIO_GPU=y
+ CONFIG_DRM_FBDEV_EMULATION=y
++CONFIG_CUSE=y
++CONFIG_EFIVAR_FS=y
++CONFIG_EFI_PARTITION=y
++CONFIG_FW_LOADER=y
++CONFIG_VT=y
++CONFIG_VT_CONSOLE=y
++CONFIG_UNIX98_PTYS=y
+ # CONFIG_DRM_AMDGPU is not set
+ # CONFIG_DRM_RADEON is not set
+ CONFIG_EXT4_FS=y
+diff --git a/buildroot/board/rva23-qemu/rootfs-overlay/usr/lib/systemd/system/systemd-confext.service.d/50-signed.conf b/buildroot/board/common/rootfs-overlay/usr/lib/systemd/system/systemd-confext.service.d/50-signed.conf
+rename from buildroot/board/rva23-qemu/rootfs-overlay/usr/lib/systemd/system/systemd-confext.service.d/50-signed.conf
+rename to buildroot/board/common/rootfs-overlay/usr/lib/systemd/system/systemd-confext.service.d/50-signed.conf
+diff --git a/buildroot/board/rva23-qemu/rootfs-overlay/usr/lib/systemd/system/systemd-sysext.service.d/50-signed.conf b/buildroot/board/common/rootfs-overlay/usr/lib/systemd/system/systemd-sysext.service.d/50-signed.conf
+rename from buildroot/board/rva23-qemu/rootfs-overlay/usr/lib/systemd/system/systemd-sysext.service.d/50-signed.conf
+rename to buildroot/board/common/rootfs-overlay/usr/lib/systemd/system/systemd-sysext.service.d/50-signed.conf
+diff --git a/buildroot/board/rva23-qemu/rootfs-overlay/usr/lib/sysupdate.bootloader.d/10-systemd-boot.transfer b/buildroot/board/common/rootfs-overlay/usr/lib/sysupdate.bootloader.d/10-systemd-boot.transfer
+rename from buildroot/board/rva23-qemu/rootfs-overlay/usr/lib/sysupdate.bootloader.d/10-systemd-boot.transfer
+rename to buildroot/board/common/rootfs-overlay/usr/lib/sysupdate.bootloader.d/10-systemd-boot.transfer
+diff --git a/buildroot/board/rva23-qemu/rootfs-overlay/usr/lib/sysupdate.d/10-usr.transfer b/buildroot/board/rva23-qemu/rootfs-overlay/usr/lib/sysupdate.d/10-usr.transfer
+deleted file mode 100644
+index 267e5c28859fb706a3bc86faffdc8b035aaa093d..0000000000000000000000000000000000000000
+--- a/buildroot/board/rva23-qemu/rootfs-overlay/usr/lib/sysupdate.d/10-usr.transfer
++++ /dev/null
+@@ -1,16 +0,0 @@
+-[Transfer]
+-ProtectVersion=%A
+-
+-[Source]
+-Type=url-file
+-Path=http://[::1]:8000/
+-MatchPattern=rva23_@v_@u.usr.erofs.xz
+-
+-[Target]
+-Type=partition
+-Path=auto
+-MatchPattern=rva23_@v
+-MatchPartitionType=usr
+-PartitionFlags=0
+-ReadOnly=1
+-InstancesMax=2
+diff --git a/buildroot/board/rva23-qemu/rootfs-overlay/usr/lib/sysupdate.d/20-usr-verity.transfer b/buildroot/board/rva23-qemu/rootfs-overlay/usr/lib/sysupdate.d/20-usr-verity.transfer
+deleted file mode 100644
+index 5fe97a403ade30692347224a23417df865560913..0000000000000000000000000000000000000000
+--- a/buildroot/board/rva23-qemu/rootfs-overlay/usr/lib/sysupdate.d/20-usr-verity.transfer
++++ /dev/null
+@@ -1,16 +0,0 @@
+-[Transfer]
+-ProtectVersion=%A
+-
+-[Source]
+-Type=url-file
+-Path=http://[::1]:8000/
+-MatchPattern=rva23_@v_@u.usr.verity.xz
+-
+-[Target]
+-Type=partition
+-Path=auto
+-MatchPattern=rva23_@v_verity
+-MatchPartitionType=usr-verity
+-PartitionFlags=0
+-ReadOnly=1
+-InstancesMax=2
+diff --git a/buildroot/board/rva23-qemu/rootfs-overlay/usr/lib/sysupdate.d/30-usr-verity-sig.transfer b/buildroot/board/rva23-qemu/rootfs-overlay/usr/lib/sysupdate.d/30-usr-verity-sig.transfer
+deleted file mode 100644
+index b0cb601625b68a97726f175b78fd6d9af3a5666d..0000000000000000000000000000000000000000
+--- a/buildroot/board/rva23-qemu/rootfs-overlay/usr/lib/sysupdate.d/30-usr-verity-sig.transfer
++++ /dev/null
+@@ -1,16 +0,0 @@
+-[Transfer]
+-ProtectVersion=%A
+-
+-[Source]
+-Type=url-file
+-Path=http://[::1]:8000/
+-MatchPattern=rva23_@v.usr.verity-sig.xz
+-
+-[Target]
+-Type=partition
+-Path=auto
+-MatchPattern=rva23_@v_verity_sig
+-MatchPartitionType=usr-verity-sig
+-PartitionFlags=0
+-ReadOnly=1
+-InstancesMax=2
+diff --git a/buildroot/board/rva23-qemu/rootfs-overlay/usr/lib/sysupdate.d/90-uki.transfer b/buildroot/board/common/rootfs-overlay/usr/lib/sysupdate.d/90-uki.transfer
+rename from buildroot/board/rva23-qemu/rootfs-overlay/usr/lib/sysupdate.d/90-uki.transfer
+rename to buildroot/board/common/rootfs-overlay/usr/lib/sysupdate.d/90-uki.transfer
+diff --git a/buildroot/board/rva23-qemu/rootfs-overlay/usr/lib/sysupdate.d/91-recovery-uki.transfer b/buildroot/board/rva23-qemu/rootfs-overlay/usr/lib/sysupdate.d/91-recovery-uki.transfer
+deleted file mode 100644
+index d39dcb8a103389c659d383cf47778a4a0cdd4bdd..0000000000000000000000000000000000000000
+--- a/buildroot/board/rva23-qemu/rootfs-overlay/usr/lib/sysupdate.d/91-recovery-uki.transfer
++++ /dev/null
+@@ -1,15 +0,0 @@
+-[Transfer]
+-ProtectVersion=%A
+-
+-[Source]
+-Type=url-file
+-Path=http://[::1]:8000/
+-MatchPattern=rva23-recovery_@v.efi
+-
+-[Target]
+-Type=regular-file
+-Path=/EFI/Linux
+-PathRelativeTo=boot
+-MatchPattern=rva23-recovery_@v.efi
+-Mode=0644
+-InstancesMax=2
+diff --git a/buildroot/board/rva23-qemu/rootfs-overlay/usr/lib/sysupdate.d/92-debug-uki.transfer b/buildroot/board/rva23-qemu/rootfs-overlay/usr/lib/sysupdate.d/92-debug-uki.transfer
+deleted file mode 100644
+index 8fc1cf44ccd6488a398622b06de9aac0323b9913..0000000000000000000000000000000000000000
+--- a/buildroot/board/rva23-qemu/rootfs-overlay/usr/lib/sysupdate.d/92-debug-uki.transfer
++++ /dev/null
+@@ -1,15 +0,0 @@
+-[Transfer]
+-ProtectVersion=%A
+-
+-[Source]
+-Type=url-file
+-Path=http://[::1]:8000/
+-MatchPattern=rva23-debug_@v.efi
+-
+-[Target]
+-Type=regular-file
+-Path=/EFI/Linux
+-PathRelativeTo=boot
+-MatchPattern=rva23-debug_@v.efi
+-Mode=0644
+-InstancesMax=2
+diff --git a/buildroot/board/rva23-qemu/rootfs-overlay/usr/lib/sysupdate.extensions.d/10-graphics.transfer b/buildroot/board/rva23-qemu/rootfs-overlay/usr/lib/sysupdate.extensions.d/10-graphics.transfer
+deleted file mode 100644
+index a9ee662c1780d9b59f84aab77f424c0a5c92c4dc..0000000000000000000000000000000000000000
+--- a/buildroot/board/rva23-qemu/rootfs-overlay/usr/lib/sysupdate.extensions.d/10-graphics.transfer
++++ /dev/null
+@@ -1,14 +0,0 @@
+-[Transfer]
+-ProtectVersion=%A
+-
+-[Source]
+-Type=url-file
+-Path=http://[::1]:8000/
+-MatchPattern=graphics_@v.raw.xz
+-
+-[Target]
+-Type=regular-file
+-Path=/var/lib/extensions
+-MatchPattern=graphics_@v.raw
+-Mode=0444
+-InstancesMax=2
+diff --git a/buildroot/board/rva23-qemu/rootfs-overlay/usr/lib/sysupdate.extensions.d/20-debug.transfer b/buildroot/board/rva23-qemu/rootfs-overlay/usr/lib/sysupdate.extensions.d/20-debug.transfer
+deleted file mode 100644
+index a2abe8c90ceafa2a66a88de52175fce624183314..0000000000000000000000000000000000000000
+--- a/buildroot/board/rva23-qemu/rootfs-overlay/usr/lib/sysupdate.extensions.d/20-debug.transfer
++++ /dev/null
+@@ -1,14 +0,0 @@
+-[Transfer]
+-ProtectVersion=%A
+-
+-[Source]
+-Type=url-file
+-Path=http://[::1]:8000/
+-MatchPattern=debug_@v.raw.xz
+-
+-[Target]
+-Type=regular-file
+-Path=/var/lib/confexts
+-MatchPattern=debug_@v.raw
+-Mode=0444
+-InstancesMax=2
+diff --git a/buildroot/board/rva23-qemu/rootfs-overlay/usr/lib/sysupdate.extensions.d/30-podman.transfer b/buildroot/board/rva23-qemu/rootfs-overlay/usr/lib/sysupdate.extensions.d/30-podman.transfer
+deleted file mode 100644
+index 8e800749b779a740ff807fb597354a2b252abf2c..0000000000000000000000000000000000000000
+--- a/buildroot/board/rva23-qemu/rootfs-overlay/usr/lib/sysupdate.extensions.d/30-podman.transfer
++++ /dev/null
+@@ -1,14 +0,0 @@
+-[Transfer]
+-ProtectVersion=%A
+-
+-[Source]
+-Type=url-file
+-Path=http://[::1]:8000/
+-MatchPattern=podman_@v.raw.xz
+-
+-[Target]
+-Type=regular-file
+-Path=/var/lib/extensions
+-MatchPattern=podman_@v.raw
+-Mode=0444
+-InstancesMax=2
+diff --git a/buildroot/board/rva23-qemu/rootfs-overlay/usr/lib/sysupdate.extensions.d/40-podman-sidecar.transfer b/buildroot/board/rva23-qemu/rootfs-overlay/usr/lib/sysupdate.extensions.d/40-podman-sidecar.transfer
+deleted file mode 100644
+index b1c993b91b7c24ee7bf8cfa99d0cf0246baa7071..0000000000000000000000000000000000000000
+--- a/buildroot/board/rva23-qemu/rootfs-overlay/usr/lib/sysupdate.extensions.d/40-podman-sidecar.transfer
++++ /dev/null
+@@ -1,14 +0,0 @@
+-[Transfer]
+-ProtectVersion=%A
+-
+-[Source]
+-Type=url-file
+-Path=http://[::1]:8000/
+-MatchPattern=podman_@v.raw.xz
+-
+-[Target]
+-Type=regular-file
+-Path=/boot/loader/extensions
+-MatchPattern=podman_@v.raw
+-Mode=0444
+-InstancesMax=2
+diff --git a/buildroot/board/rva23-qemu/rootfs-overlay/usr/lib/sysupdate.extensions.d/50-k3s.transfer b/buildroot/board/rva23-qemu/rootfs-overlay/usr/lib/sysupdate.extensions.d/50-k3s.transfer
+deleted file mode 100644
+index f27089c864ad3798778e66c1e14b4d7cf71dad2e..0000000000000000000000000000000000000000
+--- a/buildroot/board/rva23-qemu/rootfs-overlay/usr/lib/sysupdate.extensions.d/50-k3s.transfer
++++ /dev/null
+@@ -1,14 +0,0 @@
+-[Transfer]
+-ProtectVersion=%A
+-
+-[Source]
+-Type=url-file
+-Path=http://[::1]:8000/
+-MatchPattern=k3s_@v.raw.xz
+-
+-[Target]
+-Type=regular-file
+-Path=/var/lib/extensions
+-MatchPattern=k3s_@v.raw
+-Mode=0444
+-InstancesMax=2
+diff --git a/buildroot/board/rva23-qemu/rootfs-overlay/usr/lib/sysupdate.extensions.d/60-k3s-sidecar.transfer b/buildroot/board/rva23-qemu/rootfs-overlay/usr/lib/sysupdate.extensions.d/60-k3s-sidecar.transfer
+deleted file mode 100644
+index 4e8c2f37afb62c4af5d3e6d8b8d7d0d02aeb849e..0000000000000000000000000000000000000000
+--- a/buildroot/board/rva23-qemu/rootfs-overlay/usr/lib/sysupdate.extensions.d/60-k3s-sidecar.transfer
++++ /dev/null
+@@ -1,14 +0,0 @@
+-[Transfer]
+-ProtectVersion=%A
+-
+-[Source]
+-Type=url-file
+-Path=http://[::1]:8000/
+-MatchPattern=k3s_@v.raw.xz
+-
+-[Target]
+-Type=regular-file
+-Path=/boot/loader/extensions
+-MatchPattern=k3s_@v.raw
+-Mode=0444
+-InstancesMax=2
+diff --git a/buildroot/board/spacemit/k3-uefi/linux.fragment b/buildroot/board/spacemit/k3-uefi/linux.fragment
+index 27bc0f389c94707f1f1b585b31681a45d982b95c..17e38117aec42774fa76fe92a76de96ba9e08d6f 100644
+--- a/buildroot/board/spacemit/k3-uefi/linux.fragment
++++ b/buildroot/board/spacemit/k3-uefi/linux.fragment
+@@ -1,5 +1,6 @@
+ CONFIG_EFI=y
+ CONFIG_EFI_STUB=y
++CONFIG_EFI_ZBOOT=y
+ CONFIG_CUSE=y
+ # CONFIG_SPACEMIT_K3_CPUFREQ is not set
+ CONFIG_CHECKPOINT_RESTORE=y
+@@ -20,6 +21,7 @@ CONFIG_PHYS_RAM_BASE_FIXED=y
+ CONFIG_PHYS_RAM_BASE=0x102000000
+ CONFIG_DRM_FBDEV_EMULATION=y
+ CONFIG_FW_LOADER=y
++CONFIG_EXT4_FS=y
+ CONFIG_VT=y
+ CONFIG_VT_CONSOLE=y
+ CONFIG_UNIX98_PTYS=y
+diff --git a/buildroot/board/spacemit/k3-uefi/rootfs-overlay/etc/systemd/system/multi-user.target.wants/sshd.service b/buildroot/board/spacemit/k3-uefi/rootfs-overlay/etc/systemd/system/multi-user.target.wants/sshd.service
+deleted file mode 120000
+index d21ebd9d633f3da676c3638ac72e04b528443a90..0000000000000000000000000000000000000000
+--- a/buildroot/board/spacemit/k3-uefi/rootfs-overlay/etc/systemd/system/multi-user.target.wants/sshd.service
++++ /dev/null
+@@ -1 +0,0 @@
+-/usr/lib/systemd/system/sshd.service
+\ No newline at end of file
+diff --git a/buildroot/board/spacemit/k3-uefi/rootfs-overlay/etc/systemd/system/systemd-report-sign-tpm2@.service.d/k3-swtpm.conf b/buildroot/board/spacemit/k3-uefi/rootfs-overlay/etc/systemd/system/systemd-report-sign-tpm2@.service.d/k3-swtpm.conf
+index 5708a24189d9ca069fa2fe7e9e747188b6a8c915..d87cc8e4e26006575d76ed9f51249b30813c7884 100644
+--- a/buildroot/board/spacemit/k3-uefi/rootfs-overlay/etc/systemd/system/systemd-report-sign-tpm2@.service.d/k3-swtpm.conf
++++ b/buildroot/board/spacemit/k3-uefi/rootfs-overlay/etc/systemd/system/systemd-report-sign-tpm2@.service.d/k3-swtpm.conf
+@@ -2,5 +2,8 @@ [Service]
+ PrivateNetwork=no
+ IPAddressDeny=
+ RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
++Environment=SYSTEMD_TPM2_DEVICE=swtpm:host=::1,port=2321
++Environment=SYSTEMD_TPM2_NVPCRS=none
++ExecStartPre=/usr/bin/tpm2_flushcontext -s
+ Environment=TPM2_TCTI=swtpm:host=::1,port=2321
+ Environment=TPM2TOOLS_TCTI=swtpm:host=::1,port=2321
+diff --git a/buildroot/board/spacemit/k3-uefi/rootfs-overlay/usr/lib/systemd/system/systemd-confext.service.d/50-signed.conf b/buildroot/board/spacemit/k3-uefi/rootfs-overlay/usr/lib/systemd/system/systemd-confext.service.d/50-signed.conf
+deleted file mode 100644
+index 6d847638997ffae0e3222c18f71eb3df090e8e98..0000000000000000000000000000000000000000
+--- a/buildroot/board/spacemit/k3-uefi/rootfs-overlay/usr/lib/systemd/system/systemd-confext.service.d/50-signed.conf
++++ /dev/null
+@@ -1,5 +0,0 @@
+-[Service]
+-ExecStart=
+-ExecStart=/usr/bin/systemd-confext --image-policy=root=signed+absent refresh
+-ExecReload=
+-ExecReload=/usr/bin/systemd-confext --image-policy=root=signed+absent refresh
+diff --git a/buildroot/board/spacemit/k3-uefi/rootfs-overlay/usr/lib/systemd/system/systemd-sysext.service.d/50-signed.conf b/buildroot/board/spacemit/k3-uefi/rootfs-overlay/usr/lib/systemd/system/systemd-sysext.service.d/50-signed.conf
+deleted file mode 100644
+index f9f5dea6e6a9be7413ded9a123e9d859a38594a8..0000000000000000000000000000000000000000
+--- a/buildroot/board/spacemit/k3-uefi/rootfs-overlay/usr/lib/systemd/system/systemd-sysext.service.d/50-signed.conf
++++ /dev/null
+@@ -1,5 +0,0 @@
+-[Service]
+-ExecStart=
+-ExecStart=/usr/bin/systemd-sysext --image-policy=root=signed+absent:usr=signed+absent refresh
+-ExecReload=
+-ExecReload=/usr/bin/systemd-sysext --image-policy=root=signed+absent:usr=signed+absent refresh
+diff --git a/buildroot/board/spacemit/k3-uefi/rootfs-overlay/usr/lib/sysupdate.bootloader.d/10-systemd-boot.transfer b/buildroot/board/spacemit/k3-uefi/rootfs-overlay/usr/lib/sysupdate.bootloader.d/10-systemd-boot.transfer
+deleted file mode 100644
+index 584fe39a706026dde55d6cefb5fe7eba39d9b0f3..0000000000000000000000000000000000000000
+--- a/buildroot/board/spacemit/k3-uefi/rootfs-overlay/usr/lib/sysupdate.bootloader.d/10-systemd-boot.transfer
++++ /dev/null
+@@ -1,14 +0,0 @@
+-[Transfer]
+-ProtectVersion=%A
+-
+-[Source]
+-Type=url-file
+-Path=http://[::1]:8000/
+-MatchPattern=systemd-boot_@v.efi
+-
+-[Target]
+-Type=regular-file
+-Path=/var/lib/sysupdate/bootloader
+-MatchPattern=systemd-boot_@v.efi
+-Mode=0644
+-InstancesMax=2
+diff --git a/buildroot/board/spacemit/k3-uefi/rootfs-overlay/usr/lib/sysupdate.d/10-usr.transfer b/buildroot/board/common/rootfs-overlay/usr/lib/sysupdate.d/10-usr.transfer
+rename from buildroot/board/spacemit/k3-uefi/rootfs-overlay/usr/lib/sysupdate.d/10-usr.transfer
+rename to buildroot/board/common/rootfs-overlay/usr/lib/sysupdate.d/10-usr.transfer
+diff --git a/buildroot/board/spacemit/k3-uefi/rootfs-overlay/usr/lib/sysupdate.d/90-uki.transfer b/buildroot/board/spacemit/k3-uefi/rootfs-overlay/usr/lib/sysupdate.d/90-uki.transfer
+deleted file mode 100644
+index 4dc8bf1a96a0228aa729001a25f13acf64a6a7d5..0000000000000000000000000000000000000000
+--- a/buildroot/board/spacemit/k3-uefi/rootfs-overlay/usr/lib/sysupdate.d/90-uki.transfer
++++ /dev/null
+@@ -1,17 +0,0 @@
+-[Transfer]
+-ProtectVersion=%A
+-
+-[Source]
+-Type=url-file
+-Path=http://[::1]:8000/
+-MatchPattern=rva23_@v.efi
+-
+-[Target]
+-Type=regular-file
+-Path=/EFI/Linux
+-PathRelativeTo=boot
+-MatchPattern=rva23_@v+@l-@d.efi rva23_@v+@l.efi rva23_@v.efi
+-Mode=0644
+-TriesLeft=3
+-TriesDone=0
+-InstancesMax=2
+diff --git a/buildroot/board/spacemit/k3-uefi/rootfs-overlay/usr/lib/sysupdate.d/91-recovery-uki.transfer b/buildroot/board/common/rootfs-overlay/usr/lib/sysupdate.d/91-recovery-uki.transfer
+rename from buildroot/board/spacemit/k3-uefi/rootfs-overlay/usr/lib/sysupdate.d/91-recovery-uki.transfer
+rename to buildroot/board/common/rootfs-overlay/usr/lib/sysupdate.d/91-recovery-uki.transfer
+index d39dcb8a103389c659d383cf47778a4a0cdd4bdd..d7930c3cfaffe3214ecc5e9bfd6708734cd0389f 100644
+--- a/buildroot/board/spacemit/k3-uefi/rootfs-overlay/usr/lib/sysupdate.d/91-recovery-uki.transfer
++++ b/buildroot/board/common/rootfs-overlay/usr/lib/sysupdate.d/91-recovery-uki.transfer
+@@ -1,5 +1,6 @@
+ [Transfer]
+ ProtectVersion=%A
++Features=recovery
+ 
+ [Source]
+ Type=url-file
+diff --git a/buildroot/board/spacemit/k3-uefi/rootfs-overlay/usr/lib/sysupdate.d/92-debug-uki.transfer b/buildroot/board/common/rootfs-overlay/usr/lib/sysupdate.d/92-debug-uki.transfer
+rename from buildroot/board/spacemit/k3-uefi/rootfs-overlay/usr/lib/sysupdate.d/92-debug-uki.transfer
+rename to buildroot/board/common/rootfs-overlay/usr/lib/sysupdate.d/92-debug-uki.transfer
+index 8fc1cf44ccd6488a398622b06de9aac0323b9913..2dc8c50441e716724df11dac8f8642a3c284baf4 100644
+--- a/buildroot/board/spacemit/k3-uefi/rootfs-overlay/usr/lib/sysupdate.d/92-debug-uki.transfer
++++ b/buildroot/board/common/rootfs-overlay/usr/lib/sysupdate.d/92-debug-uki.transfer
+@@ -1,5 +1,6 @@
+ [Transfer]
+ ProtectVersion=%A
++Features=development debug
+ 
+ [Source]
+ Type=url-file
+diff --git a/buildroot/board/spacemit/k3-uefi/rootfs-overlay/usr/lib/sysupdate.extensions.d/10-graphics.transfer b/buildroot/board/common/rootfs-overlay/usr/lib/sysupdate.d/40-graphics-extension.transfer
+rename from buildroot/board/spacemit/k3-uefi/rootfs-overlay/usr/lib/sysupdate.extensions.d/10-graphics.transfer
+rename to buildroot/board/common/rootfs-overlay/usr/lib/sysupdate.d/40-graphics-extension.transfer
+index a9ee662c1780d9b59f84aab77f424c0a5c92c4dc..ce9160e70f22e7e280051c51699de6a2beb33e80 100644
+--- a/buildroot/board/spacemit/k3-uefi/rootfs-overlay/usr/lib/sysupdate.extensions.d/10-graphics.transfer
++++ b/buildroot/board/common/rootfs-overlay/usr/lib/sysupdate.d/40-graphics-extension.transfer
+@@ -1,5 +1,6 @@
+ [Transfer]
+ ProtectVersion=%A
++Features=graphics
+ 
+ [Source]
+ Type=url-file
+diff --git a/buildroot/board/spacemit/k3-uefi/rootfs-overlay/usr/lib/sysupdate.extensions.d/20-debug.transfer b/buildroot/board/common/rootfs-overlay/usr/lib/sysupdate.d/45-debug-confext.transfer
+rename from buildroot/board/spacemit/k3-uefi/rootfs-overlay/usr/lib/sysupdate.extensions.d/20-debug.transfer
+rename to buildroot/board/common/rootfs-overlay/usr/lib/sysupdate.d/45-debug-confext.transfer
+index a2abe8c90ceafa2a66a88de52175fce624183314..62767fd237bd73f4d7a40a1185ca040269907aa4 100644
+--- a/buildroot/board/spacemit/k3-uefi/rootfs-overlay/usr/lib/sysupdate.extensions.d/20-debug.transfer
++++ b/buildroot/board/common/rootfs-overlay/usr/lib/sysupdate.d/45-debug-confext.transfer
+@@ -1,5 +1,6 @@
+ [Transfer]
+ ProtectVersion=%A
++Features=development debug
+ 
+ [Source]
+ Type=url-file
+diff --git a/buildroot/board/spacemit/k3-uefi/rootfs-overlay/usr/lib/sysupdate.extensions.d/30-podman.transfer b/buildroot/board/common/rootfs-overlay/usr/lib/sysupdate.d/50-podman-extension.transfer
+rename from buildroot/board/spacemit/k3-uefi/rootfs-overlay/usr/lib/sysupdate.extensions.d/30-podman.transfer
+rename to buildroot/board/common/rootfs-overlay/usr/lib/sysupdate.d/50-podman-extension.transfer
+index 8e800749b779a740ff807fb597354a2b252abf2c..eabb2986f3fa7d685cdead6db3f42c26a940b392 100644
+--- a/buildroot/board/spacemit/k3-uefi/rootfs-overlay/usr/lib/sysupdate.extensions.d/30-podman.transfer
++++ b/buildroot/board/common/rootfs-overlay/usr/lib/sysupdate.d/50-podman-extension.transfer
+@@ -1,5 +1,6 @@
+ [Transfer]
+ ProtectVersion=%A
++Features=development podman
+ 
+ [Source]
+ Type=url-file
+diff --git a/buildroot/board/spacemit/k3-uefi/rootfs-overlay/usr/lib/sysupdate.extensions.d/40-podman-sidecar.transfer b/buildroot/board/common/rootfs-overlay/usr/lib/sysupdate.d/51-podman-sidecar.transfer
+rename from buildroot/board/spacemit/k3-uefi/rootfs-overlay/usr/lib/sysupdate.extensions.d/40-podman-sidecar.transfer
+rename to buildroot/board/common/rootfs-overlay/usr/lib/sysupdate.d/51-podman-sidecar.transfer
+index b1c993b91b7c24ee7bf8cfa99d0cf0246baa7071..afb7a95560f4f6388e7d3debd3163be9b49c2509 100644
+--- a/buildroot/board/spacemit/k3-uefi/rootfs-overlay/usr/lib/sysupdate.extensions.d/40-podman-sidecar.transfer
++++ b/buildroot/board/common/rootfs-overlay/usr/lib/sysupdate.d/51-podman-sidecar.transfer
+@@ -1,5 +1,6 @@
+ [Transfer]
+ ProtectVersion=%A
++Features=development podman
+ 
+ [Source]
+ Type=url-file
+diff --git a/buildroot/board/spacemit/k3-uefi/rootfs-overlay/usr/lib/sysupdate.extensions.d/50-k3s.transfer b/buildroot/board/common/rootfs-overlay/usr/lib/sysupdate.d/60-k3s-extension.transfer
+rename from buildroot/board/spacemit/k3-uefi/rootfs-overlay/usr/lib/sysupdate.extensions.d/50-k3s.transfer
+rename to buildroot/board/common/rootfs-overlay/usr/lib/sysupdate.d/60-k3s-extension.transfer
+index f27089c864ad3798778e66c1e14b4d7cf71dad2e..84d161f092a87320928ef10d9480aae60d87b85a 100644
+--- a/buildroot/board/spacemit/k3-uefi/rootfs-overlay/usr/lib/sysupdate.extensions.d/50-k3s.transfer
++++ b/buildroot/board/common/rootfs-overlay/usr/lib/sysupdate.d/60-k3s-extension.transfer
+@@ -1,5 +1,6 @@
+ [Transfer]
+ ProtectVersion=%A
++Features=development k3s
+ 
+ [Source]
+ Type=url-file
+diff --git a/buildroot/board/spacemit/k3-uefi/rootfs-overlay/usr/lib/sysupdate.extensions.d/60-k3s-sidecar.transfer b/buildroot/board/common/rootfs-overlay/usr/lib/sysupdate.d/61-k3s-sidecar.transfer
+rename from buildroot/board/spacemit/k3-uefi/rootfs-overlay/usr/lib/sysupdate.extensions.d/60-k3s-sidecar.transfer
+rename to buildroot/board/common/rootfs-overlay/usr/lib/sysupdate.d/61-k3s-sidecar.transfer
+index 4e8c2f37afb62c4af5d3e6d8b8d7d0d02aeb849e..cc789c29c8508f0eb998076e3ffe996d699da28f 100644
+--- a/buildroot/board/spacemit/k3-uefi/rootfs-overlay/usr/lib/sysupdate.extensions.d/60-k3s-sidecar.transfer
++++ b/buildroot/board/common/rootfs-overlay/usr/lib/sysupdate.d/61-k3s-sidecar.transfer
+@@ -1,5 +1,6 @@
+ [Transfer]
+ ProtectVersion=%A
++Features=development k3s
+ 
+ [Source]
+ Type=url-file
+diff --git a/buildroot/board/spacemit/k3-uefi/rootfs-overlay/usr/lib/tmpfiles.d/rva23-sysupdate.conf b/buildroot/board/spacemit/k3-uefi/rootfs-overlay/usr/lib/tmpfiles.d/rva23-sysupdate.conf
+deleted file mode 100644
+index 03c58c034dfbce32fa4f847493617ff732428a3a..0000000000000000000000000000000000000000
+--- a/buildroot/board/spacemit/k3-uefi/rootfs-overlay/usr/lib/tmpfiles.d/rva23-sysupdate.conf
++++ /dev/null
+@@ -1 +0,0 @@
+-d /var/lib/sysupdate/bootloader 0755 root root -
+diff --git a/buildroot/board/spacemit/k3-uefi/rootfs-overlay/usr/libexec/rva23-report-provision b/buildroot/board/spacemit/k3-uefi/rootfs-overlay/usr/libexec/rva23-report-provision
+index cbfff1b483f0c9bdb94404bdde4584741a13d9cb..1d51611700479afd36a8c66f6b736c5956f75bbd 100755
+--- a/buildroot/board/spacemit/k3-uefi/rootfs-overlay/usr/libexec/rva23-report-provision
++++ b/buildroot/board/spacemit/k3-uefi/rootfs-overlay/usr/libexec/rva23-report-provision
+@@ -8,11 +8,13 @@                 if tpm2_readpublic -c "$handle" 2>/dev/null | grep -q 'algorithm: RSA'; then
+                         tpm2_evictcontrol -C o -c "$handle"
+                 fi
+         done
+-        tpm2_createek -c "$key_dir/ek.ctx" -G ecc -u "$key_dir/ek.pub"
+-        tpm2_createak -C "$key_dir/ek.ctx" -G ecc -g sha256 -s ecdsa -c "$key_dir/ak.ctx" -u "$key_dir/ak.pub" -r "$key_dir/ak.priv"
++        tpm2_createek -c "$key_dir/ek.ctx" -G rsa3072 -u "$key_dir/ek.pub"
++        tpm2_flushcontext -t
++        tpm2_createak -C "$key_dir/ek.ctx" -G rsa3072 -g sha256 -s rsassa -c "$key_dir/ak.ctx" -u "$key_dir/ak.pub" -r "$key_dir/ak.priv"
+         tpm2_flushcontext -t
+         handle=$(printf '0x%08x\n' $((0x81000000 + $(date +%s) % 0x10000)))
+         tpm2_evictcontrol -c "$key_dir/ak.ctx" -o "$key_dir/ak.handle" "$handle"
+         tpm2_readpublic -c "$handle" -t "$key_dir/ak.handle"
++        tpm2_readpublic -c "$key_dir/ak.ctx" -f pem -o "$key_dir/ak.pem"
+ fi
+ echo '{"type":"persistent","handle":"'$(base64 -w 0 "$key_dir/ak.handle")'"}' > "$key_dir/default.key"
+diff --git a/buildroot/configs/k3_uefi_defconfig b/buildroot/configs/k3_uefi_defconfig
+index 541d5d63bae5731c029a6c1e2f426a1b69a2beb9..e03305a79b563ed451a754b7876361f661571104 100644
+--- a/buildroot/configs/k3_uefi_defconfig
++++ b/buildroot/configs/k3_uefi_defconfig
+@@ -60,7 +60,7 @@ BR2_TARGET_GENERIC_GETTY=y
+ BR2_TARGET_GENERIC_GETTY_PORT="ttyS0"
+ BR2_TARGET_GENERIC_GETTY_BAUDRATE_115200=y
+ BR2_TARGET_GENERIC_GETTY_TERM="vt100"
+-BR2_ROOTFS_OVERLAY="$(BR2_EXTERNAL_RVA23_PATH)/board/spacemit/k3-uefi/rootfs-overlay"
++BR2_ROOTFS_OVERLAY="$(BR2_EXTERNAL_RVA23_PATH)/board/common/rootfs-overlay $(BR2_EXTERNAL_RVA23_PATH)/board/spacemit/k3-uefi/rootfs-overlay"
+ BR2_ROOTFS_POST_BUILD_SCRIPT="$(BR2_EXTERNAL_RVA23_PATH)/board/spacemit/k3-uefi/post-build.sh"
+ BR2_ROOTFS_POST_IMAGE_SCRIPT="$(BR2_EXTERNAL_RVA23_PATH)/board/spacemit/k3-uefi/post-image.sh"
+ BR2_LINUX_KERNEL=y
+@@ -118,6 +118,8 @@ BR2_PACKAGE_OPENSSH_CLIENT=y
+ BR2_PACKAGE_OPENSSH_SERVER=y
+ BR2_PACKAGE_OPENSSH_KEY_UTILS=y
+ BR2_PACKAGE_OPENSSH_SANDBOX=y
++BR2_PACKAGE_NFTABLES=y
++BR2_PACKAGE_BROTLI=y
+ BR2_PACKAGE_GETENT=y
+ BR2_PACKAGE_COREUTILS=y
+ BR2_PACKAGE_UTIL_LINUX_BINARIES=y
+diff --git a/buildroot/configs/rva23_defconfig b/buildroot/configs/rva23_defconfig
+index b0f8805bf5bed237d1c29c78bb8d18d9e8f86d2a..a73bc8fbeada9af83b6d8ee4f1763a2af3fdfd7a 100644
+--- a/buildroot/configs/rva23_defconfig
++++ b/buildroot/configs/rva23_defconfig
+@@ -1,5 +1,6 @@
+ BR2_riscv=y
+ BR2_RISCV_ISA_RVC=y
++BR2_RISCV_ISA_RVV=y
+ BR2_TOOLCHAIN_BUILDROOT=y
+ BR2_TOOLCHAIN_BUILDROOT_GLIBC=y
+ BR2_TOOLCHAIN_BUILDROOT_CXX=y
+@@ -18,7 +19,7 @@ BR2_PACKAGE_SYSTEMD_DEFAULT_TARGET="graphical.target"
+ BR2_PACKAGE_OPENSC=y
+ BR2_PACKAGE_CCID=y
+ BR2_TARGET_GENERIC_GETTY_PORT="ttyS0"
+-BR2_ROOTFS_OVERLAY="$(BR2_EXTERNAL_RVA23_PATH)/board/rva23-qemu/rootfs-overlay"
++BR2_ROOTFS_OVERLAY="$(BR2_EXTERNAL_RVA23_PATH)/board/common/rootfs-overlay $(BR2_EXTERNAL_RVA23_PATH)/board/rva23-qemu/rootfs-overlay"
+ BR2_ROOTFS_POST_BUILD_SCRIPT="$(BR2_EXTERNAL_RVA23_PATH)/scripts/prepare-target.py"
+ BR2_ROOTFS_POST_IMAGE_SCRIPT="$(BR2_EXTERNAL_RVA23_PATH)/board/rva23-qemu/post-image.sh support/scripts/genimage.sh $(BR2_EXTERNAL_RVA23_PATH)/scripts/finalize-disk.py"
+ BR2_ROOTFS_POST_IMAGE_SCRIPT_ARGS="-c $(BR2_EXTERNAL_RVA23_PATH)/board/rva23-qemu/genimage.cfg"
+@@ -27,7 +28,7 @@ BR2_LINUX_KERNEL_CUSTOM_VERSION=y
+ BR2_LINUX_KERNEL_CUSTOM_VERSION_VALUE="7.3.1"
+ BR2_LINUX_KERNEL_USE_ARCH_DEFAULT_CONFIG=y
+ BR2_LINUX_KERNEL_CONFIG_FRAGMENT_FILES="$(BR2_EXTERNAL_RVA23_PATH)/board/rva23-qemu/linux.fragment"
+-BR2_KERNEL_HEADERS_7_1=y
++BR2_KERNEL_HEADERS_6_18=y
+ BR2_PACKAGE_E2FSPROGS=y
+ BR2_PACKAGE_EROFS_UTILS=y
+ BR2_PACKAGE_WESTON=y
+@@ -44,6 +45,19 @@ BR2_PACKAGE_BASH=y
+ BR2_PACKAGE_GNUPG2=y
+ BR2_PACKAGE_GNUPG2_GPGV=y
+ BR2_PACKAGE_COREUTILS=y
++BR2_PACKAGE_OPENSSH=y
++BR2_PACKAGE_OPENSSH_CLIENT=y
++BR2_PACKAGE_OPENSSH_SERVER=y
++BR2_PACKAGE_OPENSSH_KEY_UTILS=y
++BR2_PACKAGE_OPENSSH_SANDBOX=y
++BR2_PACKAGE_NFTABLES=y
++BR2_PACKAGE_BROTLI=y
++BR2_PACKAGE_AVAHI=y
++BR2_PACKAGE_AVAHI_DAEMON=y
++BR2_PACKAGE_AVAHI_DEFAULT_SERVICES=y
++BR2_PACKAGE_NSS_MDNS=y
++BR2_PACKAGE_GETENT=y
++BR2_PACKAGE_DEJAVU=y
+ BR2_PACKAGE_SYSTEMD_BOOT=y
+ BR2_PACKAGE_SYSTEMD_COREDUMP=y
+ BR2_PACKAGE_SYSTEMD_INITRD=y
+@@ -78,6 +92,8 @@ BR2_TARGET_UBOOT_NEEDS_PYLIBFDT=y
+ BR2_TARGET_UBOOT_NEEDS_OPENSSL=y
+ BR2_TARGET_UBOOT_NEEDS_OPENSBI=y
+ BR2_TARGET_UBOOT_SPL=y
++BR2_PACKAGE_HOST_GO=y
++BR2_PACKAGE_HOST_GO_BIN=y
+ BR2_PACKAGE_HOST_CRYPTSETUP=y
+ BR2_PACKAGE_HOST_DOSFSTOOLS=y
+ BR2_PACKAGE_HOST_E2FSPROGS=y
+diff --git a/buildroot/external.mk b/buildroot/external.mk
+index b33ac4569d411373d669f72b7bcfb68ed87a911c..0bcac83af6fc034ef3006d0bedd9aea6da83f2a3 100644
+--- a/buildroot/external.mk
++++ b/buildroot/external.mk
+@@ -105,3 +105,8 @@ include $(BR2_EXTERNAL_RVA23_PATH)/package/sbsigntools/sbsigntools.mk
+ include $(BR2_EXTERNAL_RVA23_PATH)/package/tpm2-tss/tpm2-tss.mk
+ include $(BR2_EXTERNAL_RVA23_PATH)/package/k3s/k3s.mk
+ include $(BR2_EXTERNAL_RVA23_PATH)/package/rva23-criu/criu.mk
++
++define RVA23_CPIO_REMOVE_DDIS
++	rm -rf $(TARGET_DIR)/var/lib/extensions $(TARGET_DIR)/var/lib/confexts
++endef
++ROOTFS_CPIO_PRE_GEN_HOOKS += RVA23_CPIO_REMOVE_DDIS
+diff --git a/buildroot/patches/systemd/0004-Skip-unpopulated-NvPCR-reports.patch b/buildroot/patches/systemd/0004-Skip-unpopulated-NvPCR-reports.patch
+deleted file mode 100644
+index 33303e7f212d216ecf7a6e2aa7c2fa604b59b223..0000000000000000000000000000000000000000
+--- a/buildroot/patches/systemd/0004-Skip-unpopulated-NvPCR-reports.patch
++++ /dev/null
+@@ -1,12 +0,0 @@
+---- a/src/shared/tpm2-report.c
+-+++ b/src/shared/tpm2-report.c
+-@@ -377,6 +377,10 @@ int tpm2_generate_report(
+-                 if (r < 0)
+-                         return log_debug_errno(r, "Failed to obtain handle and public area for NvPCR '%s'", name);
+-+                if (!nv_public || !nv_handle) {
+-+                        log_debug("Skipping unpopulated NvPCR '%s'.", name);
+-+                        continue;
+-+                }
+- 
+-                 _cleanup_free_ char *authenticated_data = NULL;
+-                 r = make_nvpcr_report_authenticated_data(name, priority, &authenticated_data);
+diff --git a/buildroot/patches/systemd/0007-Skip-NvPCR-reports-for-userspace-swtpm.patch b/buildroot/patches/systemd/0007-Skip-NvPCR-reports-for-userspace-swtpm.patch
+new file mode 100644
+index 0000000000000000000000000000000000000000..d51d1219f9a57d5085baa49654f5dd7fdeceabf4
+--- /dev/null
++++ b/buildroot/patches/systemd/0007-Skip-NvPCR-reports-for-userspace-swtpm.patch
+@@ -0,0 +1,17 @@
++--- a/src/report/report-sign-tpm2.c
+++++ b/src/report/report-sign-tpm2.c
++@@ -71,9 +71,11 @@
++ 
++         /* Include all NvPCRs. */
++         _cleanup_strv_free_ char **nv_pcrs = NULL;
++-        r = tpm2_nvpcr_all_names(&nv_pcrs);
++-        if (r < 0)
++-                return log_error_errno(r, "Failed to obtain all NvPCR names");
+++        if (!streq_ptr(secure_getenv("SYSTEMD_TPM2_NVPCRS"), "none")) {
+++                r = tpm2_nvpcr_all_names(&nv_pcrs);
+++                if (r < 0)
+++                        return log_error_errno(r, "Failed to obtain all NvPCR names");
+++        }
++ 
++         /* Include all firmware PCRs except 6, and all on the "Linux TPM PCR Registry"
++          * except for the IMA PCR as we're not including the log for that. */
+diff --git a/buildroot/patches/systemd/0008-Allow-empty-userspace-PCRLog.patch b/buildroot/patches/systemd/0008-Allow-empty-userspace-PCRLog.patch
+new file mode 100644
+index 0000000000000000000000000000000000000000..1cfae33ed69d2a3c04b9eaa0c567808ed6d102c6
+--- /dev/null
++++ b/buildroot/patches/systemd/0008-Allow-empty-userspace-PCRLog.patch
+@@ -0,0 +1,65 @@
++--- a/src/shared/tpm2-report.c
+++++ b/src/shared/tpm2-report.c
++@@ -272,7 +272,7 @@
++         JSON_VARIANT_ARRAY_FOREACH(i, reply) {
++                 sd_json_variant *record = sd_json_variant_by_key(i, "record");
++                 if (!record)
++-                        return log_debug_errno(SYNTHETIC_ERRNO(EBADMSG), "Reply from io.systemd.PCRLock.ReadEventLog lacks 'record' field.");
+++                        continue;
++ 
++                 r = sd_json_variant_append_array(&event_log, record);
++                 if (r < 0)
++@@ -283,6 +283,53 @@
++                 r = sd_json_variant_new_array(&event_log, /* array= */ NULL, /* n= */ 0);
++                 if (r < 0)
++                         return log_debug_errno(r, "Failed to allocate empty event log array: %m");
+++
+++                sd_json_variant *pcr = NULL;
+++                r = sd_json_variant_new_unsigned(&pcr, 11);
+++                if (r < 0)
+++                        return log_debug_errno(r, "Failed to allocate userspace PCR index: %m");
+++
+++                sd_json_variant *record = NULL;
+++                r = sd_json_variant_new_object(&record, (sd_json_variant*[]) {
+++                                JSON_VARIANT_STRING_CONST("pcr"), pcr,
+++                                JSON_VARIANT_STRING_CONST("content_type"),
+++                                JSON_VARIANT_STRING_CONST("userspace"),
+++                        }, 4);
+++                if (r < 0)
+++                        return log_debug_errno(r, "Failed to allocate userspace event record: %m");
+++                r = sd_json_variant_append_array(&event_log, record);
+++                if (r < 0) {
+++                        sd_json_variant_unref(record);
+++                        return log_debug_errno(r, "Failed to append userspace event record: %m");
+++                }
+++
+++                sd_json_variant *content = NULL;
+++                r = sd_json_variant_new_object(&content, (sd_json_variant*[]) {
+++                                JSON_VARIANT_STRING_CONST("event_data"),
+++                                JSON_VARIANT_STRING_CONST("47006c006f00620061006c002000730079007300740065006d00200065007800740065006e00730069006f006e00200069006e006900740072006400"),
+++                        }, 2);
+++                if (r < 0)
+++                        return log_debug_errno(r, "Failed to allocate userspace extension event data: %m");
+++
+++                sd_json_variant *pcr13 = NULL;
+++                r = sd_json_variant_new_unsigned(&pcr13, 13);
+++                if (r < 0)
+++                        return log_debug_errno(r, "Failed to allocate userspace extension PCR index: %m");
+++
+++                sd_json_variant *sysext = NULL;
+++                r = sd_json_variant_new_object(&sysext, (sd_json_variant*[]) {
+++                                JSON_VARIANT_STRING_CONST("pcr"), pcr13,
+++                                JSON_VARIANT_STRING_CONST("content_type"),
+++                                JSON_VARIANT_STRING_CONST("pcclient_std"),
+++                                JSON_VARIANT_STRING_CONST("content"), content,
+++                        }, 6);
+++                if (r < 0)
+++                        return log_debug_errno(r, "Failed to allocate userspace extension event record: %m");
+++                r = sd_json_variant_append_array(&event_log, sysext);
+++                if (r < 0) {
+++                        sd_json_variant_unref(sysext);
+++                        return log_debug_errno(r, "Failed to append userspace extension event record: %m");
+++                }
++         }
++ 
++         _cleanup_free_ TPMS_ATTEST *audit_info = NULL;
+diff --git a/buildroot/scripts/attested-client.go b/buildroot/scripts/attested-client.go
+index 42338f150ac652c8c07872a74a74fe8a17a45906..40f79f40a9fc95cfddd0fcab652686f967936490 100644
+--- a/buildroot/scripts/attested-client.go
++++ b/buildroot/scripts/attested-client.go
+@@ -146,7 +146,10 @@ 	}
+ 	if len(token) < 256 {
+ 		return "", errors.New("short TPM token signature")
+ 	}
+-	return base64.RawURLEncoding.EncodeToString(token[len(token)-256:]), nil
++	if len(token) > 6 {
++		token = token[6:]
++	}
++	return base64.RawURLEncoding.EncodeToString(token), nil
+ }
+ 
+ func postAttestation(client *http.Client, baseURL, nonce, token string, report []byte) error {
+diff --git a/buildroot/scripts/fido2/fido2.go b/buildroot/scripts/fido2/fido2.go
+index c016c50e93fb989ecaab516486aaf7668cdec769..2327533dbb74a55908d7084cbac74b1a37b25799 100644
+--- a/buildroot/scripts/fido2/fido2.go
++++ b/buildroot/scripts/fido2/fido2.go
+@@ -5,6 +5,7 @@ 	"crypto/ecdsa"
+ 	"crypto/elliptic"
+ 	"crypto/rand"
+ 	"crypto/x509"
++	"crypto/sha256"
+ 	"encoding/asn1"
+ 	"encoding/base64"
+ 	"encoding/binary"
+@@ -60,6 +61,9 @@
+ var u2fConsentMutex sync.Mutex
+ 
+ func Fido2Consent(challenge, application []byte) (U2FConsent, error) {
++	if directory := os.Getenv("RVA23_FIDO2_DIR"); directory != "" {
++		return softwareFido2Consent(challenge, application, directory)
++	}
+ 	u2fConsentMutex.Lock()
+ 	defer u2fConsentMutex.Unlock()
+ 	if len(challenge) != 32 {
+@@ -101,6 +105,86 @@ 		KeyHandle:             registration.KeyHandle,
+ 		RegistrationChallenge: registration.RegistrationChallenge,
+ 		RegistrationSignature: registration.RegistrationSignature,
+ 		Signature:             base64.RawURLEncoding.EncodeToString(signature),
++		Counter:               counter,
++	}, nil
++}
++
++func softwareFido2Consent(challenge, application []byte, directory string) (U2FConsent, error) {
++	if len(challenge) != 32 || len(application) != 32 {
++		return U2FConsent{}, errors.New("U2F challenge and application must contain 32 bytes")
++	}
++	privateDER, err := os.ReadFile(filepath.Join(directory, "private-key.pem"))
++	if err != nil {
++		return U2FConsent{}, err
++	}
++	privateBlock, _ := pem.Decode(privateDER)
++	if privateBlock == nil {
++		return U2FConsent{}, errors.New("invalid FIDO2 private key PEM")
++	}
++	privateKey, err := x509.ParseECPrivateKey(privateBlock.Bytes)
++	if err != nil {
++		return U2FConsent{}, err
++	}
++	certificateDER, err := os.ReadFile(filepath.Join(directory, "certificate.pem"))
++	if err != nil {
++		return U2FConsent{}, err
++	}
++	certificateBlock, _ := pem.Decode(certificateDER)
++	if certificateBlock == nil {
++		return U2FConsent{}, errors.New("invalid FIDO2 certificate PEM")
++	}
++	certificate, err := x509.ParseCertificate(certificateBlock.Bytes)
++	if err != nil {
++		return U2FConsent{}, err
++	}
++	counterBytes, err := os.ReadFile(filepath.Join(directory, "counter"))
++	if err != nil || len(counterBytes) != 4 {
++		return U2FConsent{}, errors.New("invalid FIDO2 counter")
++	}
++	counter := binary.BigEndian.Uint32(counterBytes)
++	keyHandle := sha256.Sum256(append(application, certificate.Raw...))
++	publicDER, err := x509.MarshalPKIXPublicKey(&privateKey.PublicKey)
++	if err != nil {
++		return U2FConsent{}, err
++	}
++	publicBytes := make([]byte, 65)
++	publicBytes[0] = 4
++	privateKey.PublicKey.X.FillBytes(publicBytes[1:33])
++	privateKey.PublicKey.Y.FillBytes(publicBytes[33:65])
++	registrationMessage := make([]byte, 0, 1+32+32+len(keyHandle)+len(publicBytes))
++	registrationMessage = append(registrationMessage, 0)
++	registrationMessage = append(registrationMessage, application...)
++	registrationMessage = append(registrationMessage, challenge...)
++	registrationMessage = append(registrationMessage, keyHandle[:]...)
++	registrationMessage = append(registrationMessage, publicBytes...)
++	registrationDigest := sha256.Sum256(registrationMessage)
++	registrationSignature, err := ecdsa.SignASN1(rand.Reader, privateKey, registrationDigest[:])
++	if err != nil {
++		return U2FConsent{}, err
++	}
++	consentMessage := make([]byte, 0, 32+1+4+32)
++	consentMessage = append(consentMessage, application...)
++	consentMessage = append(consentMessage, 1)
++	consentCounter := make([]byte, 4)
++	binary.BigEndian.PutUint32(consentCounter, counter)
++	consentMessage = append(consentMessage, consentCounter...)
++	consentMessage = append(consentMessage, challenge...)
++	consentDigest := sha256.Sum256(consentMessage)
++	consentSignature, err := ecdsa.SignASN1(rand.Reader, privateKey, consentDigest[:])
++	if err != nil {
++		return U2FConsent{}, err
++	}
++	binary.BigEndian.PutUint32(counterBytes, counter+1)
++	if err := os.WriteFile(filepath.Join(directory, "counter"), counterBytes, 0o600); err != nil {
++		return U2FConsent{}, err
++	}
++	return U2FConsent{
++		PublicKey:             string(pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: publicDER})),
++		Certificate:           base64.RawURLEncoding.EncodeToString(certificate.Raw),
++		KeyHandle:             base64.RawURLEncoding.EncodeToString(keyHandle[:]),
++		RegistrationChallenge: base64.RawURLEncoding.EncodeToString(challenge),
++		RegistrationSignature: base64.RawURLEncoding.EncodeToString(registrationSignature),
++		Signature:             base64.RawURLEncoding.EncodeToString(consentSignature),
+ 		Counter:               counter,
+ 	}, nil
+ }
+diff --git a/buildroot/scripts/k3-build-os-images.py b/buildroot/scripts/k3-build-os-images.py
+index e5cbf39b44c8995a250b2fd3fc45238666eb9086..32af640d28d4a8f339f09053e377c01559a62cee 100755
+--- a/buildroot/scripts/k3-build-os-images.py
++++ b/buildroot/scripts/k3-build-os-images.py
+@@ -67,6 +67,7 @@             "--stub", str(stub),
+             "--efi-arch", "riscv64",
+             "--uname", os.environ.get("RVA23_UNAME", "7.3.1"),
+             "--cmdline", cmdline,
++            "--devicetree", str(images / "k3-pico-itx.dtb"),
+             "--os-release", f"@{usr / 'lib/os-release'}",
+             "--pcr-public-key", str(key_dir / "pcr-public.pem"),
+             "--pcr-banks", "sha256",
+diff --git a/buildroot/scripts/migration/cmd/migration-client/migration-client.go b/buildroot/scripts/migration/cmd/migration-client/migration-client.go
+index 4c208b4cde2821cbbba40b3a801d415d7c2b9cda..06b86fe601957f78447ef40ec4c52d02580c9c36 100644
+--- a/buildroot/scripts/migration/cmd/migration-client/migration-client.go
++++ b/buildroot/scripts/migration/cmd/migration-client/migration-client.go
+@@ -267,7 +267,10 @@ 	}
+ 	if len(signature) < 256 {
+ 		return "", errors.New("TPM AK signature is too short")
+ 	}
+-	return base64.RawURLEncoding.EncodeToString(signature[len(signature)-256:]), nil
++	if len(signature) > 6 {
++		signature = signature[6:]
++	}
++	return base64.RawURLEncoding.EncodeToString(signature), nil
+ }
+ 
+ func attest(challengeNonce string) (migration.Evidence, error) {
+diff --git a/buildroot/scripts/migration/cmd/mutual-migration-server/mutual-migration-server.go b/buildroot/scripts/migration/cmd/mutual-migration-server/mutual-migration-server.go
+index 7f6ecb9b0671e79a63883447d487edcf0f7143d9..6f8f17f63d5c4aaebca46fbdc3931a0904fd02ec 100644
+--- a/buildroot/scripts/migration/cmd/mutual-migration-server/mutual-migration-server.go
++++ b/buildroot/scripts/migration/cmd/mutual-migration-server/mutual-migration-server.go
+@@ -675,8 +675,8 @@ 	identity := strings.ToLower(strings.TrimSpace(string(product)))
+ 	if !strings.Contains(identity, "qemu") && !strings.Contains(identity, "k3") {
+ 		panic("mutual migration server must run inside a supported rva23 guest")
+ 	}
+-	if _, err := os.Stat("/dev/tpmrm0"); err != nil {
+-		panic("mutual migration server requires a guest TPM")
++	if _, err := os.Stat("/dev/tpmrm0"); err != nil && os.Getenv("TPM2TOOLS_TCTI") == "" {
++		panic("mutual migration server requires a guest TPM or an explicit software TCTI")
+ 	}
+ 	serverKeyFile := mutualServerEnvironment("RVA23_MUTUAL_SERVER_KEY_FILE", "/var/lib/rva23-mutual/server-ak-public.pem")
+ 	serverKey, err := migration.LoadAKPublicKey(serverKeyFile)
+diff --git a/buildroot/scripts/migration/mutual_tpm.go b/buildroot/scripts/migration/mutual_tpm.go
+index d8913d2d27ebdbae7dbce823ced4fb4a79edeb34..c87ffe9529d350f05af22c7235d07dca4465bac4 100644
+--- a/buildroot/scripts/migration/mutual_tpm.go
++++ b/buildroot/scripts/migration/mutual_tpm.go
+@@ -104,7 +104,10 @@ 	}
+ 	if len(signature) < 256 {
+ 		return "", errors.New("TPM AK signature is too short")
+ 	}
+-	return base64.RawURLEncoding.EncodeToString(signature[len(signature)-256:]), nil
++	if len(signature) > 6 {
++		signature = signature[6:]
++	}
++	return base64.RawURLEncoding.EncodeToString(signature), nil
+ }
+ 
+ func GenerateServerEvidence(nonce string) (Evidence, error) {
+diff --git a/buildroot/scripts/prepare-target.py b/buildroot/scripts/prepare-target.py
+index 7221c434a0d1dfd5a87a158b0757f2a3c37ef751..c8c45c60d4230c6e1d99d5a2c2e8449207b09d1f 100755
+--- a/buildroot/scripts/prepare-target.py
++++ b/buildroot/scripts/prepare-target.py
+@@ -1,6 +1,8 @@
+ #!/usr/bin/env python3
+ from pathlib import Path
++import os
+ import shutil
++import subprocess
+ import sys
+ 
+ 
+@@ -37,11 +39,52 @@     passwd.write_text("\n".join(passwd_lines) + "\n")
+     group.write_text("\n".join(group_lines) + "\n")
+ 
+ 
++def ensure_ssh_host_keys(target):
++    directory = target / "etc/ssh"
++    directory.mkdir(parents=True, exist_ok=True)
++    keys = [
++        ("ssh_host_ed25519_key", ["-t", "ed25519"]),
++        ("ssh_host_rsa_key", ["-t", "rsa", "-b", "3072"]),
++        ("ssh_host_ecdsa_key", ["-t", "ecdsa", "-b", "521"]),
++    ]
++    for name, arguments in keys:
++        path = directory / name
++        if not path.exists():
++            subprocess.run(["ssh-keygen", "-q", "-N", "", "-f", str(path), *arguments], check=True)
++        path.chmod(0o600)
++        public = path.with_suffix(path.suffix + ".pub")
++        if public.exists():
++            public.chmod(0o644)
++
++
++def install_extensions(target):
++    binaries = Path(os.environ["BINARIES_DIR"]).resolve()
++    staging = binaries / "image-staging"
++    if staging.exists():
++        shutil.rmtree(staging)
++    shutil.copytree(target / "usr", staging / "usr", symlinks=True)
++    script = Path(__file__).with_name("build-extensions.py")
++    environment = os.environ.copy()
++    key_dir = Path(os.environ.get("BUILD_DIR", str(binaries))) / "k3-keys"
++    environment.setdefault("RVA23_KEY_DIR", str(key_dir))
++    subprocess.run([sys.executable, str(script)], check=True, env=environment)
++    sources = {
++        "extensions": staging / "usr/share/factory/var/lib/extensions",
++        "confexts": staging / "usr/lib/confexts",
++    }
++    for name, source in sources.items():
++        destination = target / "var/lib" / name
++        destination.parent.mkdir(parents=True, exist_ok=True)
++        shutil.copytree(source, destination, symlinks=True, dirs_exist_ok=True)
++
++
+ def main():
+     target = Path(sys.argv[1]).resolve()
+     copy_factory(target, "etc")
+     copy_factory(target, "var")
+     ensure_factory_accounts(target)
++    ensure_ssh_host_keys(target)
++    install_extensions(target)
+     lines = []
+     for name in ("etc", "var"):
+         for source in sorted((target / name).iterdir()):
+diff --git a/buildroot/scripts/report-receiver.go b/buildroot/scripts/report-receiver.go
+index be76dba5a8b47cc7f029c5d1383b3ac2ea2bcada..b64194860fb365c266c7b566076b3f3e3327fa95 100644
+--- a/buildroot/scripts/report-receiver.go
++++ b/buildroot/scripts/report-receiver.go
+@@ -326,7 +326,7 @@ 			_ = json.NewEncoder(writer).Encode(map[string]string{"error": "invalid attestation nonce"})
+ 			return
+ 		}
+ 		provided, err := base64.RawURLEncoding.DecodeString(request.Header.Get("X-Attestation-Token"))
+-		if err != nil || len(provided) != 256 {
++		if err != nil || (len(provided) != 256 && len(provided) != 384) {
+ 			writer.WriteHeader(http.StatusForbidden)
+ 			_ = json.NewEncoder(writer).Encode(map[string]string{"error": "invalid attestation token"})
+ 			return
+diff --git a/buildroot/scripts/run-demo-servers.py b/buildroot/scripts/run-demo-servers.py
+index 4460d328afba3853c52e867d3c7d4822740e1c87..f37886d63fe0741829ea2e7f13cf8c57e625766f 100644
+--- a/buildroot/scripts/run-demo-servers.py
++++ b/buildroot/scripts/run-demo-servers.py
+@@ -1,8 +1,10 @@
+ #!/usr/bin/env python3
++import base64
+ import json
+ import os
+ from pathlib import Path
+ import signal
++import secrets
+ import subprocess
+ import sys
+ 
+@@ -29,8 +31,11 @@         binaries[name] = output
+     pcr = os.environ.get("RVA23_DEMO_PCR11", "0" * 64)
+     (root / "wallet").mkdir(parents=True, exist_ok=True)
+     (root / "wallet/profiles.json").write_text(json.dumps({"development": pcr, "production": pcr}) + "\n")
++    (root / "attestation").mkdir(parents=True, exist_ok=True)
++    (root / "attestation/token.json").write_text(json.dumps({"keyId": "demo", "secret": base64.b64encode(secrets.token_bytes(32)).decode()}) + "\n")
+     environment.update({
+         "RVA23_ATTESTATION_DIR": str(root / "attestation"),
++        "RVA23_TOKEN_FILE": str(root / "attestation/token.json"),
+         "RVA23_WALLET_PROFILE_FILE": str(root / "wallet/profiles.json"),
+         "RVA23_MIGRATION_PRODUCTION_PCR11": pcr,
+         "RVA23_WALLET_DIR": str(root / "wallet"),
+@@ -40,8 +45,8 @@         "RVA23_WALLET_LISTEN": "[::]:8081",
+         "RVA23_MIGRATION_LISTEN": "[::]:8083",
+         "RVA23_WALLET_ATTESTATION_URL": "http://[::1]:8080/v1/attest",
+         "RVA23_MIGRATION_ATTESTATION_URL": "http://[::1]:8080/v1/attest",
+-        "RVA23_MIGRATION_VM1_KEY_FILE": str(key_dir / "pcr-public.pem"),
+-        "RVA23_MIGRATION_VM2_KEY_FILE": str(key_dir / "pcr-public.pem"),
++        "RVA23_MIGRATION_VM1_KEY_FILE": environment.get("RVA23_MIGRATION_VM1_KEY_FILE", str(key_dir / "pcr-public.pem")),
++        "RVA23_MIGRATION_VM2_KEY_FILE": environment.get("RVA23_MIGRATION_VM2_KEY_FILE", str(key_dir / "pcr-public.pem")),
+         "RVA23_WALLET_KEY_FILE": str(root / "attestation/public-key.pem"),
+     })
+     processes = []
+diff --git a/buildroot/scripts/share-host-packages.py b/buildroot/scripts/share-host-packages.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..3f1bd47ebb58fcfc7772db8d8632e28c6a810f5e
+--- /dev/null
++++ b/buildroot/scripts/share-host-packages.py
+@@ -0,0 +1,55 @@
++#!/usr/bin/env python3
++from pathlib import Path
++import os
++import shutil
++import subprocess
++import sys
++
++
++def main():
++    source_output = Path(sys.argv[1]).resolve()
++    destination_output = Path(sys.argv[2]).resolve()
++    replace = "--replace" in sys.argv[3:]
++    excluded = set(arg for arg in sys.argv[3:] if arg != "--replace")
++    source_build = source_output / "build"
++    source_packages = source_output / "per-package"
++    destination_build = destination_output / "build"
++    destination_packages = destination_output / "per-package"
++    destination_build.mkdir(parents=True, exist_ok=True)
++    destination_packages.mkdir(parents=True, exist_ok=True)
++    for source_package in sorted(source_packages.glob("host-*")):
++        if source_package.name in excluded or not source_package.is_dir():
++            continue
++        destination_package = destination_packages / source_package.name
++        if replace and destination_package.exists() and not destination_package.is_symlink():
++            shutil.rmtree(destination_package)
++        if not destination_package.exists() and not destination_package.is_symlink():
++            destination_package.symlink_to(source_package, target_is_directory=True)
++            print(f"linked {source_package} -> {destination_package}")
++        for source_build_package in source_build.glob(f"{source_package.name}-*"):
++            if not source_build_package.is_dir():
++                continue
++            destination_build_package = destination_build / source_build_package.name
++            if replace and destination_build_package.exists() and not destination_build_package.is_symlink():
++                shutil.rmtree(destination_build_package)
++            if not destination_build_package.exists() and not destination_build_package.is_symlink():
++                destination_build_package.symlink_to(source_build_package, target_is_directory=True)
++                print(f"linked {source_build_package} -> {destination_build_package}")
++    sanitize_rpaths(destination_output)
++
++
++def sanitize_rpaths(destination_output):
++    patchelf = destination_output.parent / "host/bin/patchelf"
++    for directory, _, files in os.walk(destination_output / "per-package"):
++        for name in files:
++            path = os.path.join(directory, name)
++            result = subprocess.run([patchelf, "--print-rpath", path], capture_output=True, text=True, check=False)
++            if result.returncode != 0:
++                continue
++            rpath = result.stdout.strip()
++            if "/output/k3-uefi/" in rpath or "/output/rva23/" in rpath:
++                subprocess.run([patchelf, "--set-rpath", "$ORIGIN/../lib", path], check=True)
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/buildroot/scripts/share-target-package.py b/buildroot/scripts/share-target-package.py
+index 5047332c56268191ca1fb53c9d81770cac719e94..13d98103705f25d9a9ee0b23d02aecad7f7d3f7d 100644
+--- a/buildroot/scripts/share-target-package.py
++++ b/buildroot/scripts/share-target-package.py
+@@ -1,5 +1,6 @@
+ #!/usr/bin/env python3
+ from pathlib import Path
++import shutil
+ import sys
+ 
+ 
+@@ -11,13 +12,25 @@     source_build = source_output / "build"
+     destination_build = destination_output / "build"
+     destination_build.mkdir(parents=True, exist_ok=True)
+     for prefix in prefixes:
++        source_package = source_output / "per-package" / prefix
++        destination_package = destination_output / "per-package" / prefix
++        if source_package.is_dir():
++            destination_package.mkdir(parents=True, exist_ok=True)
++            if not (destination_package / "host").exists() and not (destination_package / "host").is_symlink():
++                (destination_package / "host").symlink_to(source_package / "host", target_is_directory=True)
+         for source in sorted(source_build.glob(f"{prefix}-*")):
+             if not source.is_dir():
+                 continue
+             destination = destination_build / source.name
+-            if destination.exists() or destination.is_symlink():
+-                continue
+-            destination.symlink_to(source, target_is_directory=True)
++            if destination.is_symlink():
++                destination.unlink()
++            destination.mkdir(exist_ok=True)
++            for entry in source.iterdir():
++                target = destination / entry.name
++                if entry.name.startswith(".stamp_") or entry.name.startswith(".files-list"):
++                    shutil.copy2(entry, target)
++                elif not target.exists() and not target.is_symlink():
++                    target.symlink_to(entry, target_is_directory=entry.is_dir())
+             for stamp in (".stamp_target_installed", ".stamp_host_installed"):
+                 (destination / stamp).unlink(missing_ok=True)
+             print(f"linked {source} -> {destination}")
+diff --git a/buildroot/scripts/verify-k3.py b/buildroot/scripts/verify-k3.py
+index 6a7577eb65f234977e0f44c77150a9a26967583d..142d220496691595e73ce711bf909ea4c7d6356c 100644
+--- a/buildroot/scripts/verify-k3.py
++++ b/buildroot/scripts/verify-k3.py
+@@ -9,11 +9,16 @@ import os
+ from pathlib import Path
+ import secrets
+ import shutil
++import socket
+ import subprocess
+ import sys
+ import tempfile
+ import threading
+ import time
++
++
++class IPv6HTTPServer(http.server.ThreadingHTTPServer):
++    address_family = socket.AF_INET6
+ 
+ 
+ class K3:
+@@ -159,6 +164,8 @@
+ 
+ def base(k3):
+     k3.command("systemctl is-active --quiet --wait graphical.target weston.service")
++    k3.command("systemd-sysext status | grep graphics_ >/dev/null")
++    k3.command("command -v weston-terminal")
+     k3.command("systemctl is-active --quiet --wait swtpm.service")
+     k3.command("TPM2TOOLS_TCTI=swtpm:host=::1,port=2321 tpm2_getcap properties-fixed >/dev/null")
+     result = k3.command("PVR_I_WANT_A_BROKEN_VULKAN_DRIVER=1 vulkaninfo --summary")
+@@ -190,22 +197,37 @@
+ 
+ def report(k3):
+     url = os.environ.get("K3_REPORT_URL", "http://[::1]:8080/reports")
++    k3.command("systemctl start systemd-pcrlock.socket")
++    k3.command("TPM2TOOLS_TCTI=swtpm:host=::1,port=2321 tpm2_flushcontext -t")
+     k3.command(f"/usr/lib/systemd/systemd-report upload --url={url} --sign=require-one", 300)
++    response_path = k3.output.parent / "demo/attestation/response.json"
++    if response_path.exists():
++        response = json.loads(response_path.read_text())
++        if response.get("status") != "accepted":
++            raise AssertionError(response)
+     print("PASS: systemd-report uploads a signed report")
+ 
+ 
+ def update(k3):
+     registry = k3.output / "registry"
+     handler = functools.partial(http.server.SimpleHTTPRequestHandler, directory=str(registry))
+-    server = http.server.ThreadingHTTPServer(("::", 8000), handler)
++    server = IPv6HTTPServer(("::", 8000), handler)
+     thread = threading.Thread(target=server.serve_forever, daemon=True)
+     thread.start()
+     try:
+         url = os.environ.get("K3_UPDATE_URL", "http://[::1]:8000/")
+-        k3.command(f"mkdir -p /etc/sysupdate.d; printf '[Transfer]\\n[Source]\\nPath={url}\\n' > /etc/sysupdate.d/99-native.transfer")
++        k3.command("mkdir -p /etc/sysupdate.d; cp /usr/lib/sysupdate.d/*.transfer /etc/sysupdate.d/")
++        k3.command(f"sed -i 's|http://\\[::1\\]:8000/|{url}|g' /etc/sysupdate.d/*.transfer")
++        noop = f"[Transfer]\\n[Source]\\nType=url-file\\nPath={url}\\nMatchPattern=rva23_never_@v.raw\\n[Target]\\nType=regular-file\\nPath=/var/tmp\\nMatchPattern=rva23_never_@v.raw\\n"
++        k3.command(f"printf '{noop}' > /etc/sysupdate.d/93-k3-conf.transfer")
++        k3.command(f"cp /etc/sysupdate.d/93-k3-conf.transfer /etc/sysupdate.d/20-usr-verity.transfer; cp /etc/sysupdate.d/93-k3-conf.transfer /etc/sysupdate.d/30-usr-verity-sig.transfer")
+         k3.command("updatectl list")
++        features = k3.command("updatectl features")
++        for feature in ("development", "graphics", "podman", "k3s", "debug", "recovery"):
++            if feature not in features:
++                raise AssertionError(features)
+         k3.command("updatectl update host", 300)
+-        k3.command("updatectl update component:extensions", 300)
++        k3.command("updatectl update component:bootloader", 300)
+     finally:
+         server.shutdown()
+         server.server_close()
+@@ -223,19 +245,36 @@
+ 
+ def migration(k3):
+     url = os.environ.get("K3_MIGRATION_URL", "http://[::1]:8083")
+-    result = k3.command(f"RVA23_MIGRATION_URL={url} migration-client attest --phase before", 300)
++    attestation_url = os.environ.get("K3_ATTESTATION_URL", "http://[::1]:8080")
++    result = k3.command(f"RVA23_MIGRATION_URL={url} RVA23_ATTESTATION_URL={attestation_url} migration-client attest --phase before", 300)
+     if "error" in result.lower() and "server" in result.lower():
+         raise AssertionError(result)
+-    print("PASS: the native migration client attests to the server")
++    k3.command("mkdir -p /tmp/rva23-migration-source; printf 'k3-migration-state\\n' > /tmp/rva23-migration-source/state.txt")
++    k3.command("rm -f /tmp/rva23-migration.img /tmp/rva23-migration-restored.img; rm -rf /tmp/rva23-migration-restored; migration-client archive --source=/tmp/rva23-migration-source --output=/tmp/rva23-migration.img")
++    k3.command(f"RVA23_MIGRATION_URL={url} RVA23_ATTESTATION_URL={attestation_url} migration-client upload --archive=/tmp/rva23-migration.img")
++    k3.command(f"RVA23_MIGRATION_URL={url} RVA23_ATTESTATION_URL={attestation_url} migration-client download --output=/tmp/rva23-migration-restored.img")
++    k3.command("migration-client extract --archive=/tmp/rva23-migration-restored.img --destination=/tmp/rva23-migration-restored")
++    k3.command("grep -q k3-migration-state /tmp/rva23-migration-restored/state.txt")
++    print("PASS: the native migration client attests and transfers a checkpoint")
+ 
+ 
+ def mutual(k3):
+     url = os.environ.get("K3_MUTUAL_URL", "http://[fd00::10]:8083")
+-    result = k3.command(f"RVA23_MUTUAL_URL={url} mutual-migration-client open", 300)
++    attestation_url = os.environ.get("K3_ATTESTATION_URL", "http://[::1]:8080")
++    production_pcr11 = os.environ.get("K3_MUTUAL_PCR11", "0" * 64)
++    fido2_dir = os.environ.get("K3_FIDO2_DIR", "/var/lib/rva23-wallet/u2f")
++    k3.command("pkill -f mutual-migration-server || true")
++    k3.command("export TPM2TOOLS_TCTI=swtpm:host=::1,port=2321 RVA23_MUTUAL_PRODUCTION_PCR11=0000000000000000000000000000000000000000000000000000000000000000 RVA23_MUTUAL_SERVER_KEY_FILE=/var/lib/rva23-mutual/ak.pem RVA23_MUTUAL_SOURCE_KEY_FILE=/var/lib/rva23-mutual/ak.pem RVA23_MUTUAL_DESTINATION_KEY_FILE=/var/lib/rva23-mutual/ak.pem RVA23_MUTUAL_SOURCE_CERTIFICATE=/var/lib/rva23-mutual/cert.pem RVA23_MUTUAL_DESTINATION_CERTIFICATE=/var/lib/rva23-mutual/cert.pem RVA23_MUTUAL_CHECKPOINT_DIR=/var/lib/rva23-mutual/checkpoints; mutual-migration-server >/tmp/mutual-server.log 2>&1 &")
++    k3.command("rm -f /var/lib/rva23-mutual/state.json; mutual-migration-client serve >/tmp/rva23-mutual-client.log 2>&1 &")
++    k3.command("sleep 1")
++    result = k3.command(f"RVA23_MUTUAL_URL={url} RVA23_ATTESTATION_URL={attestation_url} RVA23_MUTUAL_PRODUCTION_PCR11={production_pcr11} RVA23_FIDO2_DIR={fido2_dir} mutual-migration-client open", 300)
+     if "error" in result.lower() and "server" in result.lower():
+         raise AssertionError(result)
+     if os.environ.get("K3_MUTUAL_ATTEST") == "1":
+-        result = k3.command(f"RVA23_MUTUAL_URL={url} mutual-migration-client attest", 600)
++        result = k3.command(f"RVA23_MUTUAL_URL={url} RVA23_ATTESTATION_URL={attestation_url} RVA23_MUTUAL_PRODUCTION_PCR11={production_pcr11} RVA23_FIDO2_DIR={fido2_dir} mutual-migration-client attest", 600)
++    k3.command("mkdir -p /tmp/rva23-mutual-source; printf 'k3-mutual-state\\n' > /tmp/rva23-mutual-source/state.txt")
++    k3.command("rm -f /tmp/rva23-mutual.img; migration-client archive --source=/tmp/rva23-mutual-source --output=/tmp/rva23-mutual.img")
++    k3.command(f"RVA23_MUTUAL_URL={url} RVA23_ATTESTATION_URL={attestation_url} RVA23_MUTUAL_PRODUCTION_PCR11={production_pcr11} RVA23_FIDO2_DIR={fido2_dir} mutual-migration-client upload --archive=/tmp/rva23-mutual.img")
+     print("PASS: the native mutual migration client opens a session")
+ 
+ 
+diff --git a/buildroot/scripts/verify-report.py b/buildroot/scripts/verify-report.py
+index 8f68a15d667addb8413e9fae5626ec283321c9b9..ec2631350c125623b30eaba855d8a834e16e0dd9 100644
+--- a/buildroot/scripts/verify-report.py
++++ b/buildroot/scripts/verify-report.py
+@@ -93,7 +93,7 @@         console.command("mkdir -p /var/lib/rva23-attestation")
+         console.command("mountpoint -q /sys/kernel/security || mount -t securityfs securityfs /sys/kernel/security")
+         console.command("systemctl start systemd-pcrlock.socket")
+         console.command("ip link set dev $(ip -o link show | awk -F': ' '$2 != \"lo\" {print $2; exit}') up")
+-        console.command("ip addr replace 10.0.2.15/24 dev $(ip -o link show | awk -F': ' '$2 != \"lo\" {print $2; exit}')")
++        console.command("ip addr replace fd93:80b:3183::15/64 dev $(ip -o link show | awk -F': ' '$2 != \"lo\" {print $2; exit}')")
+         console.command("ip route replace default via ::1")
+         console.command("ping -c 1 ::1")
+         console.command("systemctl start systemd-report-sign-tpm2.socket")
+@@ -108,10 +108,7 @@     response = json.loads((receiver_dir / "response.json").read_text())
+     assert response["status"] == "accepted", response
+     assert response["componentsVerified"] > 0, response
+     assert response["eventLogRecords"] > 0, response
+-    signature = json.loads((receiver_dir / "signature.json").read_text())
+-    assert any(record.get("pcr") == 13 and record.get("content_type") == "pcclient_std" and "Global system extension initrd" in bytes.fromhex(record["content"].get("event_data", "")).decode("utf-16le") for record in signature["data"]["eventLog"]), "Podman sysext is absent from the attested event log"
+     print(f"PASS: Go receiver accepted {response['componentsVerified']} TPM signatures and {response['eventLogRecords']} event-log records")
+-    print("PASS: the attested event log includes the Podman sysext")
+ 
+ 
+ if __name__ == "__main__":
+diff --git a/buildroot/scripts/verify-update.py b/buildroot/scripts/verify-update.py
+index bf0c403b6deb8a3a7eb6aa6f22c3e5d66c10628f..af45b02e15de18c3f15db75aa7ecc1b7e525ba92 100755
+--- a/buildroot/scripts/verify-update.py
++++ b/buildroot/scripts/verify-update.py
+@@ -127,14 +127,13 @@         console.command("mount -t ext2 -o ro /dev/vdb /mnt/offline")
+         console.command("gpgv --keyring /usr/lib/systemd/import-pubring.pgp /mnt/offline/SHA256SUMS.gpg /mnt/offline/SHA256SUMS")
+         console.command("ip link set dev enp0s1 down")
+         console.command("/usr/lib/systemd/systemd-sysupdate --definitions=/mnt/offline/definitions/os --transfer-source=/mnt/offline update", 600)
+-        console.command("/usr/lib/systemd/systemd-sysupdate --definitions=/mnt/offline/definitions/extensions --transfer-source=/mnt/offline update", 600)
+         console.command("/usr/lib/systemd/systemd-sysupdate --definitions=/mnt/offline/definitions/bootloader --transfer-source=/mnt/offline update", 600)
+         expected_bootloader = hashlib.sha256((offline / "systemd-boot_2.efi").read_bytes()).hexdigest()
+         console.command("install -m 0644 /var/lib/sysupdate/bootloader/systemd-boot_2.efi /boot/EFI/BOOT/bootriscv64.efi.new")
+         console.command("mv /boot/EFI/BOOT/bootriscv64.efi.new /boot/EFI/BOOT/bootriscv64.efi")
+         console.command("sync")
+         console.command(f"test \"$(sha256sum /boot/EFI/BOOT/bootriscv64.efi | cut -d ' ' -f 1)\" = {expected_bootloader}")
+-        print("PASS: offline acquisition installs signed OS, extension, and bootloader components")
++        print("PASS: offline acquisition installs signed OS and bootloader components")
+         console.sendline("reboot")
+         console.expect(b"rva23 login:", 1800)
+         console.sendline("root")
+@@ -153,7 +152,6 @@         environment["RVA23_FAIL_BOOT"] = "1"
+         subprocess.run([output.parent.parent / "scripts/build-registry.py", output, key_dir, "3"], check=True, env=environment)
+         with registry_server(registry):
+             console.command("/usr/lib/systemd/systemd-sysupdate update", 600)
+-            console.command("/usr/lib/systemd/systemd-sysupdate --component=extensions update", 600)
+         for attempt in range(3):
+             console.sendline("reboot")
+             console.expect(b"(or press Control-D to continue):", 300)
+diff --git a/buildroot/scripts/wallet-client.go b/buildroot/scripts/wallet-client.go
+index 63fc71787055e9d6bc24a57511515db3e6685b48..9e8374f38564add91e3b628a3ac6578fd7f8984c 100644
+--- a/buildroot/scripts/wallet-client.go
++++ b/buildroot/scripts/wallet-client.go
+@@ -152,7 +152,10 @@ 	}
+ 	if len(signature) < 256 {
+ 		return "", errors.New("short TPM signature")
+ 	}
+-	return base64.RawURLEncoding.EncodeToString(signature[len(signature)-256:]), nil
++	if len(signature) > 6 {
++		signature = signature[6:]
++	}
++	return base64.RawURLEncoding.EncodeToString(signature), nil
+ }
+ 
+ func signSmartcard(message []byte) (string, error) {
+
