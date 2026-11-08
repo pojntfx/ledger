@@ -1,0 +1,308 @@
+From 1a6ff9b2d371f2668dbe772c6c5f90887fe27f6b Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Sun, 08 Nov 2026 10:56:02 -0700
+Subject: [PATCH] refactor: Drop legacy shared targets and fix U2F patches
+---
+diff --git a/buildroot/Makefile b/buildroot/Makefile
+index bb95e40780ea13d983350efee4bbb86473a2dd6a..7a74941e94578e386576f76cd58c4042155c26f8 100644
+--- a/buildroot/Makefile
++++ b/buildroot/Makefile
+@@ -10,38 +10,36 @@ BR2_CCACHE_DIR ?= $(THIS_EXTERNAL_PATH)/ccache
+ K3_SOURCE_DIR ?= $(THIS_EXTERNAL_PATH)/src
+ K3_LINUX_FIRMWARE_DIR ?= $(K3_SOURCE_DIR)/linux-firmware/powervr
+ RVA23_KEY_DIR ?= $(THIS_EXTERNAL_PATH)/qemu-keys
+-HOST_DIR ?= $(THIS_EXTERNAL_PATH)/output/host
++HOST_DIR ?= $(OUTPUT_DIR)/host
++K3_HOST_DIR ?= $(K3_OUTPUT_DIR)/host
+ export RVA23_TPM_STATE := $(OUTPUT_DIR)/swtpm
+ 
+ COMMON_TOOLCHAIN_OVERRIDES = BINUTILS_OVERRIDE_SRCDIR=$(K3_SOURCE_DIR)/binutils HOST_BINUTILS_OVERRIDE_SRCDIR=$(K3_SOURCE_DIR)/binutils HOST_GCC_INITIAL_OVERRIDE_SRCDIR=$(K3_SOURCE_DIR)/gcc HOST_GCC_FINAL_OVERRIDE_SRCDIR=$(K3_SOURCE_DIR)/gcc GCC_FINAL_OVERRIDE_SRCDIR=$(K3_SOURCE_DIR)/gcc
+ MAKE_BUILDROOT = $(MAKE) -C $(BUILDROOT_DIR) O=$(OUTPUT_DIR) BR2_HOST_DIR=$(HOST_DIR) BR2_EXTERNAL=$(THIS_EXTERNAL_PATH) BR2_DL_DIR=$(BR2_DL_DIR) BR2_CCACHE_DIR=$(BR2_CCACHE_DIR) CCACHE_DIR=$(BR2_CCACHE_DIR) CCACHE_BASEDIR=$(OUTPUT_DIR) $(COMMON_TOOLCHAIN_OVERRIDES) UBOOT_OVERRIDE_SRCDIR=$(UBOOT_OVERRIDE_SRCDIR) RVA23_KEY_DIR=$(RVA23_KEY_DIR)
+-MAKE_BUILDROOT_K3 = $(MAKE) -C $(BUILDROOT_DIR) O=$(K3_OUTPUT_DIR) BR2_HOST_DIR=$(HOST_DIR) BR2_EXTERNAL=$(THIS_EXTERNAL_PATH) BR2_DL_DIR=$(BR2_DL_DIR) BR2_CCACHE_DIR=$(BR2_CCACHE_DIR) CCACHE_DIR=$(BR2_CCACHE_DIR) CCACHE_BASEDIR=$(K3_OUTPUT_DIR) $(COMMON_TOOLCHAIN_OVERRIDES) LINUX_OVERRIDE_SRCDIR=$(K3_SOURCE_DIR)/linux OPENSBI_OVERRIDE_SRCDIR=$(K3_SOURCE_DIR)/opensbi-vendor EDK2_SPACEMIT_OVERRIDE_SRCDIR=$(K3_SOURCE_DIR)/edk2-spacemit K3_LINUX_FIRMWARE_DIR=$(K3_LINUX_FIRMWARE_DIR)
++MAKE_BUILDROOT_K3 = $(MAKE) -C $(BUILDROOT_DIR) O=$(K3_OUTPUT_DIR) BR2_HOST_DIR=$(K3_HOST_DIR) BR2_EXTERNAL=$(THIS_EXTERNAL_PATH) BR2_DL_DIR=$(BR2_DL_DIR) BR2_CCACHE_DIR=$(BR2_CCACHE_DIR) CCACHE_DIR=$(BR2_CCACHE_DIR) CCACHE_BASEDIR=$(K3_OUTPUT_DIR) $(COMMON_TOOLCHAIN_OVERRIDES) LINUX_OVERRIDE_SRCDIR=$(K3_SOURCE_DIR)/linux OPENSBI_OVERRIDE_SRCDIR=$(K3_SOURCE_DIR)/opensbi-vendor EDK2_SPACEMIT_OVERRIDE_SRCDIR=$(K3_SOURCE_DIR)/edk2-spacemit K3_LINUX_FIRMWARE_DIR=$(K3_LINUX_FIRMWARE_DIR)
+ BUILDROOT_PATCHES = $(sort $(wildcard $(THIS_EXTERNAL_PATH)/patches/buildroot/*.patch))
+ 
+-.PHONY: all configure build clean rva23-fix-host-rpaths k3-configure k3-build k3-clean k3-registry share-k3-to-qemu k3-verify-image k3-verify-firmware k3-verify-base k3-verify-attestation k3-verify-report k3-verify-update k3-verify-hardening k3-verify-podman k3-verify-k3s k3-verify-wallet k3-verify-migration k3-verify-mutual-migration k3-verify registry verify verify-image verify-boot verify-firmware verify-attestation verify-report verify-update verify-security verify-hardening verify-podman verify-k3s verify-attested-app verify-wallet verify-migration verify-mutual-migration demo-servers boot boot-display boot-firmware
++.PHONY: all configure build clean k3-configure k3-build k3-clean k3-registry k3-verify-image k3-verify-firmware k3-verify-base k3-verify-attestation k3-verify-report k3-verify-update k3-verify-hardening k3-verify-podman k3-verify-k3s k3-verify-wallet k3-verify-migration k3-verify-mutual-migration k3-verify registry verify verify-image verify-boot verify-firmware verify-attestation verify-report verify-update verify-security verify-hardening verify-podman verify-k3s verify-attested-app verify-wallet verify-migration verify-mutual-migration demo-servers boot boot-display boot-firmware
+ 
+ all: build k3-build
+ 
+-rva23-fix-host-rpaths:
+-	python3 scripts/fix-host-rpaths.py $(HOST_DIR)
++.NOTPARALLEL: all
+ 
+ configure:
+ 	for patch in $(BUILDROOT_PATCHES); do git -C $(BUILDROOT_DIR) apply --reverse --check "$$patch" || exit 1; done
+ 	$(MAKE_BUILDROOT) rva23_defconfig
+ 	$(MAKE_BUILDROOT) rva23-refresh-toolchain-wrapper
+ 
+-build: rva23-fix-host-rpaths configure share-k3-to-qemu
++build: configure
+ 	$(MAKE_BUILDROOT)
+-	$(MAKE) rva23-fix-host-rpaths
+ 
+ k3-configure:
+ 	for patch in $(BUILDROOT_PATCHES); do git -C $(BUILDROOT_DIR) apply --reverse --check "$$patch" || exit 1; done
+ 	$(MAKE_BUILDROOT_K3) k3_uefi_defconfig
+ 	$(MAKE_BUILDROOT_K3) rva23-refresh-toolchain-wrapper
+ 
+-k3-build: rva23-fix-host-rpaths k3-configure
++k3-build: k3-configure
+ 	$(MAKE_BUILDROOT_K3) -j14
+-	$(MAKE) rva23-fix-host-rpaths
+ 
+ clean:
+ 	$(MAKE_BUILDROOT) clean
+@@ -89,10 +87,6 @@ k3-verify-mutual-migration:
+ 	python3 scripts/verify-k3.py $(K3_OUTPUT_DIR) mutual
+ 
+ k3-verify: k3-verify-image k3-verify-base k3-verify-attestation k3-verify-report k3-verify-update k3-verify-hardening k3-verify-podman k3-verify-k3s k3-verify-wallet k3-verify-migration k3-verify-mutual-migration
+-
+-share-k3-to-qemu: k3-build
+-	python3 scripts/share-host-packages.py $(K3_OUTPUT_DIR) $(OUTPUT_DIR) --replace host-systemd host-edk2 host-opensbi host-uboot-tools host-dracut host-openssl
+-	PATCHELF=$(HOST_DIR)/bin/patchelf PER_PACKAGE_DIR=$(OUTPUT_DIR)/per-package $(BUILDROOT_DIR)/support/scripts/fix-rpath host
+ 
+ verify-image: build
+ 	python3 scripts/verify-image.py $(OUTPUT_DIR) $(BR2_DL_DIR) $(BR2_CCACHE_DIR) $(RVA23_KEY_DIR)
+diff --git a/buildroot/local.mk.tpl b/buildroot/local.mk.tpl
+index 3132f3ed3f0902bec75321222fe29c70b13103f8..c899efc9ecafda940121e9694526566c01ff99cd 100644
+--- a/buildroot/local.mk.tpl
++++ b/buildroot/local.mk.tpl
+@@ -1,7 +1,8 @@
+ BUILDROOT_DIR = /home/pojntfx/Projets/pushrod/buildroot/buildroot
+ OUTPUT_DIR = /home/pojntfx/Projets/pushrod/buildroot/output/rva23
+ K3_OUTPUT_DIR = /home/pojntfx/Projets/pushrod/buildroot/output/k3-uefi
+-HOST_DIR = /home/pojntfx/Projets/pushrod/buildroot/output/host
++HOST_DIR = /home/pojntfx/Projets/pushrod/buildroot/output/rva23/host
++K3_HOST_DIR = /home/pojntfx/Projets/pushrod/buildroot/output/k3-uefi/host
+ BR2_DL_DIR = /home/pojntfx/Projets/pushrod/buildroot/dl
+ BR2_CCACHE_DIR = /home/pojntfx/Projets/pushrod/buildroot/ccache
+ K3_SOURCE_DIR = /home/pojntfx/Projets/pushrod/buildroot/src
+diff --git a/buildroot/package/u2f-emu/0002-Allow-OpenSSL3-deprecated-API.patch b/buildroot/package/u2f-emu/0002-Allow-OpenSSL3-deprecated-API.patch
+index 3bfa3b81d8f3fa2d4d53d7baff944ad05206f7d7..15cdf16aa75e09c53f639f46ab26e0da124a2b6f 100644
+--- a/buildroot/package/u2f-emu/0002-Allow-OpenSSL3-deprecated-API.patch
++++ b/buildroot/package/u2f-emu/0002-Allow-OpenSSL3-deprecated-API.patch
+@@ -1,6 +1,7 @@
+ --- a/meson.build
+ +++ b/meson.build
+-@@ -7,6 +7,7 @@ compiler_c = meson.get_compiler('c')
++@@ -11,6 +11,8 @@
++ compiler_c = meson.get_compiler('c')
+  compiler_ccx = meson.get_compiler('cpp')
+  
+ +add_global_arguments('-Wno-error=deprecated-declarations', language: 'c')
+@@ -15,5 +16,5 @@  #ifndef TRANSACTION_H
+ -#define TRANSaCTION_H
+ +#define TRANSACTION_H
+  
+- #include <stdint.h>
+  #include <stdbool.h>
++ #include <time.h>
+diff --git a/buildroot/scripts/fix-host-rpaths.py b/buildroot/scripts/fix-host-rpaths.py
+deleted file mode 100644
+index 706dd95f626a37d790f3ede3ae0fe0c16d3fb091..0000000000000000000000000000000000000000
+--- a/buildroot/scripts/fix-host-rpaths.py
++++ /dev/null
+@@ -1,88 +0,0 @@
+-#!/usr/bin/env python3
+-import os
+-from pathlib import Path
+-import shutil
+-import subprocess
+-import sys
+-import tempfile
+-import time
+-
+-
+-ROOTS = ("bin", "sbin", "lib", "libexec")
+-
+-
+-def elf(path):
+-    try:
+-        with path.open("rb") as file:
+-            return file.read(4) == b"\x7fELF"
+-    except OSError:
+-        return False
+-
+-
+-def relative(host, directory, tail):
+-    rel = os.path.relpath(host / tail, directory)
+-    return "$ORIGIN" if rel == "." else "$ORIGIN/" + rel
+-
+-
+-def set_rpath(patchelf, path, rpath):
+-    for _ in range(5):
+-        result = subprocess.run([patchelf, "--set-rpath", rpath, str(path)], capture_output=True, text=True)
+-        if result.returncode == 0:
+-            return
+-        if "Text file busy" not in result.stderr:
+-            raise RuntimeError(f"patchelf failed for {path}: {result.stderr}")
+-        time.sleep(0.5)
+-    raise RuntimeError(f"patchelf cannot write {path}: file is busy")
+-
+-
+-def main():
+-    host = Path(sys.argv[1] if len(sys.argv) > 1 else Path(__file__).resolve().parent.parent / "output/host").resolve()
+-    temporary = Path(tempfile.mkdtemp(prefix="rva23-patchelf-")) / "patchelf"
+-    shutil.copy2(host / "bin/patchelf", temporary)
+-    patchelf = str(temporary)
+-    marker = f"{host.parent.name}/{host.name}/"
+-    repaired = 0
+-    broken = []
+-    for root in ROOTS:
+-        for directory, _, names in os.walk(host / root):
+-            for name in names:
+-                link = Path(directory) / name
+-                if not elf(link):
+-                    continue
+-                path = Path(os.path.realpath(link))
+-                directory = str(path.parent)
+-                result = subprocess.run([patchelf, "--print-rpath", str(path)], capture_output=True, text=True)
+-                if result.returncode != 0 or not result.stdout.strip():
+-                    continue
+-                entries = result.stdout.strip().split(":")
+-                updated = []
+-                for entry in entries:
+-                    tail = entry.split("/" + marker, 1)[1] if "/" + marker in entry else None
+-                    updated.append(relative(host, directory, tail) if tail is not None else entry)
+-                if updated != entries:
+-                    set_rpath(patchelf, path, ":".join(updated))
+-                    repaired += 1
+-                for entry in updated:
+-                    resolved = os.path.normpath(entry.replace("$ORIGIN", directory, 1)) if entry.startswith("$ORIGIN") else entry
+-                    if not (resolved == str(host) or resolved.startswith(str(host) + os.sep)):
+-                        broken.append(f"{path}: {entry}")
+-    for name in ("libsoftokn3.so", "libfreebl3.so"):
+-        path = host / "lib" / name
+-        if not path.exists():
+-            continue
+-        result = subprocess.run([patchelf, "--print-rpath", str(path)], capture_output=True, text=True)
+-        entries = result.stdout.strip().split(":") if result.stdout.strip() else []
+-        if "$ORIGIN" not in entries:
+-            set_rpath(patchelf, path, ":".join(["$ORIGIN"] + [entry for entry in entries if entry]))
+-            repaired += 1
+-    shutil.rmtree(temporary.parent, ignore_errors=True)
+-    print(f"repaired {repaired} host rpaths", flush=True)
+-    if broken:
+-        for line in broken[:20]:
+-            print(line, file=sys.stderr)
+-        print(f"{len(broken)} host rpaths need manual repair", file=sys.stderr)
+-        raise SystemExit(1)
+-
+-
+-if __name__ == "__main__":
+-    main()
+diff --git a/buildroot/scripts/share-host-packages.py b/buildroot/scripts/share-host-packages.py
+deleted file mode 100644
+index 00134602f088e1a8a26ba68f2badec3d165a886c..0000000000000000000000000000000000000000
+--- a/buildroot/scripts/share-host-packages.py
++++ /dev/null
+@@ -1,61 +0,0 @@
+-#!/usr/bin/env python3
+-from pathlib import Path
+-import os
+-import shutil
+-import subprocess
+-import sys
+-
+-
+-def main():
+-    source_output = Path(sys.argv[1]).resolve()
+-    destination_output = Path(sys.argv[2]).resolve()
+-    replace = "--replace" in sys.argv[3:]
+-    excluded = set(arg for arg in sys.argv[3:] if arg != "--replace")
+-    source_build = source_output / "build"
+-    source_packages = source_output / "per-package"
+-    destination_build = destination_output / "build"
+-    destination_packages = destination_output / "per-package"
+-    destination_build.mkdir(parents=True, exist_ok=True)
+-    destination_packages.mkdir(parents=True, exist_ok=True)
+-    for source_package in sorted(source_packages.glob("host-*")):
+-        if source_package.name in excluded or not source_package.is_dir():
+-            continue
+-        destination_package = destination_packages / source_package.name
+-        if replace and destination_package.exists() and not destination_package.is_symlink():
+-            shutil.rmtree(destination_package)
+-        if not destination_package.exists() and not destination_package.is_symlink():
+-            destination_package.symlink_to(source_package, target_is_directory=True)
+-            print(f"linked {source_package} -> {destination_package}")
+-        for source_build_package in source_build.glob(f"{source_package.name}-*"):
+-            if not source_build_package.is_dir():
+-                continue
+-            destination_build_package = destination_build / source_build_package.name
+-            if replace and destination_build_package.exists() and not destination_build_package.is_symlink():
+-                shutil.rmtree(destination_build_package)
+-            if not destination_build_package.exists() and not destination_build_package.is_symlink():
+-                destination_build_package.symlink_to(source_build_package, target_is_directory=True)
+-                print(f"linked {source_build_package} -> {destination_build_package}")
+-    sanitize_rpaths(destination_output)
+-
+-
+-def sanitize_rpaths(destination_output):
+-    patchelf = destination_output.parent / "host/bin/patchelf"
+-    for directory, _, files in os.walk(destination_output / "per-package"):
+-        for name in files:
+-            path = os.path.join(directory, name)
+-            try:
+-                with open(path, "rb") as stream:
+-                    if stream.read(4) != b"\x7fELF":
+-                        continue
+-            except OSError:
+-                continue
+-            result = subprocess.run([patchelf, "--print-rpath", path], capture_output=True, text=True, check=False)
+-            if result.returncode != 0:
+-                continue
+-            rpath = result.stdout.strip()
+-            if "/output/k3-uefi/" in rpath or "/output/rva23/" in rpath:
+-                subprocess.run([patchelf, "--set-rpath", "$ORIGIN/../lib:$ORIGIN/../lib/systemd:$ORIGIN/../lib/swtpm", path], check=True)
+-
+-
+-if __name__ == "__main__":
+-    main()
+diff --git a/buildroot/scripts/share-target-package.py b/buildroot/scripts/share-target-package.py
+deleted file mode 100644
+index 13d98103705f25d9a9ee0b23d02aecad7f7d3f7d..0000000000000000000000000000000000000000
+--- a/buildroot/scripts/share-target-package.py
++++ /dev/null
+@@ -1,40 +0,0 @@
+-#!/usr/bin/env python3
+-from pathlib import Path
+-import shutil
+-import sys
+-
+-
+-def main():
+-    source_output = Path(sys.argv[1]).resolve()
+-    destination_output = Path(sys.argv[2]).resolve()
+-    prefixes = sys.argv[3:] or ["llvm"]
+-    source_build = source_output / "build"
+-    destination_build = destination_output / "build"
+-    destination_build.mkdir(parents=True, exist_ok=True)
+-    for prefix in prefixes:
+-        source_package = source_output / "per-package" / prefix
+-        destination_package = destination_output / "per-package" / prefix
+-        if source_package.is_dir():
+-            destination_package.mkdir(parents=True, exist_ok=True)
+-            if not (destination_package / "host").exists() and not (destination_package / "host").is_symlink():
+-                (destination_package / "host").symlink_to(source_package / "host", target_is_directory=True)
+-        for source in sorted(source_build.glob(f"{prefix}-*")):
+-            if not source.is_dir():
+-                continue
+-            destination = destination_build / source.name
+-            if destination.is_symlink():
+-                destination.unlink()
+-            destination.mkdir(exist_ok=True)
+-            for entry in source.iterdir():
+-                target = destination / entry.name
+-                if entry.name.startswith(".stamp_") or entry.name.startswith(".files-list"):
+-                    shutil.copy2(entry, target)
+-                elif not target.exists() and not target.is_symlink():
+-                    target.symlink_to(entry, target_is_directory=entry.is_dir())
+-            for stamp in (".stamp_target_installed", ".stamp_host_installed"):
+-                (destination / stamp).unlink(missing_ok=True)
+-            print(f"linked {source} -> {destination}")
+-
+-
+-if __name__ == "__main__":
+-    main()
+
