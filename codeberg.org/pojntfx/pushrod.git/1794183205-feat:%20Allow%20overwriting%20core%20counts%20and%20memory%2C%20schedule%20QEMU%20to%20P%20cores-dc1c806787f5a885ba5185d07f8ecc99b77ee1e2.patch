@@ -1,0 +1,62 @@
+From dc1c806787f5a885ba5185d07f8ecc99b77ee1e2 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Sun, 08 Nov 2026 17:13:25 -0700
+Subject: [PATCH] feat: Allow overwriting core counts and memory, schedule QEMU to P cores
+---
+diff --git a/buildroot/board/rva23-qemu/run-firmware.sh b/buildroot/board/rva23-qemu/run-firmware.sh
+index a69250c4743c8f7d2b253bc6d9befba6c35e7fac..d5cd5f53140a4c84f8680a51bb4792db5475668d 100755
+--- a/buildroot/board/rva23-qemu/run-firmware.sh
++++ b/buildroot/board/rva23-qemu/run-firmware.sh
+@@ -56,12 +56,12 @@ if [ -n "${RVA23_SMARTCARD_DIR:-}" ]; then
+ 	set -- "$@" -device "usb-ccid" -device "ccid-card-emulated,debug=3,backend=certificates,db=sql:${RVA23_SMARTCARD_DIR},cert1=id-cert,cert2=signing-cert,cert3=encryption-cert"
+ fi
+ 
+-exec "${QEMU}" \
++set -- "${QEMU}" \
+ 	-M virt,pflash0=pflash0,pflash1=pflash1,acpi=off \
+ 	-accel tcg \
+ 	-cpu rva23s64 \
+-	-smp 4 \
+-	-m 2048 \
++	-smp "${RVA23_SMP:-4}" \
++	-m "${RVA23_MEMORY:-4096}" \
+ 	-bios "${IMAGES_DIR}/u-boot-spl.bin" \
+ 	-dtb "${FIRMWARE_DTB}" \
+ 	-device loader,file="${FIRMWARE_FIT}",addr=0x80200000 \
+@@ -80,3 +80,7 @@ 	-device virtio-net-pci,netdev=net0 \
+ 	-monitor unix:"${RVA23_QEMU_MONITOR:-${IMAGES_DIR}/firmware-monitor.sock}",server=on,wait=off \
+ 	"$@" \
+ 	-serial stdio
++if [ -n "${RVA23_CPU_SET:-}" ]; then
++	set -- taskset -c "${RVA23_CPU_SET}" "$@"
++fi
++exec "$@"
+diff --git a/buildroot/board/rva23-qemu/run-qemu.sh b/buildroot/board/rva23-qemu/run-qemu.sh
+index 31f90be239ed96e18164e20151ec7be6bc8de631..765332e2e848940e5b9f0203661ff102e4b2938d 100755
+--- a/buildroot/board/rva23-qemu/run-qemu.sh
++++ b/buildroot/board/rva23-qemu/run-qemu.sh
+@@ -42,12 +42,12 @@ if [ -n "${RVA23_SMARTCARD_DIR:-}" ]; then
+ 	set -- "$@" -device "usb-ccid,attached=on" -device "ccid-card-emulated,backend=certificates,db=sql:${RVA23_SMARTCARD_DIR},cert1=id-cert,cert2=signing-cert,cert3=encryption-cert"
+ fi
+ 
+-exec "${QEMU}" \
++set -- "${QEMU}" \
+ 	-M virt,pflash0=pflash0,pflash1=pflash1,acpi=off \
+ 	-accel tcg \
+ 	-cpu rva23s64 \
+-	-smp 4 \
+-	-m 2048 \
++	-smp "${RVA23_SMP:-4}" \
++	-m "${RVA23_MEMORY:-4096}" \
+ 	-bios "${IMAGES_DIR}/fw_dynamic.bin" \
+ 	-blockdev node-name=pflash0,driver=file,read-only=on,filename="${IMAGES_DIR}/RISCV_VIRT_CODE.fd" \
+ 	-blockdev node-name=pflash1,driver=file,filename="${EDK2_VARS}" \
+@@ -62,3 +62,7 @@ 	-tpmdev emulator,id=tpm0,chardev=chrtpm \
+ 	-device tpm-tis-device,tpmdev=tpm0 \
+ 	"$@" \
+ 	-serial stdio
++if [ -n "${RVA23_CPU_SET:-}" ]; then
++	set -- taskset -c "${RVA23_CPU_SET}" "$@"
++fi
++exec "$@"
+
