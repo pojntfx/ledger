@@ -1,0 +1,64 @@
+From 63a4fe0603f83f6ed9f32a86c3e377666cd93cce Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Sun, 08 Nov 2026 17:17:26 -0700
+Subject: [PATCH] fix: Get K3 builds to work with per-package dirs
+---
+diff --git a/buildroot/board/spacemit/k3-uefi/post-build.sh b/buildroot/board/spacemit/k3-uefi/post-build.sh
+index 5d29bdb4892426e886efba04a1f6051617e2ed53..983bbe83a481d1b58726609fa4bb236e57403008 100755
+--- a/buildroot/board/spacemit/k3-uefi/post-build.sh
++++ b/buildroot/board/spacemit/k3-uefi/post-build.sh
+@@ -8,6 +8,7 @@ mkdir -p "$KEY_DIR"
+ if [ ! -f "$KEY_DIR/root_ed25519" ]; then
+ 	ssh-keygen -q -t ed25519 -N '' -C 'k3-root' -f "$KEY_DIR/root_ed25519"
+ fi
++"$BUILD_DIR/../host/bin/python3" "$BOARD_DIR/../../../scripts/provision-keys.py" "$KEY_DIR"
+ install -d -m 0700 "$TARGET_DIR/root/.ssh"
+ install -m 0600 "$KEY_DIR/root_ed25519.pub" "$TARGET_DIR/root/.ssh/authorized_keys"
+ install -d -m 0755 "$TARGET_DIR/lib/firmware/powervr"
+diff --git a/buildroot/external.mk b/buildroot/external.mk
+index 2aa3698811d9d8e55b56e035d54e3083c1eeeb89..f5c0cc0e715162509f29b62985730dc039862aaf 100644
+--- a/buildroot/external.mk
++++ b/buildroot/external.mk
+@@ -19,7 +19,6 @@ 	done
+ endef
+ LINUX_POST_RSYNC_HOOKS += LINUX_APPLY_CUSTOM_DIR_PATCHES
+ 
+-MESA3D_DEPENDENCIES += host-mesa3d spirv-llvm-translator spirv-tools
+ MESA3D_CONF_OPTS += -Dcpp_rtti=true -Dmesa-clc=system -Dprecomp-compiler=system -Dimagination-srv=false
+ HOST_CLANG_POST_INSTALL_HOOKS += K3_USE_REAL_CLANG
+ define K3_USE_REAL_CLANG
+@@ -28,7 +27,6 @@ 	ln -sf clang.br_real $(HOST_DIR)/bin/clang-22
+ 	ln -sf clang++.br_real $(HOST_DIR)/bin/clang++
+ 	ln -sf clang-cpp.br_real $(HOST_DIR)/bin/clang-cpp
+ endef
+-HOST_MESA3D_DEPENDENCIES += host-spirv-llvm-translator
+ HOST_MESA3D_CONF_OPTS += -Dcpp_rtti=true
+ HOST_MESA3D_POST_INSTALL_HOOKS += K3_INSTALL_PCO_CLC
+ define K3_INSTALL_PCO_CLC
+diff --git a/buildroot/patches/buildroot/0010-Add-mesa3d-precomp-compiler-dependencies.patch b/buildroot/patches/buildroot/0010-Add-mesa3d-precomp-compiler-dependencies.patch
+new file mode 100644
+index 0000000000000000000000000000000000000000..4de999e8a36dcf5e128df46a51cde54d72660942
+--- /dev/null
++++ b/buildroot/patches/buildroot/0010-Add-mesa3d-precomp-compiler-dependencies.patch
+@@ -0,0 +1,20 @@
++diff --git a/package/mesa3d/mesa3d.mk b/package/mesa3d/mesa3d.mk
++index 87c7f427e4..f5e4e5f54b 100644
++--- a/package/mesa3d/mesa3d.mk
+++++ b/package/mesa3d/mesa3d.mk
++@@ -182,6 +182,7 @@ ifeq ($(BR2_PACKAGE_MESA3D_NEEDS_PRECOMP_COMPILER),y)
++ MESA3D_CONF_OPTS += -Dmesa-clc=system -Dprecomp-compiler=system
++ MESA3D_DEPENDENCIES += host-mesa3d spirv-llvm-translator spirv-tools
++ endif
+++MESA3D_DEPENDENCIES += host-mesa3d spirv-llvm-translator spirv-tools
++ 
++ ifeq ($(BR2_PACKAGE_MESA3D_VULKAN_DRIVER),)
++ MESA3D_CONF_OPTS += \
++@@ -355,6 +356,7 @@ HOST_MESA3D_DEPENDENCIES = \
++ 	host-llvm \
++ 	host-python-mako \
++ 	host-python-pyyaml \
+++	host-spirv-llvm-translator \
++ 	host-spirv-tools
++ 
++ ifneq ($(BR2_PACKAGE_MESA3D_GALLIUM_DRIVER_PANFROST)$(BR2_PACKAGE_MESA3D_VULKAN_DRIVER_PANFROST),)
+
