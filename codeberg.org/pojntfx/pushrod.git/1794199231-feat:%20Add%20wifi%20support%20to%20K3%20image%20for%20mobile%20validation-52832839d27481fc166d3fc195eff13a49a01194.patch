@@ -1,0 +1,148 @@
+From 52832839d27481fc166d3fc195eff13a49a01194 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Sun, 08 Nov 2026 21:40:31 -0700
+Subject: [PATCH] feat: Add wifi support to K3 image for mobile validation
+---
+diff --git a/buildroot/Makefile b/buildroot/Makefile
+index e944df2d8a7c7329898bf48ebb8c3135ccff2e69..c3e384fc72c789ae4fedaaa0aaecf00d9230f978 100644
+--- a/buildroot/Makefile
++++ b/buildroot/Makefile
+@@ -13,6 +13,8 @@ RVA23_KEY_DIR ?= $(THIS_EXTERNAL_PATH)/qemu-keys
+ HOST_DIR ?= $(OUTPUT_DIR)/host
+ K3_HOST_DIR ?= $(K3_OUTPUT_DIR)/host
+ export RVA23_TPM_STATE := $(OUTPUT_DIR)/swtpm
++export RVA23_WIFI_SSID
++export RVA23_WIFI_PSK
+ 
+ COMMON_TOOLCHAIN_OVERRIDES = BINUTILS_OVERRIDE_SRCDIR=$(K3_SOURCE_DIR)/binutils HOST_BINUTILS_OVERRIDE_SRCDIR=$(K3_SOURCE_DIR)/binutils HOST_GCC_INITIAL_OVERRIDE_SRCDIR=$(K3_SOURCE_DIR)/gcc HOST_GCC_FINAL_OVERRIDE_SRCDIR=$(K3_SOURCE_DIR)/gcc GCC_FINAL_OVERRIDE_SRCDIR=$(K3_SOURCE_DIR)/gcc
+ MAKE_BUILDROOT = $(MAKE) -C $(BUILDROOT_DIR) O=$(OUTPUT_DIR) BR2_HOST_DIR=$(HOST_DIR) BR2_EXTERNAL=$(THIS_EXTERNAL_PATH) BR2_DL_DIR=$(BR2_DL_DIR) BR2_CCACHE_DIR=$(BR2_CCACHE_DIR) CCACHE_DIR=$(BR2_CCACHE_DIR) CCACHE_BASEDIR=$(OUTPUT_DIR) $(COMMON_TOOLCHAIN_OVERRIDES) UBOOT_OVERRIDE_SRCDIR=$(UBOOT_OVERRIDE_SRCDIR) RVA23_KEY_DIR=$(RVA23_KEY_DIR)
+diff --git a/buildroot/board/spacemit/k3-uefi/dracut-k3.conf b/buildroot/board/spacemit/k3-uefi/dracut-k3.conf
+new file mode 100644
+index 0000000000000000000000000000000000000000..982f13c198e33775e78c29482a1c30fff38b16d1
+--- /dev/null
++++ b/buildroot/board/spacemit/k3-uefi/dracut-k3.conf
+@@ -0,0 +1 @@
++install_items+=" /lib/firmware/regulatory.db /lib/firmware/regulatory.db.p7s "
+diff --git a/buildroot/board/spacemit/k3-uefi/post-build.sh b/buildroot/board/spacemit/k3-uefi/post-build.sh
+index 983bbe83a481d1b58726609fa4bb236e57403008..f06e106d3f4e51d6b351ada57440e392838c9236 100755
+--- a/buildroot/board/spacemit/k3-uefi/post-build.sh
++++ b/buildroot/board/spacemit/k3-uefi/post-build.sh
+@@ -20,4 +20,8 @@ rm -f "$TARGET_DIR/etc/systemd/system/k3-validation.service"
+ rm -f "$TARGET_DIR/etc/systemd/system/basic.target.wants/k3-validation.service"
+ rm -f "$TARGET_DIR/etc/systemd/system/multi-user.target.wants/k3-validation.service"
+ "$BUILD_DIR/../host/bin/python3" "$BOARD_DIR/../../../scripts/prepare-target.py" "$TARGET_DIR"
++if [ -n "${RVA23_WIFI_SSID:-}" ] && [ -n "${RVA23_WIFI_PSK:-}" ]; then
++	install -d -m 0755 "$TARGET_DIR/etc/wpa_supplicant"
++	printf 'country=CA\nctrl_interface=DIR=/run/wpa_supplicant\nnetwork={\n\tssid="%s"\n\tpsk="%s"\n\tkey_mgmt=WPA-PSK SAE\n\tieee80211w=2\n}\n' "$RVA23_WIFI_SSID" "$RVA23_WIFI_PSK" > "$TARGET_DIR/etc/wpa_supplicant/wpa_supplicant-wlP4p1s0.conf"
++fi
+ K3_CLIENTS_ONLY=1 RVA23_BOARD=k3-uefi BINARIES_DIR="$BUILD_DIR/../images" TARGET_DIR="$TARGET_DIR" HOST_DIR="$BUILD_DIR/../host" "$BUILD_DIR/../host/bin/python3" "$BOARD_DIR/../../../scripts/k3-build-os-images.py"
+diff --git a/buildroot/board/spacemit/k3-uefi/rootfs-overlay/etc/systemd/network/30-wlP4p1s0.network b/buildroot/board/spacemit/k3-uefi/rootfs-overlay/etc/systemd/network/30-wlP4p1s0.network
+new file mode 100644
+index 0000000000000000000000000000000000000000..e1e91dd2675e3dc8a4451e561758eeb3eafc2885
+--- /dev/null
++++ b/buildroot/board/spacemit/k3-uefi/rootfs-overlay/etc/systemd/network/30-wlP4p1s0.network
+@@ -0,0 +1,5 @@
++[Match]
++Name=wlP4p1s0
++
++[Network]
++DHCP=yes
+diff --git a/buildroot/board/spacemit/k3-uefi/rootfs-overlay/etc/systemd/system/k3-wifi-regdom.service b/buildroot/board/spacemit/k3-uefi/rootfs-overlay/etc/systemd/system/k3-wifi-regdom.service
+new file mode 100644
+index 0000000000000000000000000000000000000000..a30d5c131f9a3e79192debd4df00207e677347bd
+--- /dev/null
++++ b/buildroot/board/spacemit/k3-uefi/rootfs-overlay/etc/systemd/system/k3-wifi-regdom.service
+@@ -0,0 +1,12 @@
++[Unit]
++Description=Set WiFi regulatory domain
++After=network-pre.target
++Wants=network-pre.target
++
++[Service]
++Type=oneshot
++ExecStart=-/usr/sbin/iw reg set CA
++RemainAfterExit=yes
++
++[Install]
++WantedBy=multi-user.target
+diff --git a/buildroot/board/spacemit/k3-uefi/rootfs-overlay/etc/systemd/system/k3-wifi.service b/buildroot/board/spacemit/k3-uefi/rootfs-overlay/etc/systemd/system/k3-wifi.service
+new file mode 100644
+index 0000000000000000000000000000000000000000..25e8d2dfc148bff617c3ada394143beb53519eca
+--- /dev/null
++++ b/buildroot/board/spacemit/k3-uefi/rootfs-overlay/etc/systemd/system/k3-wifi.service
+@@ -0,0 +1,12 @@
++[Unit]
++Description=WiFi supplicant on wlP4p1s0
++Requires=sys-subsystem-net-devices-wlP4p1s0.device
++After=sys-subsystem-net-devices-wlP4p1s0.device network-pre.target
++Wants=network-pre.target
++
++[Service]
++ExecStart=/usr/sbin/wpa_supplicant -i wlP4p1s0 -c /etc/wpa_supplicant/wpa_supplicant-wlP4p1s0.conf
++Restart=on-failure
++
++[Install]
++WantedBy=multi-user.target
+diff --git a/buildroot/board/spacemit/k3-uefi/rootfs-overlay/etc/systemd/system/multi-user.target.wants/k3-wifi-regdom.service b/buildroot/board/spacemit/k3-uefi/rootfs-overlay/etc/systemd/system/multi-user.target.wants/k3-wifi-regdom.service
+new file mode 120000
+index 0000000000000000000000000000000000000000..3dd5f82abe528c31bd87fdc73c53d8b5112da8a3
+--- /dev/null
++++ b/buildroot/board/spacemit/k3-uefi/rootfs-overlay/etc/systemd/system/multi-user.target.wants/k3-wifi-regdom.service
+@@ -0,0 +1 @@
++/etc/systemd/system/k3-wifi-regdom.service
+\ No newline at end of file
+diff --git a/buildroot/board/spacemit/k3-uefi/rootfs-overlay/etc/systemd/system/multi-user.target.wants/k3-wifi.service b/buildroot/board/spacemit/k3-uefi/rootfs-overlay/etc/systemd/system/multi-user.target.wants/k3-wifi.service
+new file mode 120000
+index 0000000000000000000000000000000000000000..f92918f594152e65bc157843c17689aec00c5b09
+--- /dev/null
++++ b/buildroot/board/spacemit/k3-uefi/rootfs-overlay/etc/systemd/system/multi-user.target.wants/k3-wifi.service
+@@ -0,0 +1 @@
++/etc/systemd/system/k3-wifi.service
+\ No newline at end of file
+diff --git a/buildroot/board/spacemit/k3-uefi/rootfs-overlay/etc/wpa_supplicant/wpa_supplicant-wlP4p1s0.conf b/buildroot/board/spacemit/k3-uefi/rootfs-overlay/etc/wpa_supplicant/wpa_supplicant-wlP4p1s0.conf
+new file mode 100644
+index 0000000000000000000000000000000000000000..97d9bb4e506e8fc142d1d16ef03957ab5d64f583
+--- /dev/null
++++ b/buildroot/board/spacemit/k3-uefi/rootfs-overlay/etc/wpa_supplicant/wpa_supplicant-wlP4p1s0.conf
+@@ -0,0 +1,2 @@
++country=CA
++ctrl_interface=DIR=/run/wpa_supplicant
+diff --git a/buildroot/configs/k3_uefi_defconfig b/buildroot/configs/k3_uefi_defconfig
+index e03305a79b563ed451a754b7876361f661571104..8ceb25a1623a6ca8cb399143080e1109f4b32783 100644
+--- a/buildroot/configs/k3_uefi_defconfig
++++ b/buildroot/configs/k3_uefi_defconfig
+@@ -54,7 +54,7 @@ BR2_PACKAGE_HOST_SBSIGNTOOLS=y
+ BR2_TARGET_ROOTFS_CPIO=y
+ BR2_TARGET_ROOTFS_CPIO_DRACUT=y
+ BR2_TARGET_ROOTFS_CPIO_DRACUT_MODULES="$(BR2_EXTERNAL_RVA23_PATH)/board/rva23-qemu/dracut"
+-BR2_TARGET_ROOTFS_CPIO_DRACUT_CONF_FILES="$(BR2_EXTERNAL_RVA23_PATH)/board/rva23-qemu/dracut.conf"
++BR2_TARGET_ROOTFS_CPIO_DRACUT_CONF_FILES="$(BR2_EXTERNAL_RVA23_PATH)/board/rva23-qemu/dracut.conf $(BR2_EXTERNAL_RVA23_PATH)/board/spacemit/k3-uefi/dracut-k3.conf"
+ BR2_TARGET_ROOTFS_CPIO_GZIP=y
+ BR2_TARGET_GENERIC_GETTY=y
+ BR2_TARGET_GENERIC_GETTY_PORT="ttyS0"
+@@ -128,6 +128,14 @@ BR2_PACKAGE_LIBDRM_INSTALL_TESTS=y
+ BR2_PACKAGE_TPM2_TOOLS=y
+ BR2_PACKAGE_LIBFUSE=y
+ BR2_PACKAGE_K3_SWTPM=y
++BR2_PACKAGE_LINUX_FIRMWARE=y
++BR2_PACKAGE_LINUX_FIRMWARE_RTL_RTW89=y
++BR2_PACKAGE_WIRELESS_REGDB=y
++BR2_PACKAGE_IW=y
++BR2_PACKAGE_WPA_SUPPLICANT=y
++BR2_PACKAGE_WPA_SUPPLICANT_NL80211=y
++BR2_PACKAGE_WPA_SUPPLICANT_CLI=y
++BR2_PACKAGE_WPA_SUPPLICANT_WPA3=y
+ BR2_PACKAGE_HOST_TPM2_TSS=y
+ BR2_PACKAGE_HOST_GO=y
+ BR2_PACKAGE_HOST_GO_BIN=y
+diff --git a/buildroot/local.mk.tpl b/buildroot/local.mk.tpl
+index c899efc9ecafda940121e9694526566c01ff99cd..0cde4485554385f9a7b800534f8566a7fdcce37e 100644
+--- a/buildroot/local.mk.tpl
++++ b/buildroot/local.mk.tpl
+@@ -9,3 +9,5 @@ K3_SOURCE_DIR = /home/pojntfx/Projets/pushrod/buildroot/src
+ K3_LINUX_FIRMWARE_DIR = /home/pojntfx/Projets/pushrod/buildroot/src/linux-firmware/powervr
+ UBOOT_OVERRIDE_SRCDIR = /home/pojntfx/Projets/pushrod/buildroot/src/u-boot
+ RVA23_KEY_DIR = /home/pojntfx/Projets/pushrod/buildroot/qemu-keys
++RVA23_WIFI_SSID = your-ssid
++RVA23_WIFI_PSK = your-psk
+
