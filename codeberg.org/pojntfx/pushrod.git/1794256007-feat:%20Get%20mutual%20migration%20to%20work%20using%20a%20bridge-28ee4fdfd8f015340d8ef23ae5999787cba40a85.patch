@@ -1,0 +1,326 @@
+From 28ee4fdfd8f015340d8ef23ae5999787cba40a85 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Mon, 09 Nov 2026 13:26:47 -0700
+Subject: [PATCH] feat: Get mutual migration to work using a bridge
+---
+diff --git a/buildroot/board/rva23-qemu/run-firmware.sh b/buildroot/board/rva23-qemu/run-firmware.sh
+index d5cd5f53140a4c84f8680a51bb4792db5475668d..fafe92e14b3e9e15623bfbc84929029bba474826 100755
+--- a/buildroot/board/rva23-qemu/run-firmware.sh
++++ b/buildroot/board/rva23-qemu/run-firmware.sh
+@@ -34,20 +34,17 @@ if [ -n "${RVA23_UPDATE_IMAGE:-}" ]; then
+ 	set -- "$@" -drive file="${RVA23_UPDATE_IMAGE}",format=raw,if=virtio
+ fi
+ if [ -n "${RVA23_UI_HOST_PORT:-}" ]; then
+-	set -- "$@" -netdev "user,id=net0,hostfwd=tcp:[::1]:${RVA23_UI_HOST_PORT}-:8084"
++	set -- "$@" -netdev "user,id=net0,hostfwd=tcp:127.0.0.1:${RVA23_UI_HOST_PORT}-:8084"
+ elif [ -n "${RVA23_SERVER_UI_HOST_PORT:-}" ]; then
+-	set -- "$@" -netdev "user,id=net0,hostfwd=tcp:[::1]:${RVA23_SERVER_UI_HOST_PORT}-:8083"
++	set -- "$@" -netdev "user,id=net0,hostfwd=tcp:127.0.0.1:${RVA23_SERVER_UI_HOST_PORT}-:8083"
+ else
+ 	set -- "$@" -netdev user,id=net0
+ fi
+-if [ -n "${RVA23_MUTUAL_NET_LISTEN:-}" ]; then
+-	set -- "$@" -netdev "socket,id=mutual,listen=[::1]:${RVA23_MUTUAL_NET_LISTEN}" -device "virtio-net-pci,netdev=mutual,mac=${RVA23_MUTUAL_MAC}"
++if [ -n "${RVA23_MUTUAL_BRIDGE:-}" ] && [ "${RVA23_MUTUAL_HOTPLUG:-0}" != "1" ]; then
++	set -- "$@" -netdev "bridge,id=mutual,br=${RVA23_MUTUAL_BRIDGE}" -device "virtio-net-pci,netdev=mutual,mac=${RVA23_MUTUAL_MAC}"
+ fi
+-if [ -n "${RVA23_MUTUAL_NET_LISTEN_DESTINATION:-}" ]; then
+-	set -- "$@" -netdev "socket,id=mutual-destination,listen=[::1]:${RVA23_MUTUAL_NET_LISTEN_DESTINATION}" -device "virtio-net-pci,netdev=mutual-destination,mac=${RVA23_MUTUAL_MAC_DESTINATION}"
+-fi
+-if [ -n "${RVA23_MUTUAL_NET_CONNECT:-}" ]; then
+-	set -- "$@" -netdev "socket,id=mutual,connect=[::1]:${RVA23_MUTUAL_NET_CONNECT}" -device "virtio-net-pci,netdev=mutual,mac=${RVA23_MUTUAL_MAC}"
++if [ -n "${RVA23_MUTUAL_BRIDGE_DESTINATION:-}" ] && [ "${RVA23_MUTUAL_HOTPLUG:-0}" != "1" ]; then
++	set -- "$@" -netdev "bridge,id=mutual-destination,br=${RVA23_MUTUAL_BRIDGE_DESTINATION}" -device "virtio-net-pci,netdev=mutual-destination,mac=${RVA23_MUTUAL_MAC_DESTINATION}"
+ fi
+ if [ -n "${RVA23_FIDO2_DIR:-}" ]; then
+ 	set -- "$@" -device "u2f-emulated,dir=${RVA23_FIDO2_DIR}"
+diff --git a/buildroot/board/rva23-qemu/run-qemu.sh b/buildroot/board/rva23-qemu/run-qemu.sh
+index 765332e2e848940e5b9f0203661ff102e4b2938d..f7f40a4697bf144fd92c26f47c865e2f54bb47ad 100755
+--- a/buildroot/board/rva23-qemu/run-qemu.sh
++++ b/buildroot/board/rva23-qemu/run-qemu.sh
+@@ -30,10 +30,16 @@ fi
+ if [ -n "${RVA23_UPDATE_IMAGE:-}" ]; then
+ 	set -- "$@" -drive file="${RVA23_UPDATE_IMAGE}",format=raw,if=virtio
+ fi
+-if [ -n "${RVA23_UI_HOST_PORT:-}" ]; then
+-	set -- "$@" -netdev "user,id=net0,hostfwd=tcp:[::1]:${RVA23_UI_HOST_PORT}-:8084"
+-else
+-	set -- "$@" -netdev user,id=net0
++if [ "${RVA23_NO_USER_NET:-0}" != "1" ]; then
++	if [ -n "${RVA23_UI_HOST_PORT:-}" ]; then
++		set -- "$@" -netdev "user,id=net0,hostfwd=tcp:127.0.0.1:${RVA23_UI_HOST_PORT}-:8084"
++	else
++		if [ -n "${RVA23_SERVER_UI_HOST_PORT:-}" ]; then
++			set -- "$@" -netdev "user,id=net0,hostfwd=tcp:127.0.0.1:${RVA23_SERVER_UI_HOST_PORT}-:8083"
++		else
++			set -- "$@" -netdev user,id=net0
++		fi
++	fi
+ fi
+ if [ -n "${RVA23_FIDO2_DIR:-}" ]; then
+ 	set -- "$@" -device "u2f-emulated,dir=${RVA23_FIDO2_DIR}"
+@@ -42,6 +48,12 @@ if [ -n "${RVA23_SMARTCARD_DIR:-}" ]; then
+ 	set -- "$@" -device "usb-ccid,attached=on" -device "ccid-card-emulated,backend=certificates,db=sql:${RVA23_SMARTCARD_DIR},cert1=id-cert,cert2=signing-cert,cert3=encryption-cert"
+ fi
+ 
++if [ -n "${RVA23_MUTUAL_BRIDGE:-}" ] && [ "${RVA23_MUTUAL_HOTPLUG:-0}" != "1" ]; then
++	set -- "$@" -netdev "bridge,id=mutual,br=${RVA23_MUTUAL_BRIDGE}" -device "virtio-net-pci,netdev=mutual,mac=${RVA23_MUTUAL_MAC}"
++fi
++if [ -n "${RVA23_MUTUAL_BRIDGE_DESTINATION:-}" ] && [ "${RVA23_MUTUAL_HOTPLUG:-0}" != "1" ]; then
++	set -- "$@" -netdev "bridge,id=mutual-destination,br=${RVA23_MUTUAL_BRIDGE_DESTINATION}" -device "virtio-net-pci,netdev=mutual-destination,mac=${RVA23_MUTUAL_MAC_DESTINATION}"
++fi
+ set -- "${QEMU}" \
+ 	-M virt,pflash0=pflash0,pflash1=pflash1,acpi=off \
+ 	-accel tcg \
+@@ -52,7 +64,7 @@ 	-bios "${IMAGES_DIR}/fw_dynamic.bin" \
+ 	-blockdev node-name=pflash0,driver=file,read-only=on,filename="${IMAGES_DIR}/RISCV_VIRT_CODE.fd" \
+ 	-blockdev node-name=pflash1,driver=file,filename="${EDK2_VARS}" \
+ 	-drive file="${DISK_IMAGE}",format=raw,if=virtio \
+-	-device virtio-net-pci,netdev=net0 \
++	$( [ "${RVA23_NO_USER_NET:-0}" = "1" ] || printf '%s' '-device virtio-net-pci,netdev=net0' ) \
+ 	-device virtio-gpu-pci \
+ 	-device qemu-xhci \
+ 	-device usb-kbd \
+diff --git a/buildroot/scripts/verify-migration.py b/buildroot/scripts/verify-migration.py
+index 685bec7bc09c8c2f8750c8d12596ba1717404f32..64410724b1f233964fbf48601cdbac35406af635 100644
+--- a/buildroot/scripts/verify-migration.py
++++ b/buildroot/scripts/verify-migration.py
+@@ -147,7 +147,7 @@ def start_workload(console):
+     output = console.capture("migration-client serve </dev/null >/tmp/migration-client.log 2>&1 & printf '%s\\n' $!")
+     match = re.search(r"(?:^|\r?\n)(\d+)\r?\n", output)
+     assert match, output[-2000:]
+-    wait_http("http://[::1]:18084/api/state")
++    wait_http("http://127.0.0.1:18084/api/state")
+     return int(match.group(1))
+ 
+ 
+@@ -175,7 +175,7 @@         development = predict_profile(output, "rva23-debug_1.efi")
+         server = start_migration_server(output, development)
+         pid = start_workload(first)
+         first.command("migration-client attest -phase before", 300)
+-        state = read_state("http://[::1]:18084/api/state")
++        state = read_state("http://127.0.0.1:18084/api/state")
+         assert state["pid"] == pid
+         instance = state["instanceId"]
+         first.command("rm -rf /tmp/criu-dump /tmp/migration.tar.gz; mkdir -p /tmp/criu-dump")
+@@ -195,7 +195,7 @@         second.command("touch /tmp/migration-client.log")
+         second.command(f"if [ \"$(cat /proc/sys/kernel/ns_last_pid)\" -eq \"$(({pid} - 1))\" ]; then true; fi")
+         second.command("criu restore -D /tmp/criu-restore --shell-job --tcp-close -d", 300)
+         second.command("migration-client attest -phase after", 300)
+-        restored = read_state("http://[::1]:18085/api/state")
++        restored = read_state("http://127.0.0.1:18085/api/state")
+         assert restored["pid"] == pid
+         assert restored["instanceId"] == instance
+         history = read_state("http://[::1]:8083/api/state")["history"]
+diff --git a/buildroot/scripts/verify-mutual-migration.py b/buildroot/scripts/verify-mutual-migration.py
+index c1f04ab7ec338f6a8ef1fac14b428d210d693ae9..e97db04e35bcf616a5805d12f20d59a777858e20 100644
+--- a/buildroot/scripts/verify-mutual-migration.py
++++ b/buildroot/scripts/verify-mutual-migration.py
+@@ -91,25 +91,24 @@     os.environ["RVA23_DISK"] = str(directory / f"{name}.img")
+     os.environ["RVA23_EDK2_VARS"] = str(directory / f"{name}-vars.fd")
+     os.environ["RVA23_TPM_STATE"] = str(directory / f"{name}-swtpm")
+     os.environ["RVA23_QEMU_MONITOR"] = str(directory / f"{name}-monitor.sock")
+-    os.environ["QEMU"] = str(output / "build/host-qemu-11.0.0/build/qemu-system-riscv64")
++    os.environ["QEMU"] = str(output / "host/bin/qemu-system-riscv64")
+     os.environ.pop("RVA23_UI_HOST_PORT", None)
+     os.environ.pop("RVA23_SERVER_UI_HOST_PORT", None)
+-    os.environ.pop("RVA23_MUTUAL_NET_LISTEN", None)
+-    os.environ.pop("RVA23_MUTUAL_NET_LISTEN_DESTINATION", None)
+-    os.environ.pop("RVA23_MUTUAL_NET_CONNECT", None)
++    os.environ.pop("RVA23_MUTUAL_BRIDGE", None)
++    os.environ.pop("RVA23_MUTUAL_BRIDGE_DESTINATION", None)
+     if server:
+-        os.environ["RVA23_SERVER_UI_HOST_PORT"] = str(host_port)
+-        os.environ["RVA23_MUTUAL_NET_LISTEN"] = str(network_port)
+-        os.environ["RVA23_MUTUAL_NET_LISTEN_DESTINATION"] = str(destination_network_port)
++        os.environ["RVA23_NO_USER_NET"] = "1"
++        os.environ["RVA23_MUTUAL_BRIDGE"] = "br-mutual-src"
++        os.environ["RVA23_MUTUAL_BRIDGE_DESTINATION"] = "br-mutual-dst"
+         os.environ["RVA23_MUTUAL_MAC"] = "52:54:00:00:00:11"
+         os.environ["RVA23_MUTUAL_MAC_DESTINATION"] = "52:54:00:00:00:12"
+         os.environ.pop("RVA23_FIDO2_DIR", None)
+     else:
+-        os.environ["RVA23_UI_HOST_PORT"] = str(host_port)
+-        os.environ["RVA23_MUTUAL_NET_CONNECT"] = str(network_port)
++        os.environ["RVA23_NO_USER_NET"] = "1"
++        os.environ["RVA23_MUTUAL_BRIDGE"] = "br-mutual-src" if name == "source" else "br-mutual-dst"
+         os.environ["RVA23_MUTUAL_MAC"] = "52:54:00:00:00:20" if name == "source" else "52:54:00:00:00:30"
+         os.environ["RVA23_FIDO2_DIR"] = str(directory / f"{name}-u2f")
+-    return Console(output, f"mutual-migration-{name}.log", firmware=True)
++    return Console(output, f"mutual-migration-{name}.log", firmware=False)
+ 
+ 
+ def enroll(console, output, name, production=False):
+@@ -128,6 +127,36 @@         login(console)
+         console.command("criu check", 300)
+ 
+ 
++def hotplug_bridge(directory, name, server):
++    path = directory / f"{name}-monitor.sock"
++    def command(text):
++        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
++        sock.settimeout(3)
++        sock.connect(str(path))
++        try:
++            sock.recv(4096)
++            sock.sendall((text + "\n").encode())
++            time.sleep(0.2)
++            try:
++                sock.recv(4096)
++            except socket.timeout:
++                pass
++        finally:
++            sock.close()
++    if server:
++        command("netdev_add bridge,id=mutual,br=br-mutual-src")
++        command("device_add virtio-net-pci,netdev=mutual,mac=52:54:00:00:00:11,id=netmutual")
++        command("netdev_add bridge,id=mutual-destination,br=br-mutual-dst")
++        command("device_add virtio-net-pci,netdev=mutual-destination,mac=52:54:00:00:00:12,id=netmutualdst")
++    elif name == "source":
++        command("netdev_add bridge,id=mutual,br=br-mutual-src")
++        command("device_add virtio-net-pci,netdev=mutual,mac=52:54:00:00:00:20,id=netmutual")
++    else:
++        command("netdev_add bridge,id=mutual,br=br-mutual-dst")
++        command("device_add virtio-net-pci,netdev=mutual,mac=52:54:00:00:00:30,id=netmutual")
++    time.sleep(1)
++
++
+ def initialize_guest(console, output, name, production, resume):
+     if resume:
+         login(console)
+@@ -136,6 +165,7 @@         enroll(console, output, name, production=production)
+ 
+ 
+ def configure_link(console, mac, address):
++    console.command("mkdir -p /run/systemd/network; printf '[Match]\\nMACAddress=52:54:00:00:00:11 52:54:00:00:00:12 52:54:00:00:00:20 52:54:00:00:00:30\\n[Link]\\nUnmanaged=yes\\n' > /run/systemd/network/90-mutual-unmanaged.network; networkctl reload 2>/dev/null || true", 60)
+     command = f"iface=; for path in /sys/class/net/*; do if [ \"$(cat $path/address)\" = '{mac}' ]; then iface=$(basename $path); fi; done; test -n \"$iface\"; ip link set dev \"$iface\" up; ip addr replace {address}/64 dev \"$iface\""
+     console.command(command, 120)
+     console.command(f"ip addr show | grep -q '{address}/64'")
+@@ -144,11 +174,11 @@
+ def configure_network(console, name):
+     if name == "server":
+         configure_link(console, "52:54:00:00:00:11", "fd00::10")
+-        configure_link(console, "52:54:00:00:00:12", "fd00::20")
++        configure_link(console, "52:54:00:00:00:12", "fd00:1::20")
+     elif name == "source":
+         configure_link(console, "52:54:00:00:00:20", "fd00::30")
+     else:
+-        configure_link(console, "52:54:00:00:00:30", "fd00::40")
++        configure_link(console, "52:54:00:00:00:30", "fd00:1::40")
+ 
+ 
+ def install_identities(server, source, destination, output):
+@@ -161,16 +191,24 @@     for name in ("source", "destination"):
+         put_guest_file(server, directory / f"{name}-u2f/certificate.pem", f"/var/lib/rva23-mutual/{name}-u2f-certificate.pem")
+ 
+ 
++def guest_state(console, port):
++    raw = console.capture(f"wget -q -O- http://[::1]:{port}/api/state")
++    start = raw.find("{")
++    end = raw.rfind("}")
++    assert start >= 0 and end > start, raw[-2000:]
++    return json.loads(raw[start:end+1])
++
++
+ def start_workload(console):
+     output = console.capture("mutual-migration-client serve </dev/null >/tmp/mutual-migration-client.log 2>&1 & printf '%s\\n' $!")
+     match = re.search(r"(?:^|\r?\n)(\d+)\r?\n", output)
+     assert match, output[-2000:]
+-    wait_http("http://[::1]:18086/api/state")
++    wait_http("http://[fd00::30]:8084/api/state")
+     return int(match.group(1))
+ 
+ 
+ def free_port():
+-    with socket.socket() as listener:
++    with socket.socket(socket.AF_INET6) as listener:
+         listener.bind(("::1", 0))
+         return listener.getsockname()[1]
+ 
+@@ -194,9 +232,9 @@
+ 
+ def capture_screenshots(output):
+     targets = [
+-        ("http://[::1]:8085", "#summary table", "mutual-migration-server-ui.png"),
+-        ("http://[::1]:18086", "#state table", "mutual-migration-source-ui.png"),
+-        ("http://[::1]:18087", "#state table", "mutual-migration-destination-ui.png"),
++        ("http://[fd00::10]:8083", "#summary table", "mutual-migration-server-ui.png"),
++        ("http://[fd00::30]:8084", "#state table", "mutual-migration-source-ui.png"),
++        ("http://[fd00:1::40]:8084", "#state table", "mutual-migration-destination-ui.png"),
+     ]
+     digests = set()
+     for url, selector, name in targets:
+@@ -226,6 +264,11 @@     destination = None
+     try:
+         server = vm_console(output, "server", 8085, network_port, server=True, destination_network_port=destination_network_port)
+         initialize_guest(server, output, "server", True, resume)
++        pcr11_output = server.capture("tpm2_pcrread sha256:11")
++        match = re.search(r"11\s*:\s*0x([0-9a-f]{64})", pcr11_output)
++        assert match, pcr11_output[-2000:]
++        production = match.group(1)
++        (directory / "profiles.json").write_text(json.dumps({"production": production}) + "\n")
+         configure_network(server, "server")
+         source = vm_console(output, "source", 18086, network_port)
+         initialize_guest(source, output, "source", False, resume)
+@@ -234,14 +277,12 @@         destination = vm_console(output, "destination", 18087, destination_network_port)
+         initialize_guest(destination, output, "destination", False, resume)
+         configure_network(destination, "destination")
+         install_identities(server, source, destination, output)
+-        server.capture(f"RVA23_MUTUAL_PRODUCTION_PCR11={production} mutual-migration-server </dev/null >/tmp/mutual-migration-server.log 2>&1 & printf '%s\\n' $!")
+-        wait_http("http://[::1]:8085/api/state")
+-        source.command(f"ping -c 1 -W 5 fd00::10")
+-        destination.command(f"ping -c 1 -W 5 fd00::20")
++        server.capture(f"RVA23_MUTUAL_PRODUCTION_PCR11={production} RVA23_ATTESTATION_URL=http://[fd00::1]:8080 mutual-migration-server </dev/null >/tmp/mutual-migration-server.log 2>&1 & printf '%s\\n' $!")
++        wait_http("http://[fd00::10]:8083/api/state")
+         pid = start_workload(source)
+-        source.command("mutual-migration-client open", 300)
+-        source.command(f"RVA23_MUTUAL_PRODUCTION_PCR11={production} mutual-migration-client attest", 600)
+-        source_state = read_state("http://[::1]:18086/api/state")
++        source.command("RVA23_ATTESTATION_URL=http://[fd00::1]:8080 mutual-migration-client open", 300)
++        source.command(f"RVA23_MUTUAL_PRODUCTION_PCR11={production} RVA23_ATTESTATION_URL=http://[fd00::1]:8080 mutual-migration-client attest", 600)
++        source_state = guest_state(source, 8084)
+         assert source_state["serverVerification"]["hostOsReport"] == "accepted"
+         assert source_state["serverVerification"]["pcr11Quote"] == "accepted"
+         assert source_state["clientTier2"]["hostOsReport"] == "not required for Tier 2"
+@@ -249,23 +290,31 @@         print("PASS: source client verifies the server full OS report and production PCR 11 inside its guest", flush=True)
+         source.command("rm -rf /tmp/criu-dump /tmp/migration.tar.gz; mkdir -p /tmp/criu-dump")
+         source.command(f"CRIU_FAULT=129 criu dump -t {pid} -D /tmp/criu-dump --shell-job --tcp-close", 300)
+         source.command("migration-client archive -source /tmp/criu-dump -output /tmp/migration.tar.gz", 300)
+-        source.command(f"RVA23_MUTUAL_PRODUCTION_PCR11={production} mutual-migration-client upload -archive /tmp/migration.tar.gz", 600)
++        source.command(f"RVA23_MUTUAL_PRODUCTION_PCR11={production} RVA23_ATTESTATION_URL=http://[fd00::1]:8080 mutual-migration-client upload -archive /tmp/migration.tar.gz", 600)
+         copy_guest_file(source, "/var/lib/rva23-mutual/state.json", directory / "state.json")
+         put_guest_file(destination, directory / "state.json", "/var/lib/rva23-mutual/state.json")
+-        destination.command(f"RVA23_MUTUAL_ROLE=destination RVA23_MUTUAL_URL=http://fd00::20:8083 RVA23_MUTUAL_PRODUCTION_PCR11={production} mutual-migration-client attest", 600)
+-        destination.command(f"RVA23_MUTUAL_ROLE=destination RVA23_MUTUAL_URL=http://fd00::20:8083 RVA23_MUTUAL_PRODUCTION_PCR11={production} mutual-migration-client download -output /tmp/migration.tar.gz", 600)
++        print("BR-SRC:", subprocess.run(["ip","-o","link","show","master","br-mutual-src"], capture_output=True, text=True).stdout, flush=True)
++        print("BR-DST:", subprocess.run(["ip","-o","link","show","master","br-mutual-dst"], capture_output=True, text=True).stdout, flush=True)
++        print("SERVER-ADDRS:", server.capture("ip -6 addr show"), flush=True)
++        print("DEST-ADDRS:", destination.capture("ip -6 addr show"), flush=True)
++        print("SERVER-LISTEN:", server.capture("netstat -ltn | grep 8083 || true"), flush=True)
++        print("SERVER-NEIGH:", server.capture("ip -6 neigh show || true"), flush=True)
++        print("DEST-NEIGH:", destination.capture("ip -6 neigh show || true"), flush=True)
++        print("DEST-PROBE:", destination.capture("wget -T 3 -q -O- http://[fd00:1::20]:8083/api/state 2>&1 | head -c 200"), flush=True)
++        destination.command(f"RVA23_MUTUAL_ROLE=destination RVA23_MUTUAL_URL=http://[fd00:1::20]:8083 RVA23_MUTUAL_PRODUCTION_PCR11={production} RVA23_ATTESTATION_URL=http://[fd00::1]:8080 mutual-migration-client attest", 600)
++        destination.command(f"RVA23_MUTUAL_ROLE=destination RVA23_MUTUAL_URL=http://[fd00:1::20]:8083 RVA23_MUTUAL_PRODUCTION_PCR11={production} RVA23_ATTESTATION_URL=http://[fd00::1]:8080 mutual-migration-client download -output /tmp/migration.tar.gz", 600)
+         destination.command("rm -rf /tmp/criu-restore; migration-client extract -archive /tmp/migration.tar.gz -destination /tmp/criu-restore", 300)
+         destination.command("touch /tmp/mutual-migration-client.log")
+         destination.command(f"if [ \"$(cat /proc/sys/kernel/ns_last_pid)\" -eq \"$(({pid} - 1))\" ]; then true; fi")
+         destination.command("criu restore -D /tmp/criu-restore --shell-job --tcp-close -d", 300)
+-        wait_http("http://[::1]:18087/api/state")
+-        destination.command(f"RVA23_MUTUAL_ROLE=destination RVA23_MUTUAL_URL=http://fd00::20:8083 RVA23_MUTUAL_PRODUCTION_PCR11={production} mutual-migration-client complete", 600)
++        wait_http("http://[fd00:1::40]:8084/api/state")
++        destination.command(f"RVA23_MUTUAL_ROLE=destination RVA23_MUTUAL_URL=http://[fd00:1::20]:8083 RVA23_MUTUAL_PRODUCTION_PCR11={production} RVA23_ATTESTATION_URL=http://[fd00::1]:8080 mutual-migration-client complete", 600)
+         source.capture("mutual-migration-client serve </dev/null >/tmp/mutual-migration-client-observer.log 2>&1 & printf '%s\\n' $!")
+-        wait_http("http://[::1]:18086/api/state")
++        wait_http("http://[fd00::30]:8084/api/state")
+         source.command("mutual-migration-client observe", 300)
+-        restored = read_state("http://[::1]:18087/api/state")
+-        source_final = read_state("http://[::1]:18086/api/state")
+-        server_state = read_state("http://[::1]:8085/api/state")
++        restored = guest_state(destination, 8084)
++        source_final = guest_state(source, 8084)
++        server_state = guest_state(server, 8083)
+         instance = source_state["instanceId"]
+         session_id = source_state["sessionId"]
+         assert restored["pid"] == pid and restored["instanceId"] == instance
+
