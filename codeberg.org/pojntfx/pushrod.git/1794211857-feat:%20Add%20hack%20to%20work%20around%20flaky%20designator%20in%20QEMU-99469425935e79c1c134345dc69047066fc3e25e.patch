@@ -1,0 +1,65 @@
+From 99469425935e79c1c134345dc69047066fc3e25e Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Mon, 09 Nov 2026 01:10:57 -0700
+Subject: [PATCH] feat: Add hack to work around flaky designator in QEMU
+---
+diff --git a/buildroot/board/rva23-qemu/dracut/99rva23/module-setup.sh b/buildroot/board/rva23-qemu/dracut/99rva23/module-setup.sh
+index 7e1db05ff5c06f709e3b74ce5bf43ff1b7f6c4da..ea708cfd6c2d7d3742b173d3db20ba91bf8df115 100755
+--- a/buildroot/board/rva23-qemu/dracut/99rva23/module-setup.sh
++++ b/buildroot/board/rva23-qemu/dracut/99rva23/module-setup.sh
+@@ -12,6 +12,9 @@     inst_multiple mkswap bootctl sfdisk
+     inst_script "$moddir/rva23-fix-gpt.sh" /usr/bin/rva23-fix-gpt
+     inst_simple "$moddir/rva23-fix-gpt.service" "$systemdsystemunitdir/rva23-fix-gpt.service"
+     $SYSTEMCTL -q --root "$initdir" add-wants initrd-root-fs.target rva23-fix-gpt.service
++    inst_script "$moddir/rva23-designator.sh" /usr/bin/rva23-designator
++    inst_simple "$moddir/rva23-designator.service" "$systemdsystemunitdir/rva23-designator.service"
++    $SYSTEMCTL -q --root "$initdir" add-wants initrd-root-fs.target rva23-designator.service
+     mkdir -p "${initdir}/etc"
+     printf 'root::::::::\n' > "${initdir}/etc/shadow"
+     ln_r /usr/bin/busybox /usr/bin/stat
+diff --git a/buildroot/board/rva23-qemu/dracut/99rva23/rva23-designator.service b/buildroot/board/rva23-qemu/dracut/99rva23/rva23-designator.service
+new file mode 100644
+index 0000000000000000000000000000000000000000..6fae1f4bc245de9c2a8251b91cde0d51fed30d07
+--- /dev/null
++++ b/buildroot/board/rva23-qemu/dracut/99rva23/rva23-designator.service
+@@ -0,0 +1,14 @@
++[Unit]
++Description=Create missing designator links for the dissect root
++DefaultDependencies=no
++After=systemd-udevd.service
++Before=initrd-root-fs.target
++ConditionKernelCommandLine=usrhash
++
++[Service]
++Type=oneshot
++ExecStart=/usr/bin/rva23-designator
++RemainAfterExit=yes
++
++[Install]
++RequiredBy=initrd-root-fs.target
+diff --git a/buildroot/board/rva23-qemu/dracut/99rva23/rva23-designator.sh b/buildroot/board/rva23-qemu/dracut/99rva23/rva23-designator.sh
+new file mode 100755
+index 0000000000000000000000000000000000000000..ed7d8c2d098ea173e50bfc9fc0139459f233ec27
+--- /dev/null
++++ b/buildroot/board/rva23-qemu/dracut/99rva23/rva23-designator.sh
+@@ -0,0 +1,19 @@
++#!/bin/bash
++set -eu
++udevadm settle --timeout=30 || true
++mkdir -p /dev/disk/by-designator
++link() {
++    designator="$1"
++    shift
++    for label in "$@"; do
++        if [ -b "/dev/disk/by-partlabel/$label" ]; then
++            ln -sfn "/dev/disk/by-partlabel/$label" "/dev/disk/by-designator/$designator"
++            return 0
++        fi
++    done
++    return 0
++}
++link root root
++link home home
++link usr rva23_1 usr-riscv64 usr-a
++link esp esp bootfs
+
