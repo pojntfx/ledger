@@ -1,0 +1,1611 @@
+From fbe7b3d54fd00e7c397386998a83d3cdc07c1e2e Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Mon, 09 Nov 2026 01:02:21 -0700
+Subject: [PATCH] feat: Add support for remaining validation dirs to pass on the K3 too
+---
+diff --git a/buildroot/board/spacemit/k3-uefi/rootfs-overlay/etc/rancher b/buildroot/board/spacemit/k3-uefi/rootfs-overlay/etc/rancher
+new file mode 120000
+index 0000000000000000000000000000000000000000..9b4a06d6d6c8e7c393b85badc55073836687930c
+--- /dev/null
++++ b/buildroot/board/spacemit/k3-uefi/rootfs-overlay/etc/rancher
+@@ -0,0 +1 @@
++/var/lib/rancher
+\ No newline at end of file
+diff --git a/buildroot/board/spacemit/k3-uefi/rootfs-overlay/etc/sysupdate.bootloader.d b/buildroot/board/spacemit/k3-uefi/rootfs-overlay/etc/sysupdate.bootloader.d
+new file mode 120000
+index 0000000000000000000000000000000000000000..ba9d168aa0044d2cea4172741d64c29d5c77f0ae
+--- /dev/null
++++ b/buildroot/board/spacemit/k3-uefi/rootfs-overlay/etc/sysupdate.bootloader.d
+@@ -0,0 +1 @@
++/var/lib/sysupdate.bootloader.d
+\ No newline at end of file
+diff --git a/buildroot/board/spacemit/k3-uefi/rootfs-overlay/etc/sysupdate.d b/buildroot/board/spacemit/k3-uefi/rootfs-overlay/etc/sysupdate.d
+new file mode 120000
+index 0000000000000000000000000000000000000000..a8f2abb8d10c83c391fe4e3ede16b3840bb0c3ae
+--- /dev/null
++++ b/buildroot/board/spacemit/k3-uefi/rootfs-overlay/etc/sysupdate.d
+@@ -0,0 +1 @@
++/var/lib/sysupdate.d
+\ No newline at end of file
+diff --git a/buildroot/configs/k3_uefi_defconfig b/buildroot/configs/k3_uefi_defconfig
+index 8ceb25a1623a6ca8cb399143080e1109f4b32783..09adac4673c372da16fb48fc10dab065c30119ca 100644
+--- a/buildroot/configs/k3_uefi_defconfig
++++ b/buildroot/configs/k3_uefi_defconfig
+@@ -73,7 +73,7 @@ BR2_LINUX_KERNEL_CONFIG_FRAGMENT_FILES="$(BR2_EXTERNAL_RVA23_PATH)/board/spacemit/k3-uefi/linux.fragment"
+ BR2_LINUX_KERNEL_IMAGE=y
+ BR2_LINUX_KERNEL_DTS_SUPPORT=y
+ BR2_LINUX_KERNEL_INTREE_DTS_NAME="spacemit/k3-pico-itx"
+-BR2_GLOBAL_PATCH_DIR="$(BR2_EXTERNAL_RVA23_PATH)/board/spacemit/k3-uefi/patches"
++BR2_GLOBAL_PATCH_DIR="$(BR2_EXTERNAL_RVA23_PATH)/patches $(BR2_EXTERNAL_RVA23_PATH)/board/spacemit/k3-uefi/patches"
+ BR2_PACKAGE_EDK2_SPACEMIT=y
+ BR2_TARGET_OPENSBI=y
+ BR2_TARGET_OPENSBI_CUSTOM_GIT=y
+diff --git a/buildroot/patches/systemd/0008-Allow-empty-userspace-PCRLog.patch b/buildroot/patches/systemd/0008-Allow-empty-userspace-PCRLog.patch
+index 1cfae33ed69d2a3c04b9eaa0c567808ed6d102c6..015dfc2c83cef1ba394263c9a671a81f48a3ca7c 100644
+--- a/buildroot/patches/systemd/0008-Allow-empty-userspace-PCRLog.patch
++++ b/buildroot/patches/systemd/0008-Allow-empty-userspace-PCRLog.patch
+@@ -1,15 +1,40 @@
+ --- a/src/shared/tpm2-report.c
+ +++ b/src/shared/tpm2-report.c
+-@@ -272,7 +272,7 @@
+-         JSON_VARIANT_ARRAY_FOREACH(i, reply) {
+-                 sd_json_variant *record = sd_json_variant_by_key(i, "record");
+-                 if (!record)
++@@ -257,6 +257,10 @@
++         sd_json_variant *reply = NULL;
++         const char *error_id = NULL;
++         r = sd_varlink_collect(vl, "io.systemd.PCRLock.ReadEventLog", /* parameters= */ NULL, &reply, &error_id);
+++        if (r == -EBADMSG) {
+++                reply = sd_json_variant_unref(reply);
+++                r = 0;
+++        }
++         if (r < 0)
++                 return log_debug_errno(r, "Failed to issue io.systemd.PCRLock.ReadEventLog varlink call: %m");
++         if (error_id) {
++@@ -269,20 +273,69 @@
++ 
++         _cleanup_(sd_json_variant_unrefp) sd_json_variant *event_log = NULL;
++         sd_json_variant *i;
++-        JSON_VARIANT_ARRAY_FOREACH(i, reply) {
++-                sd_json_variant *record = sd_json_variant_by_key(i, "record");
++-                if (!record)
+ -                        return log_debug_errno(SYNTHETIC_ERRNO(EBADMSG), "Reply from io.systemd.PCRLock.ReadEventLog lacks 'record' field.");
+-+                        continue;
+++        if (sd_json_variant_is_array(reply)) {
+++                JSON_VARIANT_ARRAY_FOREACH(i, reply) {
+++                        sd_json_variant *record = sd_json_variant_by_key(i, "record");
+++                        if (!record)
+++                                continue;
+  
+-                 r = sd_json_variant_append_array(&event_log, record);
+-                 if (r < 0)
+-@@ -283,6 +283,53 @@
++-                r = sd_json_variant_append_array(&event_log, record);
++-                if (r < 0)
++-                        return r;
+++                        r = sd_json_variant_append_array(&event_log, record);
+++                        if (r < 0)
+++                                return r;
+++                }
++         }
++ 
++         if (!event_log) {
+                  r = sd_json_variant_new_array(&event_log, /* array= */ NULL, /* n= */ 0);
+                  if (r < 0)
+                          return log_debug_errno(r, "Failed to allocate empty event log array: %m");
+diff --git a/buildroot/scripts/event-explorer.go b/buildroot/scripts/event-explorer.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..6a4d54caae46532631e9765f03c18d4a5cebb607
+--- /dev/null
++++ b/buildroot/scripts/event-explorer.go
+@@ -0,0 +1,869 @@
++package main
++
++import (
++	"context"
++	"crypto/sha256"
++	_ "embed"
++	"encoding/hex"
++	"encoding/json"
++	"fmt"
++	"io"
++	"net/http"
++	"os"
++	"sort"
++	"strings"
++	"sync"
++	"time"
++)
++
++//go:embed event-explorer.html
++var eventExplorerHTML string
++
++type evidence struct {
++	Report          string `json:"report"`
++	Nonce           string `json:"nonce"`
++	Token           string `json:"token"`
++	PCR11           string `json:"pcr11"`
++	PCR11Quote      string `json:"pcr11Quote"`
++	PCR11Signature  string `json:"pcr11Signature"`
++	PCR11Selections string `json:"pcr11Selections"`
++}
++
++type reportResponse struct {
++	Status             string `json:"status"`
++	ComponentsVerified int    `json:"componentsVerified"`
++	EventLogRecords    int    `json:"eventLogRecords"`
++}
++
++type reportRecord struct {
++	At         time.Time         `json:"at"`
++	Path       string            `json:"path"`
++	Headers    map[string]string `json:"headers"`
++	BodyBase64 string            `json:"bodyBase64"`
++	Nonce      string            `json:"nonce"`
++	Token      string            `json:"token"`
++	Report     json.RawMessage   `json:"report"`
++	Signatures json.RawMessage   `json:"signatures"`
++	Response   *reportResponse   `json:"response"`
++	Sysext     []json.RawMessage `json:"sysext"`
++	Error      string            `json:"error"`
++}
++
++type reportState struct {
++	Latest  *reportRecord  `json:"latest"`
++	History []reportRecord `json:"history"`
++}
++
++type walletContract struct {
++	ID              string `json:"id"`
++	Tier            int    `json:"tier"`
++	Title           string `json:"title"`
++	Body            string `json:"body"`
++	AmountCents     int64  `json:"amountCents"`
++	DailyLimitCents int64  `json:"dailyLimitCents"`
++}
++
++type walletResponse struct {
++	Status         string `json:"status"`
++	ContractID     string `json:"contractId"`
++	Tier           int    `json:"tier"`
++	AmountCents    int64  `json:"amountCents"`
++	DailyUsedCents int64  `json:"dailyUsedCents"`
++	Consent        string `json:"consent"`
++}
++
++type walletRecord struct {
++	At         time.Time         `json:"at"`
++	BodyBase64 string            `json:"bodyBase64"`
++	Contract   *walletContract   `json:"contract"`
++	Consent    string            `json:"consent"`
++	Device     string            `json:"device"`
++	Validation map[string]string `json:"validation"`
++	Evidence   *evidence         `json:"evidence"`
++	Response   *walletResponse   `json:"response"`
++	Error      string            `json:"error"`
++}
++
++type walletState struct {
++	Latest  *walletRecord  `json:"latest"`
++	History []walletRecord `json:"history"`
++}
++
++type checkpointAuthorization struct {
++	Action           string `json:"action"`
++	InstanceID       string `json:"instanceId"`
++	PID              int    `json:"pid"`
++	Counter          uint64 `json:"counter"`
++	Phase            string `json:"phase"`
++	Nonce            string `json:"nonce"`
++	CheckpointSHA256 string `json:"checkpointSha256"`
++	CheckpointSize   int64  `json:"checkpointSize"`
++}
++
++type checkpointMetadata struct {
++	InstanceID string    `json:"instanceId"`
++	SHA256     string    `json:"sha256"`
++	Size       int64     `json:"size"`
++	UploadedAt time.Time `json:"uploadedAt"`
++}
++
++type attestationRequest struct {
++	InstanceID string   `json:"instanceId"`
++	PID        int      `json:"pid"`
++	Counter    uint64   `json:"counter"`
++	Phase      string   `json:"phase"`
++	Nonce      string   `json:"nonce"`
++	Evidence   evidence `json:"evidence"`
++	Signature  string   `json:"signature"`
++}
++
++type migrationResponse struct {
++	Status string `json:"status"`
++	UserID int    `json:"userId"`
++}
++
++type migrationRecord struct {
++	At            time.Time                `json:"at"`
++	Operation     string                   `json:"operation"`
++	BodyBase64    string                   `json:"bodyBase64"`
++	Attestation   *attestationRequest      `json:"attestation"`
++	Authorization *checkpointAuthorization `json:"authorization"`
++	Validation    map[string]string        `json:"validation"`
++	Checkpoint    *checkpointMetadata      `json:"checkpoint"`
++	Response      json.RawMessage          `json:"response"`
++	Error         string                   `json:"error"`
++}
++
++type migrationState struct {
++	Latest  *migrationRecord  `json:"latest"`
++	History []migrationRecord `json:"history"`
++}
++
++type operationBinding struct {
++	SessionID        string `json:"sessionId"`
++	Role             string `json:"role"`
++	Operation        string `json:"operation"`
++	InstanceID       string `json:"instanceId"`
++	PID              int    `json:"pid"`
++	Counter          uint64 `json:"counter"`
++	CheckpointSHA256 string `json:"checkpointSha256"`
++	CheckpointSize   int64  `json:"checkpointSize"`
++}
++
++type mutualResponse struct {
++	Status string `json:"status"`
++}
++
++type mutualRecord struct {
++	At             time.Time           `json:"at"`
++	Direction      string              `json:"direction"`
++	Operation      string              `json:"operation"`
++	Binding        *operationBinding   `json:"binding"`
++	ServerEvidence *evidence           `json:"serverEvidence"`
++	Validation     map[string]string   `json:"validation"`
++	Checkpoint     *checkpointMetadata `json:"checkpoint"`
++	Response       json.RawMessage     `json:"response"`
++	Error          string              `json:"error"`
++}
++
++type mutualSession struct {
++	SessionID         string              `json:"sessionId"`
++	InstanceID        string              `json:"instanceId"`
++	PID               int                 `json:"pid"`
++	Counter           uint64              `json:"counter"`
++	Phase             string              `json:"phase"`
++	Checkpoint        *checkpointMetadata `json:"checkpoint"`
++	SourceTier2       map[string]string   `json:"sourceTier2"`
++	DestinationTier2  map[string]string   `json:"destinationTier2"`
++	SourceUserID      int                 `json:"sourceUserId"`
++	DestinationUserID int                 `json:"destinationUserId"`
++	UpdatedAt         time.Time           `json:"updatedAt"`
++}
++
++type mutualState struct {
++	ServerGuest     string          `json:"serverGuest"`
++	ProductionPCR11 string          `json:"productionPcr11"`
++	ServerIdentity  string          `json:"serverIdentity"`
++	ServerEvidence  *evidence       `json:"serverEvidence"`
++	Sessions        []mutualSession `json:"sessions"`
++	Latest          *mutualRecord   `json:"latest"`
++	History         []mutualRecord  `json:"history"`
++}
++
++type migrationClientState struct {
++	InstanceID    string    `json:"instanceId"`
++	PID           int       `json:"pid"`
++	Counter       uint64    `json:"counter"`
++	LastPhase     string    `json:"lastPhase"`
++	LastOperation string    `json:"lastOperation"`
++	LastError     string    `json:"lastError"`
++	UpdatedAt     time.Time `json:"updatedAt"`
++}
++
++type mutualClientState struct {
++	InstanceID         string            `json:"instanceId"`
++	PID                int               `json:"pid"`
++	SessionID          string            `json:"sessionId"`
++	Role               string            `json:"role"`
++	Counter            uint64            `json:"counter"`
++	Operation          string            `json:"operation"`
++	Phase              string            `json:"phase"`
++	CheckpointSHA256   string            `json:"checkpointSha256"`
++	CheckpointSize     int64             `json:"checkpointSize"`
++	ServerIdentity     string            `json:"serverIdentity"`
++	ServerPCR11        string            `json:"serverPcr11"`
++	ServerVerification map[string]string `json:"serverVerification"`
++	ClientTier2        map[string]string `json:"clientTier2"`
++	ServerEvidence     *evidence         `json:"serverEvidence"`
++	LastServerNonce    string            `json:"lastServerNonce"`
++	LastClientNonce    string            `json:"lastClientNonce"`
++	UsedServerNonces   []string          `json:"usedServerNonces"`
++	LastError          string            `json:"lastError"`
++	UpdatedAt          time.Time         `json:"updatedAt"`
++}
++
++type Check struct {
++	Name   string `json:"name"`
++	Result string `json:"result"`
++	Detail string `json:"detail"`
++}
++
++type EventDetail struct {
++	Reason     string            `json:"reason"`
++	Checks     []Check           `json:"checks"`
++	Validation map[string]string `json:"validation,omitempty"`
++}
++
++type Event struct {
++	ID           string      `json:"id"`
++	At           time.Time   `json:"at"`
++	Verification string      `json:"verification"`
++	Target       string      `json:"target"`
++	Step         string      `json:"step"`
++	Outcome      string      `json:"outcome"`
++	Result       string      `json:"result"`
++	Source       string      `json:"source"`
++	Detail       EventDetail `json:"detail"`
++	Data         any         `json:"data"`
++}
++
++type sourceConfig struct {
++	ID     string
++	Name   string
++	Kind   string
++	URL    string
++	Target string
++}
++
++type sourceStatus struct {
++	ID     string `json:"id"`
++	Name   string `json:"name"`
++	Kind   string `json:"kind"`
++	URL    string `json:"url"`
++	Target string `json:"target"`
++	OK     bool   `json:"ok"`
++	Error  string `json:"error,omitempty"`
++	Count  int    `json:"count"`
++}
++
++type explorerState struct {
++	Events  []Event        `json:"events"`
++	Sources []sourceStatus `json:"sources"`
++}
++
++func env(name, fallback string) string {
++	if value := os.Getenv(name); value != "" {
++		return value
++	}
++	return fallback
++}
++
++func sourceConfigs() []sourceConfig {
++	target := env("RVA23_EVENT_TARGET", "QEMU")
++	return []sourceConfig{
++		{ID: "report", Name: "report receiver", Kind: "receiver", URL: env("RVA23_EVENT_REPORT_URL", "http://[::1]:8080"), Target: target},
++		{ID: "wallet", Name: "wallet", Kind: "receiver", URL: env("RVA23_EVENT_WALLET_URL", "http://[::1]:8081"), Target: target},
++		{ID: "migration", Name: "migration server", Kind: "receiver", URL: env("RVA23_EVENT_MIGRATION_URL", "http://[::1]:8083"), Target: target},
++		{ID: "mutual", Name: "mutual server", Kind: "receiver", URL: env("RVA23_EVENT_MUTUAL_URL", "http://[::1]:8085"), Target: target},
++		{ID: "migration-client", Name: "migration client", Kind: "client", URL: env("RVA23_EVENT_MIGRATION_CLIENT_URL", "http://[::1]:18084"), Target: target},
++		{ID: "mutual-client", Name: "mutual client", Kind: "client", URL: env("RVA23_EVENT_MUTUAL_CLIENT_URL", "http://[::1]:18086"), Target: target},
++	}
++}
++
++func eventID(source string, at time.Time, key string) string {
++	digest := sha256.Sum256([]byte(source + "\x00" + at.UTC().Format(time.RFC3339Nano) + "\x00" + key))
++	return source + "-" + hex.EncodeToString(digest[:4])
++}
++
++func outcomeFrom(status, errorText string) string {
++	if errorText != "" {
++		return "Fail"
++	}
++	switch strings.ToLower(status) {
++	case "accepted", "uploaded", "downloaded", "completed":
++		return "Pass"
++	case "rejected", "failed", "error":
++		return "Fail"
++	case "pending", "waiting", "challenged", "authorized", "open":
++		return "Open"
++	}
++	if status == "" {
++		return "Open"
++	}
++	return "Pass"
++}
++
++func checkResult(value string) string {
++	lower := strings.ToLower(value)
++	switch {
++	case strings.Contains(lower, "reject"), strings.Contains(lower, "fail"), strings.Contains(lower, "error"), strings.Contains(lower, "replay"), strings.Contains(lower, "invalid"), strings.Contains(lower, "timeout"), strings.Contains(lower, "missing"), strings.Contains(lower, "unavailable"), strings.Contains(lower, "expire"):
++		return "Fail"
++	case strings.Contains(lower, "pending"), strings.Contains(lower, "outstanding"), strings.Contains(lower, "waiting"), strings.Contains(lower, "challenged"), strings.Contains(lower, "authorized"), strings.Contains(lower, "open"):
++		return "Open"
++	case strings.Contains(lower, "not required"), strings.Contains(lower, "not covered"), strings.Contains(lower, "skip"):
++		return "Skip"
++	case strings.Contains(lower, "pass"), strings.Contains(lower, "accept"), strings.Contains(lower, "consum"), strings.Contains(lower, "upload"), strings.Contains(lower, "download"), strings.Contains(lower, "complet"), strings.Contains(lower, "generated"):
++		return "Pass"
++	default:
++		return "Pass"
++	}
++}
++
++func checkRank(result string) int {
++	switch result {
++	case "Fail":
++		return 0
++	case "Open":
++		return 1
++	case "Skip":
++		return 2
++	default:
++		return 3
++	}
++}
++
++func sortChecks(checks []Check) []Check {
++	sort.SliceStable(checks, func(left, right int) bool {
++		leftRank := checkRank(checks[left].Result)
++		rightRank := checkRank(checks[right].Result)
++		if leftRank != rightRank {
++			return leftRank < rightRank
++		}
++		return checks[left].Name < checks[right].Name
++	})
++	return checks
++}
++
++func checksFromValidation(validation map[string]string) []Check {
++	checks := make([]Check, 0, len(validation))
++	for name, value := range validation {
++		checks = append(checks, Check{Name: name, Result: checkResult(value), Detail: value})
++	}
++	return sortChecks(checks)
++}
++
++func titleCase(value string) string {
++	if value == "" {
++		return "—"
++	}
++	return strings.ToUpper(value[:1]) + value[1:]
++}
++
++func migrationStatus(raw json.RawMessage) (string, int) {
++	if len(raw) == 0 {
++		return "", 0
++	}
++	var response migrationResponse
++	if err := json.Unmarshal(raw, &response); err != nil {
++		return "", 0
++	}
++	return response.Status, response.UserID
++}
++
++func mutualStatus(raw json.RawMessage) string {
++	if len(raw) == 0 {
++		return ""
++	}
++	var response mutualResponse
++	if err := json.Unmarshal(raw, &response); err != nil {
++		return ""
++	}
++	return response.Status
++}
++
++func reasonFor(status, errorText, fallback string) string {
++	if errorText != "" {
++		return errorText
++	}
++	if status != "" {
++		return status
++	}
++	return fallback
++}
++
++func reportRecords(state reportState) []reportRecord {
++	if len(state.History) > 0 {
++		return state.History
++	}
++	if state.Latest != nil {
++		return []reportRecord{*state.Latest}
++	}
++	return nil
++}
++
++func walletRecords(state walletState) []walletRecord {
++	if len(state.History) > 0 {
++		return state.History
++	}
++	if state.Latest != nil {
++		return []walletRecord{*state.Latest}
++	}
++	return nil
++}
++
++func migrationRecords(state migrationState) []migrationRecord {
++	if len(state.History) > 0 {
++		return state.History
++	}
++	if state.Latest != nil {
++		return []migrationRecord{*state.Latest}
++	}
++	return nil
++}
++
++func mutualRecords(state mutualState) []mutualRecord {
++	if len(state.History) > 0 {
++		return state.History
++	}
++	if state.Latest != nil {
++		return []mutualRecord{*state.Latest}
++	}
++	return nil
++}
++
++func reportEvents(config sourceConfig, state reportState) []Event {
++	events := []Event{}
++	for _, record := range reportRecords(state) {
++		verification := "OS report"
++		step := "Upload"
++		if record.Path == "/v1/attest" {
++			verification = "Freshness"
++			step = "Attest"
++			if record.Error != "" && strings.Contains(strings.ToLower(record.Error), "nonce") {
++				step = "Replay"
++			}
++		}
++		status := ""
++		if record.Response != nil {
++			status = record.Response.Status
++		}
++		result := record.Path
++		if record.Response != nil {
++			result = fmt.Sprintf("%d components / %d events", record.Response.ComponentsVerified, record.Response.EventLogRecords)
++		} else if record.Error != "" {
++			result = record.Error
++		}
++		checks := []Check{}
++		if record.Response != nil {
++			checks = append(checks, Check{Name: "Response", Result: checkResult(record.Response.Status), Detail: record.Response.Status})
++			checks = append(checks, Check{Name: "Components", Result: "Pass", Detail: fmt.Sprintf("%d", record.Response.ComponentsVerified)})
++			checks = append(checks, Check{Name: "Event log", Result: "Pass", Detail: fmt.Sprintf("%d records", record.Response.EventLogRecords)})
++		} else {
++			checks = append(checks, Check{Name: "Response", Result: "Fail", Detail: record.Error})
++		}
++		if len(record.Sysext) > 0 {
++			checks = append(checks, Check{Name: "Sysext", Result: "Pass", Detail: fmt.Sprintf("%d records", len(record.Sysext))})
++		}
++		if record.Nonce != "" {
++			checks = append(checks, Check{Name: "Nonce", Result: "Pass", Detail: record.Nonce})
++		}
++		if record.Token != "" {
++			checks = append(checks, Check{Name: "Token", Result: "Pass", Detail: "present"})
++		}
++		events = append(events, Event{
++			ID:           eventID(config.ID, record.At, record.Path+"\x00"+record.Nonce+"\x00"+record.Error),
++			At:           record.At,
++			Verification: verification,
++			Target:       config.Target,
++			Step:         step,
++			Outcome:      outcomeFrom(status, record.Error),
++			Result:       result,
++			Source:       config.Name,
++			Detail:       EventDetail{Reason: reasonFor(status, record.Error, "Pending"), Checks: sortChecks(checks)},
++			Data:         record,
++		})
++	}
++	return events
++}
++
++func walletEvents(config sourceConfig, state walletState) []Event {
++	events := []Event{}
++	for _, record := range walletRecords(state) {
++		status := ""
++		if record.Response != nil {
++			status = record.Response.Status
++		}
++		result := record.Consent
++		contractID := ""
++		if record.Contract != nil {
++			contractID = record.Contract.ID
++			result = fmt.Sprintf("%s / Tier %d / %s", record.Contract.ID, record.Contract.Tier, record.Consent)
++		}
++		if record.Error != "" {
++			result = record.Error
++		} else if status != "" {
++			result += " / " + status
++		}
++		events = append(events, Event{
++			ID:           eventID(config.ID, record.At, contractID+"\x00"+record.Consent+"\x00"+record.Error),
++			At:           record.At,
++			Verification: "Wallet",
++			Target:       config.Target,
++			Step:         "Sign",
++			Outcome:      outcomeFrom(status, record.Error),
++			Result:       result,
++			Source:       config.Name,
++			Detail:       EventDetail{Reason: reasonFor(status, record.Error, "Pending"), Checks: checksFromValidation(record.Validation), Validation: record.Validation},
++			Data:         record,
++		})
++	}
++	return events
++}
++
++func migrationEvents(config sourceConfig, state migrationState) []Event {
++	events := []Event{}
++	for _, record := range migrationRecords(state) {
++		status, userID := migrationStatus(record.Response)
++		phase := ""
++		instanceID := ""
++		counter := uint64(0)
++		if record.Attestation != nil {
++			phase = record.Attestation.Phase
++			instanceID = record.Attestation.InstanceID
++			counter = record.Attestation.Counter
++		}
++		if record.Authorization != nil {
++			phase = record.Authorization.Phase
++			instanceID = record.Authorization.InstanceID
++			counter = record.Authorization.Counter
++		}
++		step := "Attest"
++		switch record.Operation {
++		case "checkpoint-upload":
++			step = "Upload"
++		case "checkpoint-download":
++			step = "Download"
++		default:
++			if phase != "" {
++				step = titleCase(phase)
++			}
++		}
++		result := record.Operation
++		if phase != "" {
++			result += " / " + phase
++		}
++		if userID > 0 {
++			result += fmt.Sprintf(" / user %d", userID)
++		}
++		if record.Error != "" {
++			result = record.Error
++		} else if status != "" {
++			result += " / " + status
++		}
++		events = append(events, Event{
++			ID:           eventID(config.ID, record.At, record.Operation+"\x00"+instanceID+"\x00"+fmt.Sprint(counter)),
++			At:           record.At,
++			Verification: "Migration",
++			Target:       config.Target,
++			Step:         step,
++			Outcome:      outcomeFrom(status, record.Error),
++			Result:       result,
++			Source:       config.Name,
++			Detail:       EventDetail{Reason: reasonFor(status, record.Error, "Pending"), Checks: checksFromValidation(record.Validation), Validation: record.Validation},
++			Data:         record,
++		})
++	}
++	return events
++}
++
++func mutualEvents(config sourceConfig, state mutualState) []Event {
++	events := []Event{}
++	for _, record := range mutualRecords(state) {
++		status := mutualStatus(record.Response)
++		step := "Transfer"
++		switch record.Operation {
++		case "source-attestation", "destination-attestation":
++			step = "Attest"
++		case "checkpoint-upload":
++			step = "Upload"
++		case "checkpoint-download":
++			step = "Download"
++		case "migration-completion":
++			step = "Complete"
++		case "server-challenge":
++			step = "Challenge"
++		}
++		result := record.Operation
++		if record.Direction != "" {
++			result = record.Direction + " / " + record.Operation
++		}
++		if record.Error != "" {
++			result = record.Error
++		} else if status != "" {
++			result += " / " + status
++		}
++		events = append(events, Event{
++			ID:           eventID(config.ID, record.At, record.Operation+"\x00"+record.Direction),
++			At:           record.At,
++			Verification: "Mutual",
++			Target:       config.Target,
++			Step:         step,
++			Outcome:      outcomeFrom(status, record.Error),
++			Result:       result,
++			Source:       config.Name,
++			Detail:       EventDetail{Reason: reasonFor(status, record.Error, "Pending"), Checks: checksFromValidation(record.Validation), Validation: record.Validation},
++			Data:         record,
++		})
++	}
++	for _, session := range state.Sessions {
++		validation := map[string]string{}
++		for name, value := range session.SourceTier2 {
++			validation["source."+name] = value
++		}
++		for name, value := range session.DestinationTier2 {
++			validation["destination."+name] = value
++		}
++		outcome := "Open"
++		if strings.EqualFold(session.Phase, "completed") {
++			outcome = "Pass"
++		}
++		events = append(events, Event{
++			ID:           eventID(config.ID, session.UpdatedAt, session.SessionID),
++			At:           session.UpdatedAt,
++			Verification: "Mutual",
++			Target:       config.Target,
++			Step:         "Complete",
++			Outcome:      outcome,
++			Result:       fmt.Sprintf("source user %d / destination user %d / %s", session.SourceUserID, session.DestinationUserID, session.Phase),
++			Source:       config.Name,
++			Detail:       EventDetail{Reason: reasonFor(session.Phase, "", "Pending"), Checks: checksFromValidation(validation), Validation: validation},
++			Data:         session,
++		})
++	}
++	return events
++}
++
++func migrationClientEvents(config sourceConfig, state migrationClientState) []Event {
++	lastErrorResult := "Pass"
++	if state.LastError != "" {
++		lastErrorResult = "Fail"
++	}
++	checks := sortChecks([]Check{
++		{Name: "instanceId", Result: "Pass", Detail: state.InstanceID},
++		{Name: "pid", Result: "Pass", Detail: fmt.Sprint(state.PID)},
++		{Name: "counter", Result: "Pass", Detail: fmt.Sprint(state.Counter)},
++		{Name: "lastPhase", Result: checkResult(state.LastPhase), Detail: state.LastPhase},
++		{Name: "lastError", Result: lastErrorResult, Detail: state.LastError},
++	})
++	result := state.LastOperation
++	if state.LastPhase != "" {
++		result += " / " + state.LastPhase
++	}
++	if state.LastError != "" {
++		result = state.LastError
++	}
++	return []Event{{
++		ID:           eventID(config.ID, state.UpdatedAt, state.InstanceID),
++		At:           state.UpdatedAt,
++		Verification: "Migration",
++		Target:       config.Target,
++		Step:         titleCase(state.LastOperation),
++		Outcome:      outcomeFrom(state.LastPhase, state.LastError),
++		Result:       result,
++		Source:       config.Name,
++		Detail:       EventDetail{Reason: reasonFor(state.LastPhase, state.LastError, "Pending"), Checks: checks},
++		Data:         state,
++	}}
++}
++
++func mutualClientEvents(config sourceConfig, state mutualClientState) []Event {
++	validation := map[string]string{}
++	for name, value := range state.ServerVerification {
++		validation["server."+name] = value
++	}
++	for name, value := range state.ClientTier2 {
++		validation["client."+name] = value
++	}
++	step := "Attest"
++	switch state.Operation {
++	case "checkpoint-upload":
++		step = "Upload"
++	case "checkpoint-download":
++		step = "Download"
++	case "migration-completion":
++		step = "Complete"
++	}
++	result := fmt.Sprintf("%s / %s / counter %d", state.Role, state.Phase, state.Counter)
++	if state.LastError != "" {
++		result = state.LastError
++	}
++	return []Event{{
++		ID:           eventID(config.ID, state.UpdatedAt, state.SessionID),
++		At:           state.UpdatedAt,
++		Verification: "Mutual",
++		Target:       config.Target,
++		Step:         step,
++		Outcome:      outcomeFrom(state.Phase, state.LastError),
++		Result:       result,
++		Source:       config.Name,
++		Detail:       EventDetail{Reason: reasonFor(state.Phase, state.LastError, "Pending"), Checks: checksFromValidation(validation), Validation: validation},
++		Data:         state,
++	}}
++}
++
++func fetchSource(ctx context.Context, client *http.Client, config sourceConfig) ([]Event, sourceStatus) {
++	status := sourceStatus{ID: config.ID, Name: config.Name, Kind: config.Kind, URL: config.URL, Target: config.Target}
++	if config.URL == "" {
++		status.Error = "no URL"
++		return nil, status
++	}
++	request, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(config.URL, "/")+"/api/state", nil)
++	if err != nil {
++		status.Error = err.Error()
++		return nil, status
++	}
++	response, err := client.Do(request)
++	if err != nil {
++		status.Error = err.Error()
++		return nil, status
++	}
++	defer response.Body.Close()
++	if response.StatusCode != http.StatusOK {
++		status.Error = response.Status
++		return nil, status
++	}
++	body, err := io.ReadAll(io.LimitReader(response.Body, 16*1024*1024))
++	if err != nil {
++		status.Error = err.Error()
++		return nil, status
++	}
++	var events []Event
++	switch config.ID {
++	case "report":
++		var state reportState
++		if err := json.Unmarshal(body, &state); err != nil {
++			status.Error = err.Error()
++			return nil, status
++		}
++		events = reportEvents(config, state)
++	case "wallet":
++		var state walletState
++		if err := json.Unmarshal(body, &state); err != nil {
++			status.Error = err.Error()
++			return nil, status
++		}
++		events = walletEvents(config, state)
++	case "migration":
++		var state migrationState
++		if err := json.Unmarshal(body, &state); err != nil {
++			status.Error = err.Error()
++			return nil, status
++		}
++		events = migrationEvents(config, state)
++	case "mutual":
++		var state mutualState
++		if err := json.Unmarshal(body, &state); err != nil {
++			status.Error = err.Error()
++			return nil, status
++		}
++		events = mutualEvents(config, state)
++	case "migration-client":
++		var state migrationClientState
++		if err := json.Unmarshal(body, &state); err != nil {
++			status.Error = err.Error()
++			return nil, status
++		}
++		events = migrationClientEvents(config, state)
++	case "mutual-client":
++		var state mutualClientState
++		if err := json.Unmarshal(body, &state); err != nil {
++			status.Error = err.Error()
++			return nil, status
++		}
++		events = mutualClientEvents(config, state)
++	default:
++		status.Error = "unknown source"
++		return nil, status
++	}
++	status.OK = true
++	status.Count = len(events)
++	return events, status
++}
++
++func collectEvents(ctx context.Context) explorerState {
++	configs := sourceConfigs()
++	client := &http.Client{Timeout: 10 * time.Second}
++	events := []Event{}
++	sources := []sourceStatus{}
++	var mutex sync.Mutex
++	var group sync.WaitGroup
++	for _, config := range configs {
++		config := config
++		group.Add(1)
++		go func() {
++			defer group.Done()
++			sourceEvents, sourceStatus := fetchSource(ctx, client, config)
++			mutex.Lock()
++			events = append(events, sourceEvents...)
++			sources = append(sources, sourceStatus)
++			mutex.Unlock()
++		}()
++	}
++	group.Wait()
++	sort.Slice(events, func(left, right int) bool {
++		return events[left].At.After(events[right].At)
++	})
++	sort.Slice(sources, func(left, right int) bool {
++		return sources[left].ID < sources[right].ID
++	})
++	return explorerState{Events: events, Sources: sources}
++}
++
++func main() {
++	listen := env("RVA23_EVENT_LISTEN", "[::]:8086")
++	mux := http.NewServeMux()
++	mux.HandleFunc("/api/state", func(writer http.ResponseWriter, request *http.Request) {
++		if request.Method != http.MethodGet {
++			writer.Header().Set("Allow", http.MethodGet)
++			http.Error(writer, "method not allowed", http.StatusMethodNotAllowed)
++			return
++		}
++		writer.Header().Set("Content-Type", "application/json")
++		_ = json.NewEncoder(writer).Encode(collectEvents(request.Context()))
++	})
++	mux.HandleFunc("/", func(writer http.ResponseWriter, request *http.Request) {
++		if request.URL.Path != "/" {
++			http.NotFound(writer, request)
++			return
++		}
++		if request.Method != http.MethodGet {
++			writer.Header().Set("Allow", http.MethodGet)
++			http.Error(writer, "method not allowed", http.StatusMethodNotAllowed)
++			return
++		}
++		writer.Header().Set("Content-Type", "text/html; charset=utf-8")
++		_, _ = io.WriteString(writer, eventExplorerHTML)
++	})
++	server := &http.Server{
++		Addr:              listen,
++		Handler:           mux,
++		ReadHeaderTimeout: 5 * time.Second,
++		ReadTimeout:       30 * time.Second,
++		WriteTimeout:      30 * time.Second,
++		IdleTimeout:       60 * time.Second,
++		MaxHeaderBytes:    64 * 1024,
++	}
++	if err := server.ListenAndServe(); err != nil {
++		panic(err)
++	}
++}
+diff --git a/buildroot/scripts/event-explorer.html b/buildroot/scripts/event-explorer.html
+new file mode 100644
+index 0000000000000000000000000000000000000000..a8651e8ea8f8d2bd553c5d8b9eaf15131b1abf10
+--- /dev/null
++++ b/buildroot/scripts/event-explorer.html
+@@ -0,0 +1,320 @@
++<!doctype html>
++<html lang="en">
++<head>
++<meta charset="utf-8">
++<meta name="viewport" content="width=device-width, initial-scale=1">
++<title>Event Explorer</title>
++<style>
++body{max-width:100rem;margin:0 auto;padding:.75rem 1rem}
++header h1{margin:0}
++main{display:grid;grid-template-columns:minmax(0,2fr) minmax(22rem,1fr);gap:1rem;align-items:start}
++search,#error{grid-column:1/-1}
++search{display:flex;flex-wrap:wrap;gap:.5rem;align-items:center}
++#requests{min-width:0;overflow-x:auto}
++#detail{min-width:0}
++footer{margin-top:1rem}
++h1,h2,h3,h4,p,dl,ul{margin:0}
++h2,h3{margin:.25rem 0}
++p{margin:.25rem 0}
++dl{display:grid;grid-template-columns:max-content 1fr;gap:.15rem 1rem;margin:.25rem 0}
++dt,dd{margin:0}
++table{border-collapse:collapse;width:100%}
++th,td{padding:.2rem .35rem;text-align:left;vertical-align:top}
++caption{text-align:left}
++thead th,time{white-space:nowrap}
++#detail > table td:nth-child(2),#detail > table th:nth-child(2){white-space:nowrap}
++details{margin:.25rem 0}
++@media(max-width:60rem){main{grid-template-columns:1fr}search,#error{grid-column:auto}dl{grid-template-columns:1fr}}
++</style>
++</head>
++<body>
++<header><h1>Event Explorer</h1></header>
++<main>
++<search>
++<label for="search">Search</label>
++<input id="search" type="search" placeholder="Search all fields" autofocus>
++</search>
++<p id="error" role="alert" hidden></p>
++<section id="requests">
++<table>
++<caption>Events. Selected event: <mark id="selected-id">ch-9a4b</mark>.</caption>
++<thead><tr>
++<th scope="col" aria-sort="none"><button type="button" data-sort="id" data-label="Request">Request</button></th>
++<th scope="col" aria-sort="descending"><button type="button" data-sort="at" data-label="Time">Time</button></th>
++<th scope="col" aria-sort="none"><button type="button" data-sort="verification" data-label="Verification">Verification</button></th>
++<th scope="col" aria-sort="none"><button type="button" data-sort="target" data-label="Target">Target</button></th>
++<th scope="col" aria-sort="none"><button type="button" data-sort="step" data-label="Step">Step</button></th>
++<th scope="col" aria-sort="none"><button type="button" data-sort="outcome" data-label="Outcome">Outcome</button></th>
++<th scope="col" aria-sort="none"><button type="button" data-sort="result" data-label="Result">Result</button></th>
++</tr></thead>
++<tbody id="events-body"></tbody>
++</table>
++</section>
++<aside id="detail"><h2>Selected event</h2><p>Loading</p></aside>
++</main>
++<footer><button id="download-all" type="button">See all events (JSON)</button></footer>
++<script>
++const searchInput = document.getElementById("search");
++const errorOutput = document.getElementById("error");
++const eventsBody = document.getElementById("events-body");
++const selectedId = document.getElementById("selected-id");
++const detail = document.getElementById("detail");
++const sortButtons = document.querySelectorAll("th button[data-sort]");
++let data = null;
++let selected = "ch-9a4b";
++let sortKey = "at";
++let sortDirection = "desc";
++
++function el(tag, text = "", attrs = {}) {
++  const node = document.createElement(tag);
++  if (text !== "") node.textContent = text;
++  for (const [key, value] of Object.entries(attrs)) node.setAttribute(key, value);
++  return node;
++}
++
++function code(value) {
++  return el("code", String(value ?? "—"));
++}
++
++function timeEl(value) {
++  const text = String(value ?? "—");
++  const label = text.replace("T", " ").slice(0, 19);
++  return el("time", label, { datetime: text });
++}
++
++function timeShort(value) {
++  const text = String(value ?? "—");
++  const label = text.slice(11, 19);
++  return el("time", label, { datetime: text });
++}
++
++function statusText(value) {
++  const text = String(value ?? "—");
++  const lower = text.toLowerCase();
++  if (lower.includes("reject") || lower.includes("fail") || lower.includes("error") || lower.includes("replay")) return "❌ " + text;
++  if (lower.includes("pass") || lower.includes("accept") || lower.includes("consum") || lower.includes("upload") || lower.includes("download") || lower.includes("complet") || lower.includes("generated")) return "✅ " + text;
++  if (lower.includes("pending") || lower.includes("outstanding") || lower.includes("waiting") || lower.includes("challenged") || lower.includes("authorized") || lower.includes("open")) return "⏳ " + text;
++  if (lower.includes("not required") || lower.includes("not covered") || lower.includes("skip")) return "➖ " + text;
++  return text;
++}
++
++function statusEl(value) {
++  const text = statusText(value);
++  return el("data", text, { value: String(value ?? "") });
++}
++
++function table(caption, headers, rows, rowHeader = false) {
++  const node = el("table");
++  node.append(el("caption", caption));
++  const thead = el("thead");
++  const headRow = el("tr");
++  for (const header of headers) {
++    const th = el("th", header);
++    th.setAttribute("scope", "col");
++    headRow.append(th);
++  }
++  thead.append(headRow);
++  node.append(thead);
++  const tbody = el("tbody");
++  for (const row of rows) {
++    const tr = el("tr");
++    row.forEach((cell, index) => {
++      const cellNode = rowHeader && index === 0 ? el("th") : el("td");
++      if (rowHeader && index === 0) cellNode.setAttribute("scope", "row");
++      if (cell instanceof Node) cellNode.append(cell);
++      else cellNode.append(document.createTextNode(String(cell ?? "—")));
++      tr.append(cellNode);
++    });
++    tbody.append(tr);
++  }
++  node.append(tbody);
++  return node;
++}
++
++function dl(pairs) {
++  const node = el("dl");
++  for (const [key, value] of pairs) {
++    const dt = el("dt");
++    if (key instanceof Node) dt.append(key);
++    else dt.textContent = String(key);
++    const dd = el("dd");
++    if (value instanceof Node) dd.append(value);
++    else dd.textContent = String(value ?? "—");
++    node.append(dt, dd);
++  }
++  return node;
++}
++
++function details(summary, ...children) {
++  const node = el("details");
++  node.append(el("summary", summary));
++  for (const child of children) node.append(child);
++  return node;
++}
++
++function explorer(name, value) {
++  if (value === null || value === undefined) return code("null");
++  if (Array.isArray(value)) {
++    const node = el("details");
++    node.append(el("summary", `${name} (${value.length})`));
++    const list = el("ol");
++    value.forEach((item, index) => {
++      const li = el("li");
++      li.append(explorer(String(index + 1), item));
++      list.append(li);
++    });
++    node.append(list);
++    return node;
++  }
++  if (typeof value === "object") {
++    const node = el("details");
++    node.append(el("summary", `${name} (${Object.keys(value).length})`));
++    const list = el("dl");
++    for (const [key, item] of Object.entries(value)) {
++      const dd = el("dd");
++      dd.append(explorer(key, item));
++      list.append(el("dt", key), dd);
++    }
++    node.append(list);
++    return node;
++  }
++  return code(String(value));
++}
++
++function downloadBlob(name, value) {
++  const blob = new Blob([JSON.stringify(value, null, 2)], { type: "application/json" });
++  const url = URL.createObjectURL(blob);
++  const anchor = el("a", "", { href: url, download: name });
++  anchor.click();
++  URL.revokeObjectURL(url);
++}
++
++function sortValue(event, key) {
++  return key === "at" ? event.at : String(event[key] ?? "");
++}
++
++function filteredEvents() {
++  const events = [...(data?.events || [])];
++  const search = searchInput.value.trim().toLowerCase();
++  const filtered = search ? events.filter(event => JSON.stringify(event).toLowerCase().includes(search)) : events;
++  filtered.sort((left, right) => {
++    const comparison = String(sortValue(left, sortKey)).localeCompare(String(sortValue(right, sortKey)));
++    return sortDirection === "asc" ? comparison : -comparison;
++  });
++  return filtered;
++}
++
++function updateSortHeaders() {
++  for (const button of sortButtons) {
++    const th = button.closest("th");
++    const active = button.dataset.sort === sortKey;
++    th.setAttribute("aria-sort", active ? (sortDirection === "asc" ? "ascending" : "descending") : "none");
++    button.textContent = button.dataset.label + (active ? (sortDirection === "asc" ? " ▲" : " ▼") : "");
++  }
++}
++
++function selectEvent(identifier) {
++  selected = identifier;
++  renderTable();
++}
++
++function renderTable() {
++  if (!data) return;
++  const events = filteredEvents();
++  if (!events.some(event => event.id === selected)) selected = events[0]?.id ?? null;
++  const rows = events.map(event => {
++    const request = el("button", event.id, { type: "button", "data-id": event.id });
++    if (event.id === selected) {
++      request.setAttribute("aria-current", "true");
++      const mark = el("mark");
++      mark.append(request);
++      return [mark, timeShort(event.at), event.verification, event.target, event.step, statusEl(event.outcome), event.result];
++    }
++    return [request, timeShort(event.at), event.verification, event.target, event.step, statusEl(event.outcome), event.result];
++  });
++  const tbody = el("tbody");
++  rows.forEach((row, rowIndex) => {
++    const tr = el("tr");
++    tr.addEventListener("click", () => selectEvent(events[rowIndex].id));
++    row.forEach((cell, index) => {
++      const cellNode = index === 0 ? el("th") : el("td");
++      if (index === 0) cellNode.setAttribute("scope", "row");
++      if (cell instanceof Node) cellNode.append(cell);
++      else cellNode.textContent = String(cell ?? "—");
++      tr.append(cellNode);
++    });
++    tbody.append(tr);
++  });
++  eventsBody.replaceChildren(...tbody.childNodes);
++  selectedId.textContent = selected || "—";
++  updateSortHeaders();
++  renderDetail();
++}
++
++function renderDetail() {
++  const event = data?.events?.find(item => item.id === selected);
++  if (!event) {
++    detail.replaceChildren(el("h2", "Selected event"), el("p", "No event selected."));
++    return;
++  }
++  const header = el("header");
++  const sub = el("p");
++  sub.append(code(event.id), document.createTextNode(" / "), timeEl(event.at), document.createTextNode(" / "), code(event.source));
++  header.append(el("h2", "Selected event"), sub);
++  const verdictText = event.outcome === "Pass" ? "✅ PASS" : event.outcome === "Fail" ? "❌ FAIL" : "⏳ OPEN";
++  const verdict = el("h3");
++  verdict.append(el("strong", verdictText), document.createTextNode(": " + (event.detail?.reason || event.result)));
++  const facts = dl([
++    ["Verification", event.verification],
++    ["Target", event.target],
++    ["Step", event.step],
++    ["Source", event.source],
++  ]);
++  const checks = table("Checks", ["Check", "Result", "Detail"], (event.detail?.checks || []).map(check => [check.name, statusEl(check.result), check.detail]), true);
++  const validationEntries = Object.entries(event.detail?.validation || {});
++  const validation = validationEntries.length ? details("Validation map", table("validation", ["Key", "Value"], validationEntries.map(([key, value]) => [code(key), statusEl(value)]), true)) : null;
++  const eventData = explorer("Event data", event.data);
++  const footer = el("footer");
++  footer.append(el("button", "Download event JSON", { type: "button" }));
++  footer.firstChild.addEventListener("click", () => downloadBlob(event.id + ".json", event));
++  const children = [header, verdict, facts, checks];
++  if (validation) children.push(validation);
++  children.push(eventData, footer);
++  detail.replaceChildren(...children);
++}
++
++async function load() {
++  errorOutput.hidden = true;
++  try {
++    const response = await fetch("api/state", { cache: "no-store" });
++    if (!response.ok) throw new Error(response.statusText);
++    data = await response.json();
++  } catch (error) {
++    errorOutput.hidden = false;
++    errorOutput.textContent = "Error: " + error.message;
++    return;
++  }
++  if (!data.events?.some(event => event.id === selected)) selected = data.events?.[0]?.id ?? null;
++  renderTable();
++}
++
++for (const button of sortButtons) {
++  button.addEventListener("click", () => {
++    const key = button.dataset.sort;
++    if (sortKey === key) sortDirection = sortDirection === "asc" ? "desc" : "asc";
++    else {
++      sortKey = key;
++      sortDirection = "asc";
++    }
++    renderTable();
++  });
++}
++
++searchInput.addEventListener("input", renderTable);
++document.getElementById("download-all").addEventListener("click", () => {
++  if (data) downloadBlob("attestation-events.json", data);
++});
++load();
++</script>
++</body>
++</html>
+diff --git a/buildroot/scripts/event-explorer_test.go b/buildroot/scripts/event-explorer_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..15ed5ff71002cd0423a4f248009e8f726fc8a6e7
+--- /dev/null
++++ b/buildroot/scripts/event-explorer_test.go
+@@ -0,0 +1,137 @@
++package main
++
++import (
++	"context"
++	"encoding/json"
++	"net/http"
++	"net/http/httptest"
++	"testing"
++	"time"
++)
++
++func TestOutcomeFrom(t *testing.T) {
++	tests := []struct {
++		status string
++		error  string
++		want   string
++	}{
++		{"accepted", "", "Pass"},
++		{"uploaded", "", "Pass"},
++		{"downloaded", "", "Pass"},
++		{"completed", "", "Pass"},
++		{"rejected", "", "Fail"},
++		{"accepted", "nonce already used", "Fail"},
++		{"pending", "", "Open"},
++		{"challenged", "", "Open"},
++		{"", "", "Open"},
++	}
++	for _, test := range tests {
++		if got := outcomeFrom(test.status, test.error); got != test.want {
++			t.Fatalf("outcomeFrom(%q, %q) = %q, want %q", test.status, test.error, got, test.want)
++		}
++	}
++}
++
++func TestCheckResult(t *testing.T) {
++	tests := map[string]string{
++		"accepted":            "Pass",
++		"consumed":            "Pass",
++		"rejected":            "Fail",
++		"replayed":            "Fail",
++		"not required":        "Skip",
++		"not covered":         "Skip",
++		"pending":             "Open",
++		"challenged":          "Open",
++		"accepted for user 2": "Pass",
++	}
++	for value, want := range tests {
++		if got := checkResult(value); got != want {
++			t.Fatalf("checkResult(%q) = %q, want %q", value, got, want)
++		}
++	}
++}
++
++func sourceServer(t *testing.T, value any) *httptest.Server {
++	t.Helper()
++	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
++		if request.URL.Path != "/api/state" {
++			http.NotFound(writer, request)
++			return
++		}
++		writer.Header().Set("Content-Type", "application/json")
++		if err := json.NewEncoder(writer).Encode(value); err != nil {
++			t.Errorf("encode source state: %v", err)
++		}
++	}))
++	t.Cleanup(server.Close)
++	return server
++}
++
++func TestCollectEvents(t *testing.T) {
++	at := time.Date(2026, 11, 8, 19, 44, 12, 0, time.UTC)
++	reportServer := sourceServer(t, reportState{History: []reportRecord{{
++		At: at, Path: "/reports", Nonce: "9f0a3c7d",
++		Response: &reportResponse{Status: "accepted", ComponentsVerified: 1, EventLogRecords: 84},
++		Sysext:   []json.RawMessage{json.RawMessage(`{"pcr":13}`)},
++	}}})
++	walletServer := sourceServer(t, walletState{History: []walletRecord{{
++		At: at, Contract: &walletContract{ID: "mortgage", Tier: 2}, Consent: "host", Device: "trusted-host-os",
++		Validation: map[string]string{"tpmAkSignature": "accepted", "pcr11Profile": "accepted", "freshNonce": "accepted"},
++		Response:   &walletResponse{Status: "accepted", ContractID: "mortgage", Tier: 2, Consent: "host"},
++	}}})
++	migrationServer := sourceServer(t, migrationState{History: []migrationRecord{{
++		At: at, Operation: "attestation",
++		Attestation: &attestationRequest{InstanceID: "7a3c", PID: 4242, Counter: 4, Phase: "after"},
++		Validation:  map[string]string{"identityBinding": "accepted for user 2", "pcr11Profile": "accepted"},
++		Response:    json.RawMessage(`{"status":"accepted","userId":2}`),
++	}}})
++	mutualServer := sourceServer(t, mutualState{
++		History: []mutualRecord{{
++			At: at, Direction: "client-to-server", Operation: "destination-attestation",
++			Validation: map[string]string{"tpmAkSignature": "accepted", "fido2Consent": "accepted"},
++			Response:   json.RawMessage(`{"status":"accepted"}`),
++		}},
++		Sessions: []mutualSession{{
++			SessionID: "b8e1", InstanceID: "7a3c", PID: 4242, Counter: 5, Phase: "completed",
++			SourceTier2: map[string]string{"tpmAkSignature": "accepted"}, DestinationTier2: map[string]string{"fido2Consent": "accepted"},
++			SourceUserID: 1, DestinationUserID: 2, UpdatedAt: at,
++		}},
++	})
++	migrationClient := sourceServer(t, migrationClientState{InstanceID: "7a3c", PID: 4242, Counter: 4, LastPhase: "downloaded", LastOperation: "download", UpdatedAt: at})
++	mutualClient := sourceServer(t, mutualClientState{
++		InstanceID: "7a3c", PID: 4242, SessionID: "b8e1", Role: "destination", Counter: 5,
++		Operation: "migration-completion", Phase: "completed",
++		ServerVerification: map[string]string{"serverAkSignature": "accepted"}, ClientTier2: map[string]string{"fido2Consent": "accepted"},
++		UpdatedAt: at,
++	})
++	t.Setenv("RVA23_EVENT_TARGET", "QEMU")
++	t.Setenv("RVA23_EVENT_REPORT_URL", reportServer.URL)
++	t.Setenv("RVA23_EVENT_WALLET_URL", walletServer.URL)
++	t.Setenv("RVA23_EVENT_MIGRATION_URL", migrationServer.URL)
++	t.Setenv("RVA23_EVENT_MUTUAL_URL", mutualServer.URL)
++	t.Setenv("RVA23_EVENT_MIGRATION_CLIENT_URL", migrationClient.URL)
++	t.Setenv("RVA23_EVENT_MUTUAL_CLIENT_URL", mutualClient.URL)
++	state := collectEvents(context.Background())
++	if len(state.Sources) != 6 {
++		t.Fatalf("got %d sources, want 6", len(state.Sources))
++	}
++	for _, source := range state.Sources {
++		if !source.OK {
++			t.Fatalf("source %s failed: %s", source.ID, source.Error)
++		}
++	}
++	if len(state.Events) != 7 {
++		t.Fatalf("got %d events, want 7", len(state.Events))
++	}
++	for _, event := range state.Events {
++		if event.ID == "" || event.Source == "" || event.Verification == "" || event.Target != "QEMU" || event.Outcome == "" {
++			t.Fatalf("incomplete event: %+v", event)
++		}
++		if len(event.Detail.Checks) == 0 {
++			t.Fatalf("event has no checks: %+v", event)
++		}
++		if event.Data == nil {
++			t.Fatalf("event has no data: %+v", event)
++		}
++	}
++}
+diff --git a/buildroot/scripts/migration/cmd/migration-client/migration-client.go b/buildroot/scripts/migration/cmd/migration-client/migration-client.go
+index 6ba0af7fa7a9161369fc09d94fbd3b1ea750df7d..c176ca98f22236f299a4ee84d275e8742e2e631f 100644
+--- a/buildroot/scripts/migration/cmd/migration-client/migration-client.go
++++ b/buildroot/scripts/migration/cmd/migration-client/migration-client.go
+@@ -631,7 +631,7 @@ 		return err
+ 	}
+ 	if len(os.Args) == 1 || os.Args[1] == "serve" {
+ 		httpServer := &http.Server{
+-			Addr: "[::]:8084", Handler: clientUIHandler(client), ReadHeaderTimeout: 5 * time.Second,
++			Addr: environment("RVA23_MIGRATION_CLIENT_UI_LISTEN", "[::]:8084"), Handler: clientUIHandler(client), ReadHeaderTimeout: 5 * time.Second,
+ 			ReadTimeout: 30 * time.Second, WriteTimeout: 30 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 64 * 1024,
+ 		}
+ 		return httpServer.ListenAndServe()
+diff --git a/buildroot/scripts/run-demo-servers.py b/buildroot/scripts/run-demo-servers.py
+index f37886d63fe0741829ea2e7f13cf8c57e625766f..a78b7e62105ece58235074e46b041f313b62752e 100644
+--- a/buildroot/scripts/run-demo-servers.py
++++ b/buildroot/scripts/run-demo-servers.py
+@@ -24,6 +24,7 @@     for name, source, directory in (
+         ("report-receiver", "report-receiver.go", scripts),
+         ("wallet-server", "wallet-server.go", scripts),
+         ("migration-server", "./cmd/migration-server", scripts / "migration"),
++        ("event-explorer", "event-explorer.go", scripts),
+     ):
+         output = root / name
+         subprocess.run([go, "build", "-o", output, source], cwd=directory, env=environment, check=True)
+@@ -48,12 +49,20 @@         "RVA23_MIGRATION_ATTESTATION_URL": "http://[::1]:8080/v1/attest",
+         "RVA23_MIGRATION_VM1_KEY_FILE": environment.get("RVA23_MIGRATION_VM1_KEY_FILE", str(key_dir / "pcr-public.pem")),
+         "RVA23_MIGRATION_VM2_KEY_FILE": environment.get("RVA23_MIGRATION_VM2_KEY_FILE", str(key_dir / "pcr-public.pem")),
+         "RVA23_WALLET_KEY_FILE": str(root / "attestation/public-key.pem"),
++        "RVA23_EVENT_LISTEN": "[::]:8086",
++        "RVA23_EVENT_TARGET": environment.get("RVA23_EVENT_TARGET", "QEMU"),
++        "RVA23_EVENT_REPORT_URL": environment.get("RVA23_EVENT_REPORT_URL", "http://[::1]:8080"),
++        "RVA23_EVENT_WALLET_URL": environment.get("RVA23_EVENT_WALLET_URL", "http://[::1]:8081"),
++        "RVA23_EVENT_MIGRATION_URL": environment.get("RVA23_EVENT_MIGRATION_URL", "http://[::1]:8083"),
++        "RVA23_EVENT_MUTUAL_URL": environment.get("RVA23_EVENT_MUTUAL_URL", "http://[::1]:8085"),
++        "RVA23_EVENT_MIGRATION_CLIENT_URL": environment.get("RVA23_EVENT_MIGRATION_CLIENT_URL", "http://[::1]:18084"),
++        "RVA23_EVENT_MUTUAL_CLIENT_URL": environment.get("RVA23_EVENT_MUTUAL_CLIENT_URL", "http://[::1]:18086"),
+     })
+     processes = []
+     try:
+-        for name in ("report-receiver", "wallet-server", "migration-server"):
++        for name in ("report-receiver", "wallet-server", "migration-server", "event-explorer"):
+             processes.append(subprocess.Popen([binaries[name]], cwd=scripts, env=environment))
+-        print("Demo servers listen on [::]:8080, [::]:8081, and [::]:8083")
++        print("Demo servers listen on [::]:8080, [::]:8081, [::]:8083, and [::]:8086")
+         for process in processes:
+             process.wait()
+     except KeyboardInterrupt:
+diff --git a/buildroot/scripts/verify-k3.py b/buildroot/scripts/verify-k3.py
+index 142d220496691595e73ce711bf909ea4c7d6356c..17fd64f473b2d2c0f8db2a6c7f8ac0d946286a08 100644
+--- a/buildroot/scripts/verify-k3.py
++++ b/buildroot/scripts/verify-k3.py
+@@ -155,11 +155,28 @@         raise AssertionError("source-built OpenSBI is missing from fw_dynamic.itb")
+     edk2 = subprocess.run(["strings", str(images / "edk2.itb")], check=True, capture_output=True, text=True).stdout
+     if "MUSE-Pico" not in edk2:
+         raise AssertionError("MUSE-Pico firmware is missing from edk2.itb")
+-    mtype = shutil.which("mtype") or str(k3.output / "host/bin/mtype")
+-    entry = subprocess.run([mtype, "-i", str(images / "bootfs.img"), "::/loader/entries/k3.conf"], check=True, capture_output=True, text=True).stdout
+-    if "rva23_1+3-0.efi" not in entry or "devicetree /k3-pico-itx.dtb" not in entry:
+-        raise AssertionError(entry)
+-    print("PASS: source OpenSBI, MUSE-Pico EDK2, and the K3 ESP entry are present")
++    mtype = host_tool(k3, "mtype")
++    mdir = host_tool(k3, "mdir")
++    startup = subprocess.run([mtype, "-i", str(images / "bootfs.img"), "::/startup.nsh"], check=True, capture_output=True, text=True).stdout
++    if "BOOTRISCV64.EFI" not in startup.upper():
++        raise AssertionError(startup)
++    loader = subprocess.run([mtype, "-i", str(images / "bootfs.img"), "::/loader/loader.conf"], check=True, capture_output=True, text=True).stdout
++    if "default rva23_?.efi" not in loader:
++        raise AssertionError(loader)
++    listing = subprocess.run([mdir, "-b", "-i", str(images / "bootfs.img"), "::/EFI/Linux"], check=True, capture_output=True, text=True).stdout
++    names = [line.rsplit("/", 1)[-1] for line in listing.splitlines() if line.lower().endswith(".efi")]
++    if not names:
++        raise AssertionError("the K3 ESP has no UKIs in EFI/Linux")
++    for name in names:
++        staged = images / "efi-part/EFI/Linux" / name
++        if not staged.is_file():
++            raise AssertionError(f"missing staged UKI: {staged}")
++        if b"Pico-ITX" not in staged.read_bytes():
++            raise AssertionError(f"K3 UKI lacks the embedded devicetree: {name}")
++    root = subprocess.run([mdir, "-b", "-i", str(images / "bootfs.img"), "::/"], check=True, capture_output=True, text=True).stdout
++    if "k3-pico-itx.dtb" not in root:
++        raise AssertionError("the K3 ESP lacks k3-pico-itx.dtb")
++    print("PASS: source OpenSBI, MUSE-Pico EDK2, the K3 startup entry, and DTB-equipped UKIs are present")
+ 
+ 
+ def base(k3):
+@@ -197,6 +214,9 @@
+ 
+ def report(k3):
+     url = os.environ.get("K3_REPORT_URL", "http://[::1]:8080/reports")
++    k3.command("systemctl stop systemd-report-sign-plain.socket || true")
++    k3.command("systemctl restart swtpm.service")
++    k3.command("systemctl restart systemd-report-sign-tpm2.socket")
+     k3.command("systemctl start systemd-pcrlock.socket")
+     k3.command("TPM2TOOLS_TCTI=swtpm:host=::1,port=2321 tpm2_flushcontext -t")
+     k3.command(f"/usr/lib/systemd/systemd-report upload --url={url} --sign=require-one", 300)
+@@ -216,10 +236,10 @@     thread = threading.Thread(target=server.serve_forever, daemon=True)
+     thread.start()
+     try:
+         url = os.environ.get("K3_UPDATE_URL", "http://[::1]:8000/")
+-        k3.command("mkdir -p /etc/sysupdate.d; cp /usr/lib/sysupdate.d/*.transfer /etc/sysupdate.d/")
+-        k3.command(f"sed -i 's|http://\\[::1\\]:8000/|{url}|g' /etc/sysupdate.d/*.transfer")
+-        noop = f"[Transfer]\\n[Source]\\nType=url-file\\nPath={url}\\nMatchPattern=rva23_never_@v.raw\\n[Target]\\nType=regular-file\\nPath=/var/tmp\\nMatchPattern=rva23_never_@v.raw\\n"
+-        k3.command(f"printf '{noop}' > /etc/sysupdate.d/93-k3-conf.transfer")
++        k3.command("mkdir -p /var/lib/sysupdate.d /var/lib/sysupdate.bootloader.d; cp /usr/lib/sysupdate.d/*.transfer /etc/sysupdate.d/; cp /usr/lib/sysupdate.bootloader.d/*.transfer /etc/sysupdate.bootloader.d/ 2>/dev/null || true")
++        k3.command(f"sed -i 's|http://\\[::1\\]:8000/|{url}|g' /etc/sysupdate.d/*.transfer /etc/sysupdate.bootloader.d/*.transfer 2>/dev/null || true")
++        noop = f"[Transfer]\n[Source]\nType=url-file\nPath={url}\nMatchPattern=rva23_never_@v.raw\n[Target]\nType=regular-file\nPath=/var/tmp\nMatchPattern=rva23_never_@v.raw\n"
++        k3.command(f"printf %s {base64.b64encode(noop.encode()).decode()} | base64 -d > /etc/sysupdate.d/93-k3-conf.transfer")
+         k3.command(f"cp /etc/sysupdate.d/93-k3-conf.transfer /etc/sysupdate.d/20-usr-verity.transfer; cp /etc/sysupdate.d/93-k3-conf.transfer /etc/sysupdate.d/30-usr-verity-sig.transfer")
+         k3.command("updatectl list")
+         features = k3.command("updatectl features")
+@@ -237,7 +257,8 @@
+ 
+ def wallet(k3):
+     url = os.environ.get("K3_WALLET_URL", "http://[::1]:8081")
+-    result = k3.command(f"RVA23_WALLET_URL={url} wallet-client --contract=small-payment --consent=host --approve", 300)
++    tpm = "TPM2TOOLS_TCTI=swtpm:host=::1,port=2321 TPM2_TCTI=swtpm:host=::1,port=2321"
++    result = k3.command(f"{tpm} RVA23_WALLET_URL={url} wallet-client --contract=small-payment --consent=host --approve", 300)
+     if "accepted" not in result:
+         raise AssertionError(result)
+     print("PASS: the native wallet client completes a small payment")
+@@ -246,7 +267,8 @@
+ def migration(k3):
+     url = os.environ.get("K3_MIGRATION_URL", "http://[::1]:8083")
+     attestation_url = os.environ.get("K3_ATTESTATION_URL", "http://[::1]:8080")
+-    result = k3.command(f"RVA23_MIGRATION_URL={url} RVA23_ATTESTATION_URL={attestation_url} migration-client attest --phase before", 300)
++    tpm = "TPM2TOOLS_TCTI=swtpm:host=::1,port=2321 TPM2_TCTI=swtpm:host=::1,port=2321"
++    result = k3.command(f"{tpm} RVA23_MIGRATION_URL={url} RVA23_ATTESTATION_URL={attestation_url} migration-client attest --phase before", 300)
+     if "error" in result.lower() and "server" in result.lower():
+         raise AssertionError(result)
+     k3.command("mkdir -p /tmp/rva23-migration-source; printf 'k3-migration-state\\n' > /tmp/rva23-migration-source/state.txt")
+@@ -263,18 +285,21 @@     url = os.environ.get("K3_MUTUAL_URL", "http://[fd00::10]:8083")
+     attestation_url = os.environ.get("K3_ATTESTATION_URL", "http://[::1]:8080")
+     production_pcr11 = os.environ.get("K3_MUTUAL_PCR11", "0" * 64)
+     fido2_dir = os.environ.get("K3_FIDO2_DIR", "/var/lib/rva23-wallet/u2f")
+-    k3.command("pkill -f mutual-migration-server || true")
++    k3.command("killall -q mutual-migration-server mutual-migration-client 2>/dev/null || true")
++    k3.command("mkdir -p /var/lib/rva23-mutual/checkpoints; h=$(sed -E 's/.*\"handle\":\"([^\"]+)\".*/\\1/' /var/lib/systemd/report.sign.tpm2/default.key | base64 -d | od -An -tx1 -N4 | tr -d ' \n'); TPM2TOOLS_TCTI=swtpm:host=::1,port=2321 tpm2_readpublic -c 0x$h -f pem -o /var/lib/rva23-mutual/server-ak-public.pem")
+     k3.command("export TPM2TOOLS_TCTI=swtpm:host=::1,port=2321 RVA23_MUTUAL_PRODUCTION_PCR11=0000000000000000000000000000000000000000000000000000000000000000 RVA23_MUTUAL_SERVER_KEY_FILE=/var/lib/rva23-mutual/ak.pem RVA23_MUTUAL_SOURCE_KEY_FILE=/var/lib/rva23-mutual/ak.pem RVA23_MUTUAL_DESTINATION_KEY_FILE=/var/lib/rva23-mutual/ak.pem RVA23_MUTUAL_SOURCE_CERTIFICATE=/var/lib/rva23-mutual/cert.pem RVA23_MUTUAL_DESTINATION_CERTIFICATE=/var/lib/rva23-mutual/cert.pem RVA23_MUTUAL_CHECKPOINT_DIR=/var/lib/rva23-mutual/checkpoints; mutual-migration-server >/tmp/mutual-server.log 2>&1 &")
+-    k3.command("rm -f /var/lib/rva23-mutual/state.json; mutual-migration-client serve >/tmp/rva23-mutual-client.log 2>&1 &")
++    k3.command("rm -f /var/lib/rva23-mutual/state.json /var/lib/rva23-mutual/dest-state.json; mutual-migration-client serve >/tmp/rva23-mutual-client.log 2>&1 &")
++    k3.command("RVA23_MUTUAL_CLIENT_STATE=/var/lib/rva23-mutual/dest-state.json RVA23_MUTUAL_ROLE=destination RVA23_MUTUAL_URL=http://[::1]:8083 mutual-migration-client serve >/tmp/rva23-mutual-destination.log 2>&1 &")
+     k3.command("sleep 1")
+-    result = k3.command(f"RVA23_MUTUAL_URL={url} RVA23_ATTESTATION_URL={attestation_url} RVA23_MUTUAL_PRODUCTION_PCR11={production_pcr11} RVA23_FIDO2_DIR={fido2_dir} mutual-migration-client open", 300)
++    tpm = "TPM2TOOLS_TCTI=swtpm:host=::1,port=2321 TPM2_TCTI=swtpm:host=::1,port=2321"
++    result = k3.command(f"{tpm} RVA23_MUTUAL_URL={url} RVA23_ATTESTATION_URL={attestation_url} RVA23_MUTUAL_PRODUCTION_PCR11={production_pcr11} RVA23_FIDO2_DIR={fido2_dir} mutual-migration-client open", 300)
+     if "error" in result.lower() and "server" in result.lower():
+         raise AssertionError(result)
+     if os.environ.get("K3_MUTUAL_ATTEST") == "1":
+-        result = k3.command(f"RVA23_MUTUAL_URL={url} RVA23_ATTESTATION_URL={attestation_url} RVA23_MUTUAL_PRODUCTION_PCR11={production_pcr11} RVA23_FIDO2_DIR={fido2_dir} mutual-migration-client attest", 600)
++        result = k3.command(f"{tpm} RVA23_MUTUAL_URL={url} RVA23_ATTESTATION_URL={attestation_url} RVA23_MUTUAL_PRODUCTION_PCR11={production_pcr11} RVA23_FIDO2_DIR={fido2_dir} mutual-migration-client attest", 600)
+     k3.command("mkdir -p /tmp/rva23-mutual-source; printf 'k3-mutual-state\\n' > /tmp/rva23-mutual-source/state.txt")
+     k3.command("rm -f /tmp/rva23-mutual.img; migration-client archive --source=/tmp/rva23-mutual-source --output=/tmp/rva23-mutual.img")
+-    k3.command(f"RVA23_MUTUAL_URL={url} RVA23_ATTESTATION_URL={attestation_url} RVA23_MUTUAL_PRODUCTION_PCR11={production_pcr11} RVA23_FIDO2_DIR={fido2_dir} mutual-migration-client upload --archive=/tmp/rva23-mutual.img")
++    k3.command(f"{tpm} RVA23_MUTUAL_URL={url} RVA23_ATTESTATION_URL={attestation_url} RVA23_MUTUAL_PRODUCTION_PCR11={production_pcr11} RVA23_FIDO2_DIR={fido2_dir} mutual-migration-client upload --archive=/tmp/rva23-mutual.img")
+     print("PASS: the native mutual migration client opens a session")
+ 
+ 
+diff --git a/buildroot/scripts/wallet-server.go b/buildroot/scripts/wallet-server.go
+index 265619693319efe9aefa8154441326cd60388f75..a27cf6322b1f8804ffcd5efcc22e18b4df8a4089 100644
+--- a/buildroot/scripts/wallet-server.go
++++ b/buildroot/scripts/wallet-server.go
+@@ -533,7 +533,7 @@ 		server.reject(writer, record, http.StatusInternalServerError, err)
+ 		return
+ 	}
+ 	signature, err := base64.RawURLEncoding.DecodeString(input.Signature)
+-	if err != nil || len(signature) != 256 {
++	if err != nil || (len(signature) != 256 && len(signature) != 384) {
+ 		server.reject(writer, record, http.StatusForbidden, errors.New("invalid AK signature encoding or length"))
+ 		return
+ 	}
+
