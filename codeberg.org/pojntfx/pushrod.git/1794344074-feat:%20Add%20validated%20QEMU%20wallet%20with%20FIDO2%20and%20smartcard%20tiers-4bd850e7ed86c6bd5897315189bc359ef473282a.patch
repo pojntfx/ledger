@@ -1,0 +1,177 @@
+From 4bd850e7ed86c6bd5897315189bc359ef473282a Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Tue, 10 Nov 2026 13:54:34 -0700
+Subject: [PATCH] feat: Add validated QEMU wallet with FIDO2 and smartcard tiers
+---
+diff --git a/buildroot/scripts/5-demo-wallet-qemu.py b/buildroot/scripts/5-demo-wallet-qemu.py
+new file mode 100755
+index 0000000000000000000000000000000000000000..0e1830c1fb76c16f3f36bcc749b21370fb74a008
+--- /dev/null
++++ b/buildroot/scripts/5-demo-wallet-qemu.py
+@@ -0,0 +1,91 @@
++#!/usr/bin/env python3
++import json
++from pathlib import Path
++import re
++import sys
++
++sys.path.insert(0, str(Path(__file__).parent))
++
++import demo_lib
++import demo_qemu_warm as warm
++
++
++def enroll(demo, guest):
++    demo.step("Enroll the guest with a fresh quote")
++    warm.run(demo, guest, "systemctl restart systemd-report-sign-tpm2.socket", lines=0)
++    output = warm.run(demo, guest, "/usr/lib/systemd/systemd-report upload --url=http://10.0.2.2:8080/reports --sign=require-one", 300, lines=6)
++    if "accepted" not in output:
++        raise demo_lib.DemoError(output[-1500:])
++    demo.result("the receiver accepted the guest quote")
++
++
++def pay(demo, guest, contract, consent):
++    demo.step(f"Tier: {contract} with {consent} consent")
++    command = (
++        f"RVA23_WALLET_URL=http://10.0.2.2:8081 RVA23_ATTESTATION_URL=http://10.0.2.2:8080 "
++        f"wallet-client --contract={contract} --consent={consent} --approve"
++    )
++    output = warm.run(demo, guest, command, 300, lines=6)
++    body = None
++    for line in output.splitlines():
++        if line.strip().startswith("{"):
++            body = json.loads(line)
++    if not body:
++        raise demo_lib.DemoError(output[-1500:])
++    demo.result(f"status={body.get('status')} tier={body.get('tier')} amountCents={body.get('amountCents')}")
++
++
++def main():
++    demo = demo_lib.Demo(
++        "Demo 5b: the wallet on QEMU",
++        "The guest proves the host, the TPM signs the payment, and the wallet accepts it",
++    )
++    demo.banner()
++    demo.cue(f"Watch the wallet UI: {demo_lib.WALLET_UI}")
++    demo.ui("wallet", demo_lib.WALLET_UI)
++    demo.ui("event view", demo_lib.EVENT_UI)
++
++    demo.step("Attach to the warm guest")
++    guest, cold = warm.ensure("firmware")
++    if cold:
++        demo.note("the guest booted cold; pre-start it with make demo-qemu-warm to skip this wait")
++    demo.result("the guest is at a root shell")
++
++    demo.step("Read the measured PCR 11 from the guest")
++    output = warm.run(demo, guest, "cat /sys/class/tpm/tpm0/pcr-sha256/11", lines=1)
++    match = re.search(r"[0-9a-fA-F]{64}", output)
++    if not match:
++        raise demo_lib.DemoError(f"could not read PCR 11: {output[-400:]}")
++    pcr11 = match.group(0)
++    demo.result(f"PCR 11 = {pcr11}")
++
++    demo.step("Restart the verifier services with that profile")
++    demo_lib.restart_demo_servers("QEMU", pcr11=pcr11)
++    demo.result("the receiver and the wallet are up")
++
++    demo.step("Check the emulated consent devices")
++    warm.run(demo, guest, "systemctl restart pcscd", lines=0)
++    warm.run(demo, guest, "ls /dev/hidraw* /dev/ccid* 2>/dev/null; systemctl is-active pcscd", lines=3, check=False)
++    demo.result("the guest has the emulated U2F and CCID devices")
++
++    enroll(demo, guest)
++    pay(demo, guest, "small-payment", "host")
++    pay(demo, guest, "development-payment", "host")
++    pay(demo, guest, "development-payment", "fido2")
++    try:
++        pay(demo, guest, "development-payment", "smartcard")
++    except demo_lib.DemoError as error:
++        demo.note(f"smartcard consent needs a card reader in the guest: {str(error).splitlines()[0][:120]}")
++    pay(demo, guest, "mortgage", "host")
++    pay(demo, guest, "mortgage", "fido2")
++
++    demo.step("Read the wallet receipts in the unified view")
++    state = demo_lib.event_state()
++    demo.result(f"{len(state.get('events', []))} receipts in the view")
++
++    demo.payoff("The guest proved the host, and both payments were accepted")
++    return demo.finish()
++
++
++if __name__ == "__main__":
++    demo_lib.run(main)
+diff --git a/buildroot/scripts/demo_lib.py b/buildroot/scripts/demo_lib.py
+index 0d0ff1a60b73fa38d26af271bed7f903fca2e970..10ab6c45359ffe614351b0b5deacab4867607d29 100755
+--- a/buildroot/scripts/demo_lib.py
++++ b/buildroot/scripts/demo_lib.py
+@@ -73,7 +73,7 @@         k3.run("TPM2TOOLS_TCTI=swtpm:host=::1,port=2321 tpm2_flushcontext -t 2>/dev/null || true")
+     raise DemoError(f"the report upload failed: {last}")
+ 
+ 
+-def restart_demo_servers(target="K3"):
++def restart_demo_servers(target="K3", pcr11=None):
+     subprocess.run(["pkill", "-f", "^/home/pojntfx/Projets/pushrod/buildroot/output/demo/(report-receiver|wallet-server|migration-server|event-explorer)"])
+     time.sleep(2)
+     root = Path(__file__).parent.parent / "output/demo"
+@@ -82,6 +82,8 @@     environment["RVA23_EVENT_TARGET"] = target
+     environment["RVA23_MIGRATION_VM1_KEY_FILE"] = str(root / "attestation/public-key.pem")
+     environment["RVA23_MIGRATION_VM2_KEY_FILE"] = str(root / "attestation/public-key.pem")
+     environment["RVA23_WALLET_CONSENT_DIR"] = str(root / "wallet")
++    if pcr11:
++        environment["RVA23_DEMO_PCR11"] = pcr11
+     log = (root / "demo-servers.log").open("a")
+     subprocess.Popen(["python3", str(Path(__file__).parent / "run-demo-servers.py")], env=environment, stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
+     deadline = time.monotonic() + 120
+@@ -119,9 +121,10 @@         (temporary / "counter").write_bytes(b"\0\0\0\0")
+         for name in ("private-key.pem", "certificate.pem", "counter"):
+             k3.put(temporary / name, f"{directory}/{name}")
+         if host_directory:
+-            host_directory = Path(host_directory)
++            host_directory = Path(host_directory) / "u2f"
+             host_directory.mkdir(parents=True, exist_ok=True)
+             (host_directory / "certificate.pem").write_bytes((temporary / "certificate.pem").read_bytes())
++            (host_directory / "counter").write_bytes(b"\0\0\0\0")
+ 
+ 
+ def resp_ping(host, port, zone, timeout=6):
+diff --git a/buildroot/scripts/demo_qemu_warm.py b/buildroot/scripts/demo_qemu_warm.py
+index 21ad2d62be90acc979768e0d229a4e05189aaba8..12eaf45624224c41afeba382fc27c4d0a267cd1a 100755
+--- a/buildroot/scripts/demo_qemu_warm.py
++++ b/buildroot/scripts/demo_qemu_warm.py
+@@ -155,6 +155,24 @@         return None
+     return WarmGuest(name, connection, None)
+ 
+ 
++def consent_devices():
++    import importlib.util
++
++    spec = importlib.util.spec_from_file_location("wallet_test", Path(__file__).with_name("verify-wallet.py"))
++    wallet = importlib.util.module_from_spec(spec)
++    spec.loader.exec_module(wallet)
++    root = Path(__file__).parent.parent / "output/demo/wallet"
++    root.mkdir(parents=True, exist_ok=True)
++    fido2 = root / "u2f"
++    smartcard = root / "smartcard"
++    if not (fido2 / "certificate.pem").exists():
++        wallet.create_fido2(fido2)
++    if not (smartcard / "smartcard-public.pem").exists():
++        wallet.create_smartcard(smartcard)
++    (root / "smartcard-public.pem").write_bytes((smartcard / "smartcard-public.pem").read_bytes())
++    return fido2, smartcard
++
++
+ def start(name, script):
+     WARM.mkdir(parents=True, exist_ok=True)
+     disk = WARM / f"{name}.img"
+@@ -167,6 +185,10 @@     socket_path = WARM / f"{name}.sock"
+     if socket_path.exists():
+         socket_path.unlink()
+     environment = os.environ.copy()
++    if name == "firmware":
++        fido2, smartcard = consent_devices()
++        environment["RVA23_FIDO2_DIR"] = str(fido2)
++        environment["RVA23_SMARTCARD_DIR"] = str(smartcard)
+     environment.update({
+         "RVA23_SERIAL_SOCKET": str(socket_path),
+         "RVA23_DISK": str(disk),
+
