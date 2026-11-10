@@ -1,0 +1,371 @@
+From 93ec864c3e647027caf681c17447b4aca725fbe4 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Tue, 10 Nov 2026 13:56:13 -0700
+Subject: [PATCH] feat: Increase ESP size to allow updates
+---
+diff --git a/buildroot/board/spacemit/k3-uefi/partition_universal.json b/buildroot/board/spacemit/k3-uefi/partition_universal.json
+index 5420a1b573b2108ec42d4c013e68914b4d5abafe..86e1e96f9c66e853fbcd0df1ef95d2eb21dfa18d 100644
+--- a/buildroot/board/spacemit/k3-uefi/partition_universal.json
++++ b/buildroot/board/spacemit/k3-uefi/partition_universal.json
+@@ -47,41 +47,41 @@     },
+     {
+       "name": "bootfs",
+       "offset": "12M",
+-      "size": "512M",
++      "size": "1G",
+       "image": "bootfs.img",
+       "compress": "gzip-5"
+     },
+     {
+       "name": "rva23_1",
+-      "offset": "524M",
++      "offset": "1036M",
+       "size": "512M",
+       "image": "usr-a.erofs",
+       "compress": "gzip-5"
+     },
+     {
+       "name": "rva23_2",
+-      "offset": "1036M",
++      "offset": "1548M",
+       "size": "512M",
+       "image": "usr-b.erofs",
+       "compress": "gzip-5"
+     },
+     {
+       "name": "rva23_1_verity",
+-      "offset": "1548M",
++      "offset": "2060M",
+       "size": "64M",
+       "image": "usr-a.verity",
+       "compress": "gzip-5"
+     },
+     {
+       "name": "rva23_1_verity_sig",
+-      "offset": "1612M",
++      "offset": "2124M",
+       "size": "16K",
+       "image": "usr-a.verity-sig"
+     },
+     {
+       "name": "rootfs",
+-      "offset": "1613M",
+-      "size": "120456M",
++      "offset": "2125M",
++      "size": "119944M",
+       "image": "rootfs.ext4",
+       "type": "ext4",
+       "compress": "gzip-5"
+diff --git a/buildroot/board/spacemit/k3-uefi/post-image.sh b/buildroot/board/spacemit/k3-uefi/post-image.sh
+index 7ce6048ec254bad6feb89e83fbe1bb99fca16522..d07386d44e7734e0db891549492639db95731139 100755
+--- a/buildroot/board/spacemit/k3-uefi/post-image.sh
++++ b/buildroot/board/spacemit/k3-uefi/post-image.sh
+@@ -7,7 +7,7 @@ BOARD_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+ RVA23_BOARD=k3-uefi RVA23_UNAME=6.18.3 K3_KEY_DIR="${K3_KEY_DIR:-${BUILD_DIR}/k3-keys}" "${HOST_DIR}/bin/fakeroot" -- "${BOARD_DIR}/../../../scripts/k3-build-os-images.py"
+ install -m 0644 "${BOARD_DIR}/startup.nsh" "${BINARIES_DIR}/efi-part/startup.nsh"
+ rm -f "${BINARIES_DIR}/bootfs.img"
+-truncate -s 512M "${BINARIES_DIR}/bootfs.img"
++truncate -s 1G "${BINARIES_DIR}/bootfs.img"
+ "${HOST_DIR}/sbin/mkfs.vfat" -F 16 -S 4096 -n ESP "${BINARIES_DIR}/bootfs.img"
+ "${HOST_DIR}/bin/mcopy" -s -i "${BINARIES_DIR}/bootfs.img" "${BINARIES_DIR}/efi-part/EFI" "${BINARIES_DIR}/efi-part/loader" "${BINARIES_DIR}/efi-part/startup.nsh" "${BINARIES_DIR}/efi-part/k3-pico-itx.dtb" ::
+ cd "${BINARIES_DIR}"
+diff --git a/buildroot/scripts/1-demo-flash.py b/buildroot/scripts/1-demo-flash.py
+index 2b797b555795a16ffc55894e0ae83ba2bde9714c..6ca471776254754393000fdacf5af15babac6bb8 100755
+--- a/buildroot/scripts/1-demo-flash.py
++++ b/buildroot/scripts/1-demo-flash.py
+@@ -33,6 +33,7 @@             local = images() / "factory/bootinfo_block.bin"
+         stamp = f"{local.stat().st_size}:{int(local.stat().st_mtime)}"
+         if name not in files or manifest.get(name) != stamp:
+             demo.step(f"Upload {name}")
++            demo.note(f"{local.name}: {local.stat().st_size} bytes")
+             upload(demo, local, name)
+             manifest[name] = stamp
+     manifest_path.write_text(json.dumps(manifest, indent=1) + "\n")
+@@ -117,6 +118,7 @@         demo.note(f"mtd table: {mtd_file.name}")
+     universal = json.loads((images() / "partition_universal.json").read_text())
+     tables.append(universal)
+     for table in tables:
++        demo.note(f"{table['format']} table: {len(table['partitions'])} partitions")
+         entries = []
+         for partition in table["partitions"]:
+             entry = {"name": partition["name"], "offset": partition["offset"], "size": partition["size"], "image": partition["image"].split("/")[-1]}
+@@ -124,6 +126,7 @@             for key in ("hidden", "compress", "type"):
+                 if key in partition:
+                     entry[key] = partition[key]
+             entries.append(entry)
++            demo.note(f"{entry['name']}: offset {entry['offset']}, size {entry['size']}, image {entry['image']}")
+         table["partitions"] = entries
+     demo.result(f"{[len(table['partitions']) for table in tables]} partitions, one write call")
+     demo.step("Write every partition and reboot")
+diff --git a/buildroot/scripts/2-demo-weston.py b/buildroot/scripts/2-demo-weston.py
+index f839b9a19a630f3c332b13a3f21f0f93964c8bee..90d349de8e966a62307fc483e05970ba05a93e12 100755
+--- a/buildroot/scripts/2-demo-weston.py
++++ b/buildroot/scripts/2-demo-weston.py
+@@ -19,7 +19,8 @@     return path
+ 
+ 
+ def weston_state(demo):
+-    return demo.k3.run("systemctl is-active weston.service", check=False).stdout.strip()
++    result = demo.k3.run("systemctl is-active weston.service", check=False)
++    return result.stdout.strip()
+ 
+ 
+ def main():
+@@ -31,8 +32,8 @@     demo.banner()
+     demo.cue("Watch the screen: it shows a console, then the desktop appears")
+ 
+     demo.step("Show the screen before the fix")
+-    demo.k3.run("systemctl stop weston.service 2>/dev/null || true", check=False)
+-    demo.k3.run("rm -rf /var/lib/weston")
++    demo.run_command("systemctl stop weston.service 2>/dev/null || true", check=False)
++    demo.run_command("rm -rf /var/lib/weston")
+     deadline = time.monotonic() + 10
+     while time.monotonic() < deadline and weston_state(demo) == "active":
+         time.sleep(1)
+@@ -42,9 +43,10 @@     demo.result("no desktop, the board shows the console")
+     screenshot(demo, "weston-black.jpg")
+ 
+     demo.step("Enable Weston with one file")
+-    demo.k3.run("mkdir -p /var/lib/weston")
+-    demo.k3.run("touch /var/lib/weston/enabled")
++    demo.run_command("mkdir -p /var/lib/weston")
++    demo.run_command("touch /var/lib/weston/enabled")
+     demo.note("the image watches /var/lib/weston/enabled with a path unit")
++    demo.run_command("cat /etc/systemd/system/weston-autostart.path")
+     deadline = time.monotonic() + 20
+     while time.monotonic() < deadline and weston_state(demo) != "active":
+         demo.k3.run("systemctl start weston.service 2>/dev/null || true", check=False)
+@@ -56,14 +58,15 @@     screenshot(demo, "weston-desktop.jpg")
+ 
+     demo.step("Start the terminal that the extension carries")
+     demo.k3.run("pkill -f weston-terminal 2>/dev/null || true")
+-    demo.k3.run("XDG_RUNTIME_DIR=/run/weston WAYLAND_DISPLAY=wayland-1 weston-terminal >/tmp/demo-terminal.log 2>&1 &")
++    demo.run_command("XDG_RUNTIME_DIR=/run/weston WAYLAND_DISPLAY=wayland-1 weston-terminal >/tmp/demo-terminal.log 2>&1 &", check=False)
++    demo.run_command("command -v weston-terminal es2gears_wayland", check=False)
+     if demo.k3.run("command -v weston-terminal", check=False).returncode != 0:
+         raise demo_lib.DemoError("weston-terminal is missing from the merged extension")
+     demo.result("weston-terminal runs from the merged extension")
+ 
+     demo.step("Start the EGL gears that the extension carries")
+     demo.k3.run("pkill -f es2gears_wayland 2>/dev/null || true")
+-    demo.k3.run("PVR_I_WANT_A_BROKEN_VULKAN_DRIVER=1 MESA_LOG_LEVEL=debug XDG_RUNTIME_DIR=/run/weston WAYLAND_DISPLAY=wayland-1 es2gears_wayland >/tmp/demo-gears.log 2>&1 &")
++    demo.run_command("PVR_I_WANT_A_BROKEN_VULKAN_DRIVER=1 MESA_LOG_LEVEL=debug XDG_RUNTIME_DIR=/run/weston WAYLAND_DISPLAY=wayland-1 es2gears_wayland >/tmp/demo-gears.log 2>&1 &", check=False)
+     alive = "0"
+     for _ in range(10):
+         alive = demo.k3.run("ps | grep -c '[e]s2gears'", check=False).stdout.strip()
+diff --git a/buildroot/scripts/3-demo-update.py b/buildroot/scripts/3-demo-update.py
+new file mode 100755
+index 0000000000000000000000000000000000000000..584f348a8312c761ffeb2bdd3d0f2bafd8be2503
+--- /dev/null
++++ b/buildroot/scripts/3-demo-update.py
+@@ -0,0 +1,83 @@
++#!/usr/bin/env python3
++import functools
++import http.server
++from pathlib import Path
++import socket
++import subprocess
++import sys
++import threading
++import time
++
++sys.path.insert(0, str(Path(__file__).parent))
++
++import demo_lib
++
++TUNNEL_PORT = 8000
++
++
++class IPv6HTTPServer(http.server.ThreadingHTTPServer):
++    address_family = socket.AF_INET6
++
++
++def main():
++    demo = demo_lib.Demo(
++        "Demo 3: the workstation push",
++        "The laptop serves the next image, updatectl stages it, and the board boots it",
++    )
++    demo.banner()
++    demo.cue("Watch the registry requests, then watch the board reboot into the new image")
++
++    registry = Path(__file__).parent.parent / "output/k3-uefi/registry"
++    handler = functools.partial(http.server.SimpleHTTPRequestHandler, directory=str(registry))
++    server = IPv6HTTPServer(("::", 8000), handler)
++    threading.Thread(target=server.serve_forever, daemon=True).start()
++    demo.result(f"the registry serves {len(list(registry.glob('*')))} artifacts on port 8000")
++
++    tunnel = subprocess.Popen(
++        ["ssh", "-6", "-N", "-o", "ExitOnForwardFailure=yes", "-o", "IdentitiesOnly=yes", "-o", "StrictHostKeyChecking=no",
++         "-i", demo_lib.K3_KEY, "-R", f"[::1]:{TUNNEL_PORT}:[::1]:8000", f"root@{demo_lib.K3_HOST}"],
++        stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
++    )
++    try:
++        ready = False
++        for _ in range(20):
++            probe = demo.k3.run(f"wget -q -O- http://[::1]:{TUNNEL_PORT}/SHA256SUMS", check=False)
++            if probe.returncode == 0:
++                ready = True
++                break
++            time.sleep(0.5)
++        if not ready:
++            raise demo_lib.DemoError("the registry tunnel did not come up")
++        demo.result("the board sees the laptop registry on its loopback")
++
++        demo.step("Read the version that runs now")
++        demo.run_command("updatectl list --no-pager", 120, lines=4)
++        demo.run_command("grep IMAGE_VERSION /usr/lib/os-release", 60, lines=2)
++
++        demo.step("Stage the next image from the laptop")
++        demo.run_command("updatectl update host", 1200, lines=20)
++
++        demo.step("Read the staged version")
++        demo.run_command("updatectl list --no-pager", 120, lines=4)
++
++        demo.step("Boot the new image")
++        demo.run_command("newest=$(ls /boot/EFI/Linux/rva23_*.efi | sort -V | tail -n1); echo $newest; bootctl set-default $(basename $newest)", 120, lines=2)
++        demo.step("Reboot into the new image")
++        demo.k3.run("systemctl reboot", check=False)
++        time.sleep(5)
++        demo.k3.wait(300)
++        demo.result("the board is back")
++        demo.run_command("grep IMAGE_VERSION /usr/lib/os-release", 60, lines=2)
++        demo.run_command("updatectl list --no-pager", 120, lines=4)
++
++        demo.payoff("The image came from the laptop registry, and the board now runs the new version")
++    finally:
++        tunnel.terminate()
++        tunnel.wait(timeout=15)
++        server.shutdown()
++
++    return demo.finish()
++
++
++if __name__ == "__main__":
++    demo_lib.run(main)
+diff --git a/buildroot/scripts/demo-preflight.py b/buildroot/scripts/demo-preflight.py
+new file mode 100755
+index 0000000000000000000000000000000000000000..e0f67ee5c5b854ad3eef7993d59271f71e618018
+--- /dev/null
++++ b/buildroot/scripts/demo-preflight.py
+@@ -0,0 +1,68 @@
++#!/usr/bin/env python3
++from pathlib import Path
++import sys
++import time
++import urllib.request
++
++sys.path.insert(0, str(Path(__file__).parent))
++
++import demo_lib
++
++
++def check(demo, name, function):
++    try:
++        detail = function()
++        demo.result(f"{name}: {detail}")
++        return True
++    except Exception as error:
++        demo.note(f"{name}: FAIL ({error})")
++        return False
++
++
++def http_ok(url):
++    with urllib.request.urlopen(url, timeout=5) as response:
++        return response.status
++
++
++def main():
++    demo = demo_lib.Demo("Demo preflight", "Check the board, the verifier services, and the demo hardware")
++    demo.banner()
++    ok = True
++    def board():
++        deadline = time.monotonic() + 90
++        last = None
++        while time.monotonic() < deadline:
++            try:
++                return demo.k3.run("hostname").stdout.strip()
++            except Exception as error:
++                last = error
++                time.sleep(3)
++        raise demo_lib.DemoError(f"the board did not answer: {last}")
++
++    ok &= check(demo, "board SSH", board)
++    ok &= check(demo, "weston", lambda: demo.k3.run("systemctl is-active weston.service").stdout.strip())
++    ok &= check(demo, "extensions", lambda: demo.k3.run("ls /var/lib/extensions").stdout.split())
++    ok &= check(demo, "event view", lambda: http_ok("http://[::1]:8086/"))
++    ok &= check(demo, "report receiver", lambda: http_ok("http://[::1]:8080/"))
++    ok &= check(demo, "wallet", lambda: http_ok("http://[::1]:8081/"))
++    ok &= check(demo, "migration server", lambda: http_ok("http://[::1]:8083/"))
++    archives = demo.k3.run("test -f /tmp/valkey-local.tar && test -f /tmp/pause-image.tar", check=False)
++    if archives.returncode == 0:
++        demo.result("valkey archives: present")
++    else:
++        demo.note("valkey archives: missing, run `make k3-verify-valkey` before demo 7")
++    for tool, label in (("relay.getBoards", "relay"), ("kvm.getVideoCaptureDevices", "KVM capture"), ("kvm.getInputDevices", "KVM input"), ("serial.getConsoles", "serial")):
++        try:
++            data = demo_lib.mcp_call(tool, {})
++            present = bool(next(iter(data.values()), []))
++            demo.result(f"{label}: {'present' if present else 'missing'}")
++        except Exception as error:
++            demo.note(f"{label}: missing ({error})")
++    if not ok:
++        raise demo_lib.DemoError("the preflight found a blocking problem; if the board is down, unplug its USB-C power for five seconds and plug it back in")
++    demo.payoff("The board and the verifier services are ready")
++    return demo.finish()
++
++
++if __name__ == "__main__":
++    demo_lib.run(main)
+diff --git a/buildroot/scripts/run-demo-servers.py b/buildroot/scripts/run-demo-servers.py
+index a78b7e62105ece58235074e46b041f313b62752e..f19c229ceb0f7c796142979fb118fba661404879 100644
+--- a/buildroot/scripts/run-demo-servers.py
++++ b/buildroot/scripts/run-demo-servers.py
+@@ -46,9 +46,10 @@         "RVA23_WALLET_LISTEN": "[::]:8081",
+         "RVA23_MIGRATION_LISTEN": "[::]:8083",
+         "RVA23_WALLET_ATTESTATION_URL": "http://[::1]:8080/v1/attest",
+         "RVA23_MIGRATION_ATTESTATION_URL": "http://[::1]:8080/v1/attest",
+-        "RVA23_MIGRATION_VM1_KEY_FILE": environment.get("RVA23_MIGRATION_VM1_KEY_FILE", str(key_dir / "pcr-public.pem")),
+-        "RVA23_MIGRATION_VM2_KEY_FILE": environment.get("RVA23_MIGRATION_VM2_KEY_FILE", str(key_dir / "pcr-public.pem")),
++        "RVA23_MIGRATION_VM1_KEY_FILE": environment.get("RVA23_MIGRATION_VM1_KEY_FILE", str(root / "attestation/public-key.pem")),
++        "RVA23_MIGRATION_VM2_KEY_FILE": environment.get("RVA23_MIGRATION_VM2_KEY_FILE", str(root / "attestation/public-key.pem")),
+         "RVA23_WALLET_KEY_FILE": str(root / "attestation/public-key.pem"),
++        "RVA23_WALLET_CONSENT_DIR": environment.get("RVA23_WALLET_CONSENT_DIR", str(root / "wallet")),
+         "RVA23_EVENT_LISTEN": "[::]:8086",
+         "RVA23_EVENT_TARGET": environment.get("RVA23_EVENT_TARGET", "QEMU"),
+         "RVA23_EVENT_REPORT_URL": environment.get("RVA23_EVENT_REPORT_URL", "http://[::1]:8080"),
+diff --git a/buildroot/scripts/u2f.go b/buildroot/scripts/u2f.go
+index a2a892f7c792dd89f26fbcd9802eaad48c669081..2d4f311ac84c3d508e10ce124ffb8fb4f7fe1c4c 100644
+--- a/buildroot/scripts/u2f.go
++++ b/buildroot/scripts/u2f.go
+@@ -20,6 +20,8 @@ 	"path/filepath"
+ 	"sync"
+ 	"syscall"
+ 	"time"
++
++	"rva23/scripts/fido2"
+ )
+ 
+ const (
+@@ -60,6 +62,21 @@
+ var u2fConsentMutex sync.Mutex
+ 
+ func Fido2Consent(challenge, application []byte) (U2FConsent, error) {
++	if os.Getenv("RVA23_FIDO2_DIR") != "" {
++		proof, err := fido2.Fido2Consent(challenge, application)
++		if err != nil {
++			return U2FConsent{}, err
++		}
++		return U2FConsent{
++			PublicKey:             proof.PublicKey,
++			Certificate:           proof.Certificate,
++			KeyHandle:             proof.KeyHandle,
++			RegistrationChallenge: proof.RegistrationChallenge,
++			RegistrationSignature: proof.RegistrationSignature,
++			Signature:             proof.Signature,
++			Counter:               proof.Counter,
++		}, nil
++	}
+ 	u2fConsentMutex.Lock()
+ 	defer u2fConsentMutex.Unlock()
+ 	if len(challenge) != 32 {
+
