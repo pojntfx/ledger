@@ -1,0 +1,295 @@
+From e9b46642f831243cfedc67fcc81fc6f1e3e5aa1a Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Tue, 10 Nov 2026 13:11:36 -0700
+Subject: [PATCH] feat: Add validated k3s on K3 demo and warming scripts
+---
+diff --git a/buildroot/Makefile b/buildroot/Makefile
+index bd306323e656e979c7509291dc0fa62c8dd32963..1af957c668baa04f4ea9e953933c133f517b6307 100644
+--- a/buildroot/Makefile
++++ b/buildroot/Makefile
+@@ -21,7 +21,7 @@ MAKE_BUILDROOT = $(MAKE) -C $(BUILDROOT_DIR) O=$(OUTPUT_DIR) BR2_HOST_DIR=$(HOST_DIR) BR2_EXTERNAL=$(THIS_EXTERNAL_PATH) BR2_DL_DIR=$(BR2_DL_DIR) BR2_CCACHE_DIR=$(BR2_CCACHE_DIR) CCACHE_DIR=$(BR2_CCACHE_DIR) CCACHE_BASEDIR=$(OUTPUT_DIR) $(COMMON_TOOLCHAIN_OVERRIDES) UBOOT_OVERRIDE_SRCDIR=$(UBOOT_OVERRIDE_SRCDIR) RVA23_KEY_DIR=$(RVA23_KEY_DIR)
+ MAKE_BUILDROOT_K3 = $(MAKE) -C $(BUILDROOT_DIR) O=$(K3_OUTPUT_DIR) BR2_HOST_DIR=$(K3_HOST_DIR) BR2_EXTERNAL=$(THIS_EXTERNAL_PATH) BR2_DL_DIR=$(BR2_DL_DIR) BR2_CCACHE_DIR=$(BR2_CCACHE_DIR) CCACHE_DIR=$(BR2_CCACHE_DIR) CCACHE_BASEDIR=$(K3_OUTPUT_DIR) $(COMMON_TOOLCHAIN_OVERRIDES) LINUX_OVERRIDE_SRCDIR=$(K3_SOURCE_DIR)/linux OPENSBI_OVERRIDE_SRCDIR=$(K3_SOURCE_DIR)/opensbi-vendor EDK2_SPACEMIT_OVERRIDE_SRCDIR=$(K3_SOURCE_DIR)/edk2-spacemit K3_LINUX_FIRMWARE_DIR=$(K3_LINUX_FIRMWARE_DIR)
+ BUILDROOT_PATCHES = $(sort $(wildcard $(THIS_EXTERNAL_PATH)/patches/buildroot/*.patch))
+ 
+-.PHONY: all configure build clean k3-configure k3-build k3-clean k3-registry k3-verify-image k3-verify-firmware k3-verify-base k3-verify-attestation k3-verify-report k3-verify-update k3-verify-hardening k3-verify-podman k3-verify-k3s k3-verify-wallet k3-verify-migration k3-verify-mutual-migration k3-verify-valkey k3-verify registry verify verify-image verify-boot verify-firmware verify-attestation verify-report verify-update verify-security verify-hardening verify-podman verify-k3s verify-attested-app verify-wallet verify-migration verify-mutual-migration demo-servers boot boot-display boot-firmware
++.PHONY: all configure build clean k3-configure k3-build k3-clean k3-registry k3-verify-image k3-verify-firmware k3-verify-base k3-verify-attestation k3-verify-report k3-verify-update k3-verify-hardening k3-verify-podman k3-verify-k3s k3-verify-wallet k3-verify-migration k3-verify-mutual-migration k3-verify-valkey k3-verify registry verify verify-image verify-boot verify-firmware verify-attestation verify-report verify-update verify-security verify-hardening verify-podman verify-k3s verify-attested-app verify-wallet verify-migration verify-mutual-migration demo-servers demo-preflight demo-warm demo-flash demo-weston demo-update demo-attestation-qemu demo-wallet-qemu demo-migrate-qemu demo-k3s-qemu demo-kubernetes demo-kubernetes-warm demo-qemu-warm demo-qemu-stop demos boot boot-display boot-firmware
+ 
+ all: build k3-build
+ 
+@@ -145,6 +145,58 @@ verify: verify-image verify-boot verify-firmware verify-attestation verify-update verify-hardening verify-podman verify-k3s verify-report verify-attested-app verify-wallet verify-migration verify-mutual-migration
+ 
+ demo-servers:
+ 	python3 scripts/run-demo-servers.py
++
++demo-preflight:
++	python3 scripts/demo-preflight.py
++
++demo-flash:
++	python3 scripts/1-demo-flash.py
++
++demo-weston:
++	python3 scripts/2-demo-weston.py
++
++demo-update:
++	python3 scripts/3-demo-update.py
++
++demo-warm:
++	python3 scripts/4-demo-attestation-qemu.py
++	python3 scripts/5-demo-wallet-qemu.py
++	python3 scripts/6-demo-migrate-qemu.py
++	python3 scripts/demo-k3s-qemu.py
++
++demo-attestation-qemu:
++	python3 scripts/4-demo-attestation-qemu.py
++
++demo-wallet-qemu:
++	python3 scripts/5-demo-wallet-qemu.py
++
++demo-migrate-qemu:
++	python3 scripts/6-demo-migrate-qemu.py
++
++demo-k3s-qemu:
++	python3 scripts/demo-k3s-qemu.py
++
++demo-kubernetes:
++	python3 scripts/7-demo-kubernetes.py
++
++demo-qemu-warm:
++	python3 scripts/demo_qemu_warm.py start firmware k3s
++
++demo-qemu-stop:
++	python3 scripts/demo_qemu_warm.py stop
++
++demo-kubernetes-warm:
++	python3 scripts/demo-kubernetes-warm.py
++
++demos:
++	python3 scripts/1-demo-flash.py
++	python3 scripts/2-demo-weston.py
++	python3 scripts/3-demo-update.py
++	setsid python3 scripts/demo-kubernetes-warm.py > /tmp/demo-kubernetes-warm.log 2>&1 < /dev/null &
++	python3 scripts/4-demo-attestation-qemu.py
++	python3 scripts/5-demo-wallet-qemu.py
++	python3 scripts/6-demo-migrate-qemu.py
++	python3 scripts/7-demo-kubernetes.py
+ 
+ boot:
+ 	$(THIS_EXTERNAL_PATH)/board/rva23-qemu/run-qemu.sh $(OUTPUT_DIR)/images
+diff --git a/buildroot/scripts/7-demo-kubernetes.py b/buildroot/scripts/7-demo-kubernetes.py
+new file mode 100755
+index 0000000000000000000000000000000000000000..dcd1997d556d36ee80d85f4bcb19c78aa90f76cb
+--- /dev/null
++++ b/buildroot/scripts/7-demo-kubernetes.py
+@@ -0,0 +1,101 @@
++#!/usr/bin/env python3
++import importlib.util
++import json
++from pathlib import Path
++import sys
++import time
++
++sys.path.insert(0, str(Path(__file__).parent))
++
++import demo_lib
++
++OUTPUT = Path(__file__).parent.parent / "output/k3-uefi"
++KUBECONFIG = "/var/lib/k3s-demo/server/cred/admin.kubeconfig"
++
++
++def load(name, path):
++    spec = importlib.util.spec_from_file_location(name, path)
++    module = importlib.util.module_from_spec(spec)
++    spec.loader.exec_module(module)
++    return module
++
++
++valkey = load("valkey_test", Path(__file__).with_name("verify-valkey.py"))
++
++MANIFEST = {
++    "apiVersion": "v1",
++    "kind": "Pod",
++    "metadata": {"name": "valkey-k3s"},
++    "spec": {
++        "hostNetwork": True,
++        "containers": [
++            {
++                "name": "valkey",
++                "image": "docker.io/library/valkey-local:latest",
++                "imagePullPolicy": "Never",
++                "command": ["/lib/ld-linux-riscv64-lp64d.so.1", "--library-path", "/lib", "/valkey-server", "/etc/valkey.conf"],
++                "args": ["--port", "6380"],
++            }
++        ],
++    },
++}
++
++
++def main():
++    demo = demo_lib.Demo(
++        "Demo 7: a signed Kubernetes workload",
++        "k3s runs from a signed extension, Valkey runs on the pod, and a tampered extension is rejected",
++    )
++    demo.banner()
++    demo.cue("Watch the board: k3s and the pod run on the real hardware")
++
++    demo.step("Check the cluster on the board")
++    state = demo.run_command("systemctl is-active rva23-k3s-demo", check=False).stdout.strip()
++    if state != "active":
++        demo.note("k3s is not running; run make demo-kubernetes-warm after demo 3 to pre-warm it")
++    demo.run_command("systemctl reset-failed rva23-k3s-demo 2>/dev/null || true", check=False)
++    nodes = ""
++    for _ in range(90):
++        nodes = demo.run_command(f"kubectl --kubeconfig={KUBECONFIG} get nodes 2>/dev/null || true", 60, check=False, lines=2).stdout
++        if "Ready" in nodes:
++            break
++        time.sleep(2)
++    if "Ready" not in nodes:
++        raise demo_lib.DemoError("the k3s node is not ready")
++    demo.result("the node is ready")
++
++    demo.step("Run the signed Valkey pod")
++    document = "/tmp/valkey-k3s.yaml"
++    demo.note(f"pod valkey-k3s: image {MANIFEST['spec']['containers'][0]['image']}, port 6380, hostNetwork")
++    demo.k3.run(f"cat > {document} <<'EOF2'\n{json.dumps(MANIFEST, indent=2)}\nEOF2\n")
++    demo.run_command(f"kubectl --kubeconfig={KUBECONFIG} apply -f {document}", 120)
++    result = demo.run_command(f"kubectl --kubeconfig={KUBECONFIG} wait --for=condition=Ready pod/valkey-k3s --timeout=120s", 180, check=False)
++    if "condition met" not in result.stdout:
++        raise demo_lib.DemoError(result.stdout[-800:])
++    demo.result("the pod is ready")
++
++    demo.step("Reach Valkey over IPv6")
++    valkey.resp(demo_lib.board_link_local(), 6380, demo_lib.host_interface())
++    demo.result("PING, SET, and GET answer on port 6380")
++
++    demo.step("Tamper with the signed k3s extension")
++    demo.run_command("systemd-sysext unmerge", 120)
++    demo.run_command("image=$(find /var/lib/extensions -maxdepth 1 -name 'k3s_*.raw' -not -name '*.backup' -print -quit); cp \"$image\" \"$image.backup\"; printf X | dd of=\"$image\" bs=1 seek=1048576 conv=notrunc 2>/dev/null", 120, lines=0)
++    demo.note("one byte changed inside the signed k3s extension")
++    check = demo.run_command("if systemd-sysext --image-policy=root=signed+absent:usr=signed+absent refresh; then false; else true; fi", 120, check=False)
++    if check.returncode != 0:
++        raise demo_lib.DemoError("the tampered extension was accepted")
++    demo.result("the tampered extension is rejected")
++    demo.run_command("image=$(find /var/lib/extensions -maxdepth 1 -name 'k3s_*.raw' -not -name '*.backup' -print -quit); mv \"$image.backup\" \"$image\"", 120, lines=0)
++    demo.run_command("systemd-sysext --image-policy=root=signed+absent:usr=signed+absent refresh", 120, lines=2)
++    demo.result("the original extension merges again")
++
++    demo.step("Read the cluster state")
++    demo.run_command(f"kubectl --kubeconfig={KUBECONFIG} get pods -o wide", 60, check=False, lines=4)
++
++    demo.payoff("The cluster runs a signed workload, and a tampered extension never reaches it")
++    return demo.finish()
++
++
++if __name__ == "__main__":
++    demo_lib.run(main)
+diff --git a/buildroot/scripts/demo-kubernetes-warm.py b/buildroot/scripts/demo-kubernetes-warm.py
+new file mode 100755
+index 0000000000000000000000000000000000000000..787b7b43b7fed3e78b4b56dd75433579939cf4a6
+--- /dev/null
++++ b/buildroot/scripts/demo-kubernetes-warm.py
+@@ -0,0 +1,85 @@
++#!/usr/bin/env python3
++import importlib.util
++import os
++from pathlib import Path
++import sys
++import time
++
++sys.path.insert(0, str(Path(__file__).parent))
++
++import demo_lib
++
++OUTPUT = Path(__file__).parent.parent / "output/k3-uefi"
++KUBECONFIG = "/var/lib/k3s-demo/server/cred/admin.kubeconfig"
++
++
++def load(name, path):
++    spec = importlib.util.spec_from_file_location(name, path)
++    module = importlib.util.module_from_spec(spec)
++    spec.loader.exec_module(module)
++    return module
++
++
++valkey = load("valkey_test", Path(__file__).with_name("verify-valkey.py"))
++
++os.environ.setdefault("K3_SSH", demo_lib.K3_HOST)
++os.environ.setdefault("K3_SSH_KEY", demo_lib.K3_KEY)
++
++
++def run(k3, command, timeout=300, lines=2):
++    print(f"$ {command}", flush=True)
++    output = k3.command(command, timeout)
++    for line in (output or "").strip().splitlines()[:lines]:
++        print(f"  {line}", flush=True)
++    return output
++
++
++def ready(k3):
++    archives = k3.command("test -f /tmp/valkey-local.tar && test -f /tmp/pause-image.tar && echo yes || echo no", 60).strip()
++    if archives != "yes":
++        return False
++    nodes = k3.command(f"kubectl --kubeconfig={KUBECONFIG} get nodes 2>/dev/null || true", 60)
++    return "Ready" in nodes
++
++
++def warm():
++    k3 = valkey.K3(OUTPUT)
++    if ready(k3):
++        print("warm: already ready", flush=True)
++        return
++    print("warm: building the images", flush=True)
++    rootfs = valkey.rootfs_tar(OUTPUT, valkey.valkey_source(OUTPUT))
++    pause = valkey.pause_tar()
++    print(f"$ upload {rootfs}", flush=True)
++    k3.upload(rootfs, "/tmp/valkey-rootfs.tar")
++    print(f"$ upload {pause}", flush=True)
++    k3.upload(pause, "/tmp/pause.tar")
++    print("warm: importing the podman image", flush=True)
++    run(k3, "podman import /tmp/valkey-rootfs.tar valkey-local >/dev/null; rm -f /tmp/valkey-local.tar; podman save -o /tmp/valkey-local.tar valkey-local >/dev/null", 600)
++    run(k3, "podman import --change 'ENTRYPOINT [\"/pause\"]' /tmp/pause.tar docker.io/rancher/mirrored-pause:3.10.2 >/dev/null; rm -f /tmp/pause-image.tar; podman save -o /tmp/pause-image.tar docker.io/rancher/mirrored-pause:3.10.2 >/dev/null", 600)
++    print("warm: starting k3s", flush=True)
++    state = run(k3, "systemctl is-active rva23-k3s-demo || true", 30, lines=1).strip()
++    if state != "active":
++        run(k3, "systemctl reset-failed rva23-k3s-demo 2>/dev/null || true", 60)
++        run(k3, "systemctl stop rva23-k3s-demo 2>/dev/null || true", 120)
++        run(k3, "rm -rf /var/lib/k3s-demo", 120)
++        run(k3, "systemd-run --unit=rva23-k3s-demo --property=Type=simple k3s server --disable=metrics-server --disable=traefik --data-dir=/var/lib/k3s-demo --write-kubeconfig-mode=0644", 120)
++    for _ in range(60):
++        nodes = run(k3, f"kubectl --kubeconfig={KUBECONFIG} get nodes 2>/dev/null || true", 30, lines=2)
++        if "Ready" in nodes:
++            break
++        time.sleep(2)
++    else:
++        raise demo_lib.DemoError("k3s did not become ready")
++    print("warm: importing the k3s images", flush=True)
++    run(k3, "k3s ctr -n k8s.io images import /tmp/valkey-local.tar >/dev/null; k3s ctr -n k8s.io images tag localhost/valkey-local:latest docker.io/library/valkey-local:latest >/dev/null", 600)
++    run(k3, "k3s ctr -n k8s.io images import /tmp/pause-image.tar >/dev/null", 600)
++    print("warm: ready", flush=True)
++
++
++if __name__ == "__main__":
++    try:
++        warm()
++    except Exception as error:
++        print(f"warm: failed: {error}", flush=True)
++        raise SystemExit(1)
+diff --git a/buildroot/scripts/verify-valkey.py b/buildroot/scripts/verify-valkey.py
+index 5f341a89b0dcabb627b0a4f967318a2f60e3051d..a4f0c956fa7a0761f793e76eeb0b3284c4303f8f 100644
+--- a/buildroot/scripts/verify-valkey.py
++++ b/buildroot/scripts/verify-valkey.py
+@@ -170,8 +170,13 @@     state = k3.command("systemctl is-active rva23-k3s-demo || true").strip()
+     if state != "active":
+         k3.command("systemctl reset-failed rva23-k3s-demo 2>/dev/null || true")
+         k3.command("systemctl stop rva23-k3s-demo 2>/dev/null || true")
++        k3.command("rm -rf /var/lib/k3s-demo")
+         k3.command("systemd-run --unit=rva23-k3s-demo --property=Type=simple k3s server --disable=metrics-server --disable=traefik --data-dir=/var/lib/k3s-demo --write-kubeconfig-mode=0644")
+-        time.sleep(15)
++    for _ in range(60):
++        nodes = k3.command("kubectl --kubeconfig=/var/lib/k3s-demo/server/cred/admin.kubeconfig get nodes 2>/dev/null || true", 30)
++        if "Ready" in nodes:
++            break
++        time.sleep(2)
+     k3.command(
+         "podman save -o /tmp/valkey-local.tar valkey-local >/dev/null; "
+         "k3s ctr -n k8s.io images import /tmp/valkey-local.tar >/dev/null; "
+
