@@ -1,0 +1,780 @@
+From e7d6931e3c32d993397e66df2342acf1f67c135d Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Tue, 10 Nov 2026 12:43:14 -0700
+Subject: [PATCH] feat: Add initial flashing demo that drops us into a shell and the weston/graphics demo
+---
+diff --git a/buildroot/board/spacemit/k3-uefi/post-build.sh b/buildroot/board/spacemit/k3-uefi/post-build.sh
+index f06e106d3f4e51d6b351ada57440e392838c9236..de0f913b649161b60a28a2eaccfb953fe426f9d4 100755
+--- a/buildroot/board/spacemit/k3-uefi/post-build.sh
++++ b/buildroot/board/spacemit/k3-uefi/post-build.sh
+@@ -19,6 +19,8 @@ rm -f "$TARGET_DIR/lib/firmware/powervr/rgx.fw.36.56.104.183"
+ rm -f "$TARGET_DIR/etc/systemd/system/k3-validation.service"
+ rm -f "$TARGET_DIR/etc/systemd/system/basic.target.wants/k3-validation.service"
+ rm -f "$TARGET_DIR/etc/systemd/system/multi-user.target.wants/k3-validation.service"
++rm -f "$TARGET_DIR"/etc/systemd/system/*.wants/weston.service
++rm -f "$TARGET_DIR"/usr/share/factory/etc/systemd/system/*.wants/weston.service
+ "$BUILD_DIR/../host/bin/python3" "$BOARD_DIR/../../../scripts/prepare-target.py" "$TARGET_DIR"
+ if [ -n "${RVA23_WIFI_SSID:-}" ] && [ -n "${RVA23_WIFI_PSK:-}" ]; then
+ 	install -d -m 0755 "$TARGET_DIR/etc/wpa_supplicant"
+diff --git a/buildroot/board/spacemit/k3-uefi/rootfs-overlay/etc/systemd/system/multi-user.target.wants/weston-autostart.path b/buildroot/board/spacemit/k3-uefi/rootfs-overlay/etc/systemd/system/multi-user.target.wants/weston-autostart.path
+new file mode 120000
+index 0000000000000000000000000000000000000000..7c0a2e5822f8578cc0ccdcf533c52836307a6e87
+--- /dev/null
++++ b/buildroot/board/spacemit/k3-uefi/rootfs-overlay/etc/systemd/system/multi-user.target.wants/weston-autostart.path
+@@ -0,0 +1 @@
++/etc/systemd/system/weston-autostart.path
+\ No newline at end of file
+diff --git a/buildroot/board/spacemit/k3-uefi/rootfs-overlay/etc/systemd/system/weston-autostart.path b/buildroot/board/spacemit/k3-uefi/rootfs-overlay/etc/systemd/system/weston-autostart.path
+new file mode 100644
+index 0000000000000000000000000000000000000000..4f332ee53e11eb87b752ac4c732fe482c8f51c58
+--- /dev/null
++++ b/buildroot/board/spacemit/k3-uefi/rootfs-overlay/etc/systemd/system/weston-autostart.path
+@@ -0,0 +1,9 @@
++[Unit]
++Description=Watch for the Weston enable file
++
++[Path]
++PathExists=/var/lib/weston/enabled
++Unit=weston-autostart.service
++
++[Install]
++WantedBy=multi-user.target
+diff --git a/buildroot/board/spacemit/k3-uefi/rootfs-overlay/etc/systemd/system/weston-autostart.service b/buildroot/board/spacemit/k3-uefi/rootfs-overlay/etc/systemd/system/weston-autostart.service
+new file mode 100644
+index 0000000000000000000000000000000000000000..8e4bddadf8bc4f3bde2943841893ba4f615e75a8
+--- /dev/null
++++ b/buildroot/board/spacemit/k3-uefi/rootfs-overlay/etc/systemd/system/weston-autostart.service
+@@ -0,0 +1,9 @@
++[Unit]
++Description=Start Weston when the enable file exists
++After=systemd-udevd.service
++
++[Service]
++Type=oneshot
++RemainAfterExit=yes
++ExecStart=/bin/sh -c 'test -f /var/lib/weston/enabled && systemctl start weston.service'
++ExecStop=/bin/sh -c 'systemctl stop weston.service || true'
+diff --git a/buildroot/scripts/1-demo-flash.py b/buildroot/scripts/1-demo-flash.py
+new file mode 100755
+index 0000000000000000000000000000000000000000..2b797b555795a16ffc55894e0ae83ba2bde9714c
+--- /dev/null
++++ b/buildroot/scripts/1-demo-flash.py
+@@ -0,0 +1,177 @@
++#!/usr/bin/env python3
++import json
++from pathlib import Path
++import subprocess
++import sys
++import time
++
++sys.path.insert(0, str(Path(__file__).parent))
++
++import demo_lib
++
++
++def images():
++    return Path(__file__).parent.parent / "output/k3-uefi/images"
++
++
++def upload(demo, local, name):
++    result = subprocess.run(["curl", "-s", "--max-time", "600", "--upload-file", str(local), f"http://127.0.0.1:1337/files/{name}", "-w", "%{http_code}"], capture_output=True, text=True)
++    if result.stdout.strip() != "204":
++        raise demo_lib.DemoError(f"upload failed for {name}: {result.stdout} {result.stderr}")
++
++
++def ensure_uploads(demo):
++    manifest_path = images().parent / ".demo-uploads.json"
++    manifest = json.loads(manifest_path.read_text()) if manifest_path.exists() else {}
++    files = demo_lib.mcp_call("files.getFiles", {}).get("files", [])
++    for name in ("FSBL.bin", "u-boot.itb", "bootfs.img", "usr-a.erofs", "usr-b.erofs", "usr-a.verity", "usr-a.verity-sig", "rootfs.ext4", "env.bin", "bootinfo_block.bin", "esos.itb", "fw_dynamic.itb", "edk2.itb"):
++        local = images() / name
++        if name == "FSBL.bin":
++            local = images() / "factory/FSBL.bin"
++        if name == "bootinfo_block.bin":
++            local = images() / "factory/bootinfo_block.bin"
++        stamp = f"{local.stat().st_size}:{int(local.stat().st_mtime)}"
++        if name not in files or manifest.get(name) != stamp:
++            demo.step(f"Upload {name}")
++            upload(demo, local, name)
++            manifest[name] = stamp
++    manifest_path.write_text(json.dumps(manifest, indent=1) + "\n")
++
++
++def retry(function, attempts=6, delay=2):
++    last = None
++    for _ in range(attempts):
++        try:
++            return function()
++        except demo_lib.DemoError as error:
++            last = error
++            time.sleep(delay)
++    raise last
++
++
++def wait_device(demo, manufacturer):
++    deadline = time.monotonic() + 120
++    while time.monotonic() < deadline:
++        try:
++            devices = retry(lambda: demo_lib.mcp_call("flash.getDevices", {})).get("flashDevices", [])
++        except demo_lib.DemoError:
++            time.sleep(2)
++            continue
++        for device in devices:
++            if device.get("manufacturer") == manufacturer:
++                demo.result(f"{manufacturer} device at {device['path']}")
++                return device["path"]
++        time.sleep(2)
++    raise demo_lib.DemoError(f"no {manufacturer} device appeared")
++
++
++def main():
++    demo = demo_lib.Demo(
++        "Demo 1: from a blank board to a shell",
++        "The agent presses the buttons, stages the boot chain, and writes the disk over USB",
++    )
++    demo.banner()
++    demo.cue("Watch the screen: the board shows EDK2, then a flashing cursor, then a login")
++    demo.step("Read the devices and put the board into download mode")
++    try:
++        demo_lib.mcp_call("serial.startBuffering", {"path": "/dev/ttyUSB0"})
++        demo_lib.mcp_call("serial.clearBuffer", {"path": "/dev/ttyUSB0"})
++    except demo_lib.DemoError:
++        pass
++    ensure_uploads(demo)
++    relay = demo_lib.mcp_call("relay.getBoards", {}).get("boards", [])
++    if not relay:
++        raise demo_lib.DemoError("no relay board is connected")
++    relay_path = relay[0]["path"]
++    demo.result(f"relay board at {relay_path}")
++
++    devices = demo_lib.mcp_call("flash.getDevices", {}).get("flashDevices", [])
++    if not any(device.get("manufacturer") == "DFU" for device in devices):
++        retry(lambda: demo_lib.mcp_call("target.reset", {"path": relay_path}))
++        demo.pause(1)
++        retry(lambda: demo_lib.mcp_call("target.enterFDL", {"path": relay_path}))
++        demo.result("reset and FDL relays pulsed")
++        demo.pause(2)
++    path = wait_device(demo, "DFU")
++    demo.note("DFU means BROM: it answers OKAY and writes nothing, so stage the first stage")
++
++    demo.step("Stage the first-stage loader")
++    retry(lambda: demo_lib.mcp_call("flash.stage", {"path": path, "file": "FSBL.bin"}))
++    retry(lambda: demo_lib.mcp_call("flash.continue", {"path": path}))
++    demo.pause(3)
++    path = wait_device(demo, "U-Boot")
++
++    demo.step("Stage U-Boot and enter fastboot")
++    retry(lambda: demo_lib.mcp_call("flash.stage", {"path": path, "file": "u-boot.itb"}))
++    retry(lambda: demo_lib.mcp_call("flash.continue", {"path": path}))
++    demo.pause(4)
++    path = wait_device(demo, "U-Boot")
++
++    demo.step("Build the partition tables from offset and size")
++    tables = []
++    mtd_size = demo_lib.mcp_call("flash.getVar", {"path": path, "variable": "mtd-size"}).get("value")
++    mtd_file = images() / f"partition_{mtd_size}.json" if mtd_size else None
++    if mtd_file is not None and mtd_file.exists():
++        tables.append(json.loads(mtd_file.read_text()))
++        demo.note(f"mtd table: {mtd_file.name}")
++    universal = json.loads((images() / "partition_universal.json").read_text())
++    tables.append(universal)
++    for table in tables:
++        entries = []
++        for partition in table["partitions"]:
++            entry = {"name": partition["name"], "offset": partition["offset"], "size": partition["size"], "image": partition["image"].split("/")[-1]}
++            for key in ("hidden", "compress", "type"):
++                if key in partition:
++                    entry[key] = partition[key]
++            entries.append(entry)
++        table["partitions"] = entries
++    demo.result(f"{[len(table['partitions']) for table in tables]} partitions, one write call")
++    demo.step("Write every partition and reboot")
++    job = demo_lib.mcp_call("flash.multiFlash", {"path": path, "reboot": True, "background": True, "partitionTables": tables})
++    job_id = job["jobId"]
++    deadline = time.monotonic() + 900
++    while time.monotonic() < deadline:
++        jobs = demo_lib.mcp_call("flash.getJobs", {}).get("jobs", [])
++        current = next((item for item in jobs if item["id"] == job_id), None)
++        if current:
++            sent, total = current.get("sentBytes", 0), current.get("totalBytes", 1)
++            demo.note(f"{current.get('partition')}: {sent / total * 100:.0f}% ({sent // (1024 * 1024)} MiB of {total // (1024 * 1024)} MiB)")
++            if current["status"] == "succeeded":
++                demo.result("the flash finished")
++                break
++            if current["status"] == "failed":
++                raise demo_lib.DemoError(current.get("error", "flash failed"))
++        time.sleep(2)
++    else:
++        raise demo_lib.DemoError("the flash did not finish in time")
++
++    demo.step("Reset the board and wait for the shell")
++    for attempt in range(2):
++        retry(lambda: demo_lib.mcp_call("target.reset", {"path": relay_path}))
++        demo.pause(5)
++        try:
++            demo.k3.wait(300)
++            break
++        except demo_lib.DemoError:
++            demo.note(f"no shell after reset {attempt + 1}, resetting again")
++    else:
++        raise demo_lib.DemoError("the board did not come back after two resets; unplug the board and plug it back in")
++    banner = demo.k3.run("hostname; cat /proc/sys/kernel/hostname; uname -m").stdout.strip()
++    demo.result(banner.replace("\n", ", "))
++
++    demo.step("Show the last lines of the serial boot log")
++    try:
++        serial_output = demo_lib.mcp_call("serial.readFrom", {"path": "/dev/ttyUSB0"}).get("output", "")
++        lines = [line.strip() for line in serial_output.replace("\r", "\n").split("\n") if line.strip()]
++        for line in lines[-6:]:
++            demo.note(line)
++    except demo_lib.DemoError:
++        demo.note("the serial console returned no output")
++
++    demo.payoff("A blank board now boots a signed UKI into a read-only system tree")
++    demo.ui("the board", "serial console / webcam")
++    return demo.finish()
++
++
++if __name__ == "__main__":
++    demo_lib.run(main)
+diff --git a/buildroot/scripts/2-demo-weston.py b/buildroot/scripts/2-demo-weston.py
+new file mode 100755
+index 0000000000000000000000000000000000000000..f839b9a19a630f3c332b13a3f21f0f93964c8bee
+--- /dev/null
++++ b/buildroot/scripts/2-demo-weston.py
+@@ -0,0 +1,88 @@
++#!/usr/bin/env python3
++from pathlib import Path
++import subprocess
++import time
++import sys
++
++sys.path.insert(0, str(Path(__file__).parent))
++
++import demo_lib
++
++SCREENSHOTS = Path(__file__).parent.parent / "output/demo/screenshots"
++SCREENSHOT_FILE = Path("/tmp/demo-weston-screenshot.txt")
++
++
++def screenshot(demo, name):
++    path = demo_lib.screenshot(SCREENSHOTS / name)
++    demo.result(f"screenshot: {path}")
++    return path
++
++
++def weston_state(demo):
++    return demo.k3.run("systemctl is-active weston.service", check=False).stdout.strip()
++
++
++def main():
++    demo = demo_lib.Demo(
++        "Demo 2: the agent fixes the blank screen",
++        "The image ships Weston off, one enable file turns it on, and the desktop appears",
++    )
++    demo.banner()
++    demo.cue("Watch the screen: it shows a console, then the desktop appears")
++
++    demo.step("Show the screen before the fix")
++    demo.k3.run("systemctl stop weston.service 2>/dev/null || true", check=False)
++    demo.k3.run("rm -rf /var/lib/weston")
++    deadline = time.monotonic() + 10
++    while time.monotonic() < deadline and weston_state(demo) == "active":
++        time.sleep(1)
++    if weston_state(demo) == "active":
++        raise demo_lib.DemoError("weston is still running")
++    demo.result("no desktop, the board shows the console")
++    screenshot(demo, "weston-black.jpg")
++
++    demo.step("Enable Weston with one file")
++    demo.k3.run("mkdir -p /var/lib/weston")
++    demo.k3.run("touch /var/lib/weston/enabled")
++    demo.note("the image watches /var/lib/weston/enabled with a path unit")
++    deadline = time.monotonic() + 20
++    while time.monotonic() < deadline and weston_state(demo) != "active":
++        demo.k3.run("systemctl start weston.service 2>/dev/null || true", check=False)
++        time.sleep(1)
++    if weston_state(demo) != "active":
++        raise demo_lib.DemoError("weston did not start")
++    demo.result("weston is active, the desktop is up")
++    screenshot(demo, "weston-desktop.jpg")
++
++    demo.step("Start the terminal that the extension carries")
++    demo.k3.run("pkill -f weston-terminal 2>/dev/null || true")
++    demo.k3.run("XDG_RUNTIME_DIR=/run/weston WAYLAND_DISPLAY=wayland-1 weston-terminal >/tmp/demo-terminal.log 2>&1 &")
++    if demo.k3.run("command -v weston-terminal", check=False).returncode != 0:
++        raise demo_lib.DemoError("weston-terminal is missing from the merged extension")
++    demo.result("weston-terminal runs from the merged extension")
++
++    demo.step("Start the EGL gears that the extension carries")
++    demo.k3.run("pkill -f es2gears_wayland 2>/dev/null || true")
++    demo.k3.run("PVR_I_WANT_A_BROKEN_VULKAN_DRIVER=1 MESA_LOG_LEVEL=debug XDG_RUNTIME_DIR=/run/weston WAYLAND_DISPLAY=wayland-1 es2gears_wayland >/tmp/demo-gears.log 2>&1 &")
++    alive = "0"
++    for _ in range(10):
++        alive = demo.k3.run("ps | grep -c '[e]s2gears'", check=False).stdout.strip()
++        if alive not in ("", "0"):
++            break
++        time.sleep(1)
++    if alive in ("", "0"):
++        raise demo_lib.DemoError("es2gears_wayland did not stay up")
++    demo.result("es2gears_wayland renders on the merged extension")
++    final = screenshot(demo, "weston-terminal.jpg")
++
++    demo.step("Write the screenshot path and open it")
++    SCREENSHOT_FILE.write_text(str(final) + "\n")
++    demo.result(f"path: {SCREENSHOT_FILE} -> {final}")
++    subprocess.Popen(["xdg-open", str(final)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
++
++    demo.payoff("The agent watched the screen, enabled the unit with one file, and the desktop appeared")
++    return demo.finish()
++
++
++if __name__ == "__main__":
++    demo_lib.run(main)
+diff --git a/buildroot/scripts/demo_lib.py b/buildroot/scripts/demo_lib.py
+new file mode 100755
+index 0000000000000000000000000000000000000000..681cebb56b9e3e277bd2dbc6283f3f618288627f
+--- /dev/null
++++ b/buildroot/scripts/demo_lib.py
+@@ -0,0 +1,418 @@
++#!/usr/bin/env python3
++import base64
++import json
++import os
++import re
++from pathlib import Path
++import subprocess
++import sys
++import tempfile
++import time
++import urllib.error
++import urllib.request
++
++
++RESET = "\033[0m"
++BOLD = "\033[1m"
++DIM = "\033[2m"
++GREEN = "\033[32m"
++CYAN = "\033[36m"
++YELLOW = "\033[33m"
++RED = "\033[31m"
++
++K3_HOST = os.environ.get("K3_SSH", "fe80::b28c:b3ff:fe9a:79a8%wlp0s20f3")
++K3_KEY = os.environ.get("K3_SSH_KEY", str(Path(__file__).parent.parent / "output/k3-uefi/build/k3-keys/root_ed25519"))
++MCP_URL = os.environ.get("PUSHROD_MCP_URL", "http://127.0.0.1:1337/")
++EVENT_UI = os.environ.get("RVA23_EVENT_URL", "http://[::1]:8086")
++REPORT_UI = os.environ.get("RVA23_REPORT_URL", "http://[::1]:8080")
++WALLET_UI = os.environ.get("RVA23_WALLET_URL", "http://[::1]:8081")
++MIGRATION_UI = os.environ.get("RVA23_MIGRATION_URL", "http://[::1]:8083")
++
++
++class DemoError(RuntimeError):
++    pass
++
++
++def mcp_result(tool, arguments):
++    body = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": tool, "arguments": arguments}}).encode()
++    request = urllib.request.Request(MCP_URL, data=body, headers={"Content-Type": "application/json", "Accept": "application/json, text/event-stream"})
++    with urllib.request.urlopen(request, timeout=600) as response:
++        raw = response.read().decode()
++    payload = None
++    for line in raw.splitlines():
++        if line.startswith("data: "):
++            payload = json.loads(line[6:])
++    if payload is None:
++        raise DemoError(f"no MCP response for {tool}")
++    if "error" in payload:
++        raise DemoError(payload["error"])
++    result = payload["result"]
++    if result.get("isError"):
++        raise DemoError(result["content"][0]["text"])
++    return result
++
++
++def mcp_call(tool, arguments):
++    return mcp_result(tool, arguments).get("structuredContent", {})
++
++
++def upload_report(k3, retries=3):
++    url = board_url(8080) + "/reports"
++    last = ""
++    for _ in range(retries):
++        result = k3.run(f"/usr/lib/systemd/systemd-report upload --url={url} --sign=require-one", 300, check=False)
++        output = result.stdout + result.stderr
++        match = re.search(r"finished successfully with code (\d+): (\{.*\})", output)
++        if match:
++            return url, int(match.group(1)), json.loads(match.group(2))
++        last = output
++        k3.run("systemctl restart systemd-report-sign-tpm2.socket")
++        k3.run("systemctl restart swtpm.service")
++        time.sleep(3)
++        k3.run("TPM2TOOLS_TCTI=swtpm:host=::1,port=2321 tpm2_flushcontext -t 2>/dev/null || true")
++    raise DemoError(f"the report upload failed: {last}")
++
++
++def restart_demo_servers(target="K3"):
++    subprocess.run(["pkill", "-f", "^/home/pojntfx/Projets/pushrod/buildroot/output/demo/(report-receiver|wallet-server|migration-server|event-explorer)"])
++    time.sleep(2)
++    root = Path(__file__).parent.parent / "output/demo"
++    environment = os.environ.copy()
++    environment["RVA23_EVENT_TARGET"] = target
++    environment["RVA23_MIGRATION_VM1_KEY_FILE"] = str(root / "attestation/public-key.pem")
++    environment["RVA23_MIGRATION_VM2_KEY_FILE"] = str(root / "attestation/public-key.pem")
++    environment["RVA23_WALLET_CONSENT_DIR"] = str(root / "wallet")
++    log = (root / "demo-servers.log").open("a")
++    subprocess.Popen(["python3", str(Path(__file__).parent / "run-demo-servers.py")], env=environment, stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
++    deadline = time.monotonic() + 120
++    while time.monotonic() < deadline:
++        listeners = subprocess.run(["ss", "-ltn"], capture_output=True, text=True).stdout
++        if all(f":{port} " in listeners for port in (8080, 8081, 8083, 8086)):
++            return
++        time.sleep(2)
++    raise DemoError("the demo servers did not start")
++
++
++def ensure_wallet_client(k3):
++    if k3.run("test -x /var/tmp/wallet-client", check=False).returncode == 0:
++        return "/var/tmp/wallet-client"
++    source = Path(__file__).parent
++    binary = Path("/tmp/wallet-client-rva23")
++    environment = os.environ.copy()
++    environment.update({"GOWORK": "off", "GOOS": "linux", "GOARCH": "riscv64", "CGO_ENABLED": "0"})
++    subprocess.run(["go", "build", "-o", str(binary), "wallet-client.go", "u2f.go"], cwd=source, env=environment, check=True)
++    host = k3.host.removeprefix("root@")
++    destination = f"root@[{host}]:/var/tmp/wallet-client" if ":" in host else k3.host
++    family = ["-6"] if ":" in host else []
++    subprocess.run(["scp", *family, "-o", "BatchMode=yes", "-o", "IdentitiesOnly=yes", "-o", "StrictHostKeyChecking=no", "-i", k3.key, str(binary), destination], check=True)
++    k3.run("chmod +x /var/tmp/wallet-client")
++    return "/var/tmp/wallet-client"
++
++
++def provision_fido2(k3, directory, host_directory=None):
++    k3.run(f"mkdir -p {directory}")
++    with tempfile.TemporaryDirectory() as temporary:
++        temporary = Path(temporary)
++        subprocess.run(["openssl", "ecparam", "-name", "prime256v1", "-genkey", "-noout", "-out", temporary / "private-key.pem"], check=True)
++        subprocess.run(["openssl", "req", "-batch", "-new", "-x509", "-key", temporary / "private-key.pem", "-out", temporary / "certificate.pem", "-days", "3650", "-subj", "/CN=RVA23 software FIDO2/"], check=True)
++        (temporary / "counter").write_bytes(b"\0\0\0\0")
++        for name in ("private-key.pem", "certificate.pem", "counter"):
++            k3.put(temporary / name, f"{directory}/{name}")
++        if host_directory:
++            host_directory = Path(host_directory)
++            host_directory.mkdir(parents=True, exist_ok=True)
++            (host_directory / "certificate.pem").write_bytes((temporary / "certificate.pem").read_bytes())
++
++
++def resp_ping(host, port, zone, timeout=6):
++    import socket
++    sock = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
++    sock.settimeout(timeout)
++    sock.connect((host, port, 0, socket.if_nametoindex(zone)))
++    try:
++        sock.sendall(b"PING\r\n")
++        if b"+PONG" not in sock.recv(100):
++            raise DemoError(f"no PONG from {port}")
++    finally:
++        sock.close()
++
++
++def screenshot(destination, device=os.environ.get("DEMO_KVM_DEVICE", "/dev/video4")):
++    result = mcp_result("kvm.takeScreenshot", {"path": device})
++    for item in result.get("content", []):
++        if item.get("type") == "image":
++            destination = Path(destination)
++            destination.parent.mkdir(parents=True, exist_ok=True)
++            destination.write_bytes(base64.b64decode(item["data"]))
++            return destination
++    raise DemoError("the KVM returned no image")
++
++
++def host_ip():
++    if os.environ.get("DEMO_HOST_IP"):
++        return os.environ["DEMO_HOST_IP"]
++    result = subprocess.run(["ip", "-4", "route", "get", "1.1.1.1"], capture_output=True, text=True)
++    for token in result.stdout.split():
++        if token.startswith("src"):
++            continue
++    fields = result.stdout.split()
++    return fields[fields.index("src") + 1]
++
++
++def interface():
++    return os.environ.get("DEMO_BOARD_INTERFACE", "wlP4p1s0")
++
++
++def host_interface():
++    return os.environ.get("DEMO_HOST_INTERFACE", "wlp0s20f3")
++
++
++def host_link_local():
++    if os.environ.get("DEMO_HOST_LL"):
++        return os.environ["DEMO_HOST_LL"]
++    result = subprocess.run(["ip", "-6", "addr", "show", os.environ.get("DEMO_HOST_INTERFACE", "wlp0s20f3")], capture_output=True, text=True)
++    for line in result.stdout.splitlines():
++        fields = line.split()
++        if len(fields) > 1 and fields[0] == "inet6" and fields[1].startswith("fe80:"):
++            return fields[1].split("/")[0]
++    raise DemoError("no IPv6 link-local address on the host interface")
++
++
++def board_link_local():
++    if os.environ.get("DEMO_BOARD_LL"):
++        return os.environ["DEMO_BOARD_LL"]
++    return K3_HOST.split("%")[0].removeprefix("root@")
++
++
++def board_url(port):
++    return f"http://[{host_link_local()}%25{interface()}]:{port}"
++
++
++def http_json(url, timeout=30):
++    with urllib.request.urlopen(url, timeout=timeout) as response:
++        return json.loads(response.read().decode())
++
++
++def event_state():
++    return http_json(EVENT_UI + "/api/state")
++
++
++def wait_http(url, timeout=60):
++    deadline = time.monotonic() + timeout
++    while time.monotonic() < deadline:
++        try:
++            http_json(url, timeout=5)
++            return
++        except (urllib.error.URLError, OSError, ValueError):
++            time.sleep(1)
++    raise DemoError(f"service did not answer in time: {url}")
++
++
++
++
++def serial_console():
++    consoles = mcp_call("serial.getConsoles", {}).get("consoles", [])
++    for console in consoles:
++        if console.get("isBuffering") or console.get("bufferedBytes") is not None:
++            return console["path"]
++    return consoles[0]["path"] if consoles else None
++
++
++class SerialShell:
++    def __init__(self, path):
++        self.path = path
++        mcp_call("serial.startBuffering", {"path": path})
++
++    def read(self):
++        return mcp_call("serial.readFrom", {"path": self.path}).get("output", "")
++
++    def send(self, data, wait=1.0):
++        mcp_call("serial.writeTo", {"path": self.path, "data": data, "waitMs": int(wait * 1000)})
++        return self.read()
++
++    def command(self, command, timeout=12):
++        marker = f"__SER_{time.monotonic_ns()}__"
++        mcp_call("serial.writeTo", {"path": self.path, "data": f"{command}; printf '\n{marker}:%s\n' \"$?\"", "waitMs": 0})
++        deadline = time.monotonic() + timeout
++        buffer = ""
++        while time.monotonic() < deadline:
++            buffer += self.read()
++            if marker in buffer:
++                return buffer.split(marker)[0]
++            time.sleep(0.3)
++        return buffer
++
++    def ensure_shell(self, timeout=30):
++        mcp_call("serial.clearBuffer", {"path": self.path})
++        output = self.send("\n", 1.0)
++        if "login:" in output:
++            output = self.send("root\n", 2.0)
++        deadline = time.monotonic() + timeout
++        while "# " not in output and time.monotonic() < deadline:
++            output += self.send("\n", 1.0)
++        if "# " not in output:
++            raise DemoError("the serial console did not answer with a shell")
++
++
++def serial_network():
++    path = serial_console()
++    if path is None:
++        return None
++    shell = SerialShell(path)
++    try:
++        shell.ensure_shell()
++    except DemoError:
++        return None
++    interface = ""
++    match = re.search(r"Interface (\S+)", shell.command("iw dev 2>/dev/null"))
++    if match:
++        interface = match.group(1)
++    if not interface:
++        match = re.search(r"\b(\w+): <BROADCAST", shell.command("ip link show 2>/dev/null"))
++        interface = match.group(1) if match else ""
++    addresses = shell.command(f"ip -6 addr show dev {interface} scope link 2>/dev/null" if interface else "ip -6 addr show scope link 2>/dev/null")
++    match = re.search(r"inet6 (fe80:[0-9a-f:]+)", addresses)
++    if match:
++        return match.group(1), interface
++    shell.command("systemctl restart k3-wifi.service 2>/dev/null || systemctl restart wifi.service 2>/dev/null || true")
++    time.sleep(8)
++    interface = ""
++    match = re.search(r"Interface (\S+)", shell.command("iw dev 2>/dev/null"))
++    if match:
++        interface = match.group(1)
++    addresses = shell.command(f"ip -6 addr show dev {interface} scope link 2>/dev/null" if interface else "ip -6 addr show scope link 2>/dev/null")
++    match = re.search(r"inet6 (fe80:[0-9a-f:]+)", addresses)
++    return (match.group(1), interface) if match else None
++
++
++def is_connection_error(text):
++    markers = ("Connection timed out", "Connection refused", "No route to host", "Network is unreachable", "Cannot assign requested address", "Connection closed", "kex_exchange_identification")
++    return any(marker in text for marker in markers)
++
++
++class K3:
++    def __init__(self, host=K3_HOST, key=K3_KEY):
++        self.host = host if host.startswith("root@") else f"root@{host}"
++        self.key = key
++        self.recovered = False
++
++    def ssh(self, command, timeout):
++        family = ["-6"] if ":" in self.host else []
++        return subprocess.run(
++            ["ssh", *family, "-o", "BatchMode=yes", "-o", "IdentitiesOnly=yes", "-o", "StrictHostKeyChecking=no",
++             "-o", "ConnectTimeout=10", "-i", self.key, self.host, command],
++            capture_output=True,
++            text=True,
++            timeout=timeout,
++        )
++
++    def recover(self):
++        network = serial_network()
++        if network is None:
++            return False
++        address, interface = network
++        self.host = f"root@{address}%{interface}" if interface else f"root@{address}"
++        self.recovered = True
++        return True
++
++    def run(self, command, timeout=120, check=True):
++        try:
++            result = self.ssh(command, timeout)
++        except subprocess.TimeoutExpired:
++            if self.recovered or not self.recover():
++                raise
++            result = self.ssh(command, timeout)
++        if result.returncode != 0 and is_connection_error(result.stderr) and not self.recovered and self.recover():
++            result = self.ssh(command, timeout)
++        if check and result.returncode != 0:
++            raise DemoError(f"board command failed: {command}\n{result.stderr[-2000:]}")
++        return result
++
++    def put(self, source, destination):
++        data = base64.b64encode(Path(source).read_bytes()).decode()
++        self.run(f"printf %s {data} | base64 -d > {destination}")
++
++    def wait(self, timeout=600):
++        deadline = time.monotonic() + timeout
++        while time.monotonic() < deadline:
++            try:
++                if self.run("true", timeout=15, check=False).returncode == 0:
++                    return
++            except (subprocess.TimeoutExpired, OSError):
++                pass
++            time.sleep(3)
++        raise DemoError("the board did not come back")
++
++
++class Demo:
++    def __init__(self, title, subtitle=None, speed=None):
++        self.title = title
++        self.subtitle = subtitle
++        self.speed = float(speed or os.environ.get("DEMO_SPEED", "1"))
++        self.started = time.monotonic()
++        self.steps = []
++        self.cues = []
++        self.payoff_text = None
++        self.k3 = K3()
++
++    def _sleep(self, seconds):
++        if seconds > 0:
++            time.sleep(seconds * self.speed)
++
++    def banner(self):
++        line = "=" * 72
++        print(f"\n{BOLD}{CYAN}{line}{RESET}")
++        print(f"{BOLD}{CYAN} {self.title}{RESET}")
++        if self.subtitle:
++            print(f"{DIM} {self.subtitle}{RESET}")
++        print(f"{BOLD}{CYAN}{line}{RESET}\n", flush=True)
++
++    def cue(self, text):
++        self.cues.append(text)
++        print(f"{CYAN}  CUE     {RESET}{text}", flush=True)
++
++    def step(self, text):
++        number = len(self.steps) + 1
++        self.steps.append((number, text))
++        print(f"{BOLD}{GREEN}  [{number:02d}]     {RESET}{text}", flush=True)
++        return number
++
++    def note(self, text):
++        print(f"{DIM}           {text}{RESET}", flush=True)
++
++    def result(self, text):
++        print(f"{GREEN}    OK   {RESET}{text}", flush=True)
++
++    def payoff(self, text):
++        self.payoff_text = text
++        print(f"\n{BOLD}{GREEN}  PAYOFF  {RESET}{BOLD}{text}{RESET}\n", flush=True)
++
++    def ui(self, label, url):
++        print(f"{YELLOW}  UI      {RESET}{label}: {url}", flush=True)
++
++    def pause(self, seconds):
++        self._sleep(seconds)
++
++    def shell(self, command, timeout=300, check=True):
++        result = subprocess.run(command, shell=True, capture_output=True, text=True, timeout=timeout)
++        if check and result.returncode != 0:
++            raise DemoError(f"command failed: {command}\n{result.stderr[-2000:]}")
++        return result
++
++    def finish(self):
++        elapsed = time.monotonic() - self.started
++        print(f"{BOLD}{GREEN}  DEMO COMPLETE{RESET} {self.title} in {elapsed:.1f}s", flush=True)
++        if self.payoff_text:
++            print(f"{BOLD}  {self.payoff_text}{RESET}\n", flush=True)
++        return 0
++
++
++def run(main_function):
++    try:
++        sys.exit(main_function())
++    except KeyboardInterrupt:
++        print(f"\n{RED}  INTERRUPTED{RESET}", flush=True)
++        sys.exit(130)
++    except DemoError as error:
++        print(f"\n{RED}  DEMO FAILED: {error}{RESET}", flush=True)
++        sys.exit(1)
+diff --git a/buildroot/scripts/k3-build-os-images.py b/buildroot/scripts/k3-build-os-images.py
+index 32af640d28d4a8f339f09053e377c01559a62cee..64497532b0c69a4e3b5a88b5e9fb2bb6bcc557b3 100755
+--- a/buildroot/scripts/k3-build-os-images.py
++++ b/buildroot/scripts/k3-build-os-images.py
+@@ -144,7 +144,7 @@     linux.mkdir(parents=True, exist_ok=True)
+     for old in linux.glob("*.efi"):
+         old.unlink()
+     usr_device = "/dev/sda2" if int(version) % 2 else "/dev/sda3"
+-    base = f"console=ttyS0,115200 root=/dev/sda6 rootfstype=ext4 mount.usr={usr_device} mount.usrfstype=erofs rw"
++    base = f"console=ttyS0,115200 root=/dev/sda6 rootfstype=ext4 mount.usr={usr_device} mount.usrfstype=erofs rw rootwait systemd.default_device_timeout_sec=0"
+     policy = "systemd.image_policy=usr=unprotected+read-only-on:root=unprotected+encrypted+absent+read-only-off:home=unprotected+encrypted+absent:swap=unprotected+encrypted+absent:esp=unprotected+unused:=unused+absent"
+     stub = target / "usr/lib/systemd/boot/efi/linuxriscv64.efi.stub"
+     profiles = {
+@@ -247,7 +247,7 @@     linux = binaries / "efi-part/EFI/Linux"
+     linux.mkdir(parents=True, exist_ok=True)
+     for old in linux.glob("*.efi"):
+         old.unlink()
+-    base = "console=ttyS0,115200 earlycon=sbi root=/dev/sda6 rootfstype=ext4 mount.usr=/dev/sda2 mount.usrfstype=erofs rw"
++    base = "console=ttyS0,115200 earlycon=sbi root=/dev/sda6 rootfstype=ext4 mount.usr=/dev/sda2 mount.usrfstype=erofs rw rootwait systemd.default_device_timeout_sec=0"
+     device_timeout = os.environ.get("RVA23_BOOT_DEVICE_TIMEOUT", "300")
+     if device_timeout:
+         if not device_timeout.isdigit() or int(device_timeout) < 90:
+
