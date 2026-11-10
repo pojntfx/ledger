@@ -1,0 +1,78 @@
+From e0ca36b6a550e4f7200abab25f4477e61a0208d5 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Tue, 10 Nov 2026 15:25:35 -0700
+Subject: [PATCH] feat: Use `systemd-boot` on K3 too and use `updatectl` for `systemd-sysupdate` demo
+---
+diff --git a/buildroot/scripts/3-demo-update.py b/buildroot/scripts/3-demo-update.py
+index 584f348a8312c761ffeb2bdd3d0f2bafd8be2503..29f67915103b760c3854d50c5457fbacc88e5df7 100755
+--- a/buildroot/scripts/3-demo-update.py
++++ b/buildroot/scripts/3-demo-update.py
+@@ -54,6 +54,10 @@         demo.step("Read the version that runs now")
+         demo.run_command("updatectl list --no-pager", 120, lines=4)
+         demo.run_command("grep IMAGE_VERSION /usr/lib/os-release", 60, lines=2)
+ 
++        demo.step("Clear the stale version 3 artifacts")
++        demo.run_command("rm -f /boot/EFI/Linux/rva23_3.efi /boot/EFI/Linux/rva23-recovery_3.efi /boot/EFI/Linux/rva23-debug_3.efi", 120)
++        demo.run_command("ls /boot/EFI/Linux", 60, lines=6)
++
+         demo.step("Stage the next image from the laptop")
+         demo.run_command("updatectl update host", 1200, lines=20)
+ 
+@@ -61,7 +65,7 @@         demo.step("Read the staged version")
+         demo.run_command("updatectl list --no-pager", 120, lines=4)
+ 
+         demo.step("Boot the new image")
+-        demo.run_command("newest=$(ls /boot/EFI/Linux/rva23_*.efi | sort -V | tail -n1); echo $newest; bootctl set-default $(basename $newest)", 120, lines=2)
++        demo.run_command("bootctl set-default rva23_3.efi", 120)
+         demo.step("Reboot into the new image")
+         demo.k3.run("systemctl reboot", check=False)
+         time.sleep(5)
+diff --git a/buildroot/scripts/k3-build-os-images.py b/buildroot/scripts/k3-build-os-images.py
+index 64497532b0c69a4e3b5a88b5e9fb2bb6bcc557b3..22500ac2431b1cb0943a423bbad681c629618b47 100755
+--- a/buildroot/scripts/k3-build-os-images.py
++++ b/buildroot/scripts/k3-build-os-images.py
+@@ -143,7 +143,7 @@     linux = binaries / "efi-part/EFI/Linux"
+     linux.mkdir(parents=True, exist_ok=True)
+     for old in linux.glob("*.efi"):
+         old.unlink()
+-    usr_device = "/dev/sda2" if int(version) % 2 else "/dev/sda3"
++    usr_device = f"/dev/disk/by-partlabel/rva23_{version}"
+     base = f"console=ttyS0,115200 root=/dev/sda6 rootfstype=ext4 mount.usr={usr_device} mount.usrfstype=erofs rw rootwait systemd.default_device_timeout_sec=0"
+     policy = "systemd.image_policy=usr=unprotected+read-only-on:root=unprotected+encrypted+absent+read-only-off:home=unprotected+encrypted+absent:swap=unprotected+encrypted+absent:esp=unprotected+unused:=unused+absent"
+     stub = target / "usr/lib/systemd/boot/efi/linuxriscv64.efi.stub"
+@@ -155,6 +155,15 @@     }
+ 
+     for name, cmdline in profiles.items():
+         build_uki(host, binaries, usr, stub, name, cmdline, key_dir)
++    boot_source = target / "usr/lib/systemd/boot/efi/systemd-bootriscv64.efi"
++    boot_dir = binaries / "efi-part/EFI/BOOT"
++    systemd_dir = binaries / "efi-part/EFI/systemd"
++    boot_dir.mkdir(parents=True, exist_ok=True)
++    systemd_dir.mkdir(parents=True, exist_ok=True)
++    shutil.copy2(boot_source, boot_dir / "bootriscv64.efi")
++    shutil.copy2(boot_source, systemd_dir / "systemd-bootriscv64.efi")
++    sign_pe(host, key_dir, boot_dir / "bootriscv64.efi")
++    sign_pe(host, key_dir, systemd_dir / "systemd-bootriscv64.efi")
+     loader = binaries / "efi-part/loader"
+     loader.mkdir(parents=True, exist_ok=True)
+     entries = loader / "entries"
+@@ -269,9 +278,15 @@         })
+     for name, cmdline in profiles.items():
+         build_uki(host, binaries, usr, stub, name, cmdline, key_dir)
+         sign_pe(host, key_dir, linux / name)
+-    bootloader = binaries / "efi-part/EFI/BOOT/bootriscv64.efi"
+-    if bootloader.exists():
+-        sign_pe(host, key_dir, bootloader)
++    boot_source = target / "usr/lib/systemd/boot/efi/systemd-bootriscv64.efi"
++    boot_dir = binaries / "efi-part/EFI/BOOT"
++    systemd_dir = binaries / "efi-part/EFI/systemd"
++    boot_dir.mkdir(parents=True, exist_ok=True)
++    systemd_dir.mkdir(parents=True, exist_ok=True)
++    shutil.copy2(boot_source, boot_dir / "bootriscv64.efi")
++    shutil.copy2(boot_source, systemd_dir / "systemd-bootriscv64.efi")
++    sign_pe(host, key_dir, boot_dir / "bootriscv64.efi")
++    sign_pe(host, key_dir, systemd_dir / "systemd-bootriscv64.efi")
+     loader = binaries / "efi-part/loader"
+     loader.mkdir(parents=True, exist_ok=True)
+     sidecars = loader / "extensions"
+
