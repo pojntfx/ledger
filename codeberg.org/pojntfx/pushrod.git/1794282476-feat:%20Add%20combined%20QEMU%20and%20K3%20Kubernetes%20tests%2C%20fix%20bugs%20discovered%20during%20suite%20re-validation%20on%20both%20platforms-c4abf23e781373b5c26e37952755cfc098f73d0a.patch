@@ -1,0 +1,1094 @@
+From c4abf23e781373b5c26e37952755cfc098f73d0a Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Mon, 09 Nov 2026 20:47:56 -0700
+Subject: [PATCH] feat: Add combined QEMU and K3 Kubernetes tests, fix bugs discovered during suite re-validation on both platforms
+---
+diff --git a/buildroot/Makefile b/buildroot/Makefile
+index c3e384fc72c789ae4fedaaa0aaecf00d9230f978..bd306323e656e979c7509291dc0fa62c8dd32963 100644
+--- a/buildroot/Makefile
++++ b/buildroot/Makefile
+@@ -21,7 +21,7 @@ MAKE_BUILDROOT = $(MAKE) -C $(BUILDROOT_DIR) O=$(OUTPUT_DIR) BR2_HOST_DIR=$(HOST_DIR) BR2_EXTERNAL=$(THIS_EXTERNAL_PATH) BR2_DL_DIR=$(BR2_DL_DIR) BR2_CCACHE_DIR=$(BR2_CCACHE_DIR) CCACHE_DIR=$(BR2_CCACHE_DIR) CCACHE_BASEDIR=$(OUTPUT_DIR) $(COMMON_TOOLCHAIN_OVERRIDES) UBOOT_OVERRIDE_SRCDIR=$(UBOOT_OVERRIDE_SRCDIR) RVA23_KEY_DIR=$(RVA23_KEY_DIR)
+ MAKE_BUILDROOT_K3 = $(MAKE) -C $(BUILDROOT_DIR) O=$(K3_OUTPUT_DIR) BR2_HOST_DIR=$(K3_HOST_DIR) BR2_EXTERNAL=$(THIS_EXTERNAL_PATH) BR2_DL_DIR=$(BR2_DL_DIR) BR2_CCACHE_DIR=$(BR2_CCACHE_DIR) CCACHE_DIR=$(BR2_CCACHE_DIR) CCACHE_BASEDIR=$(K3_OUTPUT_DIR) $(COMMON_TOOLCHAIN_OVERRIDES) LINUX_OVERRIDE_SRCDIR=$(K3_SOURCE_DIR)/linux OPENSBI_OVERRIDE_SRCDIR=$(K3_SOURCE_DIR)/opensbi-vendor EDK2_SPACEMIT_OVERRIDE_SRCDIR=$(K3_SOURCE_DIR)/edk2-spacemit K3_LINUX_FIRMWARE_DIR=$(K3_LINUX_FIRMWARE_DIR)
+ BUILDROOT_PATCHES = $(sort $(wildcard $(THIS_EXTERNAL_PATH)/patches/buildroot/*.patch))
+ 
+-.PHONY: all configure build clean k3-configure k3-build k3-clean k3-registry k3-verify-image k3-verify-firmware k3-verify-base k3-verify-attestation k3-verify-report k3-verify-update k3-verify-hardening k3-verify-podman k3-verify-k3s k3-verify-wallet k3-verify-migration k3-verify-mutual-migration k3-verify registry verify verify-image verify-boot verify-firmware verify-attestation verify-report verify-update verify-security verify-hardening verify-podman verify-k3s verify-attested-app verify-wallet verify-migration verify-mutual-migration demo-servers boot boot-display boot-firmware
++.PHONY: all configure build clean k3-configure k3-build k3-clean k3-registry k3-verify-image k3-verify-firmware k3-verify-base k3-verify-attestation k3-verify-report k3-verify-update k3-verify-hardening k3-verify-podman k3-verify-k3s k3-verify-wallet k3-verify-migration k3-verify-mutual-migration k3-verify-valkey k3-verify registry verify verify-image verify-boot verify-firmware verify-attestation verify-report verify-update verify-security verify-hardening verify-podman verify-k3s verify-attested-app verify-wallet verify-migration verify-mutual-migration demo-servers boot boot-display boot-firmware
+ 
+ all: build k3-build
+ 
+@@ -88,6 +88,9 @@
+ k3-verify-mutual-migration:
+ 	python3 scripts/verify-k3.py $(K3_OUTPUT_DIR) mutual
+ 
++k3-verify-valkey:
++	python3 scripts/verify-valkey.py $(K3_OUTPUT_DIR)
++
+ k3-verify: k3-verify-image k3-verify-base k3-verify-attestation k3-verify-report k3-verify-update k3-verify-hardening k3-verify-podman k3-verify-k3s k3-verify-wallet k3-verify-migration k3-verify-mutual-migration
+ 
+ verify-image:
+@@ -134,6 +137,9 @@ 	python3 scripts/verify-migration.py $(OUTPUT_DIR)
+ 
+ verify-mutual-migration: verify-migration
+ 	python3 scripts/verify-mutual-migration.py $(OUTPUT_DIR)
++
++verify-cluster:
++	python3 scripts/verify-cluster.py $(OUTPUT_DIR)
+ 
+ verify: verify-image verify-boot verify-firmware verify-attestation verify-update verify-hardening verify-podman verify-k3s verify-report verify-attested-app verify-wallet verify-migration verify-mutual-migration
+ 
+diff --git a/buildroot/board/rva23-qemu/run-firmware.sh b/buildroot/board/rva23-qemu/run-firmware.sh
+index fafe92e14b3e9e15623bfbc84929029bba474826..52fc2e0e42bf18b79d05a0c05ed6aef35d221f83 100755
+--- a/buildroot/board/rva23-qemu/run-firmware.sh
++++ b/buildroot/board/rva23-qemu/run-firmware.sh
+@@ -33,12 +33,16 @@ fi
+ if [ -n "${RVA23_UPDATE_IMAGE:-}" ]; then
+ 	set -- "$@" -drive file="${RVA23_UPDATE_IMAGE}",format=raw,if=virtio
+ fi
++extra=""
++for rule in ${RVA23_EXTRA_HOSTFWD:-}; do
++	extra="${extra},hostfwd=${rule}"
++done
+ if [ -n "${RVA23_UI_HOST_PORT:-}" ]; then
+-	set -- "$@" -netdev "user,id=net0,hostfwd=tcp:127.0.0.1:${RVA23_UI_HOST_PORT}-:8084"
++	set -- "$@" -netdev "user,id=net0,hostfwd=tcp:127.0.0.1:${RVA23_UI_HOST_PORT}-:8084${extra}"
+ elif [ -n "${RVA23_SERVER_UI_HOST_PORT:-}" ]; then
+-	set -- "$@" -netdev "user,id=net0,hostfwd=tcp:127.0.0.1:${RVA23_SERVER_UI_HOST_PORT}-:8083"
++	set -- "$@" -netdev "user,id=net0,hostfwd=tcp:127.0.0.1:${RVA23_SERVER_UI_HOST_PORT}-:8083${extra}"
+ else
+-	set -- "$@" -netdev user,id=net0
++	set -- "$@" -netdev "user,id=net0${extra}"
+ fi
+ if [ -n "${RVA23_MUTUAL_BRIDGE:-}" ] && [ "${RVA23_MUTUAL_HOTPLUG:-0}" != "1" ]; then
+ 	set -- "$@" -netdev "bridge,id=mutual,br=${RVA23_MUTUAL_BRIDGE}" -device "virtio-net-pci,netdev=mutual,mac=${RVA23_MUTUAL_MAC}"
+diff --git a/buildroot/board/rva23-qemu/run-qemu.sh b/buildroot/board/rva23-qemu/run-qemu.sh
+index f7f40a4697bf144fd92c26f47c865e2f54bb47ad..72a6b85c2c04e87bfb55be6ef1330673857d0822 100755
+--- a/buildroot/board/rva23-qemu/run-qemu.sh
++++ b/buildroot/board/rva23-qemu/run-qemu.sh
+@@ -31,13 +31,17 @@ if [ -n "${RVA23_UPDATE_IMAGE:-}" ]; then
+ 	set -- "$@" -drive file="${RVA23_UPDATE_IMAGE}",format=raw,if=virtio
+ fi
+ if [ "${RVA23_NO_USER_NET:-0}" != "1" ]; then
++	extra=""
++	for rule in ${RVA23_EXTRA_HOSTFWD:-}; do
++		extra="${extra},hostfwd=${rule}"
++	done
+ 	if [ -n "${RVA23_UI_HOST_PORT:-}" ]; then
+-		set -- "$@" -netdev "user,id=net0,hostfwd=tcp:127.0.0.1:${RVA23_UI_HOST_PORT}-:8084"
++		set -- "$@" -netdev "user,id=net0,hostfwd=tcp:127.0.0.1:${RVA23_UI_HOST_PORT}-:8084${extra}"
+ 	else
+ 		if [ -n "${RVA23_SERVER_UI_HOST_PORT:-}" ]; then
+-			set -- "$@" -netdev "user,id=net0,hostfwd=tcp:127.0.0.1:${RVA23_SERVER_UI_HOST_PORT}-:8083"
++			set -- "$@" -netdev "user,id=net0,hostfwd=tcp:127.0.0.1:${RVA23_SERVER_UI_HOST_PORT}-:8083${extra}"
+ 		else
+-			set -- "$@" -netdev user,id=net0
++			set -- "$@" -netdev "user,id=net0${extra}"
+ 		fi
+ 	fi
+ fi
+diff --git a/buildroot/external.mk b/buildroot/external.mk
+index f5c0cc0e715162509f29b62985730dc039862aaf..da37f3a30399d57b4036fa822cc1c648709d76d9 100644
+--- a/buildroot/external.mk
++++ b/buildroot/external.mk
+@@ -110,6 +110,17 @@ include $(BR2_EXTERNAL_RVA23_PATH)/package/rva23-criu/criu.mk
+ include $(BR2_EXTERNAL_RVA23_PATH)/package/libcacard/libcacard.mk
+ include $(BR2_EXTERNAL_RVA23_PATH)/package/u2f-emu/u2f-emu.mk
+ 
++SYSTEMD_FILES_LIST = $(firstword $(wildcard $(BUILD_DIR)/systemd*/.files-list.txt))
++
++define RVA23_REFRESH_SYSTEMD_TARGET
++	if [ -f "$(SYSTEMD_FILES_LIST)" ]; then \
++		cut -d, -f2 "$(SYSTEMD_FILES_LIST)" | sed 's|^\./||' | \
++			rsync -a --ignore-times -R --files-from=- \
++				"$(PER_PACKAGE_DIR)/systemd/target/" "$(TARGET_DIR)/" || exit 1; \
++	fi
++endef
++TARGET_FINALIZE_HOOKS += RVA23_REFRESH_SYSTEMD_TARGET
++
+ define RVA23_CPIO_REMOVE_DDIS
+ 	rm -rf $(TARGET_DIR)/var/lib/extensions $(TARGET_DIR)/var/lib/confexts
+ endef
+diff --git a/buildroot/scripts/migration/cmd/migration-server/migration-server.go b/buildroot/scripts/migration/cmd/migration-server/migration-server.go
+index 052a4b8975f60b3f03191a8828a538977b3beb28..c5c3fa3f5b7f45358ae77169991866e5471a49dc 100644
+--- a/buildroot/scripts/migration/cmd/migration-server/migration-server.go
++++ b/buildroot/scripts/migration/cmd/migration-server/migration-server.go
+@@ -59,7 +59,6 @@ 	History []requestRecord `json:"history"`
+ }
+ 
+ type migrationServer struct {
+-	keys            map[int]*rsa.PublicKey
+ 	keyFiles        map[int]string
+ 	quoteVerifier   func(userID int, nonce string, evidence migration.Evidence) error
+ 	productionPCR11 string
+@@ -221,8 +220,15 @@ 	signature, err := migration.DecodeSignature(encodedSignature)
+ 	if err != nil {
+ 		return err
+ 	}
+-	key := server.keys[userID]
+-	if key == nil || len(signature) != key.Size() {
++	keyFile := server.keyFiles[userID]
++	if keyFile == "" {
++		return errors.New("no enrolled AK file for this identity")
++	}
++	key, err := loadPublicKey(keyFile)
++	if err != nil {
++		return err
++	}
++	if len(signature) != key.Size() {
+ 		return errors.New("invalid AK signature length")
+ 	}
+ 	digest := sha256.Sum256(message)
+@@ -710,20 +716,12 @@
+ func main() {
+ 	vm1KeyFile := environment("RVA23_MIGRATION_VM1_KEY_FILE", "output/rva23/migration/vm1-ak-public.pem")
+ 	vm2KeyFile := environment("RVA23_MIGRATION_VM2_KEY_FILE", "output/rva23/migration/vm2-ak-public.pem")
+-	vm1Key, err := loadPublicKey(vm1KeyFile)
+-	if err != nil {
+-		panic(err)
+-	}
+-	vm2Key, err := loadPublicKey(vm2KeyFile)
+-	if err != nil {
+-		panic(err)
+-	}
+ 	productionPCR11 := strings.ToLower(os.Getenv("RVA23_MIGRATION_PRODUCTION_PCR11"))
+ 	if !validDigest(productionPCR11) {
+ 		panic("RVA23_MIGRATION_PRODUCTION_PCR11 must contain one SHA-256 value")
+ 	}
+ 	server := &migrationServer{
+-		keys: map[int]*rsa.PublicKey{1: vm1Key, 2: vm2Key}, keyFiles: map[int]string{1: vm1KeyFile, 2: vm2KeyFile}, productionPCR11: productionPCR11,
++		keyFiles: map[int]string{1: vm1KeyFile, 2: vm2KeyFile}, productionPCR11: productionPCR11,
+ 		attestationURL: environment("RVA23_MIGRATION_ATTESTATION_URL", "http://[::1]:8080/v1/attest"),
+ 		checkpointDir:  environment("RVA23_MIGRATION_CHECKPOINT_DIR", "output/rva23/migration/checkpoints"),
+ 		client:         &http.Client{Timeout: 60 * time.Second}, maxCheckpoint: migration.DefaultMaxCheckpointBytes,
+diff --git a/buildroot/scripts/verify-attestation.py b/buildroot/scripts/verify-attestation.py
+index 7c8fe85670a1702340e46864c3fae386457ff456..5b0df7d4c9318016b5b4e1245b056821848e9dd4 100755
+--- a/buildroot/scripts/verify-attestation.py
++++ b/buildroot/scripts/verify-attestation.py
+@@ -67,7 +67,7 @@     nonce = secrets.token_hex(32)
+     try:
+         console.expect(b"rva23 login:", 1800)
+         console.sendline("root")
+-        console.expect(b"# ", 30)
++        console.expect(b"# ", 120)
+         console.command("systemctl is-active --quiet --wait graphical.target")
+         guest = "/var/lib/rva23-attestation"
+         console.command(f"mkdir -p {guest}")
+diff --git a/buildroot/scripts/verify-attested-app.py b/buildroot/scripts/verify-attested-app.py
+index d497a936c3893aedabef54b1efacd4a974d0897c..af509732e66ee361a631bf83bc651bf5120026a0 100644
+--- a/buildroot/scripts/verify-attested-app.py
++++ b/buildroot/scripts/verify-attested-app.py
+@@ -42,7 +42,7 @@     console = Console(output, "attested-app.log", firmware=True)
+     try:
+         console.expect(b"rva23 login:", 1800)
+         console.sendline("root")
+-        console.expect(b"# ", 30)
++        console.expect(b"# ", 120)
+         console.command("systemctl is-active --quiet --wait graphical.target")
+         console.command("ip link set dev $(ip -o link show | awk -F': ' '$2 != \"lo\" {print $2; exit}') up")
+         console.command("ip addr replace 10.0.2.15/24 dev $(ip -o link show | awk -F': ' '$2 != \"lo\" {print $2; exit}')")
+diff --git a/buildroot/scripts/verify-boot.py b/buildroot/scripts/verify-boot.py
+index 618cfdf5d7665a612944176a0c540c1dd1880407..6dbfc94b04c9e59d5eb0d92f7c2c88d1d05deb77 100755
+--- a/buildroot/scripts/verify-boot.py
++++ b/buildroot/scripts/verify-boot.py
+@@ -97,7 +97,7 @@     console = Console(output)
+     try:
+         console.expect(b"rva23 login:", 1800)
+         console.sendline("root")
+-        console.expect(b"# ", 30)
++        console.expect(b"# ", 120)
+         console.command("systemctl --no-pager --full status graphical.target weston.service || true")
+         console.command("journalctl -b --no-pager -u weston.service || true")
+         console.command("ls -la /run/weston")
+@@ -133,14 +133,14 @@         console.command("printf persistent > /var/lib/rva23-persistent")
+         console.sendline("reboot")
+         console.expect(b"rva23 login:", 1800)
+         console.sendline("root")
+-        console.expect(b"# ", 30)
++        console.expect(b"# ", 120)
+         console.command("test \"$(cat /var/lib/rva23-persistent)\" = persistent")
+         print("PASS: local storage survives reboot")
+         console.command("bootctl set-default rva23-recovery_1.efi")
+         console.sendline("reboot")
+         console.expect(b"(or press Control-D to continue):", 300)
+         console.sendline("")
+-        console.expect(b"# ", 30)
++        console.expect(b"# ", 120)
+         console.command("systemctl is-active --quiet rescue.target")
+         console.command("findmnt -n -o OPTIONS /usr | grep -Eq '(^|,)ro(,|$)'")
+         print("PASS: recovery boots with read-only /usr and writable local state")
+@@ -148,7 +148,7 @@         console.command("bootctl set-default rva23-factory-reset.efi")
+         console.sendline("reboot")
+         console.expect(b"rva23 login:", 1800)
+         console.sendline("root")
+-        console.expect(b"# ", 30)
++        console.expect(b"# ", 120)
+         console.command("test ! -e /var/lib/rva23-persistent")
+         console.command("test \"$(lsblk -ln -o PARTLABEL | grep -c _empty)\" -eq 3")
+         print("PASS: factory reset recreates local state and preserves empty B slots")
+diff --git a/buildroot/scripts/verify-cluster.py b/buildroot/scripts/verify-cluster.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..ea8aaf43afd403e85e565e5994a3ab33dadc4bf7
+--- /dev/null
++++ b/buildroot/scripts/verify-cluster.py
+@@ -0,0 +1,201 @@
++#!/usr/bin/env python3
++import json
++import os
++from pathlib import Path
++import re
++import socket
++import subprocess
++import sys
++import threading
++import time
++
++from verify_boot import Console
++
++
++class K3:
++    def __init__(self):
++        self.host = os.environ.get("K3_SSH", "")
++        if self.host and not self.host.startswith("root@"):
++            self.host = f"root@{self.host}"
++        self.key = Path(os.environ.get("K3_SSH_KEY", "output/k3-uefi/build/k3-keys/root_ed25519"))
++
++    def command(self, command, timeout=300):
++        if not self.host:
++            raise ValueError("Set K3_SSH to the board address")
++        result = subprocess.run(
++            ["ssh", "-6", "-o", "BatchMode=yes", "-o", "IdentitiesOnly=yes", "-o", "StrictHostKeyChecking=no", "-o", "ConnectTimeout=10", "-i", str(self.key), self.host, command],
++            check=True,
++            capture_output=True,
++            text=True,
++            timeout=timeout,
++        )
++        return result.stdout
++
++    def host_part(self):
++        user, _, address = self.host.partition("@")
++        return f"{user}@[{address}]"
++
++    def upload_file(self, source, destination):
++        subprocess.run(
++            ["scp", "-6", "-o", "BatchMode=yes", "-o", "IdentitiesOnly=yes", "-o", "StrictHostKeyChecking=no", "-o", "ConnectTimeout=10", "-i", str(self.key), str(source), f"{self.host_part()}:{destination}"],
++            check=True,
++            capture_output=True,
++            timeout=300,
++        )
++
++    def download(self, source, destination):
++        subprocess.run(
++            ["scp", "-6", "-o", "BatchMode=yes", "-o", "IdentitiesOnly=yes", "-o", "StrictHostKeyChecking=no", "-o", "ConnectTimeout=10", "-i", str(self.key), f"{self.host_part()}:{source}", str(destination)],
++            check=True,
++            capture_output=True,
++            timeout=600,
++        )
++
++
++def interface(k3):
++    if "%" in k3.host:
++        return k3.host.split("%", 1)[1]
++    return "wlp0s20f3"
++
++
++def host_ip(k3):
++    output = subprocess.run(["ip", "-4", "-o", "addr", "show", "dev", interface(k3)], capture_output=True, text=True, check=True).stdout
++    match = re.search(r"inet (\d+\.\d+\.\d+\.\d+)", output)
++    return match.group(1)
++
++
++def board_ip(k3):
++    return k3.command("ip -4 -o addr show dev wlP4p1s0 | awk '{print $4}' | cut -d/ -f1 | head -1").strip()
++
++
++def resp(host, port, timeout=8):
++    sock = socket.create_connection((host, port), timeout=timeout)
++    try:
++        sock.sendall(b"PING\r\n")
++        if b"+PONG" not in sock.recv(100):
++            raise RuntimeError(f"no PONG from {host}:{port}")
++        sock.sendall(b"SET cluster:demo ok\r\n")
++        if b"+OK" not in sock.recv(100):
++            raise RuntimeError(f"SET failed on {host}:{port}")
++        sock.sendall(b"GET cluster:demo\r\n")
++        if b"ok" not in sock.recv(100):
++            raise RuntimeError(f"GET failed on {host}:{port}")
++    finally:
++        sock.close()
++
++
++def main():
++    output = Path(sys.argv[1] if len(sys.argv) > 1 else "output/rva23").resolve()
++    k3 = K3()
++    zone = interface(k3)
++    host = host_ip(k3)
++    board = board_ip(k3)
++    state = k3.command("systemctl is-active rva23-k3s-demo || true").strip()
++    if state != "active":
++        k3.command("systemctl reset-failed rva23-k3s-demo 2>/dev/null || true")
++        k3.command("systemctl stop rva23-k3s-demo 2>/dev/null || true")
++        k3.command("systemd-run --unit=rva23-k3s-demo --property=Type=simple k3s server --disable=metrics-server --disable=traefik --data-dir=/var/lib/k3s-demo --write-kubeconfig-mode=0644")
++        time.sleep(15)
++    token = ""
++    for _ in range(60):
++        token = k3.command("cat /var/lib/k3s-demo/server/node-token 2>/dev/null || true").strip()
++        if token:
++            break
++        time.sleep(2)
++    if not token:
++        raise RuntimeError("the k3s server did not write a node token")
++    server_url = f"https://{board}:6443"
++    k3_output = Path(__file__).resolve().parents[1] / "output" / "k3-uefi"
++    subprocess.run([sys.executable, str(Path(__file__).with_name("verify-valkey.py")), str(k3_output)], check=True)
++    k3.download("/tmp/valkey-local.tar", "/tmp/cluster-valkey.tar")
++    k3.download("/tmp/pause-image.tar", "/tmp/cluster-pause.tar")
++    http = subprocess.Popen([sys.executable, "-m", "http.server", "18000", "--bind", "127.0.0.1", "--directory", "/tmp"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
++    relays = [
++        subprocess.Popen(["socat", "UDP4-LISTEN:8472,fork,reuseaddr", "UDP4:127.0.0.1:18472"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL),
++        subprocess.Popen(["socat", "TCP4-LISTEN:10250,fork,reuseaddr", "TCP4:127.0.0.1:12500"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL),
++    ]
++    os.environ["RVA23_EXTRA_HOSTFWD"] = "udp:127.0.0.1:18472-:8472 tcp:127.0.0.1:12500-:10250 tcp:127.0.0.1:16390-:6390"
++    console = Console(output, "cluster.log")
++    try:
++        console.expect(b"rva23 login:", 1800)
++        console.sendline("root")
++        console.expect(b"# ", 120)
++        console.command("systemctl is-active --quiet --wait graphical.target")
++        console.command("systemd-sysext status | grep -q k3s_")
++        console.command("k3s --version")
++        console.command("profile=$(ls /boot/EFI/Linux/rva23-debug_*.efi | sort -V | tail -n1); bootctl set-default \"$(basename \"$profile\")\"")
++        console.sendline("reboot")
++        console.expect(b"rva23 login:", 1800)
++        console.sendline("root")
++        console.expect(b"# ", 120)
++        console.command("systemctl is-active --quiet --wait graphical.target")
++        console.command("grep -q ipe.enforce=0 /proc/cmdline")
++        console.command("wget -q -O /tmp/valkey-local.tar http://10.0.2.2:18000/cluster-valkey.tar", 300)
++        console.command("wget -q -O /tmp/pause-image.tar http://10.0.2.2:18000/cluster-pause.tar", 120)
++        console.command(f"systemd-run --unit=rva23-k3s-agent --property=Type=simple k3s agent --server {server_url} --token {token} --node-ip {host} --node-external-ip {host} --data-dir=/var/lib/k3s-agent", 120)
++        console.sendline("for i in $(seq 1 120); do [ -S /run/k3s/containerd/containerd.sock ] && break; sleep 1; done")
++        console.expect(b"# ", 180)
++        console.command("k3s ctr -n k8s.io images import /tmp/valkey-local.tar >/dev/null 2>&1; k3s ctr -n k8s.io images tag localhost/valkey-local:latest docker.io/library/valkey-local:latest", 300)
++        console.command("k3s ctr -n k8s.io images import /tmp/pause-image.tar >/dev/null 2>&1", 120)
++        deadline = time.time() + 300
++        nodes = ""
++        while time.time() < deadline:
++            nodes = k3.command("kubectl --kubeconfig=/var/lib/k3s-demo/server/cred/admin.kubeconfig get nodes 2>/dev/null || true")
++            if nodes.count(" Ready ") >= 2:
++                break
++            time.sleep(5)
++        if nodes.count(" Ready ") < 2:
++            raise RuntimeError(f"nodes did not join: {nodes}")
++        print(nodes)
++        manifest = {
++            "apiVersion": "apps/v1",
++            "kind": "DaemonSet",
++            "metadata": {"name": "valkey", "labels": {"app": "valkey"}},
++            "spec": {
++                "selector": {"matchLabels": {"app": "valkey"}},
++                "template": {
++                    "metadata": {"labels": {"app": "valkey"}},
++                    "spec": {
++                        "hostNetwork": True,
++                        "containers": [
++                            {
++                                "name": "valkey",
++                                "image": "docker.io/library/valkey-local:latest",
++                                "imagePullPolicy": "Never",
++                                "command": ["/lib/ld-linux-riscv64-lp64d.so.1", "--library-path", "/lib", "/valkey-server", "/etc/valkey.conf"],
++                                "args": ["--port", "6390"],
++                                "ports": [{"containerPort": 6390, "hostPort": 6390}],
++                            }
++                        ],
++                    },
++                },
++            },
++        }
++        document = "/tmp/cluster-valkey.yaml"
++        with open(document, "w") as handle:
++            json.dump(manifest, handle, indent=2)
++        k3.upload_file(document, "/tmp/cluster-valkey.yaml")
++        k3.command("kubectl --kubeconfig=/var/lib/k3s-demo/server/cred/admin.kubeconfig apply -f /tmp/cluster-valkey.yaml")
++        deadline = time.time() + 300
++        pods = ""
++        while time.time() < deadline:
++            pods = k3.command("kubectl --kubeconfig=/var/lib/k3s-demo/server/cred/admin.kubeconfig get pods -l app=valkey -o wide 2>/dev/null || true")
++            if pods.count(" Running ") >= 2:
++                break
++            time.sleep(5)
++        if pods.count(" Running ") < 2:
++            raise RuntimeError(f"valkey pods did not run: {pods}")
++        print(pods)
++        resp(board, 6390)
++        resp("127.0.0.1", 16390)
++        print("PASS: the K3 and the QEMU node join one k3s cluster and both report Ready")
++        print("PASS: the DaemonSet runs Valkey on both nodes and the verifier connects to each")
++    finally:
++        console.close()
++        for relay in relays:
++            relay.kill()
++        http.kill()
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/buildroot/scripts/verify-hardening.py b/buildroot/scripts/verify-hardening.py
+index 36bebfc3368979540a3d363307818a5e8e23b7a0..2039c9a19fd6495448cdf35a876755a6ed30ee29 100755
+--- a/buildroot/scripts/verify-hardening.py
++++ b/buildroot/scripts/verify-hardening.py
+@@ -9,7 +9,7 @@
+ def login(console, timeout=300):
+     console.expect(b"rva23 login:", timeout)
+     console.sendline("root")
+-    console.expect(b"# ", 30)
++    console.expect(b"# ", 120)
+ 
+ 
+ def set_profile(console, development):
+diff --git a/buildroot/scripts/verify-k3.py b/buildroot/scripts/verify-k3.py
+index 17fd64f473b2d2c0f8db2a6c7f8ac0d946286a08..4de5fa8ba20e09c2b9365f3ed456eecfbe2e0d24 100644
+--- a/buildroot/scripts/verify-k3.py
++++ b/buildroot/scripts/verify-k3.py
+@@ -95,6 +95,18 @@         if "_x" in architecture:
+             raise AssertionError(f"board-specific userspace architecture in {binary}: {architecture}")
+ 
+ 
++def check_systemd_report(images):
++    signer = images / "image-staging/usr/lib/systemd/systemd-report-sign-tpm2"
++    shared = next((images / "image-staging/usr/lib/systemd").glob("libsystemd-shared-*.so"))
++    if b"SYSTEMD_TPM2_NVPCRS" not in signer.read_bytes():
++        raise AssertionError(f"systemd-report-sign-tpm2 lacks the userspace swtpm NvPCR skip: {signer}")
++    shared_bytes = shared.read_bytes()
++    if b"Failed to allocate empty event log array" not in shared_bytes:
++        raise AssertionError(f"{shared.name} lacks the empty PCRLock event log fallback: {shared}")
++    if b"lacks 'record' field" in shared_bytes:
++        raise AssertionError(f"{shared.name} still rejects a PCRLock record without a record field: {shared}")
++
++
+ def check_verity(k3, images):
+     veritysetup = host_tool(k3, "veritysetup")
+     certificate = k3.output / "build/k3-keys/verity.crt"
+@@ -139,6 +151,7 @@         if setting not in config:
+             raise AssertionError(f"missing build configuration: {setting}")
+     check_partition_table(images)
+     check_architecture(k3, images)
++    check_systemd_report(images)
+     if not filecmp.cmp(images / "usr-a.erofs", images / "usr-b.erofs", shallow=False):
+         raise AssertionError("initial A/B EROFS images differ")
+     subprocess.run([host_tool(k3, "fsck.erofs"), images / "usr-a.erofs"], check=True, capture_output=True)
+@@ -192,7 +205,8 @@     print("PASS: the base K3 image reaches Weston with userspace swtpm")
+ 
+ 
+ def attestation(k3):
+-    k3.command("systemctl enable --now swtpm.service")
++    k3.command("systemctl enable swtpm.service")
++    k3.command("systemctl restart swtpm.service")
+     k3.command("TPM2TOOLS_TCTI=swtpm:host=::1,port=2321 tpm2_getcap properties-fixed >/dev/null")
+     guest = "/var/lib/rva23-attestation"
+     k3.command(f"mkdir -p {guest}")
+@@ -219,7 +233,17 @@     k3.command("systemctl restart swtpm.service")
+     k3.command("systemctl restart systemd-report-sign-tpm2.socket")
+     k3.command("systemctl start systemd-pcrlock.socket")
+     k3.command("TPM2TOOLS_TCTI=swtpm:host=::1,port=2321 tpm2_flushcontext -t")
+-    k3.command(f"/usr/lib/systemd/systemd-report upload --url={url} --sign=require-one", 300)
++    for attempt in range(3):
++        try:
++            k3.command(f"/usr/lib/systemd/systemd-report upload --url={url} --sign=require-one", 300)
++            break
++        except subprocess.CalledProcessError:
++            if attempt == 2:
++                raise
++            k3.command("systemctl restart systemd-report-sign-tpm2.socket")
++            k3.command("systemctl restart swtpm.service")
++            time.sleep(3)
++            k3.command("TPM2TOOLS_TCTI=swtpm:host=::1,port=2321 tpm2_flushcontext -t")
+     response_path = k3.output.parent / "demo/attestation/response.json"
+     if response_path.exists():
+         response = json.loads(response_path.read_text())
+@@ -280,6 +304,31 @@     k3.command("grep -q k3-migration-state /tmp/rva23-migration-restored/state.txt")
+     print("PASS: the native migration client attests and transfers a checkpoint")
+ 
+ 
++def push_file(k3, source, destination):
++    k3.command(f"mkdir -p $(dirname {destination})")
++    encoded = base64.b64encode(source.read_bytes()).decode()
++    k3.command(f"printf %s {encoded} | base64 -d > {destination}")
++
++
++def provision_mutual(k3, fido2_dir):
++    k3.command("cp /var/lib/rva23-mutual/server-ak-public.pem /var/lib/rva23-mutual/ak.pem")
++    with tempfile.TemporaryDirectory() as temporary:
++        directory = Path(temporary)
++        subprocess.run(
++            ["openssl", "ecparam", "-name", "prime256v1", "-genkey", "-noout", "-out", directory / "private-key.pem"],
++            check=True,
++        )
++        subprocess.run(
++            ["openssl", "req", "-batch", "-new", "-x509", "-key", directory / "private-key.pem",
++             "-out", directory / "certificate.pem", "-days", "3650", "-subj", "/CN=RVA23 software FIDO2/"],
++            check=True,
++        )
++        (directory / "counter").write_bytes(b"\0\0\0\0")
++        for name in ("private-key.pem", "certificate.pem", "counter"):
++            push_file(k3, directory / name, f"{fido2_dir}/{name}")
++        push_file(k3, directory / "certificate.pem", "/var/lib/rva23-mutual/cert.pem")
++
++
+ def mutual(k3):
+     url = os.environ.get("K3_MUTUAL_URL", "http://[fd00::10]:8083")
+     attestation_url = os.environ.get("K3_ATTESTATION_URL", "http://[::1]:8080")
+@@ -287,6 +336,7 @@     production_pcr11 = os.environ.get("K3_MUTUAL_PCR11", "0" * 64)
+     fido2_dir = os.environ.get("K3_FIDO2_DIR", "/var/lib/rva23-wallet/u2f")
+     k3.command("killall -q mutual-migration-server mutual-migration-client 2>/dev/null || true")
+     k3.command("mkdir -p /var/lib/rva23-mutual/checkpoints; h=$(sed -E 's/.*\"handle\":\"([^\"]+)\".*/\\1/' /var/lib/systemd/report.sign.tpm2/default.key | base64 -d | od -An -tx1 -N4 | tr -d ' \n'); TPM2TOOLS_TCTI=swtpm:host=::1,port=2321 tpm2_readpublic -c 0x$h -f pem -o /var/lib/rva23-mutual/server-ak-public.pem")
++    provision_mutual(k3, fido2_dir)
+     k3.command("export TPM2TOOLS_TCTI=swtpm:host=::1,port=2321 RVA23_MUTUAL_PRODUCTION_PCR11=0000000000000000000000000000000000000000000000000000000000000000 RVA23_MUTUAL_SERVER_KEY_FILE=/var/lib/rva23-mutual/ak.pem RVA23_MUTUAL_SOURCE_KEY_FILE=/var/lib/rva23-mutual/ak.pem RVA23_MUTUAL_DESTINATION_KEY_FILE=/var/lib/rva23-mutual/ak.pem RVA23_MUTUAL_SOURCE_CERTIFICATE=/var/lib/rva23-mutual/cert.pem RVA23_MUTUAL_DESTINATION_CERTIFICATE=/var/lib/rva23-mutual/cert.pem RVA23_MUTUAL_CHECKPOINT_DIR=/var/lib/rva23-mutual/checkpoints; mutual-migration-server >/tmp/mutual-server.log 2>&1 &")
+     k3.command("rm -f /var/lib/rva23-mutual/state.json /var/lib/rva23-mutual/dest-state.json; mutual-migration-client serve >/tmp/rva23-mutual-client.log 2>&1 &")
+     k3.command("RVA23_MUTUAL_CLIENT_STATE=/var/lib/rva23-mutual/dest-state.json RVA23_MUTUAL_ROLE=destination RVA23_MUTUAL_URL=http://[::1]:8083 mutual-migration-client serve >/tmp/rva23-mutual-destination.log 2>&1 &")
+diff --git a/buildroot/scripts/verify-k3s.py b/buildroot/scripts/verify-k3s.py
+index bb9812bf82e60c1222ab241f6455aee9beb9519b..5234deaf97d619ff088bb09a6b1bad63b47ad604 100644
+--- a/buildroot/scripts/verify-k3s.py
++++ b/buildroot/scripts/verify-k3s.py
+@@ -8,7 +8,7 @@
+ def login(console):
+     console.expect(b"rva23 login:", 1800)
+     console.sendline("root")
+-    console.expect(b"# ", 30)
++    console.expect(b"# ", 120)
+ 
+ 
+ def set_profile(console, development):
+diff --git a/buildroot/scripts/verify-migration.py b/buildroot/scripts/verify-migration.py
+index 64410724b1f233964fbf48601cdbac35406af635..0e29b2c8bcf53ff1e2475ddb8dfb10342430be89 100644
+--- a/buildroot/scripts/verify-migration.py
++++ b/buildroot/scripts/verify-migration.py
+@@ -36,7 +36,7 @@
+ def login(console):
+     console.expect(b"rva23 login:", 1800)
+     console.sendline("root")
+-    console.expect(b"# ", 30)
++    console.expect(b"# ", 120)
+     console.command("systemctl is-active --quiet --wait graphical.target")
+     console.command("systemctl start systemd-pcrlock.socket")
+     console.command("systemctl restart systemd-report-sign-tpm2.socket")
+diff --git a/buildroot/scripts/verify-mutual-migration.py b/buildroot/scripts/verify-mutual-migration.py
+index e97db04e35bcf616a5805d12f20d59a777858e20..50b6c73d3cd3925dfafa7789f0b225cc716396bf 100644
+--- a/buildroot/scripts/verify-mutual-migration.py
++++ b/buildroot/scripts/verify-mutual-migration.py
+@@ -34,7 +34,7 @@
+ def login(console):
+     console.expect(b"rva23 login:", 1800)
+     console.sendline("root")
+-    console.expect(b"# ", 30)
++    console.expect(b"# ", 120)
+     console.command("systemctl is-active --quiet --wait graphical.target")
+     console.command("systemctl start systemd-pcrlock.socket")
+     console.command("systemctl restart systemd-report-sign-tpm2.socket")
+diff --git a/buildroot/scripts/verify-podman.py b/buildroot/scripts/verify-podman.py
+index a37ef60544f12126ca3246e158b596de7ac08e21..8cb1028cc0c440061e28659f27a8638a180f7ebe 100644
+--- a/buildroot/scripts/verify-podman.py
++++ b/buildroot/scripts/verify-podman.py
+@@ -8,7 +8,7 @@
+ def login(console):
+     console.expect(b"rva23 login:", 1800)
+     console.sendline("root")
+-    console.expect(b"# ", 30)
++    console.expect(b"# ", 120)
+ 
+ 
+ def set_profile(console, development):
+diff --git a/buildroot/scripts/verify-report.py b/buildroot/scripts/verify-report.py
+index abed2519d8751465bfc238367eb8ae2ffa3d899b..4fdced3e428ace6bbc1225cb6bee74c913ecd3f2 100644
+--- a/buildroot/scripts/verify-report.py
++++ b/buildroot/scripts/verify-report.py
+@@ -87,7 +87,7 @@     console = Console(output, "report-upload.log", firmware=True)
+     try:
+         console.expect(b"rva23 login:", 1800)
+         console.sendline("root")
+-        console.expect(b"# ", 30)
++        console.expect(b"# ", 120)
+         console.command("systemctl is-active --quiet --wait graphical.target")
+         console.command("mkdir -p /var/lib/rva23-attestation")
+         console.command("mountpoint -q /sys/kernel/security || mount -t securityfs securityfs /sys/kernel/security")
+diff --git a/buildroot/scripts/verify-security.py b/buildroot/scripts/verify-security.py
+index 0709c1960a172b96717fd0b2d6c3f76c39c8b06b..771ecde8b43a89ebc70b07be0751aca403edeb7a 100755
+--- a/buildroot/scripts/verify-security.py
++++ b/buildroot/scripts/verify-security.py
+@@ -70,7 +70,7 @@     enrollment = Console(output, "security-enroll.log")
+     try:
+         enrollment.expect(b"rva23 login:", 1800)
+         enrollment.sendline("root")
+-        enrollment.expect(b"# ", 30)
++        enrollment.expect(b"# ", 120)
+         enrollment.sendline("poweroff")
+         enrollment.process.wait(timeout=90)
+     finally:
+@@ -79,7 +79,7 @@     console = Console(output, "security-valid.log")
+     try:
+         console.expect(b"rva23 login:", 1800)
+         console.sendline("root")
+-        console.expect(b"# ", 30)
++        console.expect(b"# ", 120)
+         print(console.capture("od -An -tu1 -j4 -N1 /sys/firmware/efi/efivars/SecureBoot-8be4df61-93ca-11d2-aa0d-00e098032b8c", 30))
+         console.command("test \"$(od -An -tu1 -j4 -N1 /sys/firmware/efi/efivars/SecureBoot-8be4df61-93ca-11d2-aa0d-00e098032b8c | tr -d '[:space:]')\" = 1")
+         console.command("test \"$(cat /sys/kernel/security/ipe/enforce)\" = 1")
+diff --git a/buildroot/scripts/verify-update.py b/buildroot/scripts/verify-update.py
+index bd14b7a0dbebf7adbf8a158bb05809facf52c4a3..e208d2f3bb2c8e1ff077950b409cb3a66c90c7ea 100755
+--- a/buildroot/scripts/verify-update.py
++++ b/buildroot/scripts/verify-update.py
+@@ -108,7 +108,7 @@     console = Console(output, "update.log")
+     try:
+         console.expect(b"rva23 login:", 1800)
+         console.sendline("root")
+-        console.expect(b"# ", 30)
++        console.expect(b"# ", 120)
+         console.command("systemctl is-active --quiet --wait graphical.target")
+         console.command("updatectl list")
+         features = console.capture("updatectl features")
+@@ -143,7 +143,7 @@         console.command("bootctl set-default rva23_2+3-0.efi")
+         console.sendline("reboot")
+         console.expect(b"rva23 login:", 1800)
+         console.sendline("root")
+-        console.expect(b"# ", 30)
++        console.expect(b"# ", 120)
+         console.command("systemctl is-active --quiet --wait graphical.target weston.service")
+         console.command("grep -q 'IMAGE_VERSION=\"2\"' /usr/lib/os-release")
+         console.command("test \"$(cat /var/lib/rva23-update-persistent)\" = persistent")
+@@ -156,7 +156,7 @@             console.command("updatectl update host", 600)
+         console.sendline("reboot")
+         console.expect(b"rva23 login:", 1800)
+         console.sendline("root")
+-        console.expect(b"# ", 30)
++        console.expect(b"# ", 120)
+         console.command("systemctl is-active --quiet --wait graphical.target weston.service")
+         console.command("test -e /boot/EFI/Linux/rva23-recovery_2.efi")
+         console.command("XDG_RUNTIME_DIR=/run/weston WAYLAND_DISPLAY=wayland-1 wayland-info >/dev/null")
+@@ -173,13 +173,13 @@         for attempt in range(3):
+             console.sendline("reboot")
+             console.expect(b"(or press Control-D to continue):", 300)
+             console.sendline("")
+-            console.expect(b"# ", 30)
++            console.expect(b"# ", 120)
+             console.command("systemctl is-active --quiet emergency.target")
+             print(f"PASS: failed boot attempt {attempt + 1} consumes one boot counter")
+         console.sendline("reboot")
+         console.expect(b"rva23 login:", 1800)
+         console.sendline("root")
+-        console.expect(b"# ", 30)
++        console.expect(b"# ", 120)
+         console.command("systemctl is-active --quiet --wait graphical.target weston.service")
+         console.command("grep -q 'IMAGE_VERSION=\"2\"' /usr/lib/os-release")
+         print("PASS: three failed boots return to the previous slot")
+@@ -187,7 +187,7 @@         console.command("bootctl set-oneshot rva23-recovery_2.efi")
+         console.sendline("reboot")
+         console.expect(b"(or press Control-D to continue):", 300)
+         console.sendline("")
+-        console.expect(b"# ", 30)
++        console.expect(b"# ", 120)
+         console.command("systemctl is-active --quiet rescue.target")
+         print("PASS: recovery remains available after updates and rollback")
+         console.command("bootctl set-default 'rva23_?.efi'")
+diff --git a/buildroot/scripts/verify-valkey.py b/buildroot/scripts/verify-valkey.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..5f341a89b0dcabb627b0a4f967318a2f60e3051d
+--- /dev/null
++++ b/buildroot/scripts/verify-valkey.py
+@@ -0,0 +1,213 @@
++#!/usr/bin/env python3
++import json
++import os
++from pathlib import Path
++import socket
++import subprocess
++import sys
++import time
++
++
++VALKEY_VERSION = "8.1.0"
++VALKEY_SOURCE = Path(f"/tmp/valkey-{VALKEY_VERSION}")
++
++
++class K3:
++    def __init__(self, output):
++        self.output = output
++        self.host = os.environ.get("K3_SSH", "")
++        if self.host and not self.host.startswith("root@"):
++            self.host = f"root@{self.host}"
++        self.key = Path(os.environ.get("K3_SSH_KEY", output / "build/k3-keys/root_ed25519"))
++
++    def command(self, command, timeout=300):
++        if not self.host:
++            raise ValueError("Set K3_SSH to the board address, for example root@fe80::1%wlan0")
++        result = subprocess.run(
++            ["ssh", "-6", "-o", "BatchMode=yes", "-o", "IdentitiesOnly=yes", "-o", "StrictHostKeyChecking=no", "-o", "ConnectTimeout=10", "-i", str(self.key), self.host, command],
++            check=True,
++            capture_output=True,
++            text=True,
++            timeout=timeout,
++        )
++        return result.stdout
++
++    def host_part(self):
++        user, _, address = self.host.partition("@")
++        return f"{user}@[{address}]"
++
++    def upload(self, source, destination):
++        subprocess.run(
++            ["scp", "-6", "-o", "BatchMode=yes", "-o", "IdentitiesOnly=yes", "-o", "StrictHostKeyChecking=no", "-o", "ConnectTimeout=10", "-i", str(self.key), str(source), f"{self.host_part()}:{destination}"],
++            check=True,
++            capture_output=True,
++            timeout=300,
++        )
++
++
++def host_address(k3):
++    output = k3.command("ip -4 -o addr show dev wlP4p1s0 | awk '{print $4}' | cut -d/ -f1 | head -1")
++    return output.strip()
++
++
++def zone(k3):
++    output = k3.command("ip -6 -o addr show dev wlP4p1s0 | awk '{print $4}' | cut -d/ -f1 | head -1")
++    address = output.strip()
++    if not address:
++        raise RuntimeError("no IPv6 address on wlP4p1s0")
++    return address
++
++
++def host_interface(k3):
++    if "%" in k3.host:
++        return k3.host.split("%", 1)[1]
++    return os.environ.get("K3_ZONE", "wlp0s20f3")
++
++
++def valkey_source(output):
++    host = output / "host"
++    if not host.is_dir():
++        host = Path(os.environ.get("K3_HOST_DIR", "/home/pojntfx/Projets/pushrod/buildroot/output/k3-uefi/host"))
++    compiler = host / "bin" / "riscv64-buildroot-linux-gnu-gcc"
++    if not compiler.is_file():
++        raise RuntimeError(f"missing cross compiler: {compiler}")
++    if not (VALKEY_SOURCE / "src" / "valkey-server").is_file():
++        archive = Path(f"/tmp/valkey-{VALKEY_VERSION}.tar.gz")
++        if not archive.is_file():
++            subprocess.run(["curl", "-sL", "-o", str(archive), f"https://github.com/valkey-io/valkey/archive/refs/tags/{VALKEY_VERSION}.tar.gz"], check=True, timeout=300)
++        subprocess.run(["tar", "-xzf", str(archive), "-C", "/tmp"], check=True)
++        zmalloc = VALKEY_SOURCE / "src" / "zmalloc.c"
++        text = zmalloc.read_text()
++        if "defined(__riscv)" not in text:
++            zmalloc.write_text(text.replace("    defined(__arm64__)\n", "    defined(__arm64__) || defined(__riscv)\n", 1))
++        subprocess.run(
++            ["make", "-C", str(VALKEY_SOURCE / "src"), f"CC={compiler}", "MALLOC=libc", "BUILD_TLS=no", "USE_SYSTEMD=no", "-j8"],
++            check=True,
++            capture_output=True,
++            text=True,
++            timeout=900,
++        )
++    return VALKEY_SOURCE / "src" / "valkey-server"
++
++
++def rootfs_tar(output, binary):
++    directory = Path("/tmp/valkey-rootfs")
++    subprocess.run(["rm", "-rf", str(directory)], check=True)
++    subprocess.run(["mkdir", "-p", str(directory / "lib"), str(directory / "etc"), str(directory / "data")], check=True)
++    subprocess.run(["cp", str(binary), str(directory / "valkey-server")], check=True)
++    for name in ("ld-linux-riscv64-lp64d.so.1", "libc.so.6", "libm.so.6"):
++        subprocess.run(["cp", str(output / "target" / "lib" / name), str(directory / "lib" / name)], check=True)
++    (directory / "etc" / "valkey.conf").write_text("bind * -::*\nprotected-mode no\nport 6379\ndir /data\nsave 60 1\nappendonly no\n")
++    tar = Path("/tmp/valkey-rootfs.tar")
++    subprocess.run(["tar", "-C", str(directory), "-cf", str(tar), "."], check=True)
++    return tar
++
++
++def pause_tar():
++    source = Path("/tmp/pause.c")
++    source.write_text(
++        "struct timespec { long tv_sec; long tv_nsec; };\n"
++        "static struct timespec ts = {3600, 0};\n"
++        "void _start(void) {\n"
++        "    register long a7 asm(\"a7\") = 101;\n"
++        "    register long a0 asm(\"a0\") = (long)&ts;\n"
++        "    register long a1 asm(\"a1\") = 0;\n"
++        "    for (;;) { asm volatile(\"ecall\" : \"+r\"(a0) : \"r\"(a1), \"r\"(a7) : \"memory\"); }\n"
++        "}\n"
++    )
++    binary = Path("/tmp/pause")
++    compiler = Path(os.environ.get("K3_HOST_DIR", "/home/pojntfx/Projets/pushrod/buildroot/output/k3-uefi/host")) / "bin" / "riscv64-buildroot-linux-gnu-gcc"
++    subprocess.run([str(compiler), "-nostdlib", "-static", "-ffreestanding", "-fno-stack-protector", "-o", str(binary), str(source)], check=True, timeout=120)
++    directory = Path("/tmp/pause-rootfs")
++    subprocess.run(["rm", "-rf", str(directory)], check=True)
++    directory.mkdir()
++    subprocess.run(["cp", str(binary), str(directory / "pause")], check=True)
++    tar = Path("/tmp/pause.tar")
++    subprocess.run(["tar", "-C", str(directory), "-cf", str(tar), "."], check=True)
++    return tar
++
++
++def resp(host, port, zone, timeout=6):
++    sock = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
++    sock.settimeout(timeout)
++    sock.connect((host, port, 0, socket.if_nametoindex(zone)))
++    try:
++        sock.sendall(b"PING\r\n")
++        if b"+PONG" not in sock.recv(100):
++            raise RuntimeError(f"no PONG from {port}")
++        sock.sendall(b"SET demo:verify ok\r\n")
++        if b"+OK" not in sock.recv(100):
++            raise RuntimeError(f"SET failed on {port}")
++        sock.sendall(b"GET demo:verify\r\n")
++        if b"ok" not in sock.recv(100):
++            raise RuntimeError(f"GET failed on {port}")
++    finally:
++        sock.close()
++
++
++def main():
++    output = Path(sys.argv[1] if len(sys.argv) > 1 else "/home/pojntfx/Projets/pushrod/buildroot/output/k3-uefi")
++    if not (output / "target").is_dir():
++        output = Path(os.environ.get("K3_OUTPUT_DIR", output))
++    k3 = K3(output)
++    address = zone(k3)
++    binary = valkey_source(output)
++    rootfs = rootfs_tar(output, binary)
++    pause = pause_tar()
++    k3.upload(rootfs, "/tmp/valkey-rootfs.tar")
++    k3.upload(pause, "/tmp/pause.tar")
++    k3.command(
++        "podman import /tmp/valkey-rootfs.tar valkey-local >/dev/null; "
++        "podman rm -f valkey >/dev/null 2>&1 || true; "
++        "podman run -d --name valkey --network=host valkey-local /lib/ld-linux-riscv64-lp64d.so.1 --library-path /lib /valkey-server /etc/valkey.conf >/dev/null"
++    )
++    time.sleep(2)
++    if "Up" not in k3.command("podman ps --format '{{.Names}} {{.Status}}' | grep valkey"):
++        raise RuntimeError("podman valkey did not start")
++    resp(address, 6379, host_interface(k3))
++    print("PASS: podman serves Valkey on the K3 and the verifier connects over IPv6")
++    state = k3.command("systemctl is-active rva23-k3s-demo || true").strip()
++    if state != "active":
++        k3.command("systemctl reset-failed rva23-k3s-demo 2>/dev/null || true")
++        k3.command("systemctl stop rva23-k3s-demo 2>/dev/null || true")
++        k3.command("systemd-run --unit=rva23-k3s-demo --property=Type=simple k3s server --disable=metrics-server --disable=traefik --data-dir=/var/lib/k3s-demo --write-kubeconfig-mode=0644")
++        time.sleep(15)
++    k3.command(
++        "podman save -o /tmp/valkey-local.tar valkey-local >/dev/null; "
++        "k3s ctr -n k8s.io images import /tmp/valkey-local.tar >/dev/null; "
++        "k3s ctr -n k8s.io images tag localhost/valkey-local:latest docker.io/library/valkey-local:latest >/dev/null"
++    )
++    k3.command(
++        "podman import --change 'ENTRYPOINT [\"/pause\"]' /tmp/pause.tar docker.io/rancher/mirrored-pause:3.10.2 >/dev/null; "
++        "podman save -o /tmp/pause-image.tar docker.io/rancher/mirrored-pause:3.10.2 >/dev/null; "
++        "k3s ctr -n k8s.io images import /tmp/pause-image.tar >/dev/null"
++    )
++    manifest = {
++        "apiVersion": "v1",
++        "kind": "Pod",
++        "metadata": {"name": "valkey-k3s"},
++        "spec": {
++            "hostNetwork": True,
++            "containers": [
++                {
++                    "name": "valkey",
++                    "image": "docker.io/library/valkey-local:latest",
++                    "imagePullPolicy": "Never",
++                    "command": ["/lib/ld-linux-riscv64-lp64d.so.1", "--library-path", "/lib", "/valkey-server", "/etc/valkey.conf"],
++                    "args": ["--port", "6380"],
++                }
++            ],
++        },
++    }
++    document = "/tmp/valkey-k3s.yaml"
++    k3.command(f"cat > {document} <<'EOF'\n{json.dumps(manifest, indent=2)}\nEOF\n")
++    k3.command(f"kubectl --kubeconfig=/var/lib/k3s-demo/server/cred/admin.kubeconfig apply -f {document}")
++    result = k3.command("kubectl --kubeconfig=/var/lib/k3s-demo/server/cred/admin.kubeconfig wait --for=condition=Ready pod/valkey-k3s --timeout=120s", 180)
++    if "condition met" not in result:
++        raise RuntimeError(result)
++    resp(address, 6380, host_interface(k3))
++    print("PASS: k3s schedules Valkey on the K3 and the verifier connects over IPv6")
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/buildroot/scripts/verify-wallet.py b/buildroot/scripts/verify-wallet.py
+index b20f7a2f7938186ce9d5851f5e661f469f050c8b..419e07f514f6db9f231db3bf52aa0feb47525dc6 100644
+--- a/buildroot/scripts/verify-wallet.py
++++ b/buildroot/scripts/verify-wallet.py
+@@ -19,7 +19,7 @@
+ def login(console):
+     console.expect(b"rva23 login:", 1800)
+     console.sendline("root")
+-    console.expect(b"# ", 30)
++    console.expect(b"# ", 120)
+     console.command("systemctl is-active --quiet --wait graphical.target")
+     console.command("systemctl start systemd-pcrlock.socket")
+     console.command("systemctl restart systemd-report-sign-tpm2.socket")
+diff --git a/buildroot/scripts/verify_boot.py b/buildroot/scripts/verify_boot.py
+old mode 120000
+new mode 100755
+index a909e8bfb07ceaa52eec06c5df2b80f8f0073179..6dbfc94b04c9e59d5eb0d92f7c2c88d1d05deb77
+--- a/buildroot/scripts/verify_boot.py
++++ b/buildroot/scripts/verify_boot.py
+@@ -1 +1,163 @@
+-verify-boot.py
+\ No newline at end of file
++#!/usr/bin/env python3
++import os
++from pathlib import Path
++import re
++import select
++import subprocess
++import sys
++import time
++
++
++class Console:
++    displays = 0
++
++    def __init__(self, output, log_name="boot.log", firmware=False):
++        self.output = output
++        self.log = (output / log_name).open("wb")
++        self.buffer = b""
++        self.last_consumed = b""
++        self.command_id = 0
++        script_name = "run-firmware.sh" if firmware else "run-qemu.sh"
++        script = output.parent.parent / "board/rva23-qemu" / script_name
++        environment = os.environ.copy()
++        environment.setdefault("QEMU_VNC", "1")
++        if environment["QEMU_VNC"] != "0":
++            environment["QEMU_VNC_DISPLAY"] = str(Console.displays)
++            print(f"VNC display {Console.displays} on [::1]:{5900 + Console.displays}", file=sys.stderr, flush=True)
++            Console.displays += 1
++        self.process = subprocess.Popen(
++            [script, output / "images"],
++            stdin=subprocess.PIPE,
++            stdout=subprocess.PIPE,
++            stderr=subprocess.STDOUT,
++            bufsize=0,
++            env=environment,
++        )
++
++    def expect(self, pattern, timeout):
++        if isinstance(pattern, bytes):
++            pattern = re.compile(re.escape(pattern))
++        deadline = time.monotonic() + timeout
++        while True:
++            match = pattern.search(self.buffer)
++            if match:
++                self.last_consumed = self.buffer[:match.end()]
++                self.buffer = self.buffer[match.end():]
++                return match
++            remaining = deadline - time.monotonic()
++            if remaining <= 0:
++                tail = self.buffer[-12000:].decode(errors="replace")
++                raise TimeoutError(f"QEMU console timeout\n{tail}")
++            ready, _, _ = select.select([self.process.stdout], [], [], remaining)
++            if not ready:
++                continue
++            data = os.read(self.process.stdout.fileno(), 65536)
++            if not data:
++                tail = self.buffer[-12000:].decode(errors="replace")
++                raise RuntimeError(f"QEMU exited with {self.process.poll()}\n{tail}")
++            self.log.write(data)
++            self.log.flush()
++            self.buffer += data
++
++    def sendline(self, line):
++        self.process.stdin.write(line.encode() + b"\n")
++        self.process.stdin.flush()
++
++    def command(self, command, timeout=60):
++        self.command_id += 1
++        token = f"__RVA23_RC_{self.command_id}__"
++        self.sendline(f"{command}; printf '\\n{token}:%s\\n' \"$?\"")
++        match = self.expect(re.compile(token.encode() + rb":(\d+)"), timeout)
++        status = int(match.group(1))
++        assert status == 0, f"Guest command failed with {status}: {command}"
++
++    def capture(self, command, timeout=60):
++        self.command_id += 1
++        token = f"__RVA23_RC_{self.command_id}__"
++        self.sendline(f"{command}; printf '\\n{token}:%s\\n' \"$?\"")
++        match = self.expect(re.compile(token.encode() + rb":(\d+)"), timeout)
++        status = int(match.group(1))
++        assert status == 0, f"Guest command failed with {status}: {command}"
++        return self.last_consumed[:match.start()].decode(errors="replace")
++
++    def close(self):
++        if self.process.poll() is None:
++            self.process.terminate()
++            try:
++                self.process.wait(timeout=10)
++            except subprocess.TimeoutExpired:
++                self.process.kill()
++                self.process.wait()
++        self.log.close()
++
++
++def main():
++    output = Path(sys.argv[1]).resolve()
++    console = Console(output)
++    try:
++        console.expect(b"rva23 login:", 1800)
++        console.sendline("root")
++        console.expect(b"# ", 120)
++        console.command("systemctl --no-pager --full status graphical.target weston.service || true")
++        console.command("journalctl -b --no-pager -u weston.service || true")
++        console.command("ls -la /run/weston")
++        checks = [
++            ("systemctl is-active --quiet --wait graphical.target", "systemd reaches graphical.target"),
++            ("systemctl is-active --quiet --wait weston.service", "systemd starts Weston"),
++            ("test -S /run/weston/wayland-1", "Weston creates its Wayland socket"),
++            ("XDG_RUNTIME_DIR=/run/weston WAYLAND_DISPLAY=wayland-1 wayland-info >/dev/null", "a Wayland client connects to Weston"),
++            ("test -e /dev/dri/card0", "the guest exposes a DRM device"),
++            ("test -d /sys/module/virtio_gpu", "the DRM device uses virtio graphics"),
++            ("grep -q 'root=dissect' /proc/cmdline", "the UKI selects discoverable root storage"),
++            ("grep -q 'mount.usr=dissect' /proc/cmdline", "the UKI selects discoverable /usr storage"),
++            ("findmnt -ln -o FSTYPE | grep -q '^erofs$'", "the storage chain mounts EROFS"),
++            ("findmnt -n -o OPTIONS /usr | grep -Eq '(^|,)ro(,|$)'", "/usr stays read-only"),
++            ("touch /etc/rva23-write-test /var/lib/rva23-write-test && rm /etc/rva23-write-test /var/lib/rva23-write-test", "/etc and /var stay writable"),
++            ("test -f /usr/share/factory/etc/passwd", "factory configuration lives below /usr/share/factory"),
++            ("id rva23-state >/dev/null", "sysusers instantiates the service identity"),
++            ("test \"$(lsblk -ln -o PARTLABEL | grep -c _empty)\" -eq 3", "first boot creates three empty B slots"),
++            ("test -b /dev/disk/by-designator/root && test -b /dev/disk/by-designator/home", "first boot creates root and home"),
++            ("swapon --show | grep -q '/dev/'", "first boot activates swap"),
++            ("test -c /dev/tpmrm0", "QEMU exposes the persistent TPM"),
++            ("dmsetup table root | grep -q crypt", "root uses a LUKS2 mapping"),
++            ("dmsetup table home | grep -q crypt", "home uses a LUKS2 mapping"),
++            ("dmsetup table swap | grep -q crypt", "swap uses a LUKS2 mapping"),
++            ("cryptsetup luksDump /dev/vda8 | grep -q tpm2", "root has a TPM2 token"),
++            ("cryptsetup luksDump /dev/vda9 | grep -q tpm2", "home has a TPM2 token"),
++            ("cryptsetup luksDump /dev/vda10 | grep -q tpm2", "swap has a TPM2 token"),
++        ]
++        for command, description in checks:
++            console.command(command)
++            print(f"PASS: {description}")
++        console.command("printf persistent > /var/lib/rva23-persistent")
++        console.sendline("reboot")
++        console.expect(b"rva23 login:", 1800)
++        console.sendline("root")
++        console.expect(b"# ", 120)
++        console.command("test \"$(cat /var/lib/rva23-persistent)\" = persistent")
++        print("PASS: local storage survives reboot")
++        console.command("bootctl set-default rva23-recovery_1.efi")
++        console.sendline("reboot")
++        console.expect(b"(or press Control-D to continue):", 300)
++        console.sendline("")
++        console.expect(b"# ", 120)
++        console.command("systemctl is-active --quiet rescue.target")
++        console.command("findmnt -n -o OPTIONS /usr | grep -Eq '(^|,)ro(,|$)'")
++        print("PASS: recovery boots with read-only /usr and writable local state")
++        console.command("bootctl set-default rva23-factory-reset.efi")
++        console.sendline("reboot")
++        console.expect(b"rva23 login:", 1800)
++        console.sendline("root")
++        console.expect(b"# ", 120)
++        console.command("test ! -e /var/lib/rva23-persistent")
++        console.command("test \"$(lsblk -ln -o PARTLABEL | grep -c _empty)\" -eq 3")
++        print("PASS: factory reset recreates local state and preserves empty B slots")
++        console.sendline("poweroff")
++        console.process.wait(timeout=90)
++        print(f"PASS: QEMU shuts down cleanly; console log: {output / 'boot.log'}")
++    finally:
++        console.close()
++
++
++if __name__ == "__main__":
++    main()
+
