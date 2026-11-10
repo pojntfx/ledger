@@ -1,0 +1,401 @@
+From fd43e5b3360681aec996bf08693638049de40e79 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Tue, 10 Nov 2026 13:17:56 -0700
+Subject: [PATCH] feat: Add validated QEMU-based `systemd-report` attestation demo
+---
+diff --git a/buildroot/board/rva23-qemu/run-firmware.sh b/buildroot/board/rva23-qemu/run-firmware.sh
+index 52fc2e0e42bf18b79d05a0c05ed6aef35d221f83..f282d5ec4026a5b813d20a961522f351c1fb217c 100755
+--- a/buildroot/board/rva23-qemu/run-firmware.sh
++++ b/buildroot/board/rva23-qemu/run-firmware.sh
+@@ -22,6 +22,11 @@ while [ ! -S "${TPM_STATE}/swtpm.sock" ]; do
+ 	sleep 0.1
+ done
+ 
++if [ -n "${RVA23_SERIAL_SOCKET:-}" ]; then
++	SERIAL_OPTS="-serial unix:${RVA23_SERIAL_SOCKET},server=on,wait=off"
++else
++	SERIAL_OPTS="-serial stdio"
++fi
+ if [ -f "${IMAGES_DIR}/secure-boot-oem.txt" ]; then
+ 	set -- "$@" -smbios "type=11,value=$(cat "${IMAGES_DIR}/secure-boot-oem.txt")"
+ fi
+@@ -80,7 +85,7 @@ 	-device tpm-tis-device,tpmdev=tpm0 \
+ 	-device virtio-net-pci,netdev=net0 \
+ 	-monitor unix:"${RVA23_QEMU_MONITOR:-${IMAGES_DIR}/firmware-monitor.sock}",server=on,wait=off \
+ 	"$@" \
+-	-serial stdio
++	$SERIAL_OPTS
+ if [ -n "${RVA23_CPU_SET:-}" ]; then
+ 	set -- taskset -c "${RVA23_CPU_SET}" "$@"
+ fi
+diff --git a/buildroot/board/rva23-qemu/run-qemu.sh b/buildroot/board/rva23-qemu/run-qemu.sh
+index 72a6b85c2c04e87bfb55be6ef1330673857d0822..b269fffc3599e7bbd9d37880a84a19dd302e17a2 100755
+--- a/buildroot/board/rva23-qemu/run-qemu.sh
++++ b/buildroot/board/rva23-qemu/run-qemu.sh
+@@ -19,6 +19,11 @@ while [ ! -S "${TPM_STATE}/swtpm.sock" ]; do
+ 	sleep 0.1
+ done
+ 
++if [ -n "${RVA23_SERIAL_SOCKET:-}" ]; then
++	SERIAL_OPTS="-serial unix:${RVA23_SERIAL_SOCKET},server=on,wait=off"
++else
++	SERIAL_OPTS="-serial stdio"
++fi
+ if [ -f "${IMAGES_DIR}/secure-boot-oem.txt" ]; then
+ 	set -- -smbios "type=11,value=$(cat "${IMAGES_DIR}/secure-boot-oem.txt")"
+ fi
+@@ -77,7 +82,7 @@ 	-chardev socket,id=chrtpm,path="${TPM_STATE}/swtpm.sock" \
+ 	-tpmdev emulator,id=tpm0,chardev=chrtpm \
+ 	-device tpm-tis-device,tpmdev=tpm0 \
+ 	"$@" \
+-	-serial stdio
++	$SERIAL_OPTS
+ if [ -n "${RVA23_CPU_SET:-}" ]; then
+ 	set -- taskset -c "${RVA23_CPU_SET}" "$@"
+ fi
+diff --git a/buildroot/scripts/4-demo-attestation-qemu.py b/buildroot/scripts/4-demo-attestation-qemu.py
+new file mode 100755
+index 0000000000000000000000000000000000000000..4087d47060d1e6a083ab3c2eb42756c66789a8ab
+--- /dev/null
++++ b/buildroot/scripts/4-demo-attestation-qemu.py
+@@ -0,0 +1,50 @@
++#!/usr/bin/env python3
++from pathlib import Path
++import re
++import sys
++
++sys.path.insert(0, str(Path(__file__).parent))
++
++import demo_lib
++import demo_qemu_warm as warm
++
++
++def main():
++    demo = demo_lib.Demo(
++        "Demo 4b: the QEMU chain",
++        "SPL boots only a signed FIT, systemd-boot measures the UKI, and the guest sends a quote",
++    )
++    demo.banner()
++    demo.cue(f"Watch the event view: {demo_lib.EVENT_UI}")
++    demo.ui("event view", demo_lib.EVENT_UI)
++    demo.ui("report receiver", demo_lib.REPORT_UI)
++
++    demo.step("Attach to the warm guest")
++    guest, cold = warm.ensure("firmware")
++    if cold:
++        demo.note("the guest booted cold; pre-start it with make demo-qemu-warm to skip this wait")
++    demo.result("the guest is at a root shell")
++
++    demo.step("Restart the userspace signer inside the guest")
++    warm.run(demo, guest, "systemctl restart systemd-pcrlock.socket")
++    warm.run(demo, guest, "systemctl restart systemd-report-sign-tpm2.socket", lines=0)
++    demo.result("the signer is up")
++
++    demo.step("Upload a signed report to the verifier")
++    output = warm.run(demo, guest, "/usr/lib/systemd/systemd-report upload --url=http://10.0.2.2:8080/reports --sign=require-one", 300, lines=6)
++    match = re.search(r"finished successfully with code (\d+): (\{.*\})", output)
++    if not match:
++        raise demo_lib.DemoError(output[-1500:])
++    code, body = match.group(1), match.group(2)
++    demo.result(f"receiver answered {code}: {body}")
++
++    demo.step("Read the receipt in the unified view")
++    state = demo_lib.event_state()
++    demo.result(f"{len(state.get('events', []))} receipts in the view")
++
++    demo.payoff("The guest proved a firmware-measured boot chain and the receiver accepted it")
++    return demo.finish()
++
++
++if __name__ == "__main__":
++    demo_lib.run(main)
+diff --git a/buildroot/scripts/demo_lib.py b/buildroot/scripts/demo_lib.py
+index 681cebb56b9e3e277bd2dbc6283f3f618288627f..0d0ff1a60b73fa38d26af271bed7f903fca2e970 100755
+--- a/buildroot/scripts/demo_lib.py
++++ b/buildroot/scripts/demo_lib.py
+@@ -367,6 +367,15 @@         if self.subtitle:
+             print(f"{DIM} {self.subtitle}{RESET}")
+         print(f"{BOLD}{CYAN}{line}{RESET}\n", flush=True)
+ 
++    def run_command(self, command, timeout=120, check=True, lines=6):
++        print(f"{DIM}           $ {command}{RESET}", flush=True)
++        result = self.k3.run(command, timeout, check=check)
++        output = (result.stdout or "").strip()
++        if output:
++            for line in output.splitlines()[:lines]:
++                print(f"{DIM}           {line}{RESET}", flush=True)
++        return result
++
+     def cue(self, text):
+         self.cues.append(text)
+         print(f"{CYAN}  CUE     {RESET}{text}", flush=True)
+diff --git a/buildroot/scripts/demo_qemu_warm.py b/buildroot/scripts/demo_qemu_warm.py
+new file mode 100755
+index 0000000000000000000000000000000000000000..21ad2d62be90acc979768e0d229a4e05189aaba8
+--- /dev/null
++++ b/buildroot/scripts/demo_qemu_warm.py
+@@ -0,0 +1,263 @@
++#!/usr/bin/env python3
++import json
++import os
++from pathlib import Path
++import re
++import select
++import shutil
++import socket
++import subprocess
++import sys
++import time
++
++sys.path.insert(0, str(Path(__file__).parent))
++
++import demo_lib
++
++ROOT = Path(__file__).parent.parent
++IMAGES = ROOT / "output/rva23/images"
++WARM = ROOT / "output/demo/warm"
++GUESTS = {
++    "firmware": "run-firmware.sh",
++    "k3s": "run-qemu.sh",
++    "src": "run-firmware.sh",
++    "dst": "run-firmware.sh",
++}
++DEFAULT_START = ("firmware", "k3s")
++
++
++class WarmGuest:
++    def __init__(self, name, connection, process):
++        self.name = name
++        self.connection = connection
++        self.process = process
++        self.buffer = b""
++
++    def write(self, data):
++        self.connection.sendall(data.encode())
++
++    def sendline(self, line):
++        self.write(line + "\n")
++
++    def expect(self, pattern, timeout=600):
++        if isinstance(pattern, bytes):
++            pattern = re.compile(re.escape(pattern))
++        deadline = time.monotonic() + timeout
++        while True:
++            match = pattern.search(self.buffer)
++            if match:
++                self.buffer = self.buffer[match.end():]
++                return match
++            remaining = deadline - time.monotonic()
++            if remaining <= 0:
++                tail = self.buffer[-4000:].decode(errors="replace")
++                raise demo_lib.DemoError(f"guest '{self.name}' timed out\n{tail}")
++            ready, _, _ = select.select([self.connection], [], [], min(remaining, 1))
++            if not ready:
++                continue
++            data = self.connection.recv(65536)
++            if not data:
++                raise demo_lib.DemoError(f"guest '{self.name}' hung up")
++            self.buffer += data
++
++    def _drain(self):
++        while True:
++            ready, _, _ = select.select([self.connection], [], [], 0)
++            if not ready:
++                return
++            data = self.connection.recv(65536)
++            if not data:
++                return
++            self.buffer += data
++
++    def _run(self, command, timeout):
++        self._drain()
++        self.buffer = b""
++        token = f"__WARM_RC_{time.monotonic_ns()}__"
++        self.sendline(f"{command}; printf '\\n{token}:%s\\n' \"$?\"")
++        pattern = re.compile(token.encode() + rb":(\d+)")
++        deadline = time.monotonic() + timeout
++        while True:
++            match = pattern.search(self.buffer)
++            if match:
++                text = self.buffer[:match.start()].decode(errors="replace")
++                status = int(match.group(1))
++                self.buffer = self.buffer[match.end():]
++                return status, text
++            remaining = deadline - time.monotonic()
++            if remaining <= 0:
++                tail = self.buffer[-4000:].decode(errors="replace")
++                raise demo_lib.DemoError(f"guest '{self.name}' timed out\n{tail}")
++            ready, _, _ = select.select([self.connection], [], [], min(remaining, 1))
++            if ready:
++                data = self.connection.recv(65536)
++                if not data:
++                    raise demo_lib.DemoError(f"guest '{self.name}' hung up")
++                self.buffer += data
++
++    def command(self, command, timeout=120):
++        status, _ = self._run(command, timeout)
++        if status != 0:
++            raise demo_lib.DemoError(f"guest command failed with {status}: {command}")
++        return status
++
++    def capture(self, command, timeout=120):
++        _, text = self._run(command, timeout)
++        return text
++
++    def wait_for_login(self, timeout=900):
++        self.expect(b"rva23 login:", timeout)
++        self.sendline("root")
++        self.expect(b"# ", 120)
++
++
++def state_path(name):
++    return WARM / f"{name}.json"
++
++
++def stop(name):
++    path = state_path(name)
++    if path.exists():
++        try:
++            state = json.loads(path.read_text())
++            os.kill(state["pid"], 15)
++        except (ProcessLookupError, ValueError):
++            pass
++        path.unlink()
++    socket_path = WARM / f"{name}.sock"
++    if socket_path.exists():
++        socket_path.unlink()
++    for entry in Path("/proc").iterdir():
++        if not entry.name.isdigit():
++            continue
++        try:
++            cmdline = (entry / "cmdline").read_bytes().decode(errors="replace")
++        except (FileNotFoundError, ProcessLookupError, PermissionError, NotADirectoryError):
++            continue
++        if f"/output/demo/warm/{name}" in cmdline:
++            try:
++                os.kill(int(entry.name), 15)
++            except (ProcessLookupError, ValueError):
++                pass
++
++
++def connect(name):
++    socket_path = WARM / f"{name}.sock"
++    if not socket_path.exists():
++        return None
++    connection = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
++    connection.settimeout(30)
++    try:
++        connection.connect(str(socket_path))
++    except OSError:
++        connection.close()
++        return None
++    return WarmGuest(name, connection, None)
++
++
++def start(name, script):
++    WARM.mkdir(parents=True, exist_ok=True)
++    disk = WARM / f"{name}.img"
++    if not disk.exists():
++        shutil.copyfile(IMAGES / "disk.img", disk)
++    variables = WARM / f"{name}-vars.fd"
++    if not variables.exists():
++        shutil.copyfile(IMAGES / "RISCV_VIRT_VARS.fd", variables)
++    socket_path = WARM / f"{name}.sock"
++    if socket_path.exists():
++        socket_path.unlink()
++    environment = os.environ.copy()
++    environment.update({
++        "RVA23_SERIAL_SOCKET": str(socket_path),
++        "RVA23_DISK": str(disk),
++        "RVA23_EDK2_VARS": str(variables),
++        "RVA23_TPM_STATE": str(WARM / f"{name}-tpm"),
++        "QEMU_VNC": "1",
++        "QEMU_VNC_DISPLAY": {"firmware": "3", "k3s": "4", "src": "5", "dst": "6"}.get(name, "7"),
++    })
++    log = (WARM / f"{name}.log").open("ab")
++    process = subprocess.Popen([str(ROOT / "board/rva23-qemu" / script), str(IMAGES)], env=environment, stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
++    deadline = time.monotonic() + 60
++    while time.monotonic() < deadline:
++        if socket_path.exists():
++            connection = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
++            connection.settimeout(30)
++            try:
++                connection.connect(str(socket_path))
++            except OSError:
++                connection.close()
++                time.sleep(0.5)
++                continue
++            state_path(name).write_text(json.dumps({"pid": process.pid, "socket": str(socket_path)}) + "\n")
++            return WarmGuest(name, connection, process)
++        time.sleep(0.5)
++    raise demo_lib.DemoError(f"the guest '{name}' did not start its console")
++
++
++def run(demo, guest, command, timeout=300, lines=4, check=True):
++    print(f"{demo_lib.DIM}           $ {command}{demo_lib.RESET}", flush=True)
++    status, text = guest._run(command, timeout)
++    output = (text or "").strip()
++    if output:
++        for line in output.splitlines()[-lines:]:
++            print(f"{demo_lib.DIM}           {line}{demo_lib.RESET}", flush=True)
++    if check and status != 0:
++        raise demo_lib.DemoError(f"command failed with {status}: {command}\n{output[-800:]}")
++    return text
++
++
++def provision(guest):
++    import verify_report
++
++    guest.command("systemctl is-active --quiet --wait graphical.target")
++    guest.command("mkdir -p /var/lib/rva23-attestation")
++    guest.command("mountpoint -q /sys/kernel/security || mount -t securityfs securityfs /sys/kernel/security")
++    guest.command("systemctl start systemd-pcrlock.socket")
++    guest.command("interface=$(ip -o link show | awk -F': ' '$2 != \"lo\" {print $2; exit}'); ip link set dev $interface up")
++    guest.command("interface=$(ip -o link show | awk -F': ' '$2 != \"lo\" {print $2; exit}'); ip addr replace 10.0.2.15/24 dev $interface")
++    guest.command("ip route replace default via 10.0.2.2")
++    verify_report.provision_ek(guest)
++
++
++def ensure_prompt(guest, timeout=120):
++    guest._drain()
++    guest.sendline("root")
++    guest.expect(b"# ", timeout)
++    return guest
++
++
++def ensure(name, timeout=900):
++    guest = connect(name)
++    if guest is not None:
++        return ensure_prompt(guest), False
++    guest = start(name, GUESTS[name])
++    guest.wait_for_login(timeout)
++    if name == "firmware":
++        provision(guest)
++    return guest, True
++
++
++def main():
++    command = sys.argv[1] if len(sys.argv) > 1 else "status"
++    if command == "start":
++        names = sys.argv[2:] or list(DEFAULT_START)
++        for name in names:
++            guest = connect(name)
++            if guest is not None:
++                print(f"{name}: already running")
++                continue
++            guest = start(name, GUESTS[name])
++            print(f"{name}: starting")
++            guest.wait_for_login()
++            print(f"{name}: ready")
++    elif command == "stop":
++        for name in GUESTS:
++            stop(name)
++        print("stopped")
++    else:
++        for name in GUESTS:
++            print(f"{name}: {'running' if connect(name) else 'stopped'}")
++
++
++if __name__ == "__main__":
++    main()
+
