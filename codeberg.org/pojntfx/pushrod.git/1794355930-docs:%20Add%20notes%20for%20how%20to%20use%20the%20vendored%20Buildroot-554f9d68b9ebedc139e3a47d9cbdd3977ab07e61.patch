@@ -1,0 +1,46 @@
+From 554f9d68b9ebedc139e3a47d9cbdd3977ab07e61 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Tue, 10 Nov 2026 17:12:10 -0700
+Subject: [PATCH] docs: Add notes for how to use the vendored Buildroot
+---
+diff --git a/README.md b/README.md
+index d4f5567fe6d9fbc612fbfdcf7dee6ab13c136977..f79b6044188b41d3a826d2ae36a4a02a3f55c7f7 100644
+--- a/README.md
++++ b/README.md
+@@ -15,7 +15,7 @@   - Capture video output and provide emulated mouse/keyboard input via a [NanoKVM-USB](https://github.com/sipeed/NanoKVM-USB)
+   - Get early logs/a serial console from the board via UART
+   - Debug the board via JTAG (WIP)
+ - A clean Go reimplementation of the SpacemiT [Titanflasher/flashserver](https://www.spacemit.com/community/document/info?lang=en&nodepath=tools/user_guide/flasher_user_guide.md) to flash U-Boot, EDK2, or an entire OS onto the board
+-- A clean, close-to-mainline Buildroot tree for the K3 (and a QEMU approximation of it) with blob-free graphics drivers (WIP)
++- A clean, close-to-mainline Buildroot tree for the K3 (and a QEMU approximation of it) with blob-free graphics drivers (WIP; needs cleanup)
+ 
+ ## Tutorial
+ 
+@@ -33,6 +33,26 @@ $ cd pushrod
+ $ go run -exec sudo . # We need root to access the raw USB devices
+ $ npx @modelcontextprotocol/inspector --web # Connect via streamable HTTP at localhost:1337
+ ```
++
++To use the custom Buildroot tree, first setup `local.mk` (use `local.mk.tpl` as a template), then build it for the K3 and QEMU:
++
++```shell
++# `ccache` is enabled; the first builds will be slow, but susequent builds will be much faster
++# Caches are shared between the QEMU build and the K3 build where possible
++$ make -C buildroot build
++$ make -C buildroot k3-build
++```
++
++Then, for QEMU, you can use the verification scripts to check whether everything works; the system should boot into Weston:
++
++```shell
++$ make -C buildroot boot-display
++$ vncviewer '[::1]:5900'
++```
++
++For the K3, use Pushrod to flash (using the instructions set in the MCP server); it should also boot into Weston.
++
++For further validation, there are various `(k3-)verify-*` and `demo-*` targets that test everything from boot to sysupdate to Kubernetes support to CRIU live migration. These are currently quite hacky and will need a bit of cleanup in the future, but do work today.
+ 
+ ## License
+ 
+
