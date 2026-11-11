@@ -1,0 +1,971 @@
+From 35f0de56f33d16e0023211c6bd78ca32ae7cfcbd Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Tue, 10 Nov 2026 22:40:15 -0700
+Subject: [PATCH] feat: Add demo runbooks for validation
+---
+diff --git a/buildroot/scripts/7-demo-migrate-qemu.py b/buildroot/scripts/7-demo-migrate-qemu.py
+index e801ac180b6ef608418d29e118cc53d1a33a48e2..e5066af7954992f2e1c355a2e587e6feb6b91cf7 100755
+--- a/buildroot/scripts/7-demo-migrate-qemu.py
++++ b/buildroot/scripts/7-demo-migrate-qemu.py
+@@ -46,6 +46,7 @@     for port in (8080, 8083):
+         if not port_open(port):
+             raise demo_lib.DemoError(f"the staged service on port {port} is not running; run make demo-migrate-warm again")
+     demo.result(f"pid {staged['pid']} is staged, instance {staged['instanceId'][:12]}")
++    demo.result(f"the process holds the value {staged['value']}")
+ 
+     destination, _ = warm.ensure("dst")
+     demo.step("Restore the process on the second guest")
+@@ -64,7 +65,12 @@     time.sleep(2)
+     restored = guest_state(destination, 18085)
+     if restored["pid"] != staged["pid"] or restored["instanceId"] != staged["instanceId"]:
+         raise demo_lib.DemoError(f"the restored process has pid {restored['pid']}, expected {staged['pid']}")
++    environment = warm.run(None, destination, f"tr '\\0' '\\n' < /proc/{staged['pid']}/environ | grep RVA23_MIGRATION_VALUE", 30, lines=0, check=False)
++    restored_value = environment[environment.find("RVA23_MIGRATION_VALUE="):].split()[0].split("=")[-1] if "RVA23_MIGRATION_VALUE=" in environment else ""
++    if restored_value != staged["value"]:
++        raise demo_lib.DemoError(f"the restored value is {restored_value!r}, expected {staged['value']!r}")
+     demo.result(f"restored pid {restored['pid']}, same instance id")
++    demo.result(f"the restored process still holds the value {staged['value']}")
+ 
+     demo.step("Read the receipts in the unified view")
+     with urllib.request.urlopen("http://[::1]:8083/api/state", timeout=10) as response:
+diff --git a/buildroot/scripts/demo-migrate-warm.py b/buildroot/scripts/demo-migrate-warm.py
+index 8cb31ffb2173b8db4038f56c81fe5a5006c03c2a..ec6c531f2e144308a46f13d8c134ccc05466d7ee 100644
+--- a/buildroot/scripts/demo-migrate-warm.py
++++ b/buildroot/scripts/demo-migrate-warm.py
+@@ -1,6 +1,7 @@
+ #!/usr/bin/env python3
+ import importlib.util
+ import json
++import secrets
+ from pathlib import Path
+ import subprocess
+ import sys
+@@ -50,10 +51,10 @@             return
+         time.sleep(1)
+ 
+ 
+-def start_client(guest):
++def start_client(guest, value):
+     stop_clients(guest)
+     warm.run(None, guest, "rm -f /var/lib/rva23-migration/state.json", lines=0, check=False)
+-    output = warm.run(None, guest, "RVA23_MIGRATION_CLIENT_UI_LISTEN='[::]:18084' migration-client serve </dev/null >/dev/null 2>&1 & printf '%s\\n' $!", 60, lines=0)
++    output = warm.run(None, guest, f"RVA23_MIGRATION_VALUE={value} RVA23_MIGRATION_CLIENT_UI_LISTEN='[::]:18084' migration-client serve </dev/null >/dev/null 2>&1 & printf '%s\\n' $!", 60, lines=0)
+     for _ in range(30):
+         probe = warm.run(None, guest, "wget -q -O- http://[::1]:18084/api/state", 5, lines=0, check=False)
+         if "{" in probe:
+@@ -77,7 +78,8 @@
+     receiver = migration.start_receiver(OUTPUT)
+     production_pcr11 = wallet.predict_profile(OUTPUT, "rva23-debug_1.efi")
+     server = migration.start_migration_server(OUTPUT, production_pcr11)
+-    start_client(source)
++    value = secrets.token_hex(8)
++    start_client(source, value)
+ 
+     pid_output = warm.run(None, source, "cat /tmp/migration-client.pid 2>/dev/null || true", 30, lines=0, check=False)
+     state = None
+@@ -101,8 +103,8 @@     warm.run(None, source, "migration-client upload -archive /tmp/migration.tar.gz", 300, lines=3)
+ 
+     destination_state = dict(state)
+     destination_state["counter"] = int(destination_state.get("counter", 0)) + 100
+-    STATE.write_text(json.dumps({"pid": pid, "instanceId": instance, "destinationState": destination_state, "receiver": receiver.pid, "server": server.pid}) + "\n")
+-    print(f"warm: migration staged, pid {pid}, instance {instance[:12]}", flush=True)
++    STATE.write_text(json.dumps({"pid": pid, "instanceId": instance, "value": value, "destinationState": destination_state, "receiver": receiver.pid, "server": server.pid}) + "\n")
++    print(f"warm: migration staged, pid {pid}, instance {instance[:12]}, value {value}", flush=True)
+     print("warm: receiver and server stay up; run make demo-migrate-qemu during the talk", flush=True)
+ 
+ 
+diff --git a/buildroot/scripts/demo_qemu_warm.py b/buildroot/scripts/demo_qemu_warm.py
+index d9185f3c9a6c830fa574cba739f0111e5e7452e2..30bc528dd3b7005e38ef8e6972624d5ab1491346 100755
+--- a/buildroot/scripts/demo_qemu_warm.py
++++ b/buildroot/scripts/demo_qemu_warm.py
+@@ -261,11 +261,16 @@
+ 
+ def ensure_prompt(guest, timeout=120):
+     print(f"{guest.name}: waiting for the shell prompt", flush=True)
+-    guest._drain()
+-    guest.sendline("root")
+-    guest.expect(b"# ", timeout)
+-    print(f"{guest.name}: shell prompt ready", flush=True)
+-    return guest
++    deadline = time.monotonic() + timeout
++    while time.monotonic() < deadline:
++        guest.sendline("root")
++        try:
++            guest.expect(b"# ", 8)
++            print(f"{guest.name}: shell prompt ready", flush=True)
++            return guest
++        except demo_lib.DemoError:
++            continue
++    raise demo_lib.DemoError(f"guest '{guest.name}' did not reach a shell prompt in {timeout}s")
+ 
+ 
+ def ensure(name, timeout=900):
+diff --git a/buildroot/validation/demo-flash.md b/buildroot/validation/demo-flash.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..04a63787eb142dc829859daf3bfc33c09f33c3d4
+--- /dev/null
++++ b/buildroot/validation/demo-flash.md
+@@ -0,0 +1,187 @@
++# Demo 1: blank board to a shell
++
++Expect 3 to 4 minutes.
++
++A UKI is a bootable unified kernel image.
++
++BROM is the fixed boot ROM mode.
++
++This procedure stages the boot chain, writes every partition, and waits for a K3 shell.
++
++Make sure that the connected K3 is the intended target, because this procedure erases every partition.
++
++Do not call `make demo-flash` or `scripts/1-demo-flash.py`.
++
++Follow the common requirements in [README.md](README.md).
++
++## 1. Start evidence capture
++
++1. Call `serial.getConsoles`.
++2. Select the K3 console.
++3. Call `serial.startBuffering` with that console path.
++4. Call `serial.clearBuffer` with that console path.
++5. Tell the user that serial capture started before any reset.
++
++## 2. Upload the current images
++
++Use only the most recent build under `output/k3-uefi/images`.
++
++Even when `files.getFiles` lists an older upload, replace every required server file.
++
++- `FSBL.bin`
++- `u-boot.itb`
++- `bootfs.img`
++- `usr-a.erofs`
++- `usr-b.erofs`
++- `usr-a.verity`
++- `usr-a.verity-sig`
++- `rootfs.ext4`
++- `env.bin`
++- `bootinfo_block.bin`
++- `bootinfo_spinor.bin`
++- `bootinfo_spinand.bin`
++- `esos.itb`
++- `fw_dynamic.itb`
++- `edk2.itb`
++
++Use this loop from the `buildroot` directory.
++
++```sh
++for name in FSBL.bin u-boot.itb bootfs.img usr-a.erofs usr-b.erofs usr-a.verity usr-a.verity-sig rootfs.ext4 env.bin bootinfo_block.bin bootinfo_spinor.bin bootinfo_spinand.bin esos.itb fw_dynamic.itb edk2.itb
++do
++  case "$name" in
++    FSBL.bin|bootinfo*.bin) source="output/k3-uefi/images/factory/$name" ;;
++    *) source="output/k3-uefi/images/$name" ;;
++  esac
++  curl --fail --silent --show-error --max-time 600 --upload-file "$source" "http://127.0.0.1:1337/files/$name" || exit 1
++done
++```
++
++Call `files.getFiles`.
++
++Make sure that every required name appears.
++
++Report the number of uploaded images.
++
++## 3. Enter BROM
++
++1. Call `relay.getBoards`.
++2. Select the connected relay board.
++3. Call `flash.getDevices`.
++4. Read every manufacturer.
++5. If no `DFU` device appears, call `target.reset` with the relay path.
++6. Wait one second after the reset.
++7. If no `DFU` device appeared, call `target.enterFDL` with the relay path.
++8. Wait two seconds.
++9. Call `flash.getDevices` again.
++10. Make sure that one device has manufacturer `DFU`.
++11. Record its path as the BROM path.
++
++Treat `DFU` as BROM.
++
++Do not call `flash.flashFile` or `flash.multiFlash` on this device.
++
++Tell the user that BROM answers commands but cannot write the disk images.
++
++## 4. Stage the boot chain
++
++1. Call `flash.stage` with the BROM path and `FSBL.bin`.
++2. Call `flash.continue` with the BROM path.
++3. Wait three seconds.
++4. Call `flash.getDevices`.
++5. Make sure that a device has manufacturer `U-Boot`.
++6. Record its path as the U-Boot path.
++7. If the device reports `superSpeedCapable` true, call `flash.oem` with `speed:super-speed`.
++8. Read `flash.getDevices` after the OEM call.
++9. Make sure that the `U-Boot` device remains present.
++10. Call `flash.stage` with the current U-Boot path and `u-boot.itb`.
++11. Call `flash.continue` with the current U-Boot path.
++12. Wait four seconds.
++13. Call `flash.getDevices`.
++14. Make sure that a `U-Boot` fastboot device appears again.
++15. Record its current path.
++
++Report each detected manufacturer and path.
++
++## 5. Write the partition tables
++
++1. Call `flash.getVar` with variable `mtd-size`.
++2. Call `flash.getVar` with variable `blk-size`.
++3. When `output/k3-uefi/images/partition_<mtd-size>.json` exists, read it.
++4. Read `output/k3-uefi/images/partition_<blk-size>.json`.
++5. When the MTD file exists, include its table.
++6. Include the GPT table after the optional MTD table.
++7. Give every partition `name`, `offset`, `size`, and `image`.
++8. Keep every supplied `hidden`, `compress`, and `type` value.
++9. Remove directory prefixes from image names.
++10. Do not use a disk image as a partition table.
++
++Call `flash.multiFlash` with these arguments.
++
++- The current U-Boot path.
++- The assembled `partitionTables` array.
++- `reboot` set to `true`.
++- `background` set to `true`.
++
++Record the returned job ID.
++
++Call `flash.getJobs` until that job succeeds or fails.
++
++When either progress value changes, report the current partition and transferred bytes.
++
++If the job fails, record its complete `error` value, failed partition, and sent bytes.
++
++Do not stop after the first flash failure.
++
++The board storage controller can time out during GPT formatting.
++
++After a GPT format failure, retry the GPT table only, because the MTD write completed.
++
++1. Call `target.reset` with the relay path.
++2. Wait five seconds.
++3. Call `flash.getDevices`.
++4. If no `DFU` device appears, call `target.enterFDL` with the relay path.
++5. Wait two seconds.
++6. Call `flash.getDevices`.
++7. Make sure that a `DFU` device appears.
++8. Repeat stages 3 and 4 with the recovered BROM device.
++9. If the failed partition is `gpt`, use the GPT table only for the retry.
++10. If the error names `Writing GPT`, use the GPT table only for the retry.
++11. Otherwise, use the original MTD and GPT tables for the retry.
++12. Call `flash.multiFlash` once with the current U-Boot path, the retry tables, `reboot` true, and `background` true.
++13. Record the retry job ID and monitor it with `flash.getJobs`.
++14. If the retry succeeds, continue to stage 6.
++15. If the retry fails, report both complete errors.
++16. Then stop and report `FAIL`.
++
++## 6. Reach the shell
++
++1. Call `target.reset` after the flash job succeeds.
++2. Wait up to 300 seconds for SSH to answer.
++3. Use the address and key from [README.md](README.md).
++4. If SSH does not answer, call `target.reset` once more.
++5. Wait another 300 seconds for SSH.
++6. If SSH still does not answer, report the serial log and `FAIL`.
++7. Operate `hostname`, `cat /proc/sys/kernel/hostname`, and `uname -m` over SSH.
++8. Make sure that the host is `k3` and the architecture is `riscv64`.
++9. Call `serial.readFrom`.
++10. Show the last six nonempty serial lines.
++11. Call `kvm.getVideoCaptureDevices`.
++12. Select the K3 video path.
++13. Call `kvm.takeScreenshot` with that path.
++14. Show the final console inline.
++15. Include the serial lines and screenshot in the final report.
++
++A blinking cursor is valid when serial output shows automatic root login and `#`.
++
++Do not treat that expected cursor as a defect.
++
++## Acceptance
++
++- The initial or retry flash job ends with `succeeded`.
++- The report names every failed job and its complete error.
++- SSH answers after no more than two resets.
++- The board reports `k3` and `riscv64`.
++- The final evidence shows a shell, a login prompt, or the expected blinking cursor.
++- The user receives the flash result, serial evidence, and final screenshot.
++- The user receives the elapsed time from the harness, not an estimate.
+diff --git a/buildroot/validation/demo-kubernetes-warm.md b/buildroot/validation/demo-kubernetes-warm.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..9a7426cc4d7693679c5168f1ecb1215686882642
+--- /dev/null
++++ b/buildroot/validation/demo-kubernetes-warm.md
+@@ -0,0 +1,226 @@
++# Kubernetes warm-up: Valkey, pause, and k3s
++
++Operate this procedure immediately after [Demo 3](demo-update.md).
++
++This procedure prepares both container images, starts k3s, and imports the images before demo 6.
++
++Do not call `make demo-kubernetes-warm` or `scripts/demo-kubernetes-warm.py`.
++
++Follow the common requirements in [README.md](README.md).
++
++Use `/var/lib/k3s-demo/server/cred/admin.kubeconfig` as the board kubeconfig.
++
++## 1. Detect an existing warm state
++
++Operate this board command.
++
++```sh
++test -f /tmp/valkey-local.tar && test -f /tmp/pause-image.tar && kubectl --kubeconfig=/var/lib/k3s-demo/server/cred/admin.kubeconfig get nodes && k3s ctr -n k8s.io images ls
++```
++
++Make sure that the image list contains both exact references from stage 7.
++
++If both archives exist, the node is `Ready`, and both images exist, report `warm: already ready`.
++
++In that case, skip to Acceptance.
++
++If either archive is missing, complete stages 2 through 5.
++
++Otherwise, continue with the existing archives.
++
++Tell the user whether image preparation is necessary.
++
++## 2. Build the Valkey binary
++
++When `/tmp/valkey-8.1.0/src/valkey-server` is absent, complete this stage.
++
++Use the cross compiler at `output/k3-uefi/host/bin/riscv64-buildroot-linux-gnu-gcc`.
++
++Download Valkey 8.1.0 from the repository source archive.
++
++Extract the archive with the following commands.
++
++```sh
++curl --fail --location --output /tmp/valkey-8.1.0.tar.gz https://github.com/valkey-io/valkey/archive/refs/tags/8.1.0.tar.gz
++tar -xzf /tmp/valkey-8.1.0.tar.gz -C /tmp
++```
++
++Add RISC-V to the allocator platform condition without changing an existing patch.
++
++```sh
++python3 - <<'PY'
++from pathlib import Path
++path = Path("/tmp/valkey-8.1.0/src/zmalloc.c")
++text = path.read_text()
++if "defined(__riscv)" not in text:
++    path.write_text(text.replace("    defined(__arm64__)\n", "    defined(__arm64__) || defined(__riscv)\n", 1))
++PY
++```
++
++Build the binary from `buildroot`.
++
++```sh
++make -C /tmp/valkey-8.1.0/src CC="$PWD/output/k3-uefi/host/bin/riscv64-buildroot-linux-gnu-gcc" MALLOC=libc BUILD_TLS=no USE_SYSTEMD=no -j8
++```
++
++Make sure that `/tmp/valkey-8.1.0/src/valkey-server` exists.
++
++Tell the user when the cross build finishes.
++
++## 3. Create the Valkey root filesystem archive
++
++Operate these host commands from `buildroot`.
++
++```sh
++rm -rf /tmp/valkey-rootfs
++mkdir -p /tmp/valkey-rootfs/lib /tmp/valkey-rootfs/etc /tmp/valkey-rootfs/data
++cp /tmp/valkey-8.1.0/src/valkey-server /tmp/valkey-rootfs/valkey-server
++cp output/k3-uefi/target/lib/ld-linux-riscv64-lp64d.so.1 /tmp/valkey-rootfs/lib/
++cp output/k3-uefi/target/lib/libc.so.6 /tmp/valkey-rootfs/lib/
++cp output/k3-uefi/target/lib/libm.so.6 /tmp/valkey-rootfs/lib/
++printf 'bind * -::*\nprotected-mode no\nport 6379\ndir /data\nsave 60 1\nappendonly no\n' > /tmp/valkey-rootfs/etc/valkey.conf
++tar -C /tmp/valkey-rootfs -cf /tmp/valkey-rootfs.tar .
++```
++
++Make sure that `/tmp/valkey-rootfs.tar` exists.
++
++## 4. Create the pause archive
++
++Create the static pause archive from `buildroot`.
++
++Use the following commands.
++
++```sh
++cat > /tmp/pause.c <<'EOF'
++struct timespec { long tv_sec; long tv_nsec; };
++static struct timespec ts = {3600, 0};
++void _start(void) {
++    register long a7 asm("a7") = 101;
++    register long a0 asm("a0") = (long)&ts;
++    register long a1 asm("a1") = 0;
++    for (;;) { asm volatile("ecall" : "+r"(a0) : "r"(a1), "r"(a7) : "memory"); }
++}
++EOF
++output/k3-uefi/host/bin/riscv64-buildroot-linux-gnu-gcc -nostdlib -static -ffreestanding -fno-stack-protector -o /tmp/pause /tmp/pause.c
++rm -rf /tmp/pause-rootfs
++mkdir /tmp/pause-rootfs
++cp /tmp/pause /tmp/pause-rootfs/pause
++tar -C /tmp/pause-rootfs -cf /tmp/pause.tar .
++```
++
++Make sure that `/tmp/pause.tar` exists.
++
++## 5. Import both Podman images
++
++Upload both archives with `scp -6` and the provisioned key.
++
++Bracket the board address as `root@[fe80::b28c:b3ff:fe9a:79a8%wlp0s20f3]`.
++
++Use these remote destinations.
++
++- `/tmp/valkey-rootfs.tar`
++- `/tmp/pause.tar`
++
++Operate these board commands after the uploads.
++
++```sh
++podman import /tmp/valkey-rootfs.tar valkey-local >/dev/null
++rm -f /tmp/valkey-local.tar
++podman save -o /tmp/valkey-local.tar valkey-local >/dev/null
++podman import --change 'ENTRYPOINT ["/pause"]' /tmp/pause.tar docker.io/rancher/mirrored-pause:3.10.2 >/dev/null
++rm -f /tmp/pause-image.tar
++podman save -o /tmp/pause-image.tar docker.io/rancher/mirrored-pause:3.10.2 >/dev/null
++```
++
++Make sure that both saved archives exist under `/tmp`.
++
++Tell the user that Podman prepared the k3s import archives.
++
++## 6. Start k3s
++
++IPE is the kernel integrity policy enforcement mechanism.
++
++The production profile can deny k3s binaries under its data directory.
++
++Operate this complete board script.
++
++The script saves IPE enforcement before the API start.
++
++The exit trap restores IPE after success or failure.
++
++```sh
++set -eu
++ipe_path=/sys/kernel/security/ipe/enforce
++ipe_state=
++restore_ipe() {
++  status=$?
++  trap - EXIT
++  if [ -n "$ipe_state" ]; then
++    printf '%s\n' "$ipe_state" > "$ipe_path"
++    printf 'IPE restored to %s\n' "$ipe_state"
++  fi
++  exit "$status"
++}
++trap restore_ipe EXIT
++state=$(systemctl is-active rva23-k3s-demo 2>/dev/null || true)
++if [ "$state" != active ]; then
++  if [ -w "$ipe_path" ]; then
++    ipe_state=$(cat "$ipe_path")
++    printf 'IPE saved as %s\n' "$ipe_state"
++    printf '0\n' > "$ipe_path"
++  fi
++  systemctl reset-failed rva23-k3s-demo 2>/dev/null || true
++  systemctl stop rva23-k3s-demo 2>/dev/null || true
++  rm -rf /var/lib/k3s-demo
++  systemd-run --unit=rva23-k3s-demo --property=Type=simple k3s server --disable=metrics-server --disable=traefik --data-dir=/var/lib/k3s-demo --write-kubeconfig-mode=0644
++fi
++ready=
++for attempt in $(seq 1 60)
++do
++  nodes=$(kubectl --kubeconfig=/var/lib/k3s-demo/server/cred/admin.kubeconfig get nodes 2>/dev/null || true)
++  if printf '%s\n' "$nodes" | grep -Eq '(^|[[:space:]])Ready([[:space:]]|$)'; then
++    ready=1
++    break
++  fi
++  sleep 2
++done
++if [ "$ready" != 1 ]; then
++  systemctl status rva23-k3s-demo --no-pager || true
++  exit 1
++fi
++printf '%s\n' "$nodes"
++```
++
++If the script fails, show its complete output.
++
++Make sure that the output shows a `Ready` node.
++
++When the script changes IPE, make sure that it reports the restored value.
++
++Show the ready node to the user.
++
++## 7. Import the k3s images
++
++Operate these board commands.
++
++```sh
++k3s ctr -n k8s.io images import /tmp/valkey-local.tar >/dev/null
++k3s ctr -n k8s.io images tag localhost/valkey-local:latest docker.io/library/valkey-local:latest >/dev/null
++k3s ctr -n k8s.io images import /tmp/pause-image.tar >/dev/null
++```
++
++Make sure that `k3s ctr -n k8s.io images ls` contains both required names.
++
++- `docker.io/library/valkey-local:latest`
++- `docker.io/rancher/mirrored-pause:3.10.2`
++
++Tell the user that the cluster is warm and ready for demo 6.
++
++## Acceptance
++
++- The k3s node reports `Ready`.
++- IPE returns to its saved value after the API start.
++- Both image archives remain under `/tmp`.
++- Containerd contains the Valkey image with the required Docker name.
++- Containerd contains the pause image with the required Docker name.
++- The user receives the warm state and image evidence.
+diff --git a/buildroot/validation/demo-kubernetes.md b/buildroot/validation/demo-kubernetes.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..596ed8cd6105b0d14af0690815f86a83ec25a297
+--- /dev/null
++++ b/buildroot/validation/demo-kubernetes.md
+@@ -0,0 +1,168 @@
++# Demo 6: Valkey on k3s and signed extension rejection
++
++Expect 30 to 60 seconds after the warm-up.
++
++RESP is the Valkey wire protocol.
++
++This procedure starts a Valkey pod, tests RESP over IPv6, and rejects a modified k3s system extension.
++
++Complete [Demo 3](demo-update.md) and [Kubernetes warm-up](demo-kubernetes-warm.md) first.
++
++Do not call `make demo-kubernetes` or `scripts/6-demo-kubernetes.py`.
++
++Follow the common requirements in [README.md](README.md).
++
++Use `/var/lib/k3s-demo/server/cred/admin.kubeconfig` as the board kubeconfig.
++
++## 1. Make sure that the cluster is warm
++
++1. Operate `systemctl is-active rva23-k3s-demo` over SSH.
++2. If the state is not `active`, report that the warm-up is incomplete.
++3. In that case, stop.
++4. Operate `systemctl reset-failed rva23-k3s-demo 2>/dev/null || true` over SSH.
++5. Allow up to 180 seconds for the node `STATUS` column to equal `Ready`.
++6. Use `kubectl --kubeconfig=/var/lib/k3s-demo/server/cred/admin.kubeconfig get nodes` for each probe.
++7. If the node stays unready, show `systemctl status rva23-k3s-demo --no-pager`.
++8. In that case, report `FAIL`.
++9. Show the ready node to the user.
++
++## 2. Start the Valkey pod
++
++Write this manifest to `/tmp/valkey-k3s.yaml` on the board.
++
++```yaml
++apiVersion: v1
++kind: Pod
++metadata:
++  name: valkey-k3s
++spec:
++  hostNetwork: true
++  containers:
++    - name: valkey
++      image: docker.io/library/valkey-local:latest
++      imagePullPolicy: Never
++      command:
++        - /lib/ld-linux-riscv64-lp64d.so.1
++        - --library-path
++        - /lib
++        - /valkey-server
++        - /etc/valkey.conf
++      args:
++        - --port
++        - "6380"
++```
++
++Operate these board commands.
++
++```sh
++kubectl --kubeconfig=/var/lib/k3s-demo/server/cred/admin.kubeconfig apply -f /tmp/valkey-k3s.yaml
++kubectl --kubeconfig=/var/lib/k3s-demo/server/cred/admin.kubeconfig wait --for=condition=Ready pod/valkey-k3s --timeout=120s
++```
++
++Make sure that the wait output contains `condition met`.
++
++Tell the user that the pod uses host networking and port 6380.
++
++## 3. Test RESP over IPv6
++
++Operate this Python command on the laptop.
++
++```sh
++python3 - <<'PY'
++import socket
++
++sock = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
++sock.settimeout(6)
++sock.connect(("fe80::b28c:b3ff:fe9a:79a8", 6380, 0, socket.if_nametoindex("wlp0s20f3")))
++try:
++    for command, expected in ((b"PING\r\n", b"+PONG"), (b"SET demo:verify ok\r\n", b"+OK"), (b"GET demo:verify\r\n", b"ok")):
++        sock.sendall(command)
++        response = sock.recv(100)
++        print(response.decode().strip())
++        if expected not in response:
++            raise RuntimeError(f"unexpected response: {response!r}")
++finally:
++    sock.close()
++PY
++```
++
++Make sure that the output contains `PONG`, `OK`, and `ok`.
++
++Show those responses to the user.
++
++## 4. Reject a modified k3s extension
++
++Tell the user that one byte will change inside the signed k3s extension.
++
++Operate this complete board script.
++
++The script stops when backup creation fails.
++
++The exit trap restores the backup and remerges it after every outcome.
++
++```sh
++set -eu
++image=$(find /var/lib/extensions -maxdepth 1 -name 'k3s_*.raw' -not -name '*.backup' | sort -V | tail -n 1)
++test -n "$image"
++test -f "$image"
++backup="$image.backup"
++restore_image() {
++  status=$?
++  trap - EXIT
++  systemd-sysext unmerge >/dev/null 2>&1 || true
++  if [ -f "$backup" ]; then
++    mv -f "$backup" "$image"
++  fi
++  systemd-sysext --image-policy=root=signed+absent:usr=signed+absent refresh
++  exit "$status"
++}
++trap restore_image EXIT
++systemd-sysext unmerge
++rm -f "$backup"
++cp "$image" "$backup"
++printf X | dd of="$image" bs=1 seek=1048576 conv=notrunc 2>/dev/null
++set +e
++output=$(SYSTEMD_LOG_LEVEL=debug systemd-sysext --image-policy=root=signed+absent:usr=signed+absent refresh 2>&1)
++status=$?
++set -e
++printf '%s\n' "$output"
++if [ "$status" -eq 0 ]; then
++  printf 'ERROR: the modified image was accepted\n'
++  exit 1
++fi
++printf '%s\n' "$output" | grep -E 'k3s_[^ ]*\.raw'
++printf '%s\n' "$output" | grep -Ei 'signature|verity|authentication|bad message|input/output error'
++printf 'The modified extension was rejected: %s\n' "$image"
++```
++
++Make sure that the refresh output names the modified k3s image.
++
++Make sure that the error indicates a signature or verity authentication failure.
++
++If the refresh succeeds, make sure that the script returns nonzero after restoration.
++
++If any step fails, show the complete output and restoration result.
++
++Make sure that the exit trap successfully remerges the original image.
++
++Tell the user that the modified extension was rejected and the original extension merged again.
++
++## 5. Show the final cluster state
++
++Operate these board commands.
++
++```sh
++systemd-sysext status --no-pager
++kubectl --kubeconfig=/var/lib/k3s-demo/server/cred/admin.kubeconfig get pods -o wide
++```
++
++Make sure that the k3s extension appears under `/usr` and `valkey-k3s` is `Running`.
++
++## Acceptance
++
++- The k3s node and Valkey pod report `Ready`.
++- IPv6 RESP returns `PONG`, `OK`, and `ok` on port 6380.
++- The signed refresh rejects the one-byte modification.
++- The restored k3s extension merges successfully.
++- The final pod state is `Running`.
++- The user receives the RESP responses, rejection error, and final cluster state.
+diff --git a/buildroot/validation/demo-update.md b/buildroot/validation/demo-update.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..117cef2d2647f3f14b9549569a7d43cb93f8e889
+--- /dev/null
++++ b/buildroot/validation/demo-update.md
+@@ -0,0 +1,129 @@
++# Demo 3: signed UKI update from the laptop registry
++
++Expect 6 to 40 seconds.
++
++A UKI is a bootable unified kernel image.
++
++This procedure serves version 3 from the laptop, stages it with `updatectl`, and boots it.
++
++Complete [Demo 1](demo-flash.md) before this procedure.
++
++Do not call `make demo-update` or `scripts/3-demo-update.py`.
++
++Follow the common requirements in [README.md](README.md).
++
++Once the registry starts, always complete stage 5 before the final report.
++
++If an earlier stage fails, stop both jobs and report the original error.
++
++## 1. Start the laptop registry
++
++Make sure that `output/k3-uefi/registry/SHA256SUMS` exists.
++
++Start this command as a managed background job from `buildroot`.
++
++```sh
++python3 - <<'PY'
++import functools
++import http.server
++import socket
++
++class IPv6Server(http.server.ThreadingHTTPServer):
++    address_family = socket.AF_INET6
++
++handler = functools.partial(http.server.SimpleHTTPRequestHandler, directory="output/k3-uefi/registry")
++IPv6Server(("::", 8000), handler).serve_forever()
++PY
++```
++
++Record the registry job ID.
++
++Tell the user that the registry listens on `[::]:8000`.
++
++## 2. Connect the board to the registry
++
++Start this SSH command as a second managed background job from `buildroot`.
++
++```sh
++ssh -6 -N \
++  -o ExitOnForwardFailure=yes \
++  -o BatchMode=yes \
++  -o ConnectTimeout=10 \
++  -o IdentitiesOnly=yes \
++  -o StrictHostKeyChecking=no \
++  -i output/k3-uefi/build/k3-keys/root_ed25519 \
++  -R '[::1]:8000:[::1]:8000' \
++  root@fe80::b28c:b3ff:fe9a:79a8%wlp0s20f3
++```
++
++Record the tunnel job ID.
++
++Wait up to ten seconds for this board command to return the checksum document.
++
++```sh
++wget -q -O- http://[::1]:8000/SHA256SUMS
++```
++
++If the tunnel fails, report its complete background job output.
++
++In that case, stop the registry job.
++
++Then stop.
++
++Tell the user that the board reaches the laptop registry through loopback.
++
++## 3. Record and stage the update
++
++1. Operate `updatectl list --no-pager` over SSH.
++2. Show the result.
++3. Operate `grep IMAGE_VERSION /usr/lib/os-release` over SSH.
++4. Show the result.
++5. Remove stale version 3 UKIs with this board command.
++
++```sh
++rm -f /boot/EFI/Linux/rva23_3.efi /boot/EFI/Linux/rva23-recovery_3.efi /boot/EFI/Linux/rva23-debug_3.efi
++```
++
++6. Operate `ls /boot/EFI/Linux` over SSH.
++7. Show the remaining UKIs.
++8. Operate `updatectl update host` over SSH with a 1200-second timeout.
++9. Make sure that the command stages version 3 without a signature error.
++10. Operate `updatectl list --no-pager` over SSH.
++11. Show version 3.
++12. Read the registry background output.
++13. Show one artifact request to the user.
++
++Tell the user which version ran before the update and which version is staged.
++
++## 4. Boot version 3
++
++1. Operate `bootctl set-default rva23_3.efi` over SSH.
++2. Operate `systemctl reboot >/dev/null 2>&1 < /dev/null &` over SSH.
++3. Expect the board to reboot even when SSH returns an error.
++4. Wait five seconds.
++5. Wait up to 300 seconds for SSH to answer again.
++6. Operate `grep IMAGE_VERSION /usr/lib/os-release` over SSH.
++7. Make sure that the result contains `IMAGE_VERSION="3"`.
++8. Operate `updatectl list --no-pager` over SSH.
++9. Make sure that the host target shows version 3.
++10. Operate `systemd-sysext status --no-pager` over SSH.
++11. Make sure that version 3 graphics, k3s, and Podman extensions appear under `/usr`.
++
++## 5. Clean up and report
++
++1. When the tunnel background job remains active, stop it.
++2. Stop the registry background job.
++3. Collect both job results.
++4. Report any unexpected error.
++5. Tell the user that version 3 boots from the laptop-delivered UKI.
++
++Do not leave the registry or tunnel running for later demos.
++
++## Acceptance
++
++- The board downloads the signed artifacts through the reverse tunnel.
++- `updatectl update host` stages version 3.
++- `bootctl` selects `rva23_3.efi`.
++- The rebooted system reports `IMAGE_VERSION="3"`.
++- The version 3 graphics, k3s, and Podman extensions merge under `/usr`.
++- Both background jobs stop before the final report.
+diff --git a/buildroot/validation/demo-weston.md b/buildroot/validation/demo-weston.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..21e5c54b6a67e664755b9ac0b29d0f500c06052d
+--- /dev/null
++++ b/buildroot/validation/demo-weston.md
+@@ -0,0 +1,128 @@
++# Demo 2: black screen to a graphical desktop
++
++Expect 20 to 25 seconds for the talk demonstration.
++
++KVM devices control the board and capture video.
++
++A system extension adds signed files to `/usr`.
++
++This procedure enables Weston and tests both panel launchers with keyboard, mouse, and screenshots.
++
++Do not call `make demo-weston` or `scripts/2-demo-weston.py`.
++
++Follow the common requirements in [README.md](README.md).
++
++## 1. Discover the video and input devices
++
++1. Call `kvm.getVideoCaptureDevices`.
++2. Select the K3 video path.
++3. Call `kvm.getInputDevices`.
++4. Select the K3 input path.
++5. Tell the user which video and input paths you will use.
++
++Save screenshots under `output/demo/screenshots` with this command from `buildroot`.
++
++Replace `<selected-video-path>` with the stage 1 video path.
++
++Replace `NAME` with a descriptive filename.
++
++```sh
++DEMO_KVM_DEVICE='<selected-video-path>' python3 -c 'from pathlib import Path; import sys; sys.path.insert(0, "scripts"); import demo_lib; print(demo_lib.screenshot(Path("output/demo/screenshots/NAME.jpg")))'
++```
++
++Read each saved image with `read_image`.
++
++Show each saved image inline with an absolute Markdown image link.
++
++## 2. Show the console without Weston
++
++1. Operate `systemctl stop weston.service 2>/dev/null || true` over SSH.
++2. Operate `rm -rf /var/lib/weston` over SSH.
++3. Wait up to ten seconds until `systemctl is-active weston.service` stops returning `active`.
++4. If Weston remains active, report `FAIL`.
++5. In that case, stop.
++6. Save `weston-black.jpg`.
++7. Show the saved image inline.
++8. Make sure that the image shows a console or blank screen without a desktop.
++
++Tell the user that the desktop is absent.
++
++## 3. Enable Weston and merge the signed extension
++
++1. Operate `mkdir -p /var/lib/weston` over SSH.
++2. Operate `touch /var/lib/weston/enabled` over SSH.
++3. Operate `cat /etc/systemd/system/weston-autostart.path` over SSH.
++4. Wait up to twenty seconds for `weston.service` to become active.
++5. If the path unit does not start Weston, operate `systemctl start weston.service`.
++6. Make sure that `systemctl is-active weston.service` returns `active`.
++7. Operate `systemd-sysext --image-policy=root=signed+absent:usr=signed+absent refresh` over SSH.
++8. Make sure that the signed refresh succeeds.
++9. Operate `systemd-sysext status --no-pager` over SSH.
++10. Make sure that the `/usr` hierarchy includes a `graphics_` extension.
++11. Operate `command -v weston-terminal` over SSH.
++12. Make sure that the result is `/usr/bin/weston-terminal`.
++13. Operate `command -v es2gears_wayland` over SSH.
++14. Make sure that the result is `/usr/bin/es2gears_wayland`.
++15. Operate `ls -la /run/weston` over SSH.
++16. Make sure that `wayland-1` appears.
++17. Save `weston-desktop.jpg`.
++18. Show the saved image inline.
++19. Make sure that the desktop and both top-left launcher icons are visible.
++
++Tell the user that the signed graphics extension supplies both launcher programs.
++
++## 4. Test the terminal launcher
++
++1. Read the terminal icon position from the latest screenshot.
++2. Use normalized KVM coordinates from zero through 4096.
++3. Use approximately `x=42` and `y=60` for the leftmost icon at 1920 by 1080.
++4. Call `kvm.sendMouseInput` with `doubleClick`, the left button, and the terminal coordinates.
++5. Wait two seconds.
++6. Save `weston-terminal.jpg`.
++7. Make sure that a terminal window is visible.
++8. If no terminal appears, operate `journalctl -u weston.service -n 30 --no-pager` before one retry.
++9. Call `kvm.pressKeys` with W3C key codes to type `echo TERMINAL_OK`.
++10. Press `Enter` with `kvm.pressKeys`.
++11. Wait one second.
++12. Save `weston-terminal-test.jpg`.
++13. Make sure that the visible terminal output contains `TERMINAL_OK`.
++14. Operate `ps | grep '[w]eston-terminal'` over SSH.
++15. Make sure that a terminal process appears.
++
++Show the terminal test screenshot inline.
++
++Report the visible result.
++
++## 5. Test the graphics launcher
++
++1. Read the gears icon position from the latest desktop screenshot.
++2. Use approximately `x=112` and `y=60` for the second icon at 1920 by 1080.
++3. Call `kvm.sendMouseInput` with `doubleClick`, the left button, and the gears coordinates.
++4. Wait three seconds.
++5. Save `weston-gears.jpg`.
++6. Make sure that the animated gears window is visible.
++7. Operate `ps | grep '[e]s2gears_wayland'` over SSH.
++8. Make sure that an `es2gears_wayland` process appears.
++9. If the process is absent, operate `journalctl -u weston.service -n 30 --no-pager` before one retry.
++10. When the process exists but the window is blank or missing, report `FAIL`.
++
++Show the gears screenshot inline.
++
++A panel double click can open two gears windows.
++
++Make sure that every visible gears window renders.
++
++Call `present` with these files.
++
++- `buildroot/output/demo/screenshots/weston-desktop.jpg`
++- `buildroot/output/demo/screenshots/weston-terminal-test.jpg`
++- `buildroot/output/demo/screenshots/weston-gears.jpg`
++
++## Acceptance
++
++- Weston changes from inactive to active after the enable file appears.
++- `systemd-sysext status` shows a merged graphics extension.
++- The terminal opens from its panel icon.
++- The terminal shows the typed `TERMINAL_OK` result.
++- The gears open from their panel icon and render visibly.
++- The user receives inline screenshots and three presented screenshot files.
+
