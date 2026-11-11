@@ -1,0 +1,345 @@
+From f2f0c6efff7a1237b400585d5f2d80d974977559 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Wed, 11 Nov 2026 01:02:48 -0700
+Subject: [PATCH] feat: Add initial version of talk notes and slides
+---
+diff --git a/talk/slides.pdf b/talk/slides.pdf
+new file mode 100644
+index 0000000000000000000000000000000000000000..c07f54333dea97f821f53a2d9bd2a2a197be8387
+Binary files /dev/null and b/talk/slides.pdf differ
+diff --git a/talk/talk-notes.md b/talk/talk-notes.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..41169a3906df4fe7a6dcd26dcfc90e1eac3e1389
+--- /dev/null
++++ b/talk/talk-notes.md
+@@ -0,0 +1,329 @@
++# Talk notes
++
++Target: 30:00. Short cues, spoken, not sentences. Timings are for pacing, not slides.
++
++## 0:00 Intro (1:30)
++
++>> advance: Ownership
++- Fel, infrastructure at LiveKit
++- Quick question: what do we actually run on, and who controls it?
++- Today most of the stack is proprietary
++- Firmware is a blob, boot path signed by someone else, image locked to one build, control plane rented
++- You can use the machine, you can't inspect or replace the parts that go into it
++- So: how much of it can you own, and how far does ownership go?
++- I'll argue today: you should be able to own everything, metal, firmware, kernel, image, trust, cluster
++- Owning it means I hold the keys, I can rebuild it, and I can prove what runs
++
++>> advance: The outline
++- Seven demos, six layers, blank board to cluster, one layer at a time
++- Silicon, enablement, firmware, image, trust, cluster
++- Every demo is a runbook or a recording, no mockups, nothing manual
++
++## 1:30 Silicon (2:30)
++
++>> advance: Decades of legacy
++- First layer is silicon, and the real question: why a new ISA at all?
++- x86 and ARM carry decades of legacy
++- Licenses are expensive, and the terms are private
++- x86: only two companies can make the chips
++- ARM: design your own core, get sued, as Qualcomm shows
++- x86: management engine and PSP below the OS, firmware is a pile of blobs
++- ARM: TrustZone in every core, a black box
++- No standard boot path on ARM, downstream kernels fork and drift, some just go away
++
++>> advance: RVA23
++- 2010, Berkeley, a clean ISA for research, small base, optional extensions
++- Base frozen, software does not break
++- An ISA is the contract between compiler and chip, the binary records it
++- Missing feature fails on the first instruction, not at link time
++- Profiles bundle extensions for a market, RVA23 is the current application profile
++- Vector and virtualization are mandatory, you name the profile once, no vendor in the name
++- Anything RVA23-compliant runs the same binary
++
++>> advance: The timeline so far
++- 2011 spec public, 2014 base frozen, 2015 foundation
++- 2017 first open SoC, 2021 vector and hypervisor ratified, D1 ships
++- 2023 RVA20 and RVA22, 2024 RVA23 and the K1
++- 2026 K3, Alibaba C950 at 3.2 GHz, SpacemiT X200 core done
++- RISC-V is about a quarter of global chip production now
++- Profile this talk uses landed two years ago, and the boards are here
++
++>> advance: The K3 processor
++- This is the K3, two kinds of core
++- 8 X100 run Linux and control plane, 8 A100 are RVA22 and share memory, you could run a separate Linux there
++- Vector 256 on X100, 1024 on A100, length-agnostic, one binary for both and QEMU
++- 60 TOPS INT4, 30B model at 15 tokens per second, no GPU needed
++
++>> advance: What comes next
++- K3 is the very beginning, first commercially available RVA23 chip
++- Alibaba C950, SiFive P550, SpacemiT X200 next, Tenstorrent Atlantis
++- RVA23 becomes the baseline, many implementations, same software
++- Chip alone is not a platform, next the software
++
++## 4:00 Software (1:15)
++
++>> advance: Software support
++- The software supported and sometimes mandated RVA23 before the chips were out
++- Ubuntu mandates RVA23 now
++- RHEL 10 has a RISC-V build
++- Debian 13, riscv64 official
++- Android 17 on RVA23 hardware via RISE, last month
++- Podman, Go, k3s all work
++- AMD GPUs plug into PCIe like on x86, PowerVR has a mainline driver
++- P550 by SiFive runs games via Felix86, an x86 emulation layer
++- This laptop runs GNOME OS, and ParticleOS is the systemd team's mkosi build
++- But you still need hands on the board
++
++## 5:15 Enablement (2:30)
++
++>> advance: Pushrod
++- Pushrod gives an agent remote hands on real hardware
++- Flash, boot, watch the screen, type, retry
++- Nobody presses a button or copies a log by hand
++- That is autonomous hardware enablement
++- I've done a lot of board bring-up, pressing volume and power gets old
++
++>> advance: The button presser
++- Blank board enters flash mode only by pressing two buttons, no software path
++- No probe soldered on the board, replacement is expensive or impossible
++- Two solenoids over RST and FDL, printed holder, cents
++- Doctorow's reverse centaur: human serving the machine, we flip it
++
++>> advance: The harness
++- USB relay board drives the fingers, 150 ms, capped at 5 s per 60 s
++- NanoKVM-USB: HDMI capture, keyboard and mouse
++- UART at 115200 for the console before the screen exists
++- Tigard JTAG, work in progress
++- Fastboot over USB, Titanflasher protocol reimplemented in Go
++
++>> advance: MCP server
++- One Go server turns the desk into typed tools, not shell strings
++- Stateless, files go over the wire, no shared disk
++- Remote over Tailscale, a cloud agent drives the board on your desk
++- Localhost only unless you publish
++
++>> advance: Tool naming
++- relay.* board control, target.* button sequences
++- serial.* console, files.* uploads
++- flash.* images and partitions, kvm.* screen and input
++
++>> advance: Flash order
++- Read the devices first, DFU is BROM, U-Boot is fastboot
++- BROM answers OKAY and writes nothing, stage FSBL, continue
++- Stage U-Boot, continue, read again
++- Build the tables from offset and size, 6 MTD and 12 GPT
++- One multiFlash writes everything, watch sentBytes and totalBytes
++
++## 7:45 Build (1:45)
++
++>> advance: Images are the distributable asset
++- Images are what we ship, one signature, one switch, one rollback
++
++>> advance: Buildroot tree
++- Buildroot 2001, make and Kconfig, no package manager, image is the unit
++- Hacky tree for this talk, production wants mkosi or BuildStream
++- One tree, two defconfigs, K3 and QEMU
++- ukify and sbsign, mkfs.erofs and veritysetup, systemd-repart, genimage
++- Outputs: ext4 root, two EROFS slots, verity and sig, ESP, three UKIs per slot, extensions
++
++>> advance: Disk layout
++- One unified layout for both boards, sysupdate fills the second usr slot
++- The K3 also uses systemd-boot now, same chain as QEMU
++
++## 9:30 Demo 1 (1:15)
++
++>> advance: Demo 1
++- Demo one is a recording, the flash takes about ten minutes end to end
++- Blank board, two solenoids, runbook
++- One prompt, the agent uploads, resets, stages, writes every partition
++- Progress to 100 percent, reset, EDK2, boot, shell
++- That shell came from a boot chain, so next the chain
++
++## 10:45 Firmware (1:15)
++
++>> advance: From a blank chip to a boot menu
++- K3: BROM, FSBL, ESOS, OpenSBI, EDK2, systemd-boot, UKI
++- QEMU: SPL, OpenSBI, EDK2, systemd-boot, UKI
++- Same image, same UKI layout, two boot paths
++- K3 leaves the chain unmeasured, no TPM, Secure Boot only with eFuses, we don't blow them
++- QEMU measures, swtpm, full chain
++
++>> advance: What we could prove
++- Half check on K3: Secure Boot if we blew the eFuses, we keep the board debuggable
++- Full check on QEMU: Secure Boot and a software TPM
++- Build checks both: modified UKI fails Secure Boot, modified system data fails verity
++
++## 12:00 Demo 2 (1:15)
++
++>> advance: Demo 2
++- Demo two is a recording, the board shows a console
++- The image ships Weston off, one file enables it
++- The agent writes the file, the desktop comes up
++- It refreshes the signed graphics extension, terminal and gears appear
++- Screenshots, terminal test, EGL gears, all from the extension
++- Fix arrived as a signed extension, so next the image model
++
++## 13:15 Image model (1:45)
++
++>> advance: A package manager rewrites usr in place
++- The package model: files in place, scripts as root, rollback is reinstall
++- The image model: the image is the unit, a switch is one boot entry
++
++>> advance: Two generations before this talk
++- CoreOS: A/B slots, bootloader flips
++- rpm-ostree: layering, old commit stays on disk
++- bootc: OCI image, own boot entry, registry as channel
++- composefs: EROFS plus fs-verity, digest in the UKI, Secure Boot checks it
++
++>> advance: What this talk uses instead
++- sysupdate, not bootc, because I want to extend the root, not the image
++- DDI: one disk image with a release file, verity
++- sysext adds a subtree of usr, confext adds a subtree of etc
++- bootc marks sysext unsupported, overlay depth, so there you extend the image
++- Both work, the choice is where the update lands
++
++>> advance: Who else ships this
++- GNOME OS, BuildStream, sysupdate
++- ParticleOS, mkosi and OBS, IPE
++- Amutable OS, image-based, sysext and confext, signed report ledger
++
++## 15:00 Demo 3 (1:15)
++
++>> advance: Demo 3
++- Demo three is a recording, registry on the laptop, tunnel to the board
++- updatectl verifies signed checksums, stages version 3 in the inactive slot
++- bootctl set-default, reboot, board reports three
++- Extensions merge, graphics, k3s, podman
++- Signed update, but a signed file does not prove what runs at boot
++
++## 16:15 Trust (2:30)
++
++>> advance: A TPM is a small crypto processor
++- TPM: keys and measurements
++- EK identifies the chip, AK signs quotes
++- Measurements land in PCRs
++
++>> advance: A PCR only extends
++- PCR is a hash register, new value is hash of old value and measurement
++- Never set back, so the history is in the value
++- Firmware measures each stage, UKI stub measures the UKI into PCR 11
++- PCR 11 answers one question: which UKI booted
++
++>> advance: Remote Attestation Challenges
++- Verifier sends a nonce, recorded quote cannot replay
++- TPM signs a quote over the PCRs with the AK
++- Verifier checks the signature against the enrolled AK
++- Consumes the nonce, compares the PCRs with the profile
++- The event log explains the values, one line only, the slide is gone
++
++>> advance: pcrlock and systemd-report
++- pcrlock predicts the PCRs from the log, local policy, TPM unlocks without a remote verifier
++- systemd-report exports the report, one signature per signer
++- Receiver keeps the receipt
++
++## 17:45 Demo 4 (1:00)
++
++>> advance: Demo 4
++- Demo four runs on QEMU, ten seconds, warm guest
++- Secure Boot with our keys, swtpm
++- The guest uploads a signed report
++- Receiver answers accepted, componentsVerified, eventLogRecords, and the mechanism reads TPM2
++- The view shows the same receipt
++- This is fleet management: every node sends a signed report about its own state
++- A node that drifts stands out
++
++## 18:45 Consent (1:45)
++
++>> advance: Attestable User Consent
++- We proved the machine, now a payment needs a person
++- Two things: key residency, provable consent
++- Key residency: payment secret stays in the TPM
++- Consent: a human approved this payment, and the approval is provable
++- Two ways: trusted host OS, attested, or a separate security key or smartcard
++- The second keeps end-user freedom, no OS attestation needed
++
++>> advance: Assurance Level Tiers
++- Tier 0: small spending, TPM pays, host consent, daily limit, no replay
++- Tier 1: development spending, host, FIDO2, or smartcard
++- Development mode is like ADB on Android, it trades assurance for convenience
++- Tier 2: production spending, OS report matches, or a key or card
++- The wallet keeps the quote and the consent signature as the receipt
++
++## 20:30 Demo 5 (1:00)
++
++>> advance: Demo 5
++- Demo five runs on QEMU, about eighty seconds
++- The guest proves its boot chain, then reads PCR 11 and restarts the wallet with that profile
++- FIDO2 is an emulated U2F device, the smartcard an emulated CCID card
++- Tier 0 host, tier 1 all three paths, tier 2 host and FIDO2
++- Nonce single use, every accepted path in the wallet view
++- The U2F registration attestation and the smartcard PKCS#11 signature are the extra signals
++- The same exchange can run the other way, client attests server, mutual attestation
++
++## 21:30 Fleet (2:00)
++
++>> advance: Secure Fleet Management Primitives
++- Now we have all four: signed image, signed update, attested boot, provable consent
++- A fleet can be very secure from day one, IoT, clients, Kubernetes nodes
++- sysexts: base usr plus signed sysext, merged with overlay, IPE gate
++- Only signed code executes at the kernel level
++
++>> advance: Demo 6
++- Demo six runs on the K3, one node, under a minute after warm-up
++- k3s from a signed extension, node Ready
++- Valkey pod, RESP over IPv6, PONG
++- Tamper one byte of the k3s extension, refresh rejects it
++- Restore, pod keeps running
++- I have more demos ready: QEMU + K3, RVA22 bare metal, RVA23 beta, hybrid, not enough stage time
++
++## 23:30 Checkpoint (1:15)
++
++>> advance: Checkpoint/Restore and Migration
++- A pod restarts, a process moves
++- Many workloads keep state in memory: cache, session, queue consumer, model in flight
++- A zero-maintenance fleet drains a node for an update without killing them
++- I've worked on live migration and checkpoint restore for years on x86 and ARM, at Loophole Labs and now LiveKit
++- Useful for compliance too: a signed quote says the workload runs on a machine in a given region
++- RVA23 profiles make a process portable across implementations
++- RISC-V doing this in 2026 is a proof of maturity
++
++>> advance: What we attest, and when
++- Before: source guest proves its boot chain, quote, nonce, PCR 11, counter
++- After: destination proves the same
++- The checkpoint is the payload, the attestation names the machine that produced it and the machine that runs it
++- Same PID, same instance, same value, before and after
++
++## 24:45 Demo 7 (1:00)
++
++>> advance: Demo 7
++- Demo seven is staged before the talk, about fifteen seconds on stage
++- CRIU freezes the process, warm step uploaded the checkpoint and attested the source
++- The destination downloads, restores, attests after
++- Same PID, same instance, same value
++- The view shows attestation before, upload, download, attestation after
++- Both ends attested, the receiver knows which identity moved the process
++
++## 25:45 Close (1:30)
++
++>> advance: The whole stack, again
++- Last demo, so let me put the whole stack back up
++- We own the silicon: RVA23
++- We own enablement: the finger, the harness, the server
++- We own the firmware: BROM, FSBL, ESOS, OpenSBI, EDK2, systemd-boot, signed UKI
++- We own the image: signed, read-only, updated with sysupdate
++- We own the trust: our TPM, our AK, our update key, our signing key
++- We own the cluster: k3s from a signed extension, and a live process that moved
++- One file for the desktop, one update to version 3, one receipt, one key for consent
++- IoT fleet, phone, tablet, laptop, server, Kubernetes node
++- Not a proprietary service: your keys, your stack
++
++>> advance: The Future
++- RISC-V is the first architecture where every layer can be open at once
++- Profiles make software portable across implementations
++- Hardware that is just as open as software today
++
++>> advance: Thank you
++- Repo, notes, runbooks, slides on the QR code
++- Careers, LiveKit booth 254
++- Feedback QR at the bottom, and I know I talked fast
++- Happy to chat after, and at the booth
+
