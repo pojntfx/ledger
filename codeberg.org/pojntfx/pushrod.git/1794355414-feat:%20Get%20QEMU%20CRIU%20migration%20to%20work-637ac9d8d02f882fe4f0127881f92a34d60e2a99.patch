@@ -1,0 +1,537 @@
+From 637ac9d8d02f882fe4f0127881f92a34d60e2a99 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Tue, 10 Nov 2026 17:03:34 -0700
+Subject: [PATCH] feat: Get QEMU CRIU migration to work
+---
+diff --git a/buildroot/Makefile b/buildroot/Makefile
+index 1af957c668baa04f4ea9e953933c133f517b6307..30a6d2d4e3a80f2da227747b7924f6fecf642c8d 100644
+--- a/buildroot/Makefile
++++ b/buildroot/Makefile
+@@ -21,7 +21,7 @@ MAKE_BUILDROOT = $(MAKE) -C $(BUILDROOT_DIR) O=$(OUTPUT_DIR) BR2_HOST_DIR=$(HOST_DIR) BR2_EXTERNAL=$(THIS_EXTERNAL_PATH) BR2_DL_DIR=$(BR2_DL_DIR) BR2_CCACHE_DIR=$(BR2_CCACHE_DIR) CCACHE_DIR=$(BR2_CCACHE_DIR) CCACHE_BASEDIR=$(OUTPUT_DIR) $(COMMON_TOOLCHAIN_OVERRIDES) UBOOT_OVERRIDE_SRCDIR=$(UBOOT_OVERRIDE_SRCDIR) RVA23_KEY_DIR=$(RVA23_KEY_DIR)
+ MAKE_BUILDROOT_K3 = $(MAKE) -C $(BUILDROOT_DIR) O=$(K3_OUTPUT_DIR) BR2_HOST_DIR=$(K3_HOST_DIR) BR2_EXTERNAL=$(THIS_EXTERNAL_PATH) BR2_DL_DIR=$(BR2_DL_DIR) BR2_CCACHE_DIR=$(BR2_CCACHE_DIR) CCACHE_DIR=$(BR2_CCACHE_DIR) CCACHE_BASEDIR=$(K3_OUTPUT_DIR) $(COMMON_TOOLCHAIN_OVERRIDES) LINUX_OVERRIDE_SRCDIR=$(K3_SOURCE_DIR)/linux OPENSBI_OVERRIDE_SRCDIR=$(K3_SOURCE_DIR)/opensbi-vendor EDK2_SPACEMIT_OVERRIDE_SRCDIR=$(K3_SOURCE_DIR)/edk2-spacemit K3_LINUX_FIRMWARE_DIR=$(K3_LINUX_FIRMWARE_DIR)
+ BUILDROOT_PATCHES = $(sort $(wildcard $(THIS_EXTERNAL_PATH)/patches/buildroot/*.patch))
+ 
+-.PHONY: all configure build clean k3-configure k3-build k3-clean k3-registry k3-verify-image k3-verify-firmware k3-verify-base k3-verify-attestation k3-verify-report k3-verify-update k3-verify-hardening k3-verify-podman k3-verify-k3s k3-verify-wallet k3-verify-migration k3-verify-mutual-migration k3-verify-valkey k3-verify registry verify verify-image verify-boot verify-firmware verify-attestation verify-report verify-update verify-security verify-hardening verify-podman verify-k3s verify-attested-app verify-wallet verify-migration verify-mutual-migration demo-servers demo-preflight demo-warm demo-flash demo-weston demo-update demo-attestation-qemu demo-wallet-qemu demo-migrate-qemu demo-k3s-qemu demo-kubernetes demo-kubernetes-warm demo-qemu-warm demo-qemu-stop demos boot boot-display boot-firmware
++.PHONY: all configure build clean k3-configure k3-build k3-clean k3-registry k3-verify-image k3-verify-firmware k3-verify-base k3-verify-attestation k3-verify-report k3-verify-update k3-verify-hardening k3-verify-podman k3-verify-k3s k3-verify-wallet k3-verify-migration k3-verify-mutual-migration k3-verify-valkey k3-verify registry verify verify-image verify-boot verify-firmware verify-attestation verify-report verify-update verify-security verify-hardening verify-podman verify-k3s verify-attested-app verify-wallet verify-migration verify-mutual-migration demo-servers demo-preflight demo-warm demo-flash demo-weston demo-update demo-attestation-qemu demo-wallet-qemu demo-migrate-qemu demo-migrate-warm demo-kubernetes demo-kubernetes-warm demo-qemu-warm demo-qemu-stop demos boot boot-display boot-firmware
+ 
+ all: build k3-build
+ 
+@@ -161,8 +161,6 @@
+ demo-warm:
+ 	python3 scripts/4-demo-attestation-qemu.py
+ 	python3 scripts/5-demo-wallet-qemu.py
+-	python3 scripts/6-demo-migrate-qemu.py
+-	python3 scripts/demo-k3s-qemu.py
+ 
+ demo-attestation-qemu:
+ 	python3 scripts/4-demo-attestation-qemu.py
+@@ -171,16 +169,16 @@ demo-wallet-qemu:
+ 	python3 scripts/5-demo-wallet-qemu.py
+ 
+ demo-migrate-qemu:
+-	python3 scripts/6-demo-migrate-qemu.py
++	python3 scripts/7-demo-migrate-qemu.py
+ 
+-demo-k3s-qemu:
+-	python3 scripts/demo-k3s-qemu.py
++demo-migrate-warm:
++	python3 scripts/demo-migrate-warm.py
+ 
+ demo-kubernetes:
+-	python3 scripts/7-demo-kubernetes.py
++	python3 scripts/6-demo-kubernetes.py
+ 
+ demo-qemu-warm:
+-	python3 scripts/demo_qemu_warm.py start firmware k3s
++	python3 scripts/demo_qemu_warm.py start src dst firmware k3s
+ 
+ demo-qemu-stop:
+ 	python3 scripts/demo_qemu_warm.py stop
+@@ -195,8 +193,9 @@ 	python3 scripts/3-demo-update.py
+ 	setsid python3 scripts/demo-kubernetes-warm.py > /tmp/demo-kubernetes-warm.log 2>&1 < /dev/null &
+ 	python3 scripts/4-demo-attestation-qemu.py
+ 	python3 scripts/5-demo-wallet-qemu.py
+-	python3 scripts/6-demo-migrate-qemu.py
+-	python3 scripts/7-demo-kubernetes.py
++	python3 scripts/6-demo-kubernetes.py
++	python3 scripts/demo-migrate-warm.py
++	python3 scripts/7-demo-migrate-qemu.py
+ 
+ boot:
+ 	$(THIS_EXTERNAL_PATH)/board/rva23-qemu/run-qemu.sh $(OUTPUT_DIR)/images
+diff --git a/buildroot/scripts/6-demo-kubernetes.py b/buildroot/scripts/6-demo-kubernetes.py
+new file mode 100755
+index 0000000000000000000000000000000000000000..90e13517ee782e4aa96199d4b665a4e177176975
+--- /dev/null
++++ b/buildroot/scripts/6-demo-kubernetes.py
+@@ -0,0 +1,101 @@
++#!/usr/bin/env python3
++import importlib.util
++import json
++from pathlib import Path
++import sys
++import time
++
++sys.path.insert(0, str(Path(__file__).parent))
++
++import demo_lib
++
++OUTPUT = Path(__file__).parent.parent / "output/k3-uefi"
++KUBECONFIG = "/var/lib/k3s-demo/server/cred/admin.kubeconfig"
++
++
++def load(name, path):
++    spec = importlib.util.spec_from_file_location(name, path)
++    module = importlib.util.module_from_spec(spec)
++    spec.loader.exec_module(module)
++    return module
++
++
++valkey = load("valkey_test", Path(__file__).with_name("verify-valkey.py"))
++
++MANIFEST = {
++    "apiVersion": "v1",
++    "kind": "Pod",
++    "metadata": {"name": "valkey-k3s"},
++    "spec": {
++        "hostNetwork": True,
++        "containers": [
++            {
++                "name": "valkey",
++                "image": "docker.io/library/valkey-local:latest",
++                "imagePullPolicy": "Never",
++                "command": ["/lib/ld-linux-riscv64-lp64d.so.1", "--library-path", "/lib", "/valkey-server", "/etc/valkey.conf"],
++                "args": ["--port", "6380"],
++            }
++        ],
++    },
++}
++
++
++def main():
++    demo = demo_lib.Demo(
++        "Demo 6: a signed Kubernetes workload",
++        "k3s runs from a signed extension, Valkey runs on the pod, and a tampered extension is rejected",
++    )
++    demo.banner()
++    demo.cue("Watch the board: k3s and the pod run on the real hardware")
++
++    demo.step("Check the cluster on the board")
++    state = demo.run_command("systemctl is-active rva23-k3s-demo", check=False).stdout.strip()
++    if state != "active":
++        demo.note("k3s is not running; run make demo-kubernetes-warm after demo 3 to pre-warm it")
++    demo.run_command("systemctl reset-failed rva23-k3s-demo 2>/dev/null || true", check=False)
++    nodes = ""
++    for _ in range(90):
++        nodes = demo.run_command(f"kubectl --kubeconfig={KUBECONFIG} get nodes 2>/dev/null || true", 60, check=False, lines=2).stdout
++        if "Ready" in nodes:
++            break
++        time.sleep(2)
++    if "Ready" not in nodes:
++        raise demo_lib.DemoError("the k3s node is not ready")
++    demo.result("the node is ready")
++
++    demo.step("Run the signed Valkey pod")
++    document = "/tmp/valkey-k3s.yaml"
++    demo.note(f"pod valkey-k3s: image {MANIFEST['spec']['containers'][0]['image']}, port 6380, hostNetwork")
++    demo.k3.run(f"cat > {document} <<'EOF2'\n{json.dumps(MANIFEST, indent=2)}\nEOF2\n")
++    demo.run_command(f"kubectl --kubeconfig={KUBECONFIG} apply -f {document}", 120)
++    result = demo.run_command(f"kubectl --kubeconfig={KUBECONFIG} wait --for=condition=Ready pod/valkey-k3s --timeout=120s", 180, check=False)
++    if "condition met" not in result.stdout:
++        raise demo_lib.DemoError(result.stdout[-800:])
++    demo.result("the pod is ready")
++
++    demo.step("Reach Valkey over IPv6")
++    valkey.resp(demo_lib.board_link_local(), 6380, demo_lib.host_interface())
++    demo.result("PING, SET, and GET answer on port 6380")
++
++    demo.step("Tamper with the signed k3s extension")
++    demo.run_command("systemd-sysext unmerge", 120)
++    demo.run_command("image=$(find /var/lib/extensions -maxdepth 1 -name 'k3s_*.raw' -not -name '*.backup' -print -quit); cp \"$image\" \"$image.backup\"; printf X | dd of=\"$image\" bs=1 seek=1048576 conv=notrunc 2>/dev/null", 120, lines=0)
++    demo.note("one byte changed inside the signed k3s extension")
++    check = demo.run_command("if systemd-sysext --image-policy=root=signed+absent:usr=signed+absent refresh; then false; else true; fi", 120, check=False)
++    if check.returncode != 0:
++        raise demo_lib.DemoError("the tampered extension was accepted")
++    demo.result("the tampered extension is rejected")
++    demo.run_command("image=$(find /var/lib/extensions -maxdepth 1 -name 'k3s_*.raw' -not -name '*.backup' -print -quit); mv \"$image.backup\" \"$image\"", 120, lines=0)
++    demo.run_command("systemd-sysext --image-policy=root=signed+absent:usr=signed+absent refresh", 120, lines=2)
++    demo.result("the original extension merges again")
++
++    demo.step("Read the cluster state")
++    demo.run_command(f"kubectl --kubeconfig={KUBECONFIG} get pods -o wide", 60, check=False, lines=4)
++
++    demo.payoff("The cluster runs a signed workload, and a tampered extension never reaches it")
++    return demo.finish()
++
++
++if __name__ == "__main__":
++    demo_lib.run(main)
+diff --git a/buildroot/scripts/7-demo-kubernetes.py b/buildroot/scripts/7-demo-kubernetes.py
+deleted file mode 100755
+index dcd1997d556d36ee80d85f4bcb19c78aa90f76cb..0000000000000000000000000000000000000000
+--- a/buildroot/scripts/7-demo-kubernetes.py
++++ /dev/null
+@@ -1,101 +0,0 @@
+-#!/usr/bin/env python3
+-import importlib.util
+-import json
+-from pathlib import Path
+-import sys
+-import time
+-
+-sys.path.insert(0, str(Path(__file__).parent))
+-
+-import demo_lib
+-
+-OUTPUT = Path(__file__).parent.parent / "output/k3-uefi"
+-KUBECONFIG = "/var/lib/k3s-demo/server/cred/admin.kubeconfig"
+-
+-
+-def load(name, path):
+-    spec = importlib.util.spec_from_file_location(name, path)
+-    module = importlib.util.module_from_spec(spec)
+-    spec.loader.exec_module(module)
+-    return module
+-
+-
+-valkey = load("valkey_test", Path(__file__).with_name("verify-valkey.py"))
+-
+-MANIFEST = {
+-    "apiVersion": "v1",
+-    "kind": "Pod",
+-    "metadata": {"name": "valkey-k3s"},
+-    "spec": {
+-        "hostNetwork": True,
+-        "containers": [
+-            {
+-                "name": "valkey",
+-                "image": "docker.io/library/valkey-local:latest",
+-                "imagePullPolicy": "Never",
+-                "command": ["/lib/ld-linux-riscv64-lp64d.so.1", "--library-path", "/lib", "/valkey-server", "/etc/valkey.conf"],
+-                "args": ["--port", "6380"],
+-            }
+-        ],
+-    },
+-}
+-
+-
+-def main():
+-    demo = demo_lib.Demo(
+-        "Demo 7: a signed Kubernetes workload",
+-        "k3s runs from a signed extension, Valkey runs on the pod, and a tampered extension is rejected",
+-    )
+-    demo.banner()
+-    demo.cue("Watch the board: k3s and the pod run on the real hardware")
+-
+-    demo.step("Check the cluster on the board")
+-    state = demo.run_command("systemctl is-active rva23-k3s-demo", check=False).stdout.strip()
+-    if state != "active":
+-        demo.note("k3s is not running; run make demo-kubernetes-warm after demo 3 to pre-warm it")
+-    demo.run_command("systemctl reset-failed rva23-k3s-demo 2>/dev/null || true", check=False)
+-    nodes = ""
+-    for _ in range(90):
+-        nodes = demo.run_command(f"kubectl --kubeconfig={KUBECONFIG} get nodes 2>/dev/null || true", 60, check=False, lines=2).stdout
+-        if "Ready" in nodes:
+-            break
+-        time.sleep(2)
+-    if "Ready" not in nodes:
+-        raise demo_lib.DemoError("the k3s node is not ready")
+-    demo.result("the node is ready")
+-
+-    demo.step("Run the signed Valkey pod")
+-    document = "/tmp/valkey-k3s.yaml"
+-    demo.note(f"pod valkey-k3s: image {MANIFEST['spec']['containers'][0]['image']}, port 6380, hostNetwork")
+-    demo.k3.run(f"cat > {document} <<'EOF2'\n{json.dumps(MANIFEST, indent=2)}\nEOF2\n")
+-    demo.run_command(f"kubectl --kubeconfig={KUBECONFIG} apply -f {document}", 120)
+-    result = demo.run_command(f"kubectl --kubeconfig={KUBECONFIG} wait --for=condition=Ready pod/valkey-k3s --timeout=120s", 180, check=False)
+-    if "condition met" not in result.stdout:
+-        raise demo_lib.DemoError(result.stdout[-800:])
+-    demo.result("the pod is ready")
+-
+-    demo.step("Reach Valkey over IPv6")
+-    valkey.resp(demo_lib.board_link_local(), 6380, demo_lib.host_interface())
+-    demo.result("PING, SET, and GET answer on port 6380")
+-
+-    demo.step("Tamper with the signed k3s extension")
+-    demo.run_command("systemd-sysext unmerge", 120)
+-    demo.run_command("image=$(find /var/lib/extensions -maxdepth 1 -name 'k3s_*.raw' -not -name '*.backup' -print -quit); cp \"$image\" \"$image.backup\"; printf X | dd of=\"$image\" bs=1 seek=1048576 conv=notrunc 2>/dev/null", 120, lines=0)
+-    demo.note("one byte changed inside the signed k3s extension")
+-    check = demo.run_command("if systemd-sysext --image-policy=root=signed+absent:usr=signed+absent refresh; then false; else true; fi", 120, check=False)
+-    if check.returncode != 0:
+-        raise demo_lib.DemoError("the tampered extension was accepted")
+-    demo.result("the tampered extension is rejected")
+-    demo.run_command("image=$(find /var/lib/extensions -maxdepth 1 -name 'k3s_*.raw' -not -name '*.backup' -print -quit); mv \"$image.backup\" \"$image\"", 120, lines=0)
+-    demo.run_command("systemd-sysext --image-policy=root=signed+absent:usr=signed+absent refresh", 120, lines=2)
+-    demo.result("the original extension merges again")
+-
+-    demo.step("Read the cluster state")
+-    demo.run_command(f"kubectl --kubeconfig={KUBECONFIG} get pods -o wide", 60, check=False, lines=4)
+-
+-    demo.payoff("The cluster runs a signed workload, and a tampered extension never reaches it")
+-    return demo.finish()
+-
+-
+-if __name__ == "__main__":
+-    demo_lib.run(main)
+diff --git a/buildroot/scripts/7-demo-migrate-qemu.py b/buildroot/scripts/7-demo-migrate-qemu.py
+new file mode 100755
+index 0000000000000000000000000000000000000000..e801ac180b6ef608418d29e118cc53d1a33a48e2
+--- /dev/null
++++ b/buildroot/scripts/7-demo-migrate-qemu.py
+@@ -0,0 +1,79 @@
++#!/usr/bin/env python3
++import base64
++import json
++from pathlib import Path
++import socket
++import sys
++import urllib.request
++import time
++
++sys.path.insert(0, str(Path(__file__).parent))
++
++import demo_lib
++import demo_qemu_warm as warm
++
++OUTPUT = Path(__file__).parent.parent / "output/rva23"
++STATE = OUTPUT / "migration" / "warm-state.json"
++
++
++def port_open(port):
++    with socket.socket(socket.AF_INET6, socket.SOCK_STREAM) as connection:
++        connection.settimeout(2)
++        return connection.connect_ex(("::1", port)) == 0
++
++
++def guest_state(guest, port):
++    output = warm.run(None, guest, f"wget -q -O- http://[::1]:{port}/api/state", 60, lines=0)
++    body = output[output.find("{"):output.rfind("}") + 1]
++    return json.loads(body)
++
++
++def main():
++    demo = demo_lib.Demo(
++        "Demo 7: move a live process on QEMU",
++        "CRIU freezes a process, the checkpoint is signed and uploaded, and a second guest restores it",
++    )
++    demo.banner()
++    demo.cue("The checkpoint is already uploaded and the first guest attested")
++    demo.ui("migration server", demo_lib.MIGRATION_UI)
++    demo.ui("event view", demo_lib.EVENT_UI)
++
++    if not STATE.exists():
++        raise demo_lib.DemoError("the migration is not staged; run make demo-migrate-warm first")
++    staged = json.loads(STATE.read_text())
++    demo.step("Check the staged migration")
++    for port in (8080, 8083):
++        if not port_open(port):
++            raise demo_lib.DemoError(f"the staged service on port {port} is not running; run make demo-migrate-warm again")
++    demo.result(f"pid {staged['pid']} is staged, instance {staged['instanceId'][:12]}")
++
++    destination, _ = warm.ensure("dst")
++    demo.step("Restore the process on the second guest")
++    demo.note("The destination never saw the source; it gets the checkpoint and the state")
++    encoded = base64.b64encode(json.dumps(staged["destinationState"]).encode()).decode()
++    warm.run(demo, destination, f"mkdir -p /var/lib/rva23-migration; printf '%s' '{encoded}' | base64 -d > /var/lib/rva23-migration/state.json", 60, lines=0)
++    warm.run(demo, destination, "rm -f /tmp/migration.tar.gz; migration-client download -output /tmp/migration.tar.gz 2>&1", 300, lines=4)
++    warm.run(demo, destination, "rm -rf /tmp/criu-restore; migration-client extract -archive /tmp/migration.tar.gz -destination /tmp/criu-restore 2>&1", 300, lines=3)
++    warm.run(demo, destination, "criu restore -D /tmp/criu-restore --shell-job --tcp-close -d 2>&1", 300, lines=3)
++    demo.result("the process is back on the second guest")
++
++    demo.step("Attest the restored process")
++    warm.run(demo, destination, "migration-client attest -phase after 2>&1", 300, lines=3)
++    warm.run(demo, destination, "RVA23_MIGRATION_CLIENT_UI_LISTEN='[::]:18085' migration-client serve </dev/null >/dev/null 2>&1 & true", 60, lines=0)
++    time.sleep(2)
++    restored = guest_state(destination, 18085)
++    if restored["pid"] != staged["pid"] or restored["instanceId"] != staged["instanceId"]:
++        raise demo_lib.DemoError(f"the restored process has pid {restored['pid']}, expected {staged['pid']}")
++    demo.result(f"restored pid {restored['pid']}, same instance id")
++
++    demo.step("Read the receipts in the unified view")
++    with urllib.request.urlopen("http://[::1]:8083/api/state", timeout=10) as response:
++        history = json.load(response)
++    accepted = [item for item in history["history"] if item["operation"] == "attestation" and item.get("response", {}).get("status") == "accepted"]
++    demo.result(f"{len(accepted)} accepted attestations, users {[item['response']['userId'] for item in accepted]}")
++    demo.payoff("The process kept its PID and instance ID across the move, and both guests attested")
++    return demo.finish()
++
++
++if __name__ == "__main__":
++    demo_lib.run(main)
+diff --git a/buildroot/scripts/demo-migrate-warm.py b/buildroot/scripts/demo-migrate-warm.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..8cb31ffb2173b8db4038f56c81fe5a5006c03c2a
+--- /dev/null
++++ b/buildroot/scripts/demo-migrate-warm.py
+@@ -0,0 +1,110 @@
++#!/usr/bin/env python3
++import importlib.util
++import json
++from pathlib import Path
++import subprocess
++import sys
++import time
++
++sys.path.insert(0, str(Path(__file__).parent))
++
++import demo_lib
++import demo_qemu_warm as warm
++
++
++def load(name, path):
++    spec = importlib.util.spec_from_file_location(name, path)
++    module = importlib.util.module_from_spec(spec)
++    spec.loader.exec_module(module)
++    return module
++
++
++migration = load("migration_test", Path(__file__).with_name("verify-migration.py"))
++wallet = load("wallet_test", Path(__file__).with_name("verify-wallet.py"))
++OUTPUT = Path(__file__).parent.parent / "output/rva23"
++STATE = OUTPUT / "migration" / "warm-state.json"
++
++
++def enrolled(name):
++    return (OUTPUT / "migration" / f"{name}-ak-public.pem").exists()
++
++
++def enroll(guest, name):
++    print(f"enroll {name}", flush=True)
++    warm.run(None, guest, "systemctl is-active --quiet --wait graphical.target", lines=0)
++    warm.run(None, guest, "systemctl start systemd-pcrlock.socket", lines=0)
++    warm.run(None, guest, "systemctl restart systemd-report-sign-tpm2.socket", lines=0)
++    warm.run(None, guest, "attested-client", 300, lines=2)
++    warm.run(None, guest, "tpm2_readpublic -c /var/lib/systemd/report.sign.tpm2/ak.ctx -f pem -o /tmp/ak-public.pem", 60, lines=0)
++    migration.copy_guest_file(guest, "/tmp/ak-public.pem", OUTPUT / "migration" / f"{name}-ak-public.pem")
++    warm.run(None, guest, "criu check", 300, lines=2)
++    print(f"{name} enrolled", flush=True)
++
++
++def stop_clients(guest):
++    warm.run(None, guest, "kill $(ps | awk '/[m]igration-client serve/ {print $1}') 2>/dev/null || true", 30, lines=0, check=False)
++    for _ in range(20):
++        probe = warm.run(None, guest, "wget -q -O- http://[::1]:18084/api/state", 5, lines=0, check=False)
++        if "{" not in probe:
++            return
++        time.sleep(1)
++
++
++def start_client(guest):
++    stop_clients(guest)
++    warm.run(None, guest, "rm -f /var/lib/rva23-migration/state.json", lines=0, check=False)
++    output = warm.run(None, guest, "RVA23_MIGRATION_CLIENT_UI_LISTEN='[::]:18084' migration-client serve </dev/null >/dev/null 2>&1 & printf '%s\\n' $!", 60, lines=0)
++    for _ in range(30):
++        probe = warm.run(None, guest, "wget -q -O- http://[::1]:18084/api/state", 5, lines=0, check=False)
++        if "{" in probe:
++            return
++        time.sleep(1)
++    raise demo_lib.DemoError("the migration client did not start")
++
++
++def main():
++    subprocess.run(["pkill", "-f", r"output/(demo|rva23/host-attestation|rva23/migration)/(report-receiver|wallet-server|migration-server|event-explorer)"], check=False)
++    time.sleep(2)
++    source, _ = warm.ensure("src")
++    destination, _ = warm.ensure("dst")
++    if not enrolled("src"):
++        enroll(source, "src")
++    if not enrolled("dst"):
++        enroll(destination, "dst")
++    stop_clients(source)
++    stop_clients(destination)
++
++    receiver = migration.start_receiver(OUTPUT)
++    production_pcr11 = wallet.predict_profile(OUTPUT, "rva23-debug_1.efi")
++    server = migration.start_migration_server(OUTPUT, production_pcr11)
++    start_client(source)
++
++    pid_output = warm.run(None, source, "cat /tmp/migration-client.pid 2>/dev/null || true", 30, lines=0, check=False)
++    state = None
++    for _ in range(30):
++        probe = warm.run(None, source, "wget -q -O- http://[::1]:18084/api/state", 10, lines=0, check=False)
++        body = probe[probe.find("{"):probe.rfind("}") + 1]
++        if body:
++            state = json.loads(body)
++            break
++        time.sleep(1)
++    if state is None:
++        raise demo_lib.DemoError("the source client returned no state")
++    pid = state["pid"]
++    instance = state["instanceId"]
++
++    warm.run(None, source, "migration-client attest -phase before", 300, lines=2)
++    warm.run(None, source, "rm -rf /tmp/criu-dump /tmp/migration.tar.gz; mkdir -p /tmp/criu-dump", lines=0)
++    warm.run(None, source, f"CRIU_FAULT=129 criu dump -t {pid} -D /tmp/criu-dump --shell-job --tcp-close", 300, lines=3)
++    warm.run(None, source, "migration-client archive -source /tmp/criu-dump -output /tmp/migration.tar.gz", 300, lines=2)
++    warm.run(None, source, "migration-client upload -archive /tmp/migration.tar.gz", 300, lines=3)
++
++    destination_state = dict(state)
++    destination_state["counter"] = int(destination_state.get("counter", 0)) + 100
++    STATE.write_text(json.dumps({"pid": pid, "instanceId": instance, "destinationState": destination_state, "receiver": receiver.pid, "server": server.pid}) + "\n")
++    print(f"warm: migration staged, pid {pid}, instance {instance[:12]}", flush=True)
++    print("warm: receiver and server stay up; run make demo-migrate-qemu during the talk", flush=True)
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/buildroot/scripts/demo_qemu_warm.py b/buildroot/scripts/demo_qemu_warm.py
+index 12eaf45624224c41afeba382fc27c4d0a267cd1a..d9185f3c9a6c830fa574cba739f0111e5e7452e2 100755
+--- a/buildroot/scripts/demo_qemu_warm.py
++++ b/buildroot/scripts/demo_qemu_warm.py
+@@ -173,8 +173,25 @@     (root / "smartcard-public.pem").write_bytes((smartcard / "smartcard-public.pem").read_bytes())
+     return fido2, smartcard
+ 
+ 
++def kill_stale(name):
++    for entry in Path("/proc").iterdir():
++        if not entry.name.isdigit():
++            continue
++        try:
++            cmdline = (entry / "cmdline").read_bytes().decode(errors="replace")
++        except (FileNotFoundError, PermissionError, NotADirectoryError):
++            continue
++        if f"demo/warm/{name}.img" in cmdline:
++            try:
++                os.kill(int(entry.name), 15)
++            except (ProcessLookupError, ValueError):
++                pass
++    time.sleep(1)
++
++
+ def start(name, script):
+     WARM.mkdir(parents=True, exist_ok=True)
++    kill_stale(name)
+     disk = WARM / f"{name}.img"
+     if not disk.exists():
+         shutil.copyfile(IMAGES / "disk.img", disk)
+@@ -217,6 +234,7 @@     raise demo_lib.DemoError(f"the guest '{name}' did not start its console")
+ 
+ 
+ def run(demo, guest, command, timeout=300, lines=4, check=True):
++    command = f"SYSTEMD_PAGER=cat {command}" if not command.startswith("SYSTEMD_PAGER=") else command
+     print(f"{demo_lib.DIM}           $ {command}{demo_lib.RESET}", flush=True)
+     status, text = guest._run(command, timeout)
+     output = (text or "").strip()
+@@ -242,9 +260,11 @@     verify_report.provision_ek(guest)
+ 
+ 
+ def ensure_prompt(guest, timeout=120):
++    print(f"{guest.name}: waiting for the shell prompt", flush=True)
+     guest._drain()
+     guest.sendline("root")
+     guest.expect(b"# ", timeout)
++    print(f"{guest.name}: shell prompt ready", flush=True)
+     return guest
+ 
+ 
+@@ -252,6 +272,9 @@ def ensure(name, timeout=900):
+     guest = connect(name)
+     if guest is not None:
+         return ensure_prompt(guest), False
++    if state_path(name).exists():
++        raise demo_lib.DemoError(f"the guest '{name}' is running but its console is busy; stop it with python3 scripts/demo_qemu_warm.py stop and retry")
++    print(f"{name}: no console, starting the guest", flush=True)
+     guest = start(name, GUESTS[name])
+     guest.wait_for_login(timeout)
+     if name == "firmware":
+
