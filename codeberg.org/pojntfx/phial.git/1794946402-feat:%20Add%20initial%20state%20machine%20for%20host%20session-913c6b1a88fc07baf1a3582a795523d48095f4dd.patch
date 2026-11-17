@@ -1,0 +1,481 @@
+From 913c6b1a88fc07baf1a3582a795523d48095f4dd Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Tue, 17 Nov 2026 13:13:22 -0700
+Subject: [PATCH] feat: Add initial state machine for host session
+---
+diff --git a/go.mod b/go.mod
+index 7cc7af64acbc6ff4f6614cd0fb0d76afcae5c056..35ee5f7ddcfa3d30a4da0436a90e33f72025fcf4 100644
+--- a/go.mod
++++ b/go.mod
+@@ -6,12 +6,16 @@ tool github.com/dennwc/flatpak-go-mod
+ 
+ require (
+ 	codeberg.org/puregotk/puregotk v0.0.0-20260420231554-98419d54d2d2
++	github.com/neilotoole/slogt v1.1.0
+ 	github.com/pojntfx/go-gettext v0.4.2
++	github.com/qmuntal/stateless v1.8.0
++	github.com/stretchr/testify v1.12.1
+ )
+ 
+ require (
+ 	codeberg.org/puregotk/purego v0.0.0-20260224095105-2513c838cb80 // indirect
+ 	github.com/dennwc/flatpak-go-mod v0.1.1-0.20250809093520-ddf8d84264aa // indirect
+ 	github.com/goccy/go-yaml v1.18.0 // indirect
++	go.yaml.in/yaml/v3 v3.0.5 // indirect
+ 	golang.org/x/mod v0.27.0 // indirect
+ )
+diff --git a/go.sum b/go.sum
+index 63e8af42b332fb0924d70475dda45bab4c565afc..ab24e014a4d46663d7e135b8195231fe0ee3fcfe 100644
+--- a/go.sum
++++ b/go.sum
+@@ -2,19 +2,19 @@ codeberg.org/puregotk/purego v0.0.0-20260224095105-2513c838cb80 h1:y5ZxMLLOjl4xc2tBl02olxZQ06xbbKiR+2ipBfDrVcs=
+ codeberg.org/puregotk/purego v0.0.0-20260224095105-2513c838cb80/go.mod h1:hVVM4ddvYRlc3IcK3CXJPlMwd/vaLj7gdDBZ6oPgT8w=
+ codeberg.org/puregotk/puregotk v0.0.0-20260420231554-98419d54d2d2 h1:i2Z8LWUE+bunEy9O43+CeQeFj3SvAtkiIzJibDp0XxY=
+ codeberg.org/puregotk/puregotk v0.0.0-20260420231554-98419d54d2d2/go.mod h1:KDQjaDscQiL2OiLWuBFBF4l/x/1DW+M0lPcQTa0Id0o=
+-github.com/davecgh/go-spew v1.1.1 h1:vj9j/u1bqnvCEfJOwUhtlOARqs3+rkHYY13jYWTU97c=
+-github.com/davecgh/go-spew v1.1.1/go.mod h1:J7Y8YcW2NihsgmVo/mv3lAwl/skON4iLHjSsI+c5H38=
+ github.com/dennwc/flatpak-go-mod v0.1.1-0.20250809093520-ddf8d84264aa h1:c5k0CB16zFqMTKviySxusHVRFAnggzX3l6JK3Cw6fiQ=
+ github.com/dennwc/flatpak-go-mod v0.1.1-0.20250809093520-ddf8d84264aa/go.mod h1:4akg2uvMr36H/vDzQSPofcff2LBk4u+bTAPy2bxVoOo=
+ github.com/goccy/go-yaml v1.18.0 h1:8W7wMFS12Pcas7KU+VVkaiCng+kG8QiFeFwzFb+rwuw=
+ github.com/goccy/go-yaml v1.18.0/go.mod h1:XBurs7gK8ATbW4ZPGKgcbrY1Br56PdM69F7LkFRi1kA=
+-github.com/pmezard/go-difflib v1.0.0 h1:4DBwDE0NGyQoBHbLQYPwSUPoCMWR5BEzIk/f1lZbAQM=
+-github.com/pmezard/go-difflib v1.0.0/go.mod h1:iKH77koFhYxTK1pcRnkKkqfTogsbg7gZNVY4sRDYZ/4=
++github.com/neilotoole/slogt v1.1.0 h1:c7qE92sq+V0yvCuaxph+RQ2jOKL61c4hqS1Bv9W7FZE=
++github.com/neilotoole/slogt v1.1.0/go.mod h1:RCrGXkPc/hYybNulqQrMHRtvlQ7F6NktNVLuLwk6V+w=
+ github.com/pojntfx/go-gettext v0.4.2 h1:mYWcztN4idj11/GCNg+N2zNyJSpFKnIAr5ilksyIMtU=
+ github.com/pojntfx/go-gettext v0.4.2/go.mod h1:YztK1MAxD+AUmeEb+X4KUYOHEF0FmDaLoBZBBmxNC3Y=
+-github.com/stretchr/testify v1.11.1 h1:7s2iGBzp5EwR7/aIZr8ao5+dra3wiQyKjjFuvgVKu7U=
+-github.com/stretchr/testify v1.11.1/go.mod h1:wZwfW3scLgRK+23gO65QZefKpKQRnfz6sD981Nm4B6U=
++github.com/qmuntal/stateless v1.8.0 h1:9+Eg/7bWLKxUxs/vysNYAelFAh85kTyueC3ee6v8im8=
++github.com/qmuntal/stateless v1.8.0/go.mod h1:KWa8KVzIBD/ZS0EdzL5oU79sGq7fKwH9WEFijTC5AWw=
++github.com/stretchr/testify v1.12.1 h1:EuwCh5fleGS7H32xRwO3wRGT7DxrDhLAT6FF8MpWDWE=
++github.com/stretchr/testify v1.12.1/go.mod h1:MDEgiDPPsNp5cuIrHPPCyornHKgEVbtFUmoNlxoYthg=
++go.yaml.in/yaml/v3 v3.0.5 h1:N6y/pJk8buWs9NY5ERU2HSMfm+IuD/OtfdAnq6kESPw=
++go.yaml.in/yaml/v3 v3.0.5/go.mod h1:HVTZu1O7/Vkt2N+BFy8Zza+lnLsABggaTM2ZpNIGuKg=
+ golang.org/x/mod v0.27.0 h1:kb+q2PyFnEADO2IEF935ehFUXlWiNjJWtRNgBLSfbxQ=
+ golang.org/x/mod v0.27.0/go.mod h1:rWI627Fq0DEoudcK+MBkNkCe0EetEaDSwJJkCcjpazc=
+-gopkg.in/yaml.v3 v3.0.1 h1:fxVm/GzAzEWqLHuvctI91KS9hhNmmWOoWu0XTYJS7CA=
+-gopkg.in/yaml.v3 v3.0.1/go.mod h1:K4uyk7z7BCEPqu6E+C64Yfv1cQ7kz7rIZviUmN+EgEM=
+diff --git a/pkg/state/constants.go b/pkg/state/constants.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..3482b0c118c4e72d30b3354f7db8ca1ea22d95a2
+--- /dev/null
++++ b/pkg/state/constants.go
+@@ -0,0 +1,43 @@
++package state
++
++type sessionState string
++
++const (
++	sessionBooting sessionState = "booting"
++	sessionSetup   sessionState = "setup"
++
++	sessionSetupWelcome sessionState = "setup-welcome"
++	sessionSetupFolders sessionState = "setup-folders"
++	sessionSetupHost    sessionState = "setup-host"
++	sessionSetupSystem  sessionState = "setup-system"
++	sessionSetupFinish  sessionState = "setup-finish"
++
++	sessionReady sessionState = "ready"
++)
++
++type sessionTrigger string
++
++const (
++	triggerBoot      sessionTrigger = "boot"
++	triggerSetupNext sessionTrigger = "setupNext"
++	triggerSetupBack sessionTrigger = "setupBack"
++	triggerFinish    sessionTrigger = "finish"
++)
++
++type SetupPage string
++
++const (
++	SetupPageWelcome SetupPage = "welcome"
++	SetupPageFolders SetupPage = "folders"
++	SetupPageHost    SetupPage = "host"
++	SetupPageSystem  SetupPage = "system"
++	SetupPageFinish  SetupPage = "finish"
++)
++
++type FolderKind string
++
++const (
++	FolderConfig FolderKind = "config"
++	FolderData   FolderKind = "data"
++	FolderSSH    FolderKind = "ssh"
++)
+diff --git a/pkg/state/session.go b/pkg/state/session.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..e9e05c5ac66d87a7e4c2b5220c2dab3b042a08ea
+--- /dev/null
++++ b/pkg/state/session.go
+@@ -0,0 +1,232 @@
++package state
++
++import (
++	"context"
++	"log/slog"
++	"reflect"
++	"strings"
++
++	"github.com/qmuntal/stateless"
++)
++
++type SessionHooks struct {
++	OnSetupStep func(ctx context.Context, page SetupPage) error
++	OnReady     func(ctx context.Context) error
++}
++
++type Folders struct {
++	Config string
++	Data   string
++	SSH    string
++}
++
++type Session struct {
++	folders Folders
++
++	hostCommandCopied   bool
++	systemCommandCopied bool
++
++	ctx   context.Context
++	log   *slog.Logger
++	hooks *SessionHooks
++
++	machine *stateless.StateMachine
++}
++
++func NewSession(ctx context.Context, log *slog.Logger, hooks *SessionHooks) *Session {
++	s := &Session{
++		ctx:   ctx,
++		log:   log,
++		hooks: hooks,
++
++		machine: stateless.NewStateMachine(sessionBooting),
++	}
++
++	s.machine.SetTriggerParameters(triggerBoot, reflect.TypeFor[bool]())
++	s.machine.SetTriggerParameters(triggerSetupNext, reflect.TypeFor[bool]())
++
++	s.machine.Configure(sessionBooting).
++		Permit(triggerBoot, sessionSetup, notOnboarded).
++		Permit(triggerBoot, sessionReady, isOnboarded)
++
++	s.machine.Configure(sessionSetup).InitialTransition(sessionSetupWelcome)
++
++	s.machine.
++		Configure(sessionSetupWelcome).
++		SubstateOf(sessionSetup).
++		OnEntry(s.onSetupWelcome).
++		Permit(triggerSetupNext, sessionSetupFolders)
++
++	s.machine.
++		Configure(sessionSetupFolders).
++		SubstateOf(sessionSetup).
++		OnEntry(s.onSetupFolders).
++		Permit(triggerSetupNext, sessionSetupHost, s.foldersValid).
++		Permit(triggerSetupBack, sessionSetupWelcome)
++
++	s.machine.
++		Configure(sessionSetupHost).
++		SubstateOf(sessionSetup).
++		OnEntry(s.onSetupHost).
++		Permit(triggerSetupNext, sessionSetupSystem, hostReady, s.hostCommandCopiedGuard).
++		Permit(triggerSetupBack, sessionSetupFolders)
++
++	s.machine.
++		Configure(sessionSetupSystem).
++		SubstateOf(sessionSetup).
++		OnEntry(s.onSetupSystem).
++		Permit(triggerSetupNext, sessionSetupFinish, s.systemCommandCopiedGuard).
++		Permit(triggerSetupBack, sessionSetupHost)
++
++	s.machine.
++		Configure(sessionSetupFinish).
++		SubstateOf(sessionSetup).
++		OnEntry(s.onSetupFinish).
++		Permit(triggerFinish, sessionReady).
++		Permit(triggerSetupBack, sessionSetupSystem)
++
++	s.machine.Configure(sessionReady).OnEntry(s.onReady)
++
++	return s
++}
++
++func (s *Session) ToGraph() string {
++	return s.machine.ToGraph()
++}
++
++func (s *Session) String() string {
++	return s.machine.String()
++}
++
++func notOnboarded(_ context.Context, args ...any) bool {
++	if len(args) == 0 {
++		return false
++	}
++
++	onboarded, ok := args[0].(bool)
++
++	return ok && !onboarded
++}
++
++func isOnboarded(_ context.Context, args ...any) bool {
++	if len(args) == 0 {
++		return false
++	}
++
++	onboarded, ok := args[0].(bool)
++
++	return ok && onboarded
++}
++
++func hostReady(_ context.Context, args ...any) bool {
++	if len(args) == 0 {
++		return false
++	}
++
++	ready, ok := args[0].(bool)
++
++	return ok && ready
++}
++
++func (s *Session) foldersValid(_ context.Context, _ ...any) bool {
++	for _, path := range []string{s.folders.Config, s.folders.Data, s.folders.SSH} {
++		if strings.TrimSpace(path) == "" {
++			return false
++		}
++	}
++
++	return true
++}
++
++func (s *Session) hostCommandCopiedGuard(_ context.Context, _ ...any) bool {
++	return s.hostCommandCopied
++}
++
++func (s *Session) systemCommandCopiedGuard(_ context.Context, _ ...any) bool {
++	return s.systemCommandCopied
++}
++
++func (s *Session) onSetupStep(ctx context.Context, page SetupPage) error {
++	s.log.InfoContext(s.ctx, "Calling onSetupStep hook", "page", page)
++
++	return s.hooks.OnSetupStep(ctx, page)
++}
++
++func (s *Session) onSetupWelcome(ctx context.Context, _ ...any) error {
++	return s.onSetupStep(ctx, SetupPageWelcome)
++}
++
++func (s *Session) onSetupFolders(ctx context.Context, _ ...any) error {
++	return s.onSetupStep(ctx, SetupPageFolders)
++}
++
++func (s *Session) onSetupHost(ctx context.Context, _ ...any) error {
++	return s.onSetupStep(ctx, SetupPageHost)
++}
++
++func (s *Session) onSetupSystem(ctx context.Context, _ ...any) error {
++	return s.onSetupStep(ctx, SetupPageSystem)
++}
++
++func (s *Session) onSetupFinish(ctx context.Context, _ ...any) error {
++	return s.onSetupStep(ctx, SetupPageFinish)
++}
++
++func (s *Session) onReady(ctx context.Context, _ ...any) error {
++	s.log.InfoContext(s.ctx, "Calling onReady hook")
++
++	return s.hooks.OnReady(ctx)
++}
++
++func (s *Session) Boot(ctx context.Context, onboarded bool) error {
++	return s.machine.FireCtx(ctx, triggerBoot, onboarded)
++}
++
++func (s *Session) SetupNext(ctx context.Context, hostReady bool) error {
++	return s.machine.FireCtx(ctx, triggerSetupNext, hostReady)
++}
++
++func (s *Session) SetupBack(ctx context.Context) error {
++	return s.machine.FireCtx(ctx, triggerSetupBack)
++}
++
++func (s *Session) SetupFinish(ctx context.Context) error {
++	return s.machine.FireCtx(ctx, triggerFinish)
++}
++
++func (s *Session) CanSetupNext(ctx context.Context, hostReady bool) (bool, error) {
++	return s.machine.CanFireCtx(ctx, triggerSetupNext, hostReady)
++}
++
++func (s *Session) CanSetupBack(ctx context.Context) (bool, error) {
++	return s.machine.CanFireCtx(ctx, triggerSetupBack)
++}
++
++func (s *Session) CanSetupFinish(ctx context.Context) (bool, error) {
++	return s.machine.CanFireCtx(ctx, triggerFinish)
++}
++
++func (s *Session) SetFolder(kind FolderKind, path string) {
++	switch kind {
++	case FolderConfig:
++		s.folders.Config = path
++	case FolderData:
++		s.folders.Data = path
++	case FolderSSH:
++		s.folders.SSH = path
++	default:
++		return
++	}
++
++	s.hostCommandCopied = false
++	s.systemCommandCopied = false
++}
++
++func (s *Session) SetupCopy() {
++	switch s.machine.MustState() {
++	case sessionSetupHost:
++		s.hostCommandCopied = true
++	case sessionSetupSystem:
++		s.systemCommandCopied = true
++	}
++}
+diff --git a/pkg/state/session_test.go b/pkg/state/session_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..59921a695b74ee46b2e04b92b18708dba603dfc0
+--- /dev/null
++++ b/pkg/state/session_test.go
+@@ -0,0 +1,129 @@
++package state
++
++import (
++	"context"
++	"testing"
++
++	"github.com/neilotoole/slogt"
++	"github.com/stretchr/testify/require"
++)
++
++func newTestingSession(t *testing.T, hooks *SessionHooks) *Session {
++	return NewSession(t.Context(), slogt.New(t), hooks)
++}
++
++func TestSessionBootSetup(t *testing.T) {
++	var (
++		pages []SetupPage
++		ready int
++	)
++
++	s := newTestingSession(t, &SessionHooks{
++		OnSetupStep: func(_ context.Context, page SetupPage) error {
++			pages = append(pages, page)
++
++			return nil
++		},
++		OnReady: func(_ context.Context) error {
++			ready++
++
++			return nil
++		},
++	})
++
++	require.NoError(t, s.Boot(t.Context(), false))
++	require.Equal(t, []SetupPage{SetupPageWelcome}, pages)
++	require.Zero(t, ready)
++}
++
++func TestSessionBootReady(t *testing.T) {
++	var (
++		pages []SetupPage
++		ready int
++	)
++
++	s := newTestingSession(t, &SessionHooks{
++		OnSetupStep: func(_ context.Context, page SetupPage) error {
++			pages = append(pages, page)
++
++			return nil
++		},
++		OnReady: func(_ context.Context) error {
++			ready++
++
++			return nil
++		},
++	})
++
++	require.NoError(t, s.Boot(t.Context(), true))
++	require.Empty(t, pages)
++	require.Equal(t, 1, ready)
++}
++
++func TestSessionSetupNext(t *testing.T) {
++	var (
++		pages []SetupPage
++		ready int
++	)
++
++	s := newTestingSession(t, &SessionHooks{
++		OnSetupStep: func(_ context.Context, page SetupPage) error {
++			pages = append(pages, page)
++
++			return nil
++		},
++		OnReady: func(_ context.Context) error {
++			ready++
++
++			return nil
++		},
++	})
++
++	require.NoError(t, s.Boot(t.Context(), false))
++
++	s.SetFolder(FolderConfig, "/tmp/config")
++	s.SetFolder(FolderData, "/tmp/data")
++	s.SetFolder(FolderSSH, "/tmp/ssh")
++
++	require.NoError(t, s.SetupNext(t.Context(), false))
++	require.NoError(t, s.SetupNext(t.Context(), false))
++
++	s.SetupCopy()
++
++	require.NoError(t, s.SetupNext(t.Context(), true))
++
++	s.SetupCopy()
++
++	require.NoError(t, s.SetupNext(t.Context(), true))
++	require.NoError(t, s.SetupFinish(t.Context()))
++
++	require.Equal(t, []SetupPage{SetupPageWelcome, SetupPageFolders, SetupPageHost, SetupPageSystem, SetupPageFinish}, pages)
++	require.Equal(t, 1, ready)
++}
++
++func TestSessionSetupBack(t *testing.T) {
++	var (
++		pages []SetupPage
++		ready int
++	)
++
++	s := newTestingSession(t, &SessionHooks{
++		OnSetupStep: func(_ context.Context, page SetupPage) error {
++			pages = append(pages, page)
++
++			return nil
++		},
++		OnReady: func(_ context.Context) error {
++			ready++
++
++			return nil
++		},
++	})
++
++	require.NoError(t, s.Boot(t.Context(), false))
++	require.NoError(t, s.SetupNext(t.Context(), false))
++	require.NoError(t, s.SetupBack(t.Context()))
++
++	require.Equal(t, []SetupPage{SetupPageWelcome, SetupPageFolders, SetupPageWelcome}, pages)
++	require.Zero(t, ready)
++}
+
