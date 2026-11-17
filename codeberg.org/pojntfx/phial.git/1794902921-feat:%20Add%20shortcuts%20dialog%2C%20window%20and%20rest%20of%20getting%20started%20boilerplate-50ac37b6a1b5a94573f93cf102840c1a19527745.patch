@@ -1,0 +1,441 @@
+From 50ac37b6a1b5a94573f93cf102840c1a19527745 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Tue, 17 Nov 2026 01:08:41 -0700
+Subject: [PATCH] feat: Add shortcuts dialog, window and rest of getting started boilerplate
+---
+diff --git a/assets/resources/shortcuts-dialog.blp b/assets/resources/shortcuts-dialog.blp
+new file mode 100644
+index 0000000000000000000000000000000000000000..d27b73d2f879e4facc227c331f9dadfee2eb51f7
+--- /dev/null
++++ b/assets/resources/shortcuts-dialog.blp
+@@ -0,0 +1,28 @@
++using Gtk 4.0;
++using Adw 1;
++
++Adw.ShortcutsDialog shortcuts_dialog {
++  Adw.ShortcutsSection {
++    title: _("General");
++
++    Adw.ShortcutsItem {
++      title: _("Open menu");
++      accelerator: "F10";
++    }
++
++    Adw.ShortcutsItem {
++      title: _("Show keyboard shortcuts");
++      action-name: "app.shortcuts";
++    }
++
++    Adw.ShortcutsItem {
++      title: _("Close window");
++      action-name: "win.closeWindow";
++    }
++
++    Adw.ShortcutsItem {
++      title: _("Quit");
++      action-name: "app.quit";
++    }
++  }
++}
+diff --git a/assets/resources/window.blp b/assets/resources/window.blp
+new file mode 100644
+index 0000000000000000000000000000000000000000..64a7a782ca0aa3ffcde8093a81711b26f66e7b27
+--- /dev/null
++++ b/assets/resources/window.blp
+@@ -0,0 +1,52 @@
++using Gtk 4.0;
++using Adw 1;
++
++template $PhialMainWindow: Adw.ApplicationWindow {
++  default-width: 360;
++  default-height: 380;
++  title: _("Phial");
++
++  content: Adw.ToolbarView {
++    [top]
++    Adw.HeaderBar {
++      title-widget: Adw.WindowTitle {
++        title: _("Phial");
++      };
++
++      [end]
++      MenuButton menu_button {
++        icon-name: "open-menu-symbolic";
++        tooltip-text: _("Main Menu");
++        primary: true;
++        menu-model: main_menu;
++      }
++    }
++
++    content: Box {
++      orientation: vertical;
++      halign: center;
++      valign: center;
++
++      Label {
++        label: _("Hello, World!");
++        styles [
++          "title-1",
++        ]
++      }
++    };
++  };
++}
++
++menu main_menu {
++  section {
++    item {
++      label: _("_Keyboard Shortcuts");
++      action: "app.shortcuts";
++    }
++
++    item {
++      label: _("_About Phial");
++      action: "app.openAbout";
++    }
++  }
++}
+diff --git a/internal/components/application.go b/internal/components/application.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..f78bf91f18076139c9fba1f63ac8247d3ba4937a
+--- /dev/null
++++ b/internal/components/application.go
+@@ -0,0 +1,133 @@
++package components
++
++import (
++	"context"
++	"log/slog"
++	"runtime"
++	"unsafe"
++
++	"codeberg.org/pojntfx/phial/assets/resources"
++	"codeberg.org/puregotk/puregotk/v4/adw"
++	"codeberg.org/puregotk/puregotk/v4/gio"
++	"codeberg.org/puregotk/puregotk/v4/glib"
++	"codeberg.org/puregotk/puregotk/v4/gobject"
++	"codeberg.org/puregotk/puregotk/v4/gtk"
++	. "github.com/pojntfx/go-gettext/pkg/i18n"
++)
++
++var (
++	gTypeApplication gobject.Type
++)
++
++type Application struct {
++	adw.Application
++
++	ctx      context.Context
++	settings *gio.Settings
++	log      *slog.Logger
++
++	window      *MainWindow
++	aboutDialog *adw.AboutDialog
++}
++
++func NewApplication(ctx context.Context, settings *gio.Settings, log *slog.Logger, FirstPropertyNameVar string, varArgs ...interface{}) Application {
++	obj := gobject.NewObject(gTypeApplication, FirstPropertyNameVar, varArgs...)
++
++	var v Application
++	obj.Cast(&v)
++
++	app := (*Application)(unsafe.Pointer(obj.GetData(dataKeyGoInstance)))
++
++	app.ctx = ctx
++	app.settings = settings
++	app.log = log
++
++	return v
++}
++
++func init() {
++	var appClassInit gobject.ClassInitFunc = func(tc *gobject.TypeClass, u uintptr) {
++		objClass := (*gobject.ObjectClass)(unsafe.Pointer(tc))
++
++		objClass.OverrideConstructed(func(o *gobject.Object) {
++			parentObjClass := (*gobject.ObjectClass)(unsafe.Pointer(tc.PeekParent()))
++
++			parentObjClass.GetConstructed()(o)
++
++			var parent adw.Application
++			o.Cast(&parent)
++
++			app := &Application{
++				Application: parent,
++			}
++
++			var pinner runtime.Pinner
++			pinner.Pin(app)
++
++			var cleanupCallback glib.DestroyNotify = func(data uintptr) {
++				pinner.Unpin()
++			}
++			o.SetDataFull(dataKeyGoInstance, uintptr(unsafe.Pointer(app)), &cleanupCallback)
++		})
++
++		applicationClass := (*gio.ApplicationClass)(unsafe.Pointer(tc))
++
++		applicationClass.OverrideActivate(func(a *gio.Application) {
++			phialApp := (*Application)(unsafe.Pointer(a.GetData(dataKeyGoInstance)))
++
++			if phialApp.window != nil {
++				phialApp.window.ApplicationWindow.Present()
++				return
++			}
++
++			phialApp.aboutDialog = adw.NewAboutDialogFromAppdata(resources.ResourceMetainfoPath, resources.AppVersion)
++			phialApp.aboutDialog.SetDevelopers(resources.AppDevelopers)
++			phialApp.aboutDialog.SetArtists(resources.AppArtists)
++			phialApp.aboutDialog.SetCopyright(resources.AppCopyright)
++			// TRANSLATORS: Replace "translator-credits" with your name/username, and optionally an email or URL.
++			phialApp.aboutDialog.SetTranslatorCredits(L("translator-credits"))
++
++			var app gtk.Application
++			a.Cast(&app)
++
++			obj := NewMainWindow(phialApp.ctx, &phialApp.Application, phialApp.log, phialApp.settings, "application", app)
++
++			phialApp.window = (*MainWindow)(unsafe.Pointer(obj.GetData(dataKeyGoInstance)))
++
++			openAboutAction := gio.NewSimpleAction("openAbout", nil)
++			onOpenAbout := func(gio.SimpleAction, uintptr) {
++				phialApp.aboutDialog.Present(&phialApp.window.ApplicationWindow.Widget)
++			}
++			openAboutAction.ConnectActivate(&onOpenAbout)
++			phialApp.Application.AddAction(openAboutAction)
++
++			quitAction := gio.NewSimpleAction("quit", nil)
++			onQuit := func(gio.SimpleAction, uintptr) {
++				phialApp.Application.Quit()
++			}
++			quitAction.ConnectActivate(&onQuit)
++			phialApp.Application.AddAction(quitAction)
++
++			phialApp.Application.SetAccelsForAction("app.shortcuts", []string{`<Primary>question`})
++			phialApp.Application.SetAccelsForAction("app.quit", []string{`<Primary>q`})
++
++			phialApp.Application.AddWindow(&phialApp.window.ApplicationWindow.Window)
++			phialApp.window.ApplicationWindow.Present()
++		})
++	}
++
++	var appInstanceInit gobject.InstanceInitFunc = func(ti *gobject.TypeInstance, tc *gobject.TypeClass) {}
++
++	var appParentQuery gobject.TypeQuery
++	gobject.NewTypeQuery(adw.ApplicationGLibType(), &appParentQuery)
++
++	gTypeApplication = gobject.TypeRegisterStaticSimple(
++		appParentQuery.Type,
++		"PhialApplication",
++		appParentQuery.ClassSize,
++		&appClassInit,
++		appParentQuery.InstanceSize,
++		&appInstanceInit,
++		0,
++	)
++}
+diff --git a/internal/components/constants.go b/internal/components/constants.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..517a053758cd9d3684f2b671f0b59804a99bbf59
+--- /dev/null
++++ b/internal/components/constants.go
+@@ -0,0 +1,5 @@
++package components
++
++const (
++	dataKeyGoInstance = "go_instance"
++)
+diff --git a/internal/components/main_window.go b/internal/components/main_window.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..4b3a51078e6cbf8fe3d383d6726c6c81313b6ade
+--- /dev/null
++++ b/internal/components/main_window.go
+@@ -0,0 +1,112 @@
++package components
++
++import (
++	"context"
++	"log/slog"
++	"runtime"
++	"unsafe"
++
++	"codeberg.org/pojntfx/phial/assets/resources"
++	"codeberg.org/puregotk/puregotk/v4/adw"
++	"codeberg.org/puregotk/puregotk/v4/gio"
++	"codeberg.org/puregotk/puregotk/v4/glib"
++	"codeberg.org/puregotk/puregotk/v4/gobject"
++	"codeberg.org/puregotk/puregotk/v4/gtk"
++)
++
++var (
++	gTypeMainWindow gobject.Type
++)
++
++type MainWindow struct {
++	adw.ApplicationWindow
++
++	ctx      context.Context
++	settings *gio.Settings
++	log      *slog.Logger
++
++	app *adw.Application
++
++	callbacks []interface{}
++}
++
++func NewMainWindow(ctx context.Context, app *adw.Application, log *slog.Logger, settings *gio.Settings, FirstPropertyNameVar string, varArgs ...interface{}) MainWindow {
++	obj := gobject.NewObject(gTypeMainWindow, FirstPropertyNameVar, varArgs...)
++
++	var v MainWindow
++	obj.Cast(&v)
++
++	window := (*MainWindow)(unsafe.Pointer(obj.GetData(dataKeyGoInstance)))
++	window.settings = settings
++	window.log = log
++
++	window.app = app
++
++	window.ctx = ctx
++
++	closeWindowAction := gio.NewSimpleAction("closeWindow", nil)
++	onCloseWindow := func(gio.SimpleAction, uintptr) {
++		window.Close()
++	}
++	window.callbacks = append(window.callbacks, &onCloseWindow)
++	closeWindowAction.ConnectActivate(&onCloseWindow)
++	window.AddAction(closeWindowAction)
++
++	window.app.SetAccelsForAction("win.closeWindow", []string{`<Primary>w`})
++
++	return v
++}
++
++func init() {
++	var windowClassInit gobject.ClassInitFunc = func(tc *gobject.TypeClass, u uintptr) {
++		typeClass := (*gtk.WidgetClass)(unsafe.Pointer(tc))
++		typeClass.SetTemplateFromResource(resources.ResourceWindowUIPath)
++
++		objClass := (*gobject.ObjectClass)(unsafe.Pointer(tc))
++
++		objClass.OverrideConstructed(func(o *gobject.Object) {
++			parentObjClass := (*gobject.ObjectClass)(unsafe.Pointer(tc.PeekParent()))
++			parentObjClass.GetConstructed()(o)
++
++			var parent adw.ApplicationWindow
++			o.Cast(&parent)
++
++			parent.InitTemplate()
++
++			w := &MainWindow{
++				ApplicationWindow: parent,
++
++				callbacks: []interface{}{},
++			}
++
++			var pinner runtime.Pinner
++			pinner.Pin(w)
++
++			var cleanupCallback glib.DestroyNotify = func(data uintptr) {
++				for _, callback := range w.callbacks {
++					if err := glib.UnrefCallback(callback); err != nil {
++						w.log.Error("Could not unref callback", "err", err)
++					}
++				}
++
++				pinner.Unpin()
++			}
++			o.SetDataFull(dataKeyGoInstance, uintptr(unsafe.Pointer(w)), &cleanupCallback)
++		})
++	}
++
++	var windowInstanceInit gobject.InstanceInitFunc = func(ti *gobject.TypeInstance, tc *gobject.TypeClass) {}
++
++	var windowParentQuery gobject.TypeQuery
++	gobject.NewTypeQuery(adw.ApplicationWindowGLibType(), &windowParentQuery)
++
++	gTypeMainWindow = gobject.TypeRegisterStaticSimple(
++		windowParentQuery.Type,
++		"PhialMainWindow",
++		windowParentQuery.ClassSize,
++		&windowClassInit,
++		windowParentQuery.InstanceSize,
++		&windowInstanceInit,
++		0,
++	)
++}
+diff --git a/main.go b/main.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..c52d10178eddc379baa48bfdba16b90349b4f13e
+--- /dev/null
++++ b/main.go
+@@ -0,0 +1,69 @@
++package main
++
++import (
++	"context"
++	"errors"
++	"log/slog"
++	"os"
++
++	"codeberg.org/pojntfx/phial/assets/resources"
++	"codeberg.org/pojntfx/phial/internal/components"
++	"codeberg.org/puregotk/puregotk/v4/gio"
++	"codeberg.org/puregotk/puregotk/v4/glib"
++	"github.com/pojntfx/go-gettext/pkg/i18n"
++)
++
++//go:generate sh -c "if [ -z \"$FLATPAK_ID\" ]; then go tool github.com/dennwc/flatpak-go-mod --json .; fi"
++
++const (
++	gettextPackage = "phial"
++)
++
++var (
++	LocaleDir = "/usr/share/locale"
++	SchemaDir = ""
++)
++
++func init() {
++	if err := i18n.InitI18n(gettextPackage, LocaleDir, slog.Default()); err != nil {
++		panic(err)
++	}
++
++	resource, err := gio.NewResourceFromData(glib.NewBytes(resources.ResourceContents, uint(len(resources.ResourceContents))))
++	if err != nil {
++		panic(err)
++	}
++	gio.ResourcesRegister(resource)
++}
++
++func main() {
++	ctx, cancel := context.WithCancel(context.Background())
++	defer cancel()
++
++	var settings gio.Settings
++	if SchemaDir == "" {
++		settings = *gio.NewSettings(resources.AppID)
++	} else {
++		source, err := gio.NewSettingsSchemaSourceFromDirectory(SchemaDir, gio.SettingsSchemaSourceGetDefault(), true)
++		if err != nil {
++			panic(err)
++		}
++
++		schema := source.Lookup(resources.AppID, false)
++		if schema == nil {
++			panic(errors.New("could not find schema"))
++		}
++
++		settings = *gio.NewSettingsFull(schema, nil, schema.GetPath())
++	}
++
++	app := components.NewApplication(
++		ctx,
++		&settings,
++		slog.Default(),
++		"application_id", resources.AppID,
++		"flags", gio.GApplicationDefaultFlagsValue,
++	)
++
++	os.Exit(int(app.Run(int32(len(os.Args)), os.Args)))
++}
+
