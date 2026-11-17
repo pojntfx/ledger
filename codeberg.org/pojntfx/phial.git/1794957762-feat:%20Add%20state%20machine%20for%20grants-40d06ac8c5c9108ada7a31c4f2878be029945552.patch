@@ -1,0 +1,432 @@
+From 40d06ac8c5c9108ada7a31c4f2878be029945552 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Tue, 17 Nov 2026 16:22:42 -0700
+Subject: [PATCH] feat: Add state machine for grants
+---
+diff --git a/cmd/phial-graphs/main.go b/cmd/phial-graphs/main.go
+index 2cdc0400596f4bf29d7a6fbe415761e2b0dabe1e..8cf5a3c778c657f2050f17ec5a8a43f7ac930a5e 100644
+--- a/cmd/phial-graphs/main.go
++++ b/cmd/phial-graphs/main.go
+@@ -5,6 +5,7 @@ 	"context"
+ 	"log/slog"
+ 	"os"
+ 	"path/filepath"
++	"time"
+ 
+ 	"codeberg.org/pojntfx/phial/pkg/state"
+ )
+@@ -25,6 +26,7 @@ 	machines := map[string]string{
+ 		"session": state.NewSession(ctx, slog.Default(), &state.SessionHooks{}).ToGraph(),
+ 		"host":    state.NewHost(ctx, slog.Default(), &state.HostHooks{}).ToGraph(),
+ 		"machine": state.NewMachine(ctx, slog.Default(), &state.MachineHooks{}).ToGraph(),
++		"grant":   state.NewGrant(ctx, slog.Default(), &state.GrantHooks{}, 1, time.Time{}).ToGraph(),
+ 	}
+ 
+ 	for name, graph := range machines {
+diff --git a/pkg/state/constants.go b/pkg/state/constants.go
+index 0246799e8e8f43dea2df4a14229c742abb9f7036..3a95fc88cb7de965ed600e6e8fb2df72d582405f 100644
+--- a/pkg/state/constants.go
++++ b/pkg/state/constants.go
+@@ -83,6 +83,24 @@ 	triggerMachineUpdateAgent   machineTrigger = "updateAgent"
+ 	triggerMachineAgentUpdated  machineTrigger = "agentUpdated"
+ )
+ 
++type grantState string
++
++const (
++	grantActive  grantState = "active"
++	grantRevoked grantState = "revoked"
++	grantEnded   grantState = "ended"
++)
++
++type grantTrigger string
++
++const (
++	triggerGrantRevoke  grantTrigger = "revoke"
++	triggerGrantExpire  grantTrigger = "expire"
++	triggerGrantUse     grantTrigger = "use"
++	triggerGrantExtend  grantTrigger = "extend"
++	triggerGrantAddUses grantTrigger = "addUses"
++)
++
+ type HostStatus string
+ 
+ const (
+@@ -117,6 +135,14 @@ 	InstallStepPackages    InstallStep = "install-packages"
+ 	InstallStepPostInstall InstallStep = "install-post-install"
+ 	InstallStepConfiguring InstallStep = "install-configuring"
+ 	InstallStepFinishing   InstallStep = "install-finishing"
++)
++
++type GrantStatus string
++
++const (
++	GrantStatusActive  GrantStatus = "active"
++	GrantStatusRevoked GrantStatus = "revoked"
++	GrantStatusEnded   GrantStatus = "ended"
+ )
+ 
+ type SetupPage string
+diff --git a/pkg/state/grant.go b/pkg/state/grant.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..c2ed159373c200c4ac185be84ff04841167ac1ac
+--- /dev/null
++++ b/pkg/state/grant.go
+@@ -0,0 +1,176 @@
++package state
++
++import (
++	"context"
++	"log/slog"
++	"reflect"
++	"time"
++
++	"github.com/qmuntal/stateless"
++)
++
++type GrantHooks struct {
++	OnStatusChange func(ctx context.Context, status GrantStatus) error
++}
++
++type Grant struct {
++	maxUses       int
++	remainingUses int
++	expiresAt     time.Time
++
++	ctx   context.Context
++	log   *slog.Logger
++	hooks *GrantHooks
++
++	machine *stateless.StateMachine
++}
++
++func NewGrant(ctx context.Context, log *slog.Logger, hooks *GrantHooks, maxUses int, expiresAt time.Time) *Grant {
++	g := &Grant{
++		maxUses:       maxUses,
++		remainingUses: maxUses,
++		expiresAt:     expiresAt,
++
++		ctx:   ctx,
++		log:   log,
++		hooks: hooks,
++
++		machine: stateless.NewStateMachine(grantActive),
++	}
++
++	g.machine.SetTriggerParameters(triggerGrantExtend, reflect.TypeFor[time.Time]())
++	g.machine.SetTriggerParameters(triggerGrantAddUses, reflect.TypeFor[int]())
++
++	g.machine.
++		Configure(grantActive).
++		Permit(triggerGrantRevoke, grantRevoked).
++		Permit(triggerGrantExpire, grantEnded).
++		Permit(triggerGrantUse, grantEnded, g.lastUse).
++		PermitReentry(triggerGrantUse, g.nextUse).
++		PermitReentry(triggerGrantExtend, g.validExpiry).
++		PermitReentry(triggerGrantAddUses, g.validUses).
++		OnEntryFrom(triggerGrantUse, g.decrementUses).
++		OnEntryFrom(triggerGrantExtend, g.setExpiresAt).
++		OnEntryFrom(triggerGrantAddUses, g.addUses).
++		OnEntry(g.onActive)
++
++	g.machine.Configure(grantRevoked).OnEntry(g.onRevoked)
++
++	g.machine.
++		Configure(grantEnded).
++		OnEntryFrom(triggerGrantUse, g.decrementUses).
++		OnEntry(g.onEnded)
++
++	return g
++}
++
++func (g *Grant) ToGraph() string {
++	return g.machine.ToGraph()
++}
++
++func (g *Grant) String() string {
++	return g.machine.String()
++}
++
++func (g *Grant) FlushStatus(ctx context.Context) error {
++	return g.onStatus(ctx, GrantStatus(g.machine.MustState().(grantState)))
++}
++
++func (g *Grant) lastUse(_ context.Context, _ ...any) bool {
++	return g.remainingUses == 1
++}
++
++func (g *Grant) nextUse(_ context.Context, _ ...any) bool {
++	return g.remainingUses > 1
++}
++
++func (g *Grant) validExpiry(_ context.Context, args ...any) bool {
++	if len(args) == 0 {
++		return false
++	}
++
++	expiresAt, ok := args[0].(time.Time)
++
++	return ok && !g.expiresAt.IsZero() && expiresAt.After(g.expiresAt)
++}
++
++func (g *Grant) validUses(_ context.Context, args ...any) bool {
++	if len(args) == 0 {
++		return false
++	}
++
++	uses, ok := args[0].(int)
++
++	return ok && uses > 0
++}
++
++func (g *Grant) decrementUses(_ context.Context, _ ...any) error {
++	g.remainingUses--
++
++	return nil
++}
++
++func (g *Grant) setExpiresAt(_ context.Context, args ...any) error {
++	g.expiresAt = args[0].(time.Time)
++
++	return nil
++}
++
++func (g *Grant) addUses(_ context.Context, args ...any) error {
++	uses := args[0].(int)
++
++	g.maxUses += uses
++	g.remainingUses += uses
++
++	return nil
++}
++
++func (g *Grant) onStatus(ctx context.Context, status GrantStatus) error {
++	g.log.InfoContext(g.ctx, "Calling onStatusChange hook", "status", status)
++
++	return g.hooks.OnStatusChange(ctx, status)
++}
++
++func (g *Grant) onActive(ctx context.Context, _ ...any) error {
++	return g.onStatus(ctx, GrantStatusActive)
++}
++
++func (g *Grant) onRevoked(ctx context.Context, _ ...any) error {
++	return g.onStatus(ctx, GrantStatusRevoked)
++}
++
++func (g *Grant) onEnded(ctx context.Context, _ ...any) error {
++	return g.onStatus(ctx, GrantStatusEnded)
++}
++
++func (g *Grant) Revoke(ctx context.Context) error {
++	return g.machine.FireCtx(ctx, triggerGrantRevoke)
++}
++
++func (g *Grant) Expire(ctx context.Context) error {
++	return g.machine.FireCtx(ctx, triggerGrantExpire)
++}
++
++func (g *Grant) Use(ctx context.Context) error {
++	return g.machine.FireCtx(ctx, triggerGrantUse)
++}
++
++func (g *Grant) Extend(ctx context.Context, expiresAt time.Time) error {
++	return g.machine.FireCtx(ctx, triggerGrantExtend, expiresAt)
++}
++
++func (g *Grant) AddUses(ctx context.Context, uses int) error {
++	return g.machine.FireCtx(ctx, triggerGrantAddUses, uses)
++}
++
++func (g *Grant) MaxUses() int {
++	return g.maxUses
++}
++
++func (g *Grant) RemainingUses() int {
++	return g.remainingUses
++}
++
++func (g *Grant) ExpiresAt() time.Time {
++	return g.expiresAt
++}
+diff --git a/pkg/state/grant_test.go b/pkg/state/grant_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..13e928821707169068494e29049fe6999192b11b
+--- /dev/null
++++ b/pkg/state/grant_test.go
+@@ -0,0 +1,174 @@
++package state
++
++import (
++	"context"
++	"testing"
++	"time"
++
++	"github.com/neilotoole/slogt/v2"
++	"github.com/stretchr/testify/require"
++)
++
++func newTestingGrant(t *testing.T, hooks *GrantHooks, maxUses int, expiresAt time.Time) *Grant {
++	return NewGrant(t.Context(), slogt.New(t), hooks, maxUses, expiresAt)
++}
++
++func TestGrantFlushStatus(t *testing.T) {
++	var (
++		statuses []GrantStatus
++	)
++
++	g := newTestingGrant(t, &GrantHooks{
++		OnStatusChange: func(_ context.Context, status GrantStatus) error {
++			statuses = append(statuses, status)
++
++			return nil
++		},
++	}, 1, time.Time{})
++
++	require.NoError(t, g.FlushStatus(t.Context()))
++	require.Equal(t, []GrantStatus{GrantStatusActive}, statuses)
++}
++
++func TestGrantRevoke(t *testing.T) {
++	var (
++		statuses []GrantStatus
++	)
++
++	g := newTestingGrant(t, &GrantHooks{
++		OnStatusChange: func(_ context.Context, status GrantStatus) error {
++			statuses = append(statuses, status)
++
++			return nil
++		},
++	}, 1, time.Time{})
++
++	require.NoError(t, g.Revoke(t.Context()))
++	require.Equal(t, []GrantStatus{GrantStatusRevoked}, statuses)
++}
++
++func TestGrantExpire(t *testing.T) {
++	var (
++		statuses []GrantStatus
++	)
++
++	g := newTestingGrant(t, &GrantHooks{
++		OnStatusChange: func(_ context.Context, status GrantStatus) error {
++			statuses = append(statuses, status)
++
++			return nil
++		},
++	}, 1, time.Time{})
++
++	require.NoError(t, g.Expire(t.Context()))
++	require.Equal(t, []GrantStatus{GrantStatusEnded}, statuses)
++}
++
++func TestGrantUseOnce(t *testing.T) {
++	var (
++		statuses []GrantStatus
++	)
++
++	g := newTestingGrant(t, &GrantHooks{
++		OnStatusChange: func(_ context.Context, status GrantStatus) error {
++			statuses = append(statuses, status)
++
++			return nil
++		},
++	}, 1, time.Time{})
++
++	require.NoError(t, g.Use(t.Context()))
++	require.Equal(t, []GrantStatus{GrantStatusEnded}, statuses)
++}
++
++func TestGrantUseMany(t *testing.T) {
++	var (
++		statuses []GrantStatus
++	)
++
++	g := newTestingGrant(t, &GrantHooks{
++		OnStatusChange: func(_ context.Context, status GrantStatus) error {
++			statuses = append(statuses, status)
++
++			return nil
++		},
++	}, 3, time.Time{})
++
++	require.NoError(t, g.Use(t.Context()))
++	require.NoError(t, g.Use(t.Context()))
++	require.NoError(t, g.Use(t.Context()))
++	require.Equal(t, []GrantStatus{GrantStatusActive, GrantStatusActive, GrantStatusEnded}, statuses)
++}
++
++func TestGrantRevokeAfterUse(t *testing.T) {
++	var (
++		statuses []GrantStatus
++	)
++
++	g := newTestingGrant(t, &GrantHooks{
++		OnStatusChange: func(_ context.Context, status GrantStatus) error {
++			statuses = append(statuses, status)
++
++			return nil
++		},
++	}, 2, time.Time{})
++
++	require.NoError(t, g.Use(t.Context()))
++	require.NoError(t, g.Revoke(t.Context()))
++	require.Equal(t, []GrantStatus{GrantStatusActive, GrantStatusRevoked}, statuses)
++}
++
++func TestGrantExpireAfterUse(t *testing.T) {
++	var (
++		statuses []GrantStatus
++	)
++
++	g := newTestingGrant(t, &GrantHooks{
++		OnStatusChange: func(_ context.Context, status GrantStatus) error {
++			statuses = append(statuses, status)
++
++			return nil
++		},
++	}, 2, time.Time{})
++
++	require.NoError(t, g.Use(t.Context()))
++	require.NoError(t, g.Expire(t.Context()))
++	require.Equal(t, []GrantStatus{GrantStatusActive, GrantStatusEnded}, statuses)
++}
++
++func TestGrantExtend(t *testing.T) {
++	var (
++		statuses []GrantStatus
++	)
++
++	g := newTestingGrant(t, &GrantHooks{
++		OnStatusChange: func(_ context.Context, status GrantStatus) error {
++			statuses = append(statuses, status)
++
++			return nil
++		},
++	}, 1, time.Unix(1, 0))
++
++	require.NoError(t, g.Extend(t.Context(), time.Unix(2, 0)))
++	require.Equal(t, []GrantStatus{GrantStatusActive}, statuses)
++}
++
++func TestGrantAddUses(t *testing.T) {
++	var (
++		statuses []GrantStatus
++	)
++
++	g := newTestingGrant(t, &GrantHooks{
++		OnStatusChange: func(_ context.Context, status GrantStatus) error {
++			statuses = append(statuses, status)
++
++			return nil
++		},
++	}, 1, time.Time{})
++
++	require.NoError(t, g.AddUses(t.Context(), 2))
++	require.NoError(t, g.Use(t.Context()))
++	require.NoError(t, g.Use(t.Context()))
++	require.NoError(t, g.Use(t.Context()))
++	require.Equal(t, []GrantStatus{GrantStatusActive, GrantStatusActive, GrantStatusActive, GrantStatusEnded}, statuses)
++}
+
