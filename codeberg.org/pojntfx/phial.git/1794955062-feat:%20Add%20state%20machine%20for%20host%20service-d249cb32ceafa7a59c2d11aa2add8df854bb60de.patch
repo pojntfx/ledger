@@ -1,0 +1,325 @@
+From d249cb32ceafa7a59c2d11aa2add8df854bb60de Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Tue, 17 Nov 2026 15:37:42 -0700
+Subject: [PATCH] feat: Add state machine for host service
+---
+diff --git a/cmd/phial-graphs/main.go b/cmd/phial-graphs/main.go
+index ce61cbaef403e4e4e4beca92861c77917ee46bf4..6c011170c610edd65a8c59c2261f0944234e85a3 100644
+--- a/cmd/phial-graphs/main.go
++++ b/cmd/phial-graphs/main.go
+@@ -14,13 +14,21 @@ 	dir = "graphs"
+ )
+ 
+ func main() {
++	ctx, cancel := context.WithCancel(context.Background())
++	defer cancel()
++
+ 	if err := os.MkdirAll(dir, os.ModePerm); err != nil {
+ 		panic(err)
+ 	}
+ 
+-	session := state.NewSession(context.Background(), slog.Default(), &state.SessionHooks{})
++	machines := map[string]string{
++		"session": state.NewSession(ctx, slog.Default(), &state.SessionHooks{}).ToGraph(),
++		"host":    state.NewHost(ctx, slog.Default(), &state.HostHooks{}).ToGraph(),
++	}
+ 
+-	if err := os.WriteFile(filepath.Join(dir, "session.dot"), []byte(session.ToGraph()), os.ModePerm); err != nil {
+-		panic(err)
++	for name, graph := range machines {
++		if err := os.WriteFile(filepath.Join(dir, name+".dot"), []byte(graph), os.ModePerm); err != nil {
++			panic(err)
++		}
+ 	}
+ }
+diff --git a/pkg/state/constants.go b/pkg/state/constants.go
+index 3482b0c118c4e72d30b3354f7db8ca1ea22d95a2..3d282db194b84bd393ef3c7f742d43491bdcba74 100644
+--- a/pkg/state/constants.go
++++ b/pkg/state/constants.go
+@@ -24,6 +24,36 @@ 	triggerSetupBack sessionTrigger = "setupBack"
+ 	triggerFinish    sessionTrigger = "finish"
+ )
+ 
++type hostState string
++
++const (
++	hostConnecting hostState = "connecting"
++	hostOnline     hostState = "online"
++	hostOutdated   hostState = "outdated"
++	hostUpdating   hostState = "updating"
++	hostError      hostState = "error"
++)
++
++type hostTrigger string
++
++const (
++	triggerHostConnect  hostTrigger = "connect"
++	triggerHostOutdated hostTrigger = "markOutdated"
++	triggerHostUpdate   hostTrigger = "startUpdate"
++	triggerHostFinish   hostTrigger = "finishUpdate"
++	triggerHostFail     hostTrigger = "fail"
++)
++
++type HostStatus string
++
++const (
++	HostStatusConnecting HostStatus = "connecting"
++	HostStatusOnline     HostStatus = "online"
++	HostStatusOutdated   HostStatus = "outdated"
++	HostStatusUpdating   HostStatus = "updating"
++	HostStatusError      HostStatus = "error"
++)
++
+ type SetupPage string
+ 
+ const (
+diff --git a/pkg/state/host.go b/pkg/state/host.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..797ed246f9a1cfd7775fd5b9138de1786c9dc170
+--- /dev/null
++++ b/pkg/state/host.go
+@@ -0,0 +1,114 @@
++package state
++
++import (
++	"context"
++	"log/slog"
++
++	"github.com/qmuntal/stateless"
++)
++
++type HostHooks struct {
++	OnStatusChange func(ctx context.Context, status HostStatus) error
++}
++
++type Host struct {
++	ctx   context.Context
++	log   *slog.Logger
++	hooks *HostHooks
++
++	machine *stateless.StateMachine
++}
++
++func NewHost(ctx context.Context, log *slog.Logger, hooks *HostHooks) *Host {
++	h := &Host{
++		ctx:   ctx,
++		log:   log,
++		hooks: hooks,
++
++		machine: stateless.NewStateMachine(hostConnecting),
++	}
++
++	h.machine.
++		Configure(hostConnecting).
++		Permit(triggerHostConnect, hostOnline).
++		Permit(triggerHostFail, hostError)
++
++	h.machine.
++		Configure(hostOnline).
++		Permit(triggerHostOutdated, hostOutdated).
++		Permit(triggerHostUpdate, hostUpdating).
++		Permit(triggerHostFail, hostError).
++		OnEntry(h.onOnline)
++
++	h.machine.
++		Configure(hostOutdated).
++		Permit(triggerHostUpdate, hostUpdating).
++		OnEntry(h.onOutdated)
++
++	h.machine.
++		Configure(hostUpdating).
++		Permit(triggerHostFinish, hostOnline).
++		Permit(triggerHostFail, hostError).
++		OnEntry(h.onUpdating)
++
++	h.machine.
++		Configure(hostError).
++		Permit(triggerHostConnect, hostOnline).
++		OnEntry(h.onError)
++
++	return h
++}
++
++func (h *Host) ToGraph() string {
++	return h.machine.ToGraph()
++}
++
++func (h *Host) String() string {
++	return h.machine.String()
++}
++
++func (h *Host) FlushStatus(ctx context.Context) error {
++	return h.onStatus(ctx, HostStatus(h.machine.MustState().(hostState)))
++}
++
++func (h *Host) onStatus(ctx context.Context, status HostStatus) error {
++	h.log.InfoContext(h.ctx, "Calling onStatusChange hook", "status", status)
++
++	return h.hooks.OnStatusChange(ctx, status)
++}
++
++func (h *Host) onOnline(ctx context.Context, _ ...any) error {
++	return h.onStatus(ctx, HostStatusOnline)
++}
++
++func (h *Host) onOutdated(ctx context.Context, _ ...any) error {
++	return h.onStatus(ctx, HostStatusOutdated)
++}
++
++func (h *Host) onUpdating(ctx context.Context, _ ...any) error {
++	return h.onStatus(ctx, HostStatusUpdating)
++}
++
++func (h *Host) onError(ctx context.Context, _ ...any) error {
++	return h.onStatus(ctx, HostStatusError)
++}
++
++func (h *Host) Connect(ctx context.Context) error {
++	return h.machine.FireCtx(ctx, triggerHostConnect)
++}
++
++func (h *Host) MarkOutdated(ctx context.Context) error {
++	return h.machine.FireCtx(ctx, triggerHostOutdated)
++}
++
++func (h *Host) StartUpdate(ctx context.Context) error {
++	return h.machine.FireCtx(ctx, triggerHostUpdate)
++}
++
++func (h *Host) FinishUpdate(ctx context.Context) error {
++	return h.machine.FireCtx(ctx, triggerHostFinish)
++}
++
++func (h *Host) Fail(ctx context.Context) error {
++	return h.machine.FireCtx(ctx, triggerHostFail)
++}
+diff --git a/pkg/state/host_test.go b/pkg/state/host_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..2ce113dadaeef53b69108a4ed349772f7c13ad75
+--- /dev/null
++++ b/pkg/state/host_test.go
+@@ -0,0 +1,123 @@
++package state
++
++import (
++	"context"
++	"testing"
++
++	"github.com/neilotoole/slogt/v2"
++	"github.com/stretchr/testify/require"
++)
++
++func newTestingHost(t *testing.T, hooks *HostHooks) *Host {
++	return NewHost(t.Context(), slogt.New(t), hooks)
++}
++
++func TestHostFlushStatus(t *testing.T) {
++	var (
++		statuses []HostStatus
++	)
++
++	h := newTestingHost(t, &HostHooks{
++		OnStatusChange: func(_ context.Context, status HostStatus) error {
++			statuses = append(statuses, status)
++
++			return nil
++		},
++	})
++
++	require.NoError(t, h.FlushStatus(t.Context()))
++	require.Equal(t, []HostStatus{HostStatusConnecting}, statuses)
++}
++
++func TestHostConnect(t *testing.T) {
++	var (
++		statuses []HostStatus
++	)
++
++	h := newTestingHost(t, &HostHooks{
++		OnStatusChange: func(_ context.Context, status HostStatus) error {
++			statuses = append(statuses, status)
++
++			return nil
++		},
++	})
++
++	require.NoError(t, h.Connect(t.Context()))
++	require.Equal(t, []HostStatus{HostStatusOnline}, statuses)
++}
++
++func TestHostMarkOutdated(t *testing.T) {
++	var (
++		statuses []HostStatus
++	)
++
++	h := newTestingHost(t, &HostHooks{
++		OnStatusChange: func(_ context.Context, status HostStatus) error {
++			statuses = append(statuses, status)
++
++			return nil
++		},
++	})
++
++	require.NoError(t, h.Connect(t.Context()))
++	require.NoError(t, h.MarkOutdated(t.Context()))
++	require.Equal(t, []HostStatus{HostStatusOnline, HostStatusOutdated}, statuses)
++}
++
++func TestHostStartUpdate(t *testing.T) {
++	var (
++		statuses []HostStatus
++	)
++
++	h := newTestingHost(t, &HostHooks{
++		OnStatusChange: func(_ context.Context, status HostStatus) error {
++			statuses = append(statuses, status)
++
++			return nil
++		},
++	})
++
++	require.NoError(t, h.Connect(t.Context()))
++	require.NoError(t, h.MarkOutdated(t.Context()))
++	require.NoError(t, h.StartUpdate(t.Context()))
++	require.Equal(t, []HostStatus{HostStatusOnline, HostStatusOutdated, HostStatusUpdating}, statuses)
++}
++
++func TestHostFinishUpdate(t *testing.T) {
++	var (
++		statuses []HostStatus
++	)
++
++	h := newTestingHost(t, &HostHooks{
++		OnStatusChange: func(_ context.Context, status HostStatus) error {
++			statuses = append(statuses, status)
++
++			return nil
++		},
++	})
++
++	require.NoError(t, h.Connect(t.Context()))
++	require.NoError(t, h.MarkOutdated(t.Context()))
++	require.NoError(t, h.StartUpdate(t.Context()))
++	require.NoError(t, h.FinishUpdate(t.Context()))
++	require.Equal(t, []HostStatus{HostStatusOnline, HostStatusOutdated, HostStatusUpdating, HostStatusOnline}, statuses)
++}
++
++func TestHostFail(t *testing.T) {
++	var (
++		statuses []HostStatus
++	)
++
++	h := newTestingHost(t, &HostHooks{
++		OnStatusChange: func(_ context.Context, status HostStatus) error {
++			statuses = append(statuses, status)
++
++			return nil
++		},
++	})
++
++	require.NoError(t, h.Connect(t.Context()))
++	require.NoError(t, h.Fail(t.Context()))
++	require.NoError(t, h.Connect(t.Context()))
++	require.Equal(t, []HostStatus{HostStatusOnline, HostStatusError, HostStatusOnline}, statuses)
++}
+
