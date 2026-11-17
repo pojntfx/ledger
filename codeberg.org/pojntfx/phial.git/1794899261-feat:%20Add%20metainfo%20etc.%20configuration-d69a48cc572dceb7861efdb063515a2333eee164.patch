@@ -1,0 +1,323 @@
+From d69a48cc572dceb7861efdb063515a2333eee164 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Tue, 17 Nov 2026 00:07:41 -0700
+Subject: [PATCH] feat: Add metainfo etc. configuration
+---
+diff --git a/assets/meta/com.pojtinger.felicitas.Phial.desktop.in b/assets/meta/com.pojtinger.felicitas.Phial.desktop.in
+new file mode 100644
+index 0000000000000000000000000000000000000000..9e98e5c004a96d62e231d4ec27e307fc2b442ad0
+--- /dev/null
++++ b/assets/meta/com.pojtinger.felicitas.Phial.desktop.in
+@@ -0,0 +1,13 @@
++[Desktop Entry]
++Version=1.0
++Type=Application
++Name=Phial
++Comment=Run development machines safely
++Exec=phial
++Icon=com.pojtinger.felicitas.Phial
++Categories=Development;
++# Extra keywords that can be used to search for Phial
++# TRANSLATORS: Search terms to find this application.
++#              Do NOT translate or localize the semicolons!
++#              The list MUST also end with a semicolon!
++Keywords=virtual machine;secrets;ssh;gpg;usb;waypipe;rdp;
+diff --git a/assets/resources/index.go b/assets/resources/index.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..0730e6f6c11466a889b9a3da589c02f714825dfb
+--- /dev/null
++++ b/assets/resources/index.go
+@@ -0,0 +1,34 @@
++package resources
++
++import (
++	_ "embed"
++	"path"
++	"strings"
++)
++
++//go:generate sh -c "find ../../po -name '*.po' | sed 's|^\\../../po/||; s|\\.po$||' > ../../po/LINGUAS"
++//go:generate sh -c "msgfmt --desktop --template ../../assets/meta/com.pojtinger.felicitas.Phial.desktop.in -d ../../po -o - -f | sed 's|/LC_MESSAGES/default||g' > ../../assets/meta/com.pojtinger.felicitas.Phial.desktop"
++//go:generate sh -c "msgfmt --xml -L metainfo --template ../../assets/resources/metainfo.xml.in -d ../../po -o - -f | sed 's|/LC[-_]MESSAGES/default||g' > ../../assets/resources/metainfo.xml"
++
++const (
++	AppID      = "com.pojtinger.felicitas.Phial"
++	AppVersion = "0.1.0"
++)
++
++//go:generate sh -c "blueprint-compiler batch-compile . . *.blp && glib-compile-resources *.gresource.xml"
++//go:embed index.gresource
++var ResourceContents []byte
++
++//go:generate glib-compile-schemas .
++
++var (
++	AppPath = path.Join("/com", "pojtinger", "felicitas", "Phial")
++
++	AppDevelopers = []string{"Felicitas Pojtinger"}
++	AppArtists    = []string{"Felicitas Pojtinger"}
++	AppCopyright  = "© 2026 " + strings.Join(AppDevelopers, ", ")
++
++	ResourceWindowUIPath          = path.Join(AppPath, "window.ui")
++	ResourceShortcutsDialogUIPath = path.Join(AppPath, "shortcuts-dialog.ui")
++	ResourceMetainfoPath          = path.Join(AppPath, "metainfo.xml")
++)
+diff --git a/assets/resources/index.gresource.xml b/assets/resources/index.gresource.xml
+new file mode 100644
+index 0000000000000000000000000000000000000000..1a8f6f4b0c8087dececaa67ab8189dcf69fe9e9c
+--- /dev/null
++++ b/assets/resources/index.gresource.xml
+@@ -0,0 +1,8 @@
++<?xml version="1.0" encoding="utf-8"?>
++<gresources>
++    <gresource prefix="/com/pojtinger/felicitas/Phial">
++        <file>window.ui</file>
++        <file>shortcuts-dialog.ui</file>
++        <file>metainfo.xml</file>
++    </gresource>
++</gresources>
+\ No newline at end of file
+diff --git a/assets/resources/index.gschema.xml b/assets/resources/index.gschema.xml
+new file mode 100644
+index 0000000000000000000000000000000000000000..b3c3d51d3d1956b67669fc478ecc454273ae6ecb
+--- /dev/null
++++ b/assets/resources/index.gschema.xml
+@@ -0,0 +1,10 @@
++<?xml version="1.0" encoding="utf-8"?>
++<schemalist gettext-domain="phial">
++    <schema id="com.pojtinger.felicitas.Phial" path="/com/pojtinger/felicitas/Phial/">
++        <key name="onboarded" type="b">
++            <default>false</default>
++            <summary>Onboarded</summary>
++            <description>Whether the setup wizard completed</description>
++        </key>
++    </schema>
++</schemalist>
+\ No newline at end of file
+diff --git a/assets/resources/metainfo.xml.in b/assets/resources/metainfo.xml.in
+new file mode 100644
+index 0000000000000000000000000000000000000000..b7cd5b85a996e638506dda99267b561f660081b4
+--- /dev/null
++++ b/assets/resources/metainfo.xml.in
+@@ -0,0 +1,84 @@
++<?xml version="1.0" encoding="UTF-8"?>
++<component type="desktop-application">
++    <id>com.pojtinger.felicitas.Phial</id>
++    <metadata_license>CC0-1.0</metadata_license>
++    <project_license>AGPL-3.0-or-later</project_license>
++
++    <name>Phial</name>
++    <summary>Run development machines safely</summary>
++    <description>
++        <p>Phial runs virtual machines on your desktop. Secrets and private keys stay on the
++            host.</p>
++        <p>It enables you to:</p>
++        <ul>
++            <li>Create and install virtual machines</li>
++            <li>Grant time-boxed access to tokens, SSH keys, and GPG keys without copying them to
++                the machine</li>
++            <li>Pass USB devices, USB hubs, and shared folders to a machine</li>
++            <li>Open a window with waypipe, a desktop with RDP, a terminal, or a serial console</li>
++        </ul>
++        <p>Phial does not create, import, or delete SSH keys or GPG keys. Manage those keys in
++            Passwords and Keys, then link them to a machine.</p>
++    </description>
++
++    <developer id="com.pojtinger.felicitas">
++        <name translate="no">Felicitas Pojtinger</name>
++    </developer>
++
++    <content_rating type="oars-1.1" />
++
++    <url type="bugtracker">https://codeberg.org/pojntfx/phial/issues</url>
++    <url type="homepage">https://codeberg.org/pojntfx/phial</url>
++    <url type="donation">https://github.com/sponsors/pojntfx</url>
++    <url type="help">https://matrix.to/#/#phial:matrix.org</url>
++    <url type="contact">https://matrix.to/#/#phial:matrix.org</url>
++    <url type="faq">https://codeberg.org/pojntfx/phial#tutorial</url>
++    <url type="vcs-browser">https://codeberg.org/pojntfx/phial</url>
++    <url type="translate">https://hosted.weblate.org/projects/phial/</url>
++    <url type="contribute">https://welcome.gnome.org/app/Phial/</url>
++
++    <launchable type="desktop-id">com.pojtinger.felicitas.Phial.desktop</launchable>
++
++    <provides>
++        <binary>phial</binary>
++    </provides>
++
++    <translation type="gettext">phial</translation>
++
++    <supports>
++        <control>pointing</control>
++        <control>keyboard</control>
++        <control>touch</control>
++    </supports>
++
++    <recommends>
++        <display_length compare="ge">360</display_length>
++    </recommends>
++
++    <branding>
++        <color type="primary" scheme_preference="light">#6fb0ff</color>
++        <color type="primary" scheme_preference="dark">#0087ff</color>
++    </branding>
++
++    <screenshots>
++        <screenshot type="default">
++            <image>
++                https://codeberg.org/pojntfx/phial/raw/branch/main/assets/meta/screenshot-machine.png</image>
++            <caption>A machine with its access controls</caption>
++        </screenshot>
++        <screenshot>
++            <image>
++                https://codeberg.org/pojntfx/phial/raw/branch/main/assets/meta/screenshot-secrets.png</image>
++            <caption>Tokens and keys</caption>
++        </screenshot>
++    </screenshots>
++
++    <releases>
++        <release version="0.1.0" date="2026-11-16">
++            <url type="details">https://codeberg.org/pojntfx/phial/releases/tag/v0.1.0</url>
++            <description>
++                <p>Initial release</p>
++            </description>
++        </release>
++    </releases>
++</component>
+\ No newline at end of file
+diff --git a/po/index.go b/po/index.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..7e6e93763dc82c8ec945f0315a95544e72a58abe
+--- /dev/null
++++ b/po/index.go
+@@ -0,0 +1,10 @@
++package po
++
++import "embed"
++
++//go:generate sh -c "find .. -mindepth 1 \\( -name '.*' -o -name builddir \\) -prune -o \\( -name '*.go' -o -name '*.blp' \\) -print | xgettext --language=C++ --keyword=_ --keyword=L --add-comments=TRANSLATORS: --omit-header -o phial.pot --files-from=- && find .. -mindepth 1 \\( -name '.*' -o -name builddir \\) -prune -o -name '*.desktop.in' -print | xgettext --language=Desktop --keyword=Name --keyword=Comment --add-comments=TRANSLATORS: --omit-header -j -o phial.pot --files-from=- && find .. -mindepth 1 \\( -name '.*' -o -name builddir \\) -prune -o -name 'metainfo.xml.in' -print | xgettext --its=/usr/share/gettext/its/metainfo.its --omit-header -j -o phial.pot --files-from=- && find .. -mindepth 1 \\( -name '.*' -o -name builddir \\) -prune -o -name '*.gschema.xml' -print | xgettext --its=/usr/share/gettext/its/gschema.its --omit-header -j -o phial.pot --files-from=-"
++//go:generate sh -c "find . -mindepth 1 -name '.*' -prune -o -name '*.po' -print0 | xargs -0 -I {} msgmerge --update --backup=none \"{}\" phial.pot"
++//go:generate sh -c "find . -mindepth 1 -name '.*' -prune -o -type f -name '*.po' -print0 | xargs -0 -I {} sh -c 'mkdir -p $(basename {} .po)/LC_MESSAGES && msgfmt -o $(basename {} .po)/LC_MESSAGES/phial.mo {}'"
++//go:generate sh -c "find . -mindepth 1 -name '.*' -prune -o -name \"*.po\" -exec basename {} .po \\; > LINGUAS"
++//go:embed *
++var FS embed.FS
+diff --git a/po/phial.pot b/po/phial.pot
+new file mode 100644
+index 0000000000000000000000000000000000000000..55fc72377cce307aedbbc534c591a2145082faa8
+--- /dev/null
++++ b/po/phial.pot
+@@ -0,0 +1,113 @@
++#: ../assets/resources/window.blp:7 ../assets/resources/window.blp:13
++#: ../assets/meta/com.pojtinger.felicitas.Phial.desktop.in:4
++#: ../assets/resources/metainfo.xml.in:7
++msgid "Phial"
++msgstr ""
++
++#: ../assets/resources/window.blp:19
++msgid "Main Menu"
++msgstr ""
++
++#: ../assets/resources/window.blp:31
++msgid "Hello, World!"
++msgstr ""
++
++#: ../assets/resources/window.blp:43
++msgid "_Keyboard Shortcuts"
++msgstr ""
++
++#: ../assets/resources/window.blp:48
++msgid "_About Phial"
++msgstr ""
++
++#: ../assets/resources/shortcuts-dialog.blp:6
++msgid "General"
++msgstr ""
++
++#: ../assets/resources/shortcuts-dialog.blp:9
++msgid "Open menu"
++msgstr ""
++
++#: ../assets/resources/shortcuts-dialog.blp:14
++msgid "Show keyboard shortcuts"
++msgstr ""
++
++#: ../assets/resources/shortcuts-dialog.blp:19
++msgid "Close window"
++msgstr ""
++
++#: ../assets/resources/shortcuts-dialog.blp:24
++msgid "Quit"
++msgstr ""
++
++#: ../internal/components/application.go:88
++msgid "translator-credits"
++msgstr ""
++
++#: ../assets/meta/com.pojtinger.felicitas.Phial.desktop.in:5
++#: ../assets/resources/metainfo.xml.in:8
++msgid "Run development machines safely"
++msgstr ""
++
++#. TRANSLATORS: Search terms to find this application.
++#. Do NOT translate or localize the semicolons!
++#. The list MUST also end with a semicolon!
++#: ../assets/meta/com.pojtinger.felicitas.Phial.desktop.in:13
++msgid "virtual machine;secrets;ssh;gpg;usb;waypipe;rdp;"
++msgstr ""
++
++#: ../assets/resources/metainfo.xml.in:10
++msgid ""
++"Phial runs virtual machines on your desktop. Secrets and private keys stay "
++"on the host."
++msgstr ""
++
++#: ../assets/resources/metainfo.xml.in:12
++msgid "It enables you to:"
++msgstr ""
++
++#: ../assets/resources/metainfo.xml.in:14
++msgid "Create and install virtual machines"
++msgstr ""
++
++#: ../assets/resources/metainfo.xml.in:15
++msgid ""
++"Grant time-boxed access to tokens, SSH keys, and GPG keys without copying "
++"them to the machine"
++msgstr ""
++
++#: ../assets/resources/metainfo.xml.in:17
++msgid "Pass USB devices, USB hubs, and shared folders to a machine"
++msgstr ""
++
++#: ../assets/resources/metainfo.xml.in:18
++msgid ""
++"Open a window with waypipe, a desktop with RDP, a terminal, or a serial "
++"console"
++msgstr ""
++
++#: ../assets/resources/metainfo.xml.in:20
++msgid ""
++"Phial does not create, import, or delete SSH keys or GPG keys. Manage those "
++"keys in Passwords and Keys, then link them to a machine."
++msgstr ""
++
++#: ../assets/resources/metainfo.xml.in:67
++msgid "A machine with its access controls"
++msgstr ""
++
++#: ../assets/resources/metainfo.xml.in:72
++msgid "Tokens and keys"
++msgstr ""
++
++#: ../assets/resources/metainfo.xml.in:80
++msgid "Initial release"
++msgstr ""
++
++#: ../assets/resources/index.gschema.xml:6
++msgid "Onboarded"
++msgstr ""
++
++#: ../assets/resources/index.gschema.xml:7
++msgid "Whether the setup wizard completed"
++msgstr ""
+
