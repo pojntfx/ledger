@@ -1,0 +1,865 @@
+From 4c691cb597c6157c5fa965f7e0fe6984cd2a92a3 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Tue, 17 Nov 2026 16:04:17 -0700
+Subject: [PATCH] feat: Add state machine for machine state and in-VM agent process update state
+---
+diff --git a/cmd/phial-graphs/main.go b/cmd/phial-graphs/main.go
+index 6c011170c610edd65a8c59c2261f0944234e85a3..2cdc0400596f4bf29d7a6fbe415761e2b0dabe1e 100644
+--- a/cmd/phial-graphs/main.go
++++ b/cmd/phial-graphs/main.go
+@@ -24,6 +24,7 @@
+ 	machines := map[string]string{
+ 		"session": state.NewSession(ctx, slog.Default(), &state.SessionHooks{}).ToGraph(),
+ 		"host":    state.NewHost(ctx, slog.Default(), &state.HostHooks{}).ToGraph(),
++		"machine": state.NewMachine(ctx, slog.Default(), &state.MachineHooks{}).ToGraph(),
+ 	}
+ 
+ 	for name, graph := range machines {
+diff --git a/pkg/state/constants.go b/pkg/state/constants.go
+index 3d282db194b84bd393ef3c7f742d43491bdcba74..0246799e8e8f43dea2df4a14229c742abb9f7036 100644
+--- a/pkg/state/constants.go
++++ b/pkg/state/constants.go
+@@ -44,6 +44,45 @@ 	triggerHostFinish   hostTrigger = "finishUpdate"
+ 	triggerHostFail     hostTrigger = "fail"
+ )
+ 
++type machineState string
++
++const (
++	machineNotInstalled  machineState = "not-installed"
++	machineInstalling    machineState = "installing"
++	machineInstallFailed machineState = "install-failed"
++	machineStopped       machineState = "stopped"
++	machineStarting      machineState = "starting"
++	machineRunning       machineState = "running"
++	machineStopping      machineState = "stopping"
++	machineRestarting    machineState = "restarting"
++	machineUpdatingAgent machineState = "updating-agent"
++
++	installDownloading machineState = "install-downloading"
++	installStarting    machineState = "install-starting"
++	installPreInstall  machineState = "install-pre-install"
++	installPackages    machineState = "install-packages"
++	installPostInstall machineState = "install-post-install"
++	installConfiguring machineState = "install-configuring"
++	installFinishing   machineState = "install-finishing"
++)
++
++type machineTrigger string
++
++const (
++	triggerMachineInstall       machineTrigger = "install"
++	triggerMachineInstallNext   machineTrigger = "installNext"
++	triggerMachineInstallFail   machineTrigger = "installFail"
++	triggerMachineInstallCancel machineTrigger = "installCancel"
++	triggerMachineStart         machineTrigger = "start"
++	triggerMachineStarted       machineTrigger = "started"
++	triggerMachineStop          machineTrigger = "stop"
++	triggerMachineStopped       machineTrigger = "stopped"
++	triggerMachineRestart       machineTrigger = "restart"
++	triggerMachineRestarted     machineTrigger = "restarted"
++	triggerMachineUpdateAgent   machineTrigger = "updateAgent"
++	triggerMachineAgentUpdated  machineTrigger = "agentUpdated"
++)
++
+ type HostStatus string
+ 
+ const (
+@@ -52,6 +91,32 @@ 	HostStatusOnline     HostStatus = "online"
+ 	HostStatusOutdated   HostStatus = "outdated"
+ 	HostStatusUpdating   HostStatus = "updating"
+ 	HostStatusError      HostStatus = "error"
++)
++
++type MachineStatus string
++
++const (
++	MachineStatusNotInstalled  MachineStatus = "not-installed"
++	MachineStatusInstalling    MachineStatus = "installing"
++	MachineStatusInstallFailed MachineStatus = "install-failed"
++	MachineStatusStopped       MachineStatus = "stopped"
++	MachineStatusStarting      MachineStatus = "starting"
++	MachineStatusRunning       MachineStatus = "running"
++	MachineStatusStopping      MachineStatus = "stopping"
++	MachineStatusRestarting    MachineStatus = "restarting"
++	MachineStatusUpdatingAgent MachineStatus = "updating-agent"
++)
++
++type InstallStep string
++
++const (
++	InstallStepDownloading InstallStep = "install-downloading"
++	InstallStepStarting    InstallStep = "install-starting"
++	InstallStepPreInstall  InstallStep = "install-pre-install"
++	InstallStepPackages    InstallStep = "install-packages"
++	InstallStepPostInstall InstallStep = "install-post-install"
++	InstallStepConfiguring InstallStep = "install-configuring"
++	InstallStepFinishing   InstallStep = "install-finishing"
+ )
+ 
+ type SetupPage string
+diff --git a/pkg/state/machine.go b/pkg/state/machine.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..517afafe63ac8be9c49d8fbd20329e2862e247eb
+--- /dev/null
++++ b/pkg/state/machine.go
+@@ -0,0 +1,323 @@
++package state
++
++import (
++	"context"
++	"log/slog"
++
++	"github.com/qmuntal/stateless"
++)
++
++type MachineHooks struct {
++	OnStatusChange      func(ctx context.Context, status MachineStatus) error
++	OnInstallStepChange func(ctx context.Context, step InstallStep) error
++}
++
++type Machine struct {
++	resume machineState
++
++	ctx   context.Context
++	log   *slog.Logger
++	hooks *MachineHooks
++
++	machine *stateless.StateMachine
++}
++
++func NewMachine(ctx context.Context, log *slog.Logger, hooks *MachineHooks) *Machine {
++	m := &Machine{
++		ctx:   ctx,
++		log:   log,
++		hooks: hooks,
++
++		machine: stateless.NewStateMachine(machineNotInstalled),
++	}
++
++	m.machine.
++		Configure(machineNotInstalled).
++		Permit(triggerMachineInstall, machineInstalling).
++		OnEntry(m.onNotInstalled)
++
++	m.machine.
++		Configure(machineInstalling).
++		InitialTransition(installDownloading).
++		Permit(triggerMachineInstallFail, machineInstallFailed).
++		Permit(triggerMachineInstallCancel, machineNotInstalled).
++		OnEntry(m.onInstalling)
++
++	m.machine.
++		Configure(installDownloading).
++		SubstateOf(machineInstalling).
++		Permit(triggerMachineInstallNext, installStarting).
++		OnEntry(m.onInstallDownloading)
++
++	m.machine.
++		Configure(installStarting).
++		SubstateOf(machineInstalling).
++		Permit(triggerMachineInstallNext, installPreInstall).
++		OnEntry(m.onInstallStarting)
++
++	m.machine.
++		Configure(installPreInstall).
++		SubstateOf(machineInstalling).
++		Permit(triggerMachineInstallNext, installPackages).
++		OnEntry(m.onInstallPreInstall)
++
++	m.machine.
++		Configure(installPackages).
++		SubstateOf(machineInstalling).
++		Permit(triggerMachineInstallNext, installPostInstall).
++		OnEntry(m.onInstallPackages)
++
++	m.machine.
++		Configure(installPostInstall).
++		SubstateOf(machineInstalling).
++		Permit(triggerMachineInstallNext, installConfiguring).
++		OnEntry(m.onInstallPostInstall)
++
++	m.machine.
++		Configure(installConfiguring).
++		SubstateOf(machineInstalling).
++		Permit(triggerMachineInstallNext, installFinishing).
++		OnEntry(m.onInstallConfiguring)
++
++	m.machine.
++		Configure(installFinishing).
++		SubstateOf(machineInstalling).
++		Permit(triggerMachineInstallNext, machineStopped).
++		OnEntry(m.onInstallFinishing)
++
++	m.machine.
++		Configure(machineInstallFailed).
++		Permit(triggerMachineInstall, machineInstalling).
++		OnEntry(m.onInstallFailed)
++
++	m.machine.
++		Configure(machineStopped).
++		Permit(triggerMachineStart, machineStarting).
++		Permit(triggerMachineUpdateAgent, machineUpdatingAgent).
++		OnExitWith(triggerMachineUpdateAgent, m.rememberStoppedResume).
++		OnEntry(m.onStopped)
++
++	m.machine.
++		Configure(machineStarting).
++		Permit(triggerMachineStarted, machineRunning).
++		Permit(triggerMachineStop, machineStopping).
++		OnEntry(m.onStarting)
++
++	m.machine.
++		Configure(machineRunning).
++		Permit(triggerMachineStop, machineStopping).
++		Permit(triggerMachineRestart, machineRestarting).
++		Permit(triggerMachineUpdateAgent, machineUpdatingAgent).
++		OnExitWith(triggerMachineUpdateAgent, m.rememberRunningResume).
++		OnEntry(m.onRunning)
++
++	m.machine.
++		Configure(machineStopping).
++		Permit(triggerMachineStopped, machineStopped).
++		OnEntry(m.onStopping)
++
++	m.machine.
++		Configure(machineRestarting).
++		Permit(triggerMachineRestarted, machineRunning).
++		Permit(triggerMachineStop, machineStopping).
++		OnEntry(m.onRestarting)
++
++	m.machine.
++		Configure(machineUpdatingAgent).
++		Permit(triggerMachineAgentUpdated, machineRunning, m.resumeRunning).
++		Permit(triggerMachineAgentUpdated, machineStopped, m.resumeStopped).
++		OnEntry(m.onUpdatingAgent)
++
++	return m
++}
++
++func (m *Machine) ToGraph() string {
++	return m.machine.ToGraph()
++}
++
++func (m *Machine) String() string {
++	return m.machine.String()
++}
++
++func (m *Machine) FlushStatus(ctx context.Context) error {
++	installing, err := m.machine.IsInStateCtx(ctx, machineInstalling)
++	if err != nil {
++		return err
++	}
++
++	if installing {
++		if err := m.onStatus(ctx, MachineStatusInstalling); err != nil {
++			return err
++		}
++
++		return m.onInstallStep(ctx, InstallStep(m.machine.MustState().(machineState)))
++	}
++
++	return m.onStatus(ctx, MachineStatus(m.machine.MustState().(machineState)))
++}
++
++func (m *Machine) rememberRunningResume(_ context.Context, _ ...any) error {
++	m.resume = machineRunning
++
++	return nil
++}
++
++func (m *Machine) rememberStoppedResume(_ context.Context, _ ...any) error {
++	m.resume = machineStopped
++
++	return nil
++}
++
++func (m *Machine) resumeRunning(_ context.Context, _ ...any) bool {
++	return m.resume == machineRunning
++}
++
++func (m *Machine) resumeStopped(_ context.Context, _ ...any) bool {
++	return m.resume == machineStopped
++}
++
++func (m *Machine) onStatus(ctx context.Context, status MachineStatus) error {
++	m.log.InfoContext(m.ctx, "Calling onStatusChange hook", "status", status)
++
++	return m.hooks.OnStatusChange(ctx, status)
++}
++
++func (m *Machine) onInstallStep(ctx context.Context, step InstallStep) error {
++	m.log.InfoContext(m.ctx, "Calling onInstallStepChange hook", "step", step)
++
++	return m.hooks.OnInstallStepChange(ctx, step)
++}
++
++func (m *Machine) onNotInstalled(ctx context.Context, _ ...any) error {
++	return m.onStatus(ctx, MachineStatusNotInstalled)
++}
++
++func (m *Machine) onInstalling(ctx context.Context, _ ...any) error {
++	return m.onStatus(ctx, MachineStatusInstalling)
++}
++
++func (m *Machine) onInstallFailed(ctx context.Context, _ ...any) error {
++	return m.onStatus(ctx, MachineStatusInstallFailed)
++}
++
++func (m *Machine) onStopped(ctx context.Context, _ ...any) error {
++	return m.onStatus(ctx, MachineStatusStopped)
++}
++
++func (m *Machine) onStarting(ctx context.Context, _ ...any) error {
++	return m.onStatus(ctx, MachineStatusStarting)
++}
++
++func (m *Machine) onRunning(ctx context.Context, _ ...any) error {
++	return m.onStatus(ctx, MachineStatusRunning)
++}
++
++func (m *Machine) onStopping(ctx context.Context, _ ...any) error {
++	return m.onStatus(ctx, MachineStatusStopping)
++}
++
++func (m *Machine) onRestarting(ctx context.Context, _ ...any) error {
++	return m.onStatus(ctx, MachineStatusRestarting)
++}
++
++func (m *Machine) onUpdatingAgent(ctx context.Context, _ ...any) error {
++	return m.onStatus(ctx, MachineStatusUpdatingAgent)
++}
++
++func (m *Machine) onInstallDownloading(ctx context.Context, _ ...any) error {
++	return m.onInstallStep(ctx, InstallStepDownloading)
++}
++
++func (m *Machine) onInstallStarting(ctx context.Context, _ ...any) error {
++	return m.onInstallStep(ctx, InstallStepStarting)
++}
++
++func (m *Machine) onInstallPreInstall(ctx context.Context, _ ...any) error {
++	return m.onInstallStep(ctx, InstallStepPreInstall)
++}
++
++func (m *Machine) onInstallPackages(ctx context.Context, _ ...any) error {
++	return m.onInstallStep(ctx, InstallStepPackages)
++}
++
++func (m *Machine) onInstallPostInstall(ctx context.Context, _ ...any) error {
++	return m.onInstallStep(ctx, InstallStepPostInstall)
++}
++
++func (m *Machine) onInstallConfiguring(ctx context.Context, _ ...any) error {
++	return m.onInstallStep(ctx, InstallStepConfiguring)
++}
++
++func (m *Machine) onInstallFinishing(ctx context.Context, _ ...any) error {
++	return m.onInstallStep(ctx, InstallStepFinishing)
++}
++
++func (m *Machine) Install(ctx context.Context) error {
++	return m.machine.FireCtx(ctx, triggerMachineInstall)
++}
++
++func (m *Machine) InstallNext(ctx context.Context) error {
++	return m.machine.FireCtx(ctx, triggerMachineInstallNext)
++}
++
++func (m *Machine) InstallFail(ctx context.Context) error {
++	return m.machine.FireCtx(ctx, triggerMachineInstallFail)
++}
++
++func (m *Machine) InstallCancel(ctx context.Context) error {
++	return m.machine.FireCtx(ctx, triggerMachineInstallCancel)
++}
++
++func (m *Machine) Start(ctx context.Context) error {
++	return m.machine.FireCtx(ctx, triggerMachineStart)
++}
++
++func (m *Machine) Started(ctx context.Context) error {
++	return m.machine.FireCtx(ctx, triggerMachineStarted)
++}
++
++func (m *Machine) Stop(ctx context.Context) error {
++	return m.machine.FireCtx(ctx, triggerMachineStop)
++}
++
++func (m *Machine) Stopped(ctx context.Context) error {
++	return m.machine.FireCtx(ctx, triggerMachineStopped)
++}
++
++func (m *Machine) Restart(ctx context.Context) error {
++	return m.machine.FireCtx(ctx, triggerMachineRestart)
++}
++
++func (m *Machine) Restarted(ctx context.Context) error {
++	return m.machine.FireCtx(ctx, triggerMachineRestarted)
++}
++
++func (m *Machine) UpdateAgent(ctx context.Context) error {
++	return m.machine.FireCtx(ctx, triggerMachineUpdateAgent)
++}
++
++func (m *Machine) AgentUpdated(ctx context.Context) error {
++	return m.machine.FireCtx(ctx, triggerMachineAgentUpdated)
++}
++
++func (m *Machine) Installed() bool {
++	switch m.machine.MustState() {
++	case machineStopped, machineStarting, machineRunning, machineStopping, machineRestarting, machineUpdatingAgent:
++		return true
++	default:
++		return false
++	}
++}
++
++func (m *Machine) Active() bool {
++	switch m.machine.MustState() {
++	case machineStarting, machineRunning, machineRestarting, machineUpdatingAgent:
++		return true
++	default:
++		return false
++	}
++}
++
++func (m *Machine) Linkable() bool {
++	return m.Installed()
++}
+diff --git a/pkg/state/machine_test.go b/pkg/state/machine_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..dace8e9f21e1c226349c347a0b199ccee8b4e173
+--- /dev/null
++++ b/pkg/state/machine_test.go
+@@ -0,0 +1,429 @@
++package state
++
++import (
++	"context"
++	"testing"
++
++	"github.com/neilotoole/slogt/v2"
++	"github.com/stretchr/testify/require"
++)
++
++var installSteps = []InstallStep{
++	InstallStepDownloading,
++	InstallStepStarting,
++	InstallStepPreInstall,
++	InstallStepPackages,
++	InstallStepPostInstall,
++	InstallStepConfiguring,
++	InstallStepFinishing,
++}
++
++func newTestingMachine(t *testing.T, hooks *MachineHooks) *Machine {
++	return NewMachine(t.Context(), slogt.New(t), hooks)
++}
++
++func TestMachineFlushStatus(t *testing.T) {
++	var (
++		statuses []MachineStatus
++	)
++
++	m := newTestingMachine(t, &MachineHooks{
++		OnStatusChange: func(_ context.Context, status MachineStatus) error {
++			statuses = append(statuses, status)
++
++			return nil
++		},
++	})
++
++	require.NoError(t, m.FlushStatus(t.Context()))
++	require.Equal(t, []MachineStatus{MachineStatusNotInstalled}, statuses)
++}
++
++func TestMachineInstall(t *testing.T) {
++	var (
++		statuses []MachineStatus
++		steps    []InstallStep
++	)
++
++	m := newTestingMachine(t, &MachineHooks{
++		OnStatusChange: func(_ context.Context, status MachineStatus) error {
++			statuses = append(statuses, status)
++
++			return nil
++		},
++		OnInstallStepChange: func(_ context.Context, step InstallStep) error {
++			steps = append(steps, step)
++
++			return nil
++		},
++	})
++
++	require.NoError(t, m.Install(t.Context()))
++	require.Equal(t, []MachineStatus{MachineStatusInstalling}, statuses)
++	require.Equal(t, []InstallStep{InstallStepDownloading}, steps)
++}
++
++func TestMachineInstallNext(t *testing.T) {
++	var (
++		statuses []MachineStatus
++		steps    []InstallStep
++	)
++
++	m := newTestingMachine(t, &MachineHooks{
++		OnStatusChange: func(_ context.Context, status MachineStatus) error {
++			statuses = append(statuses, status)
++
++			return nil
++		},
++		OnInstallStepChange: func(_ context.Context, step InstallStep) error {
++			steps = append(steps, step)
++
++			return nil
++		},
++	})
++
++	require.NoError(t, m.Install(t.Context()))
++
++	for range installSteps {
++		require.NoError(t, m.InstallNext(t.Context()))
++	}
++
++	require.Equal(t, []MachineStatus{MachineStatusInstalling, MachineStatusStopped}, statuses)
++	require.Equal(t, installSteps, steps)
++}
++
++func TestMachineInstallFail(t *testing.T) {
++	var (
++		statuses []MachineStatus
++		steps    []InstallStep
++	)
++
++	m := newTestingMachine(t, &MachineHooks{
++		OnStatusChange: func(_ context.Context, status MachineStatus) error {
++			statuses = append(statuses, status)
++
++			return nil
++		},
++		OnInstallStepChange: func(_ context.Context, step InstallStep) error {
++			steps = append(steps, step)
++
++			return nil
++		},
++	})
++
++	require.NoError(t, m.Install(t.Context()))
++	require.NoError(t, m.InstallNext(t.Context()))
++	require.NoError(t, m.InstallFail(t.Context()))
++	require.NoError(t, m.Install(t.Context()))
++
++	require.Equal(
++		t,
++		[]MachineStatus{
++			MachineStatusInstalling,
++			MachineStatusInstallFailed,
++			MachineStatusInstalling,
++		},
++		statuses,
++	)
++	require.Equal(
++		t,
++		[]InstallStep{
++			InstallStepDownloading,
++			InstallStepStarting,
++			InstallStepDownloading,
++		},
++		steps,
++	)
++}
++
++func TestMachineInstallCancel(t *testing.T) {
++	var (
++		statuses []MachineStatus
++		steps    []InstallStep
++	)
++
++	m := newTestingMachine(t, &MachineHooks{
++		OnStatusChange: func(_ context.Context, status MachineStatus) error {
++			statuses = append(statuses, status)
++
++			return nil
++		},
++		OnInstallStepChange: func(_ context.Context, step InstallStep) error {
++			steps = append(steps, step)
++
++			return nil
++		},
++	})
++
++	require.NoError(t, m.Install(t.Context()))
++	require.NoError(t, m.InstallCancel(t.Context()))
++
++	require.Equal(t, []MachineStatus{MachineStatusInstalling, MachineStatusNotInstalled}, statuses)
++	require.Equal(t, []InstallStep{InstallStepDownloading}, steps)
++}
++
++func TestMachineStart(t *testing.T) {
++	var (
++		statuses []MachineStatus
++	)
++
++	m := newTestingMachine(t, &MachineHooks{
++		OnStatusChange: func(_ context.Context, status MachineStatus) error {
++			statuses = append(statuses, status)
++
++			return nil
++		},
++		OnInstallStepChange: func(_ context.Context, _ InstallStep) error {
++			return nil
++		},
++	})
++
++	require.NoError(t, m.Install(t.Context()))
++
++	for range installSteps {
++		require.NoError(t, m.InstallNext(t.Context()))
++	}
++
++	require.NoError(t, m.Start(t.Context()))
++	require.NoError(t, m.Started(t.Context()))
++
++	require.Equal(
++		t,
++		[]MachineStatus{
++			MachineStatusInstalling,
++			MachineStatusStopped,
++			MachineStatusStarting,
++			MachineStatusRunning,
++		},
++		statuses,
++	)
++}
++
++func TestMachineStop(t *testing.T) {
++	var (
++		statuses []MachineStatus
++	)
++
++	m := newTestingMachine(t, &MachineHooks{
++		OnStatusChange: func(_ context.Context, status MachineStatus) error {
++			statuses = append(statuses, status)
++
++			return nil
++		},
++		OnInstallStepChange: func(_ context.Context, _ InstallStep) error {
++			return nil
++		},
++	})
++
++	require.NoError(t, m.Install(t.Context()))
++
++	for range installSteps {
++		require.NoError(t, m.InstallNext(t.Context()))
++	}
++
++	require.NoError(t, m.Start(t.Context()))
++	require.NoError(t, m.Started(t.Context()))
++	require.NoError(t, m.Stop(t.Context()))
++	require.NoError(t, m.Stopped(t.Context()))
++
++	require.Equal(
++		t,
++		[]MachineStatus{
++			MachineStatusInstalling,
++			MachineStatusStopped,
++			MachineStatusStarting,
++			MachineStatusRunning,
++			MachineStatusStopping,
++			MachineStatusStopped,
++		},
++		statuses,
++	)
++}
++
++func TestMachineRestart(t *testing.T) {
++	var (
++		statuses []MachineStatus
++	)
++
++	m := newTestingMachine(t, &MachineHooks{
++		OnStatusChange: func(_ context.Context, status MachineStatus) error {
++			statuses = append(statuses, status)
++
++			return nil
++		},
++		OnInstallStepChange: func(_ context.Context, _ InstallStep) error {
++			return nil
++		},
++	})
++
++	require.NoError(t, m.Install(t.Context()))
++
++	for range installSteps {
++		require.NoError(t, m.InstallNext(t.Context()))
++	}
++
++	require.NoError(t, m.Start(t.Context()))
++	require.NoError(t, m.Started(t.Context()))
++	require.NoError(t, m.Restart(t.Context()))
++	require.NoError(t, m.Restarted(t.Context()))
++
++	require.Equal(
++		t,
++		[]MachineStatus{
++			MachineStatusInstalling,
++			MachineStatusStopped,
++			MachineStatusStarting,
++			MachineStatusRunning,
++			MachineStatusRestarting,
++			MachineStatusRunning,
++		},
++		statuses,
++	)
++}
++
++func TestMachineStopDuringRestart(t *testing.T) {
++	var (
++		statuses []MachineStatus
++	)
++
++	m := newTestingMachine(t, &MachineHooks{
++		OnStatusChange: func(_ context.Context, status MachineStatus) error {
++			statuses = append(statuses, status)
++
++			return nil
++		},
++		OnInstallStepChange: func(_ context.Context, _ InstallStep) error {
++			return nil
++		},
++	})
++
++	require.NoError(t, m.Install(t.Context()))
++
++	for range installSteps {
++		require.NoError(t, m.InstallNext(t.Context()))
++	}
++
++	require.NoError(t, m.Start(t.Context()))
++	require.NoError(t, m.Started(t.Context()))
++	require.NoError(t, m.Restart(t.Context()))
++	require.NoError(t, m.Stop(t.Context()))
++	require.NoError(t, m.Stopped(t.Context()))
++
++	require.Equal(
++		t,
++		[]MachineStatus{
++			MachineStatusInstalling,
++			MachineStatusStopped,
++			MachineStatusStarting,
++			MachineStatusRunning,
++			MachineStatusRestarting,
++			MachineStatusStopping,
++			MachineStatusStopped,
++		},
++		statuses,
++	)
++}
++
++func TestMachineUpdateAgentRunning(t *testing.T) {
++	var (
++		statuses []MachineStatus
++	)
++
++	m := newTestingMachine(t, &MachineHooks{
++		OnStatusChange: func(_ context.Context, status MachineStatus) error {
++			statuses = append(statuses, status)
++
++			return nil
++		},
++		OnInstallStepChange: func(_ context.Context, _ InstallStep) error {
++			return nil
++		},
++	})
++
++	require.NoError(t, m.Install(t.Context()))
++
++	for range installSteps {
++		require.NoError(t, m.InstallNext(t.Context()))
++	}
++
++	require.NoError(t, m.Start(t.Context()))
++	require.NoError(t, m.Started(t.Context()))
++	require.NoError(t, m.UpdateAgent(t.Context()))
++	require.NoError(t, m.AgentUpdated(t.Context()))
++
++	require.Equal(
++		t,
++		[]MachineStatus{
++			MachineStatusInstalling,
++			MachineStatusStopped,
++			MachineStatusStarting,
++			MachineStatusRunning,
++			MachineStatusUpdatingAgent,
++			MachineStatusRunning,
++		},
++		statuses,
++	)
++}
++
++func TestMachineUpdateAgentStopped(t *testing.T) {
++	var (
++		statuses []MachineStatus
++	)
++
++	m := newTestingMachine(t, &MachineHooks{
++		OnStatusChange: func(_ context.Context, status MachineStatus) error {
++			statuses = append(statuses, status)
++
++			return nil
++		},
++		OnInstallStepChange: func(_ context.Context, _ InstallStep) error {
++			return nil
++		},
++	})
++
++	require.NoError(t, m.Install(t.Context()))
++
++	for range installSteps {
++		require.NoError(t, m.InstallNext(t.Context()))
++	}
++
++	require.NoError(t, m.UpdateAgent(t.Context()))
++	require.NoError(t, m.AgentUpdated(t.Context()))
++
++	require.Equal(
++		t,
++		[]MachineStatus{
++			MachineStatusInstalling,
++			MachineStatusStopped,
++			MachineStatusUpdatingAgent,
++			MachineStatusStopped,
++		},
++		statuses,
++	)
++}
++
++func TestMachineFlushStatusInstall(t *testing.T) {
++	var (
++		statuses []MachineStatus
++		steps    []InstallStep
++	)
++
++	m := newTestingMachine(t, &MachineHooks{
++		OnStatusChange: func(_ context.Context, status MachineStatus) error {
++			statuses = append(statuses, status)
++
++			return nil
++		},
++		OnInstallStepChange: func(_ context.Context, step InstallStep) error {
++			steps = append(steps, step)
++
++			return nil
++		},
++	})
++
++	require.NoError(t, m.Install(t.Context()))
++	require.NoError(t, m.FlushStatus(t.Context()))
++
++	require.Equal(t, []MachineStatus{MachineStatusInstalling, MachineStatusInstalling}, statuses)
++	require.Equal(t, []InstallStep{InstallStepDownloading, InstallStepDownloading}, steps)
++}
+
