@@ -1,0 +1,218 @@
+From f95f6320120d5cc24dc70b8671063fc8b7129872 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Tue, 17 Nov 2026 17:28:04 -0700
+Subject: [PATCH] test: Test only our custom validators and logic for session, not callbacks
+---
+diff --git a/pkg/state/session_test.go b/pkg/state/session_test.go
+index 825d71c44d2a7694b34d9d1ab3e75d24fb10399a..13678638f83f1ac8a9ba17411cc75cf7e629a5ae 100644
+--- a/pkg/state/session_test.go
++++ b/pkg/state/session_test.go
+@@ -8,122 +8,116 @@ 	"github.com/neilotoole/slogt/v2"
+ 	"github.com/stretchr/testify/require"
+ )
+ 
+-func newTestingSession(t *testing.T, hooks *SessionHooks) *Session {
+-	return NewSession(t.Context(), slogt.New(t), hooks)
++func newTestingSession(t *testing.T) *Session {
++	return NewSession(t.Context(), slogt.New(t), &SessionHooks{
++		OnSetupStep: func(_ context.Context, _ SetupPage) error { return nil },
++		OnReady:     func(_ context.Context) error { return nil },
++	})
+ }
+ 
+-func TestSessionBootSetup(t *testing.T) {
+-	var (
+-		pages []SetupPage
+-		ready int
+-	)
++func TestNotOnboarded(t *testing.T) {
++	require.False(t, notOnboarded(t.Context()))
++	require.False(t, notOnboarded(t.Context(), true))
++	require.True(t, notOnboarded(t.Context(), false))
++}
+ 
+-	s := newTestingSession(t, &SessionHooks{
+-		OnSetupStep: func(_ context.Context, page SetupPage) error {
+-			pages = append(pages, page)
++func TestIsOnboarded(t *testing.T) {
++	require.False(t, isOnboarded(t.Context()))
++	require.True(t, isOnboarded(t.Context(), true))
++	require.False(t, isOnboarded(t.Context(), false))
++}
+ 
+-			return nil
+-		},
+-		OnReady: func(_ context.Context) error {
+-			ready++
++func TestHostReady(t *testing.T) {
++	require.False(t, hostReady(t.Context()))
++	require.True(t, hostReady(t.Context(), true))
++	require.False(t, hostReady(t.Context(), false))
++}
+ 
+-			return nil
++func TestFoldersValid(t *testing.T) {
++	var foldersValidTests = []struct {
++		name    string
++		folders Folders
++		want    bool
++	}{
++		{
++			name:    "all folders set",
++			folders: Folders{Config: "/tmp/config", Data: "/tmp/data", SSH: "/tmp/ssh"},
++			want:    true,
++		},
++		{
++			name:    "no folders set",
++			folders: Folders{},
++			want:    false,
+ 		},
+-	})
++		{
++			name:    "config folder missing",
++			folders: Folders{Data: "/tmp/data", SSH: "/tmp/ssh"},
++			want:    false,
++		},
++		{
++			name:    "data folder missing",
++			folders: Folders{Config: "/tmp/config", SSH: "/tmp/ssh"},
++			want:    false,
++		},
++		{
++			name:    "ssh folder missing",
++			folders: Folders{Config: "/tmp/config", Data: "/tmp/data"},
++			want:    false,
++		},
++		{
++			name:    "whitespace only folder",
++			folders: Folders{Config: " ", Data: "/tmp/data", SSH: "/tmp/ssh"},
++			want:    false,
++		},
++	}
+ 
+-	require.NoError(t, s.Boot(t.Context(), false))
+-	require.Equal(t, []SetupPage{SetupPageWelcome}, pages)
+-	require.Zero(t, ready)
+-}
++	for _, tt := range foldersValidTests {
++		t.Run(tt.name, func(t *testing.T) {
++			s := newTestingSession(t)
++			s.folders = tt.folders
+ 
+-func TestSessionBootReady(t *testing.T) {
+-	var (
+-		pages []SetupPage
+-		ready int
+-	)
++			require.Equal(t, tt.want, s.foldersValid(t.Context()))
++		})
++	}
++}
+ 
+-	s := newTestingSession(t, &SessionHooks{
+-		OnSetupStep: func(_ context.Context, page SetupPage) error {
+-			pages = append(pages, page)
++func TestHostCommandCopiedGuard(t *testing.T) {
++	s := newTestingSession(t)
+ 
+-			return nil
+-		},
+-		OnReady: func(_ context.Context) error {
+-			ready++
++	require.False(t, s.hostCommandCopiedGuard(t.Context()))
+ 
+-			return nil
+-		},
+-	})
++	s.hostCommandCopied = true
+ 
+-	require.NoError(t, s.Boot(t.Context(), true))
+-	require.Empty(t, pages)
+-	require.Equal(t, 1, ready)
++	require.True(t, s.hostCommandCopiedGuard(t.Context()))
+ }
+ 
+-func TestSessionSetupNext(t *testing.T) {
+-	var (
+-		pages []SetupPage
+-		ready int
+-	)
++func TestSystemCommandCopiedGuard(t *testing.T) {
++	s := newTestingSession(t)
+ 
+-	s := newTestingSession(t, &SessionHooks{
+-		OnSetupStep: func(_ context.Context, page SetupPage) error {
+-			pages = append(pages, page)
++	require.False(t, s.systemCommandCopiedGuard(t.Context()))
+ 
+-			return nil
+-		},
+-		OnReady: func(_ context.Context) error {
+-			ready++
++	s.systemCommandCopied = true
+ 
+-			return nil
+-		},
+-	})
++	require.True(t, s.systemCommandCopiedGuard(t.Context()))
++}
+ 
+-	require.NoError(t, s.Boot(t.Context(), false))
++func TestSetFolder(t *testing.T) {
++	s := newTestingSession(t)
+ 
+ 	s.SetFolder(FolderConfig, "/tmp/config")
+ 	s.SetFolder(FolderData, "/tmp/data")
+ 	s.SetFolder(FolderSSH, "/tmp/ssh")
+ 
+-	require.NoError(t, s.SetupNext(t.Context(), false))
+-	require.NoError(t, s.SetupNext(t.Context(), false))
+-
+-	s.SetupCopy()
+-
+-	require.NoError(t, s.SetupNext(t.Context(), true))
+-
+-	s.SetupCopy()
+-
+-	require.NoError(t, s.SetupNext(t.Context(), true))
+-	require.NoError(t, s.SetupFinish(t.Context()))
+-
+-	require.Equal(t, []SetupPage{SetupPageWelcome, SetupPageFolders, SetupPageHost, SetupPageSystem, SetupPageFinish}, pages)
+-	require.Equal(t, 1, ready)
++	require.Equal(t, Folders{Config: "/tmp/config", Data: "/tmp/data", SSH: "/tmp/ssh"}, s.folders)
+ }
+ 
+-func TestSessionSetupBack(t *testing.T) {
+-	var (
+-		pages []SetupPage
+-		ready int
+-	)
+-
+-	s := newTestingSession(t, &SessionHooks{
+-		OnSetupStep: func(_ context.Context, page SetupPage) error {
+-			pages = append(pages, page)
+-
+-			return nil
+-		},
+-		OnReady: func(_ context.Context) error {
+-			ready++
+-
+-			return nil
+-		},
+-	})
++func TestSetFolderResetsCopiedCommands(t *testing.T) {
++	s := newTestingSession(t)
++	s.hostCommandCopied = true
++	s.systemCommandCopied = true
+ 
+-	require.NoError(t, s.Boot(t.Context(), false))
+-	require.NoError(t, s.SetupNext(t.Context(), false))
+-	require.NoError(t, s.SetupBack(t.Context()))
++	s.SetFolder(FolderConfig, "/tmp/config")
+ 
+-	require.Equal(t, []SetupPage{SetupPageWelcome, SetupPageFolders, SetupPageWelcome}, pages)
+-	require.Zero(t, ready)
++	require.False(t, s.hostCommandCopiedGuard(t.Context()))
++	require.False(t, s.systemCommandCopiedGuard(t.Context()))
+ }
+
