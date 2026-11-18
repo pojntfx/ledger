@@ -1,0 +1,30 @@
+From bf073447df08f3ef3ae71c67e57fef0508620c93 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Wed, 18 Nov 2026 13:05:29 -0700
+Subject: [PATCH] fix: Add missing confirmation not required guard to request
+---
+diff --git a/pkg/state/request.go b/pkg/state/request.go
+index 5b589387cc2b0132f958973414d967134b4d3f7d..11ae0d9d7d0db03a9f222bd5ab418b0c2fe72024 100644
+--- a/pkg/state/request.go
++++ b/pkg/state/request.go
+@@ -42,7 +42,7 @@
+ 	r.machine.
+ 		Configure(requestPending).
+ 		Permit(triggerRequestApprove, requestAwaitingConfirmation, r.confirmationRequired).
+-		Permit(triggerRequestApprove, requestApproved).
++		Permit(triggerRequestApprove, requestApproved, r.confirmationNotRequired).
+ 		Permit(triggerRequestDeny, requestDenied).
+ 		Permit(triggerRequestTimeout, requestTimedOut)
+ 
+@@ -100,6 +100,10 @@ }
+ 
+ func (r *Request) confirmationRequired(ctx context.Context, _ ...any) bool {
+ 	return r.NeedsConfirmation(time.Now())
++}
++
++func (r *Request) confirmationNotRequired(ctx context.Context, _ ...any) bool {
++	return !r.NeedsConfirmation(time.Now())
+ }
+ 
+ func (r *Request) onPending(ctx context.Context, _ ...any) error {
+
