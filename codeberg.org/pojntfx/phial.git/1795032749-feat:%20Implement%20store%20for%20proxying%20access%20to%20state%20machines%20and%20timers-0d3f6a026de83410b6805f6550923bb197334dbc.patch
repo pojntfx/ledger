@@ -1,0 +1,826 @@
+From 0d3f6a026de83410b6805f6550923bb197334dbc Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Wed, 18 Nov 2026 13:12:29 -0700
+Subject: [PATCH] feat: Implement store for proxying access to state machines and timers
+---
+diff --git a/pkg/state/constants.go b/pkg/state/constants.go
+index 7340c652804d88a1f85f82f81977761393f219a1..a464a58d9b27a883fddd5bfbcf856a8ceeb2e970 100644
+--- a/pkg/state/constants.go
++++ b/pkg/state/constants.go
+@@ -202,3 +202,5 @@ 	FolderConfig FolderKind = "config"
+ 	FolderData   FolderKind = "data"
+ 	FolderSSH    FolderKind = "ssh"
+ )
++
++const storeTickInterval = time.Second
+diff --git a/pkg/state/errors.go b/pkg/state/errors.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..83b76635ebb45138285831b183e30358d4deb75a
+--- /dev/null
++++ b/pkg/state/errors.go
+@@ -0,0 +1,14 @@
++package state
++
++import "errors"
++
++var (
++	ErrCouldNotAddMachine  = errors.New("could not add machine")
++	ErrCouldNotFindMachine = errors.New("could not find machine")
++
++	ErrCouldNotAddRequest  = errors.New("could not add request")
++	ErrCouldNotFindRequest = errors.New("could not find request")
++
++	ErrCouldNotAddGrant  = errors.New("could not add grant")
++	ErrCouldNotFindGrant = errors.New("could not find grant")
++)
+diff --git a/pkg/state/store.go b/pkg/state/store.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..1edc9e82cabccbf03b4347cb3a0d810208dd2ec2
+--- /dev/null
++++ b/pkg/state/store.go
+@@ -0,0 +1,493 @@
++package state
++
++import (
++	"context"
++	"log/slog"
++	"time"
++)
++
++type StoreHooks struct {
++	OnChange func(ctx context.Context) error
++}
++
++type HostProbe func(ctx context.Context) (outdated bool, err error)
++
++type Store struct {
++	ctx   context.Context
++	log   *slog.Logger
++	hooks *StoreHooks
++
++	hostProbe HostProbe
++
++	session *Session
++	host    *Host
++
++	machines map[string]*Machine
++	grants   map[string]*Grant
++	requests map[string]*Request
++
++	sessionPage  SetupPage
++	sessionReady bool
++
++	hostStatus HostStatus
++
++	machineStatuses map[string]MachineStatus
++	installSteps    map[string]InstallStep
++	grantStatuses   map[string]GrantStatus
++	requestStatuses map[string]RequestStatus
++
++	ticker *time.Ticker
++}
++
++func NewStore(ctx context.Context, log *slog.Logger, hooks *StoreHooks, hostProbe HostProbe) (*Store, error) {
++	s := &Store{
++		ctx:   ctx,
++		log:   log,
++		hooks: hooks,
++
++		hostProbe: hostProbe,
++
++		machines: map[string]*Machine{},
++		grants:   map[string]*Grant{},
++		requests: map[string]*Request{},
++
++		machineStatuses: map[string]MachineStatus{},
++		installSteps:    map[string]InstallStep{},
++		grantStatuses:   map[string]GrantStatus{},
++		requestStatuses: map[string]RequestStatus{},
++	}
++
++	s.session = NewSession(ctx, log, &SessionHooks{
++		OnSetupStep: func(ctx context.Context, page SetupPage) error {
++			s.sessionPage = page
++			s.sessionReady = false
++
++			return s.onChange(ctx)
++		},
++		OnReady: func(ctx context.Context) error {
++			s.sessionReady = true
++
++			return s.onChange(ctx)
++		},
++	})
++
++	s.host = NewHost(ctx, log, &HostHooks{
++		OnStatusChange: func(ctx context.Context, status HostStatus) error {
++			s.hostStatus = status
++
++			return s.onChange(ctx)
++		},
++	})
++
++	if err := s.host.FlushStatus(ctx); err != nil {
++		return nil, err
++	}
++
++	return s, nil
++}
++
++func (s *Store) Run() {
++	s.ticker = time.NewTicker(storeTickInterval)
++
++	go func() {
++		for {
++			select {
++			case <-s.ctx.Done():
++				s.ticker.Stop()
++
++				return
++			case <-s.ticker.C:
++				if err := s.advance(s.ctx); err != nil {
++					s.log.ErrorContext(s.ctx, "Could not advance store", "err", err)
++				}
++			}
++		}
++	}()
++
++	go func() {
++		if err := s.connectHost(s.ctx); err != nil {
++			s.log.ErrorContext(s.ctx, "Could not connect to host", "err", err)
++		}
++	}()
++}
++
++func (s *Store) Boot(ctx context.Context, onboarded bool) error {
++	return s.session.Boot(ctx, onboarded)
++}
++
++func (s *Store) SetupNext(ctx context.Context) error {
++	return s.session.SetupNext(ctx, s.hostStatus == HostStatusOnline)
++}
++
++func (s *Store) SetupBack(ctx context.Context) error {
++	return s.session.SetupBack(ctx)
++}
++
++func (s *Store) SetupFinish(ctx context.Context) error {
++	return s.session.SetupFinish(ctx)
++}
++
++func (s *Store) CanSetupNext(ctx context.Context) (bool, error) {
++	return s.session.CanSetupNext(ctx, s.hostStatus == HostStatusOnline)
++}
++
++func (s *Store) CanSetupBack(ctx context.Context) (bool, error) {
++	return s.session.CanSetupBack(ctx)
++}
++
++func (s *Store) CanSetupFinish(ctx context.Context) (bool, error) {
++	return s.session.CanSetupFinish(ctx)
++}
++
++func (s *Store) SetFolder(kind FolderKind, path string) {
++	s.session.SetFolder(kind, path)
++}
++
++func (s *Store) SetupCopy() {
++	s.session.SetupCopy()
++}
++
++func (s *Store) AddMachine(ctx context.Context, id string) error {
++	if _, ok := s.machines[id]; ok {
++		return ErrCouldNotAddMachine
++	}
++
++	m := NewMachine(s.ctx, s.log, &MachineHooks{
++		OnStatusChange: func(ctx context.Context, status MachineStatus) error {
++			s.machineStatuses[id] = status
++
++			return s.onChange(ctx)
++		},
++		OnInstallStepChange: func(ctx context.Context, step InstallStep) error {
++			s.installSteps[id] = step
++
++			return s.onChange(ctx)
++		},
++	})
++	s.machines[id] = m
++
++	return m.FlushStatus(ctx)
++}
++
++func (s *Store) Install(ctx context.Context, id string) error {
++	m, err := s.machine(id)
++	if err != nil {
++		return err
++	}
++
++	return m.Install(ctx)
++}
++
++func (s *Store) InstallNext(ctx context.Context, id string) error {
++	m, err := s.machine(id)
++	if err != nil {
++		return err
++	}
++
++	return m.InstallNext(ctx)
++}
++
++func (s *Store) InstallFail(ctx context.Context, id string) error {
++	m, err := s.machine(id)
++	if err != nil {
++		return err
++	}
++
++	return m.InstallFail(ctx)
++}
++
++func (s *Store) InstallCancel(ctx context.Context, id string) error {
++	m, err := s.machine(id)
++	if err != nil {
++		return err
++	}
++
++	return m.InstallCancel(ctx)
++}
++
++func (s *Store) Start(ctx context.Context, id string) error {
++	m, err := s.machine(id)
++	if err != nil {
++		return err
++	}
++
++	return m.Start(ctx)
++}
++
++func (s *Store) Started(ctx context.Context, id string) error {
++	m, err := s.machine(id)
++	if err != nil {
++		return err
++	}
++
++	return m.Started(ctx)
++}
++
++func (s *Store) Stop(ctx context.Context, id string) error {
++	m, err := s.machine(id)
++	if err != nil {
++		return err
++	}
++
++	return m.Stop(ctx)
++}
++
++func (s *Store) Stopped(ctx context.Context, id string) error {
++	m, err := s.machine(id)
++	if err != nil {
++		return err
++	}
++
++	return m.Stopped(ctx)
++}
++
++func (s *Store) Restart(ctx context.Context, id string) error {
++	m, err := s.machine(id)
++	if err != nil {
++		return err
++	}
++
++	return m.Restart(ctx)
++}
++
++func (s *Store) Restarted(ctx context.Context, id string) error {
++	m, err := s.machine(id)
++	if err != nil {
++		return err
++	}
++
++	return m.Restarted(ctx)
++}
++
++func (s *Store) UpdateAgent(ctx context.Context, id string) error {
++	m, err := s.machine(id)
++	if err != nil {
++		return err
++	}
++
++	return m.UpdateAgent(ctx)
++}
++
++func (s *Store) AgentUpdated(ctx context.Context, id string) error {
++	m, err := s.machine(id)
++	if err != nil {
++		return err
++	}
++
++	return m.AgentUpdated(ctx)
++}
++
++func (s *Store) AddRequest(ctx context.Context, id string, maxUses int, expiresAt time.Time, persistent bool, deadline time.Time) error {
++	if _, ok := s.requests[id]; ok {
++		return ErrCouldNotAddRequest
++	}
++
++	r := NewRequest(s.ctx, s.log, &RequestHooks{
++		OnStatusChange: func(ctx context.Context, status RequestStatus) error {
++			s.requestStatuses[id] = status
++
++			if err := s.onChange(ctx); err != nil {
++				return err
++			}
++
++			if status == RequestStatusApproved {
++				return s.addGrant(ctx, id, maxUses, expiresAt, persistent)
++			}
++
++			return nil
++		},
++	}, maxUses, expiresAt, persistent, deadline)
++	s.requests[id] = r
++
++	return r.FlushStatus(ctx)
++}
++
++func (s *Store) ApproveRequest(ctx context.Context, id string) error {
++	r, err := s.request(id)
++	if err != nil {
++		return err
++	}
++
++	return r.Approve(ctx)
++}
++
++func (s *Store) ConfirmRequest(ctx context.Context, id string) error {
++	r, err := s.request(id)
++	if err != nil {
++		return err
++	}
++
++	return r.Confirm(ctx)
++}
++
++func (s *Store) CancelRequest(ctx context.Context, id string) error {
++	r, err := s.request(id)
++	if err != nil {
++		return err
++	}
++
++	return r.Cancel(ctx)
++}
++
++func (s *Store) DenyRequest(ctx context.Context, id string) error {
++	r, err := s.request(id)
++	if err != nil {
++		return err
++	}
++
++	return r.Deny(ctx)
++}
++
++func (s *Store) RevokeGrant(ctx context.Context, id string) error {
++	g, err := s.grant(id)
++	if err != nil {
++		return err
++	}
++
++	return g.Revoke(ctx)
++}
++
++func (s *Store) RestoreGrant(ctx context.Context, id string) error {
++	g, err := s.grant(id)
++	if err != nil {
++		return err
++	}
++
++	return g.Restore(ctx)
++}
++
++func (s *Store) UseGrant(ctx context.Context, id string) error {
++	g, err := s.grant(id)
++	if err != nil {
++		return err
++	}
++
++	return g.Use(ctx)
++}
++
++func (s *Store) ExtendGrant(ctx context.Context, id string, expiresAt time.Time) error {
++	g, err := s.grant(id)
++	if err != nil {
++		return err
++	}
++
++	return g.Extend(ctx, expiresAt)
++}
++
++func (s *Store) AddGrantUses(ctx context.Context, id string, uses int) error {
++	g, err := s.grant(id)
++	if err != nil {
++		return err
++	}
++
++	return g.AddUses(ctx, uses)
++}
++
++func (s *Store) RemoveGrant(id string) {
++	delete(s.grants, id)
++	delete(s.grantStatuses, id)
++}
++
++func (s *Store) machine(id string) (*Machine, error) {
++	m, ok := s.machines[id]
++	if !ok {
++		return nil, ErrCouldNotFindMachine
++	}
++
++	return m, nil
++}
++
++func (s *Store) request(id string) (*Request, error) {
++	r, ok := s.requests[id]
++	if !ok {
++		return nil, ErrCouldNotFindRequest
++	}
++
++	return r, nil
++}
++
++func (s *Store) grant(id string) (*Grant, error) {
++	g, ok := s.grants[id]
++	if !ok {
++		return nil, ErrCouldNotFindGrant
++	}
++
++	return g, nil
++}
++
++func (s *Store) addGrant(ctx context.Context, id string, maxUses int, expiresAt time.Time, persistent bool) error {
++	if _, ok := s.grants[id]; ok {
++		return ErrCouldNotAddGrant
++	}
++
++	g := NewGrant(s.ctx, s.log, &GrantHooks{
++		OnStatusChange: func(ctx context.Context, status GrantStatus) error {
++			s.grantStatuses[id] = status
++
++			return s.onChange(ctx)
++		},
++	}, maxUses, expiresAt, persistent)
++	s.grants[id] = g
++
++	return g.FlushStatus(ctx)
++}
++
++func (s *Store) connectHost(ctx context.Context) error {
++	outdated, err := s.hostProbe(ctx)
++	if err != nil {
++		s.log.ErrorContext(ctx, "Could not probe host", "err", err)
++
++		return s.host.Fail(ctx)
++	}
++
++	if err := s.host.Connect(ctx); err != nil {
++		return err
++	}
++
++	if outdated {
++		return s.host.MarkOutdated(ctx)
++	}
++
++	return nil
++}
++
++func (s *Store) advance(ctx context.Context) error {
++	now := time.Now()
++
++	for id, status := range s.requestStatuses {
++		if status != RequestStatusPending && status != RequestStatusAwaitingConfirmation {
++			continue
++		}
++
++		if !s.requests[id].Due(now) {
++			continue
++		}
++
++		if err := s.requests[id].Timeout(ctx); err != nil {
++			return err
++		}
++	}
++
++	for id, status := range s.grantStatuses {
++		if status != GrantStatusActive {
++			continue
++		}
++
++		expiresAt := s.grants[id].ExpiresAt()
++		if expiresAt.IsZero() || now.Before(expiresAt) {
++			continue
++		}
++
++		if err := s.grants[id].Expire(ctx); err != nil {
++			return err
++		}
++	}
++
++	return nil
++}
++
++func (s *Store) onChange(ctx context.Context) error {
++	s.log.InfoContext(s.ctx, "Calling onChange hook")
++
++	return s.hooks.OnChange(ctx)
++}
+diff --git a/pkg/state/store_test.go b/pkg/state/store_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..56978c544914c83fd266053fefe121f77e177c7a
+--- /dev/null
++++ b/pkg/state/store_test.go
+@@ -0,0 +1,285 @@
++package state
++
++import (
++	"context"
++	"errors"
++	"testing"
++	"testing/synctest"
++	"time"
++
++	"github.com/neilotoole/slogt/v2"
++	"github.com/stretchr/testify/require"
++)
++
++func newTestingStore(t *testing.T, hostProbe HostProbe) *Store {
++	s, err := NewStore(
++		t.Context(),
++		slogt.New(t),
++		&StoreHooks{
++			OnChange: func(_ context.Context) error { return nil },
++		},
++		hostProbe,
++	)
++	require.NoError(t, err)
++
++	return s
++}
++
++func TestStoreSeedsConnectingHost(t *testing.T) {
++	s := newTestingStore(t, func(_ context.Context) (bool, error) { return false, nil })
++
++	require.Equal(t, HostStatusConnecting, s.hostStatus)
++}
++
++func TestStoreConnectHost(t *testing.T) {
++	var storeConnectHostTests = []struct {
++		name     string
++		outdated bool
++		probeErr error
++		want     HostStatus
++	}{
++		{
++			name: "current host comes online",
++			want: HostStatusOnline,
++		},
++		{
++			name:     "outdated host comes outdated",
++			outdated: true,
++			want:     HostStatusOutdated,
++		},
++		{
++			name:     "probe error puts the host into error",
++			probeErr: errors.New("dial failed"),
++			want:     HostStatusError,
++		},
++	}
++
++	for _, tt := range storeConnectHostTests {
++		t.Run(
++			tt.name,
++			func(t *testing.T) {
++				s := newTestingStore(t, func(_ context.Context) (bool, error) {
++					return tt.outdated, tt.probeErr
++				})
++
++				require.NoError(t, s.connectHost(t.Context()))
++
++				require.Equal(t, tt.want, s.hostStatus)
++			},
++		)
++	}
++}
++
++func TestStoreSetupNextRequiresOnlineHost(t *testing.T) {
++	s := newTestingStore(t, func(_ context.Context) (bool, error) { return false, nil })
++
++	require.NoError(t, s.Boot(t.Context(), false))
++	require.NoError(t, s.SetupNext(t.Context()))
++
++	s.SetFolder(FolderConfig, "/config")
++	s.SetFolder(FolderData, "/data")
++	s.SetFolder(FolderSSH, "/ssh")
++
++	require.NoError(t, s.SetupNext(t.Context()))
++	s.SetupCopy()
++
++	canSetupNext, err := s.CanSetupNext(t.Context())
++	require.NoError(t, err)
++	require.False(t, canSetupNext)
++	require.Error(t, s.SetupNext(t.Context()))
++
++	require.NoError(t, s.connectHost(t.Context()))
++
++	canSetupNext, err = s.CanSetupNext(t.Context())
++	require.NoError(t, err)
++	require.True(t, canSetupNext)
++	require.NoError(t, s.SetupNext(t.Context()))
++}
++
++func TestStoreAddMachineCachesInitialStatus(t *testing.T) {
++	s := newTestingStore(t, func(_ context.Context) (bool, error) { return false, nil })
++
++	require.NoError(t, s.AddMachine(t.Context(), "m1"))
++
++	require.Equal(t, MachineStatusNotInstalled, s.machineStatuses["m1"])
++}
++
++func TestStoreAdvanceRequestDeadline(t *testing.T) {
++	t.Run(
++		"pending request times out at its deadline",
++		func(t *testing.T) {
++			synctest.Test(t, func(t *testing.T) {
++				s := newTestingStore(t, func(_ context.Context) (bool, error) { return false, nil })
++
++				deadline := time.Now().Add(time.Minute)
++
++				require.NoError(t, s.AddRequest(t.Context(), "r1", 1, time.Time{}, false, deadline))
++
++				time.Sleep(deadline.Sub(time.Now()) + storeTickInterval*2)
++
++				require.NoError(t, s.advance(t.Context()))
++
++				require.Equal(t, RequestStatusTimedOut, s.requestStatuses["r1"])
++
++				_, ok := s.grants["r1"]
++				require.False(t, ok)
++			})
++		},
++	)
++
++	t.Run(
++		"awaiting confirmation request times out at its deadline",
++		func(t *testing.T) {
++			synctest.Test(t, func(t *testing.T) {
++				s := newTestingStore(t, func(_ context.Context) (bool, error) { return false, nil })
++
++				deadline := time.Now().Add(time.Minute)
++
++				require.NoError(t, s.AddRequest(t.Context(), "r1", 0, time.Time{}, false, deadline))
++				require.NoError(t, s.ApproveRequest(t.Context(), "r1"))
++				require.Equal(t, RequestStatusAwaitingConfirmation, s.requestStatuses["r1"])
++
++				time.Sleep(deadline.Sub(time.Now()) + storeTickInterval*2)
++
++				require.NoError(t, s.advance(t.Context()))
++
++				require.Equal(t, RequestStatusTimedOut, s.requestStatuses["r1"])
++			})
++		},
++	)
++}
++
++func TestStoreAdvanceGrantExpiry(t *testing.T) {
++	t.Run(
++		"active grant ends at its expiry",
++		func(t *testing.T) {
++			synctest.Test(t, func(t *testing.T) {
++				s := newTestingStore(t, func(_ context.Context) (bool, error) { return false, nil })
++
++				expiresAt := time.Now().Add(time.Minute)
++
++				require.NoError(t, s.addGrant(t.Context(), "g1", 1, expiresAt, false))
++
++				time.Sleep(expiresAt.Sub(time.Now()) + storeTickInterval*2)
++
++				require.NoError(t, s.advance(t.Context()))
++
++				require.Equal(t, GrantStatusEnded, s.grantStatuses["g1"])
++			})
++		},
++	)
++
++	t.Run(
++		"advance skips grants without expiry and revoked grants",
++		func(t *testing.T) {
++			synctest.Test(t, func(t *testing.T) {
++				s := newTestingStore(t, func(_ context.Context) (bool, error) { return false, nil })
++
++				expiresAt := time.Now().Add(time.Minute)
++
++				require.NoError(t, s.addGrant(t.Context(), "g1", 1, time.Time{}, false))
++				require.NoError(t, s.addGrant(t.Context(), "g2", 1, expiresAt, true))
++				require.NoError(t, s.RevokeGrant(t.Context(), "g2"))
++
++				time.Sleep(expiresAt.Sub(time.Now()) + storeTickInterval*2)
++
++				require.NoError(t, s.advance(t.Context()))
++
++				require.Equal(t, GrantStatusActive, s.grantStatuses["g1"])
++				require.Equal(t, GrantStatusRevoked, s.grantStatuses["g2"])
++			})
++		},
++	)
++}
++
++func TestStoreApproveRequestAddsGrant(t *testing.T) {
++	deadline := time.Unix(1_000, 0)
++	expiresAt := time.Unix(2_000, 0)
++
++	t.Run(
++		"low risk request adds a grant",
++		func(t *testing.T) {
++			s := newTestingStore(t, func(_ context.Context) (bool, error) { return false, nil })
++
++			require.NoError(t, s.AddRequest(t.Context(), "r1", 2, expiresAt, false, deadline))
++			require.NoError(t, s.ApproveRequest(t.Context(), "r1"))
++			require.Equal(t, RequestStatusApproved, s.requestStatuses["r1"])
++
++			g, ok := s.grants["r1"]
++			require.True(t, ok)
++			require.Equal(t, 2, g.MaxUses())
++			require.Equal(t, expiresAt, g.ExpiresAt())
++			require.False(t, g.Persistent())
++			require.Equal(t, GrantStatusActive, s.grantStatuses["r1"])
++		},
++	)
++
++	t.Run(
++		"high risk request adds a grant only after confirmation",
++		func(t *testing.T) {
++			s := newTestingStore(t, func(_ context.Context) (bool, error) { return false, nil })
++
++			require.NoError(t, s.AddRequest(t.Context(), "r1", 0, expiresAt, false, deadline))
++			require.NoError(t, s.ApproveRequest(t.Context(), "r1"))
++			require.Equal(t, RequestStatusAwaitingConfirmation, s.requestStatuses["r1"])
++
++			_, ok := s.grants["r1"]
++			require.False(t, ok)
++
++			require.NoError(t, s.ConfirmRequest(t.Context(), "r1"))
++			require.Equal(t, RequestStatusApproved, s.requestStatuses["r1"])
++
++			_, ok = s.grants["r1"]
++			require.True(t, ok)
++		},
++	)
++
++	t.Run(
++		"denied request adds no grant",
++		func(t *testing.T) {
++			s := newTestingStore(t, func(_ context.Context) (bool, error) { return false, nil })
++
++			require.NoError(t, s.AddRequest(t.Context(), "r1", 1, time.Time{}, false, deadline))
++			require.NoError(t, s.DenyRequest(t.Context(), "r1"))
++			require.Equal(t, RequestStatusDenied, s.requestStatuses["r1"])
++
++			_, ok := s.grants["r1"]
++			require.False(t, ok)
++		},
++	)
++}
++
++func TestStoreRemoveGrant(t *testing.T) {
++	s := newTestingStore(t, func(_ context.Context) (bool, error) { return false, nil })
++
++	require.NoError(t, s.addGrant(t.Context(), "g1", 1, time.Time{}, false))
++
++	s.RemoveGrant("g1")
++
++	_, ok := s.grants["g1"]
++	require.False(t, ok)
++
++	_, ok = s.grantStatuses["g1"]
++	require.False(t, ok)
++}
++
++func TestStoreUnknownID(t *testing.T) {
++	s := newTestingStore(t, func(_ context.Context) (bool, error) { return false, nil })
++
++	require.ErrorIs(t, s.Install(t.Context(), "missing"), ErrCouldNotFindMachine)
++	require.ErrorIs(t, s.ApproveRequest(t.Context(), "missing"), ErrCouldNotFindRequest)
++	require.ErrorIs(t, s.RevokeGrant(t.Context(), "missing"), ErrCouldNotFindGrant)
++}
++
++func TestStoreDuplicateID(t *testing.T) {
++	s := newTestingStore(t, func(_ context.Context) (bool, error) { return false, nil })
++
++	require.NoError(t, s.AddMachine(t.Context(), "m1"))
++	require.ErrorIs(t, s.AddMachine(t.Context(), "m1"), ErrCouldNotAddMachine)
++
++	require.NoError(t, s.AddRequest(t.Context(), "r1", 1, time.Time{}, false, time.Time{}))
++	require.ErrorIs(t, s.AddRequest(t.Context(), "r1", 1, time.Time{}, false, time.Time{}), ErrCouldNotAddRequest)
++
++	require.NoError(t, s.addGrant(t.Context(), "g1", 1, time.Time{}, false))
++	require.ErrorIs(t, s.addGrant(t.Context(), "g1", 1, time.Time{}, false), ErrCouldNotAddGrant)
++}
+
