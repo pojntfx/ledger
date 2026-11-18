@@ -1,0 +1,644 @@
+From 33759b7176c69f21527ba4c1a7758048f10b18d6 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Tue, 17 Nov 2026 17:27:37 -0700
+Subject: [PATCH] test: Test only our custom validators and logic for machine, not callbacks; delete host machine tests
+---
+diff --git a/pkg/state/host_test.go b/pkg/state/host_test.go
+deleted file mode 100644
+index 2ce113dadaeef53b69108a4ed349772f7c13ad75..0000000000000000000000000000000000000000
+--- a/pkg/state/host_test.go
++++ /dev/null
+@@ -1,123 +0,0 @@
+-package state
+-
+-import (
+-	"context"
+-	"testing"
+-
+-	"github.com/neilotoole/slogt/v2"
+-	"github.com/stretchr/testify/require"
+-)
+-
+-func newTestingHost(t *testing.T, hooks *HostHooks) *Host {
+-	return NewHost(t.Context(), slogt.New(t), hooks)
+-}
+-
+-func TestHostFlushStatus(t *testing.T) {
+-	var (
+-		statuses []HostStatus
+-	)
+-
+-	h := newTestingHost(t, &HostHooks{
+-		OnStatusChange: func(_ context.Context, status HostStatus) error {
+-			statuses = append(statuses, status)
+-
+-			return nil
+-		},
+-	})
+-
+-	require.NoError(t, h.FlushStatus(t.Context()))
+-	require.Equal(t, []HostStatus{HostStatusConnecting}, statuses)
+-}
+-
+-func TestHostConnect(t *testing.T) {
+-	var (
+-		statuses []HostStatus
+-	)
+-
+-	h := newTestingHost(t, &HostHooks{
+-		OnStatusChange: func(_ context.Context, status HostStatus) error {
+-			statuses = append(statuses, status)
+-
+-			return nil
+-		},
+-	})
+-
+-	require.NoError(t, h.Connect(t.Context()))
+-	require.Equal(t, []HostStatus{HostStatusOnline}, statuses)
+-}
+-
+-func TestHostMarkOutdated(t *testing.T) {
+-	var (
+-		statuses []HostStatus
+-	)
+-
+-	h := newTestingHost(t, &HostHooks{
+-		OnStatusChange: func(_ context.Context, status HostStatus) error {
+-			statuses = append(statuses, status)
+-
+-			return nil
+-		},
+-	})
+-
+-	require.NoError(t, h.Connect(t.Context()))
+-	require.NoError(t, h.MarkOutdated(t.Context()))
+-	require.Equal(t, []HostStatus{HostStatusOnline, HostStatusOutdated}, statuses)
+-}
+-
+-func TestHostStartUpdate(t *testing.T) {
+-	var (
+-		statuses []HostStatus
+-	)
+-
+-	h := newTestingHost(t, &HostHooks{
+-		OnStatusChange: func(_ context.Context, status HostStatus) error {
+-			statuses = append(statuses, status)
+-
+-			return nil
+-		},
+-	})
+-
+-	require.NoError(t, h.Connect(t.Context()))
+-	require.NoError(t, h.MarkOutdated(t.Context()))
+-	require.NoError(t, h.StartUpdate(t.Context()))
+-	require.Equal(t, []HostStatus{HostStatusOnline, HostStatusOutdated, HostStatusUpdating}, statuses)
+-}
+-
+-func TestHostFinishUpdate(t *testing.T) {
+-	var (
+-		statuses []HostStatus
+-	)
+-
+-	h := newTestingHost(t, &HostHooks{
+-		OnStatusChange: func(_ context.Context, status HostStatus) error {
+-			statuses = append(statuses, status)
+-
+-			return nil
+-		},
+-	})
+-
+-	require.NoError(t, h.Connect(t.Context()))
+-	require.NoError(t, h.MarkOutdated(t.Context()))
+-	require.NoError(t, h.StartUpdate(t.Context()))
+-	require.NoError(t, h.FinishUpdate(t.Context()))
+-	require.Equal(t, []HostStatus{HostStatusOnline, HostStatusOutdated, HostStatusUpdating, HostStatusOnline}, statuses)
+-}
+-
+-func TestHostFail(t *testing.T) {
+-	var (
+-		statuses []HostStatus
+-	)
+-
+-	h := newTestingHost(t, &HostHooks{
+-		OnStatusChange: func(_ context.Context, status HostStatus) error {
+-			statuses = append(statuses, status)
+-
+-			return nil
+-		},
+-	})
+-
+-	require.NoError(t, h.Connect(t.Context()))
+-	require.NoError(t, h.Fail(t.Context()))
+-	require.NoError(t, h.Connect(t.Context()))
+-	require.Equal(t, []HostStatus{HostStatusOnline, HostStatusError, HostStatusOnline}, statuses)
+-}
+diff --git a/pkg/state/machine_test.go b/pkg/state/machine_test.go
+index dace8e9f21e1c226349c347a0b199ccee8b4e173..47586513ac3e7b925a64424f7f216216019e7c6e 100644
+--- a/pkg/state/machine_test.go
++++ b/pkg/state/machine_test.go
+@@ -18,69 +18,15 @@ 	InstallStepConfiguring,
+ 	InstallStepFinishing,
+ }
+ 
+-func newTestingMachine(t *testing.T, hooks *MachineHooks) *Machine {
+-	return NewMachine(t.Context(), slogt.New(t), hooks)
+-}
+-
+-func TestMachineFlushStatus(t *testing.T) {
+-	var (
+-		statuses []MachineStatus
+-	)
+-
+-	m := newTestingMachine(t, &MachineHooks{
+-		OnStatusChange: func(_ context.Context, status MachineStatus) error {
+-			statuses = append(statuses, status)
+-
+-			return nil
+-		},
+-	})
+-
+-	require.NoError(t, m.FlushStatus(t.Context()))
+-	require.Equal(t, []MachineStatus{MachineStatusNotInstalled}, statuses)
+-}
+-
+-func TestMachineInstall(t *testing.T) {
+-	var (
+-		statuses []MachineStatus
+-		steps    []InstallStep
+-	)
+-
+-	m := newTestingMachine(t, &MachineHooks{
+-		OnStatusChange: func(_ context.Context, status MachineStatus) error {
+-			statuses = append(statuses, status)
+-
+-			return nil
+-		},
+-		OnInstallStepChange: func(_ context.Context, step InstallStep) error {
+-			steps = append(steps, step)
+-
+-			return nil
+-		},
++func newTestingMachine(t *testing.T) *Machine {
++	return NewMachine(t.Context(), slogt.New(t), &MachineHooks{
++		OnStatusChange:      func(_ context.Context, _ MachineStatus) error { return nil },
++		OnInstallStepChange: func(_ context.Context, _ InstallStep) error { return nil },
+ 	})
+-
+-	require.NoError(t, m.Install(t.Context()))
+-	require.Equal(t, []MachineStatus{MachineStatusInstalling}, statuses)
+-	require.Equal(t, []InstallStep{InstallStepDownloading}, steps)
+ }
+ 
+-func TestMachineInstallNext(t *testing.T) {
+-	var (
+-		statuses []MachineStatus
+-		steps    []InstallStep
+-	)
+-
+-	m := newTestingMachine(t, &MachineHooks{
+-		OnStatusChange: func(_ context.Context, status MachineStatus) error {
+-			statuses = append(statuses, status)
+-
+-			return nil
+-		},
+-		OnInstallStepChange: func(_ context.Context, step InstallStep) error {
+-			steps = append(steps, step)
+-
+-			return nil
+-		},
+-	})
++func installMachine(t *testing.T) *Machine {
++	m := newTestingMachine(t)
+ 
+ 	require.NoError(t, m.Install(t.Context()))
+ 
+@@ -88,342 +34,133 @@ 	for range installSteps {
+ 		require.NoError(t, m.InstallNext(t.Context()))
+ 	}
+ 
+-	require.Equal(t, []MachineStatus{MachineStatusInstalling, MachineStatusStopped}, statuses)
+-	require.Equal(t, installSteps, steps)
++	return m
+ }
+ 
+-func TestMachineInstallFail(t *testing.T) {
+-	var (
+-		statuses []MachineStatus
+-		steps    []InstallStep
+-	)
+-
+-	m := newTestingMachine(t, &MachineHooks{
+-		OnStatusChange: func(_ context.Context, status MachineStatus) error {
+-			statuses = append(statuses, status)
+-
+-			return nil
+-		},
+-		OnInstallStepChange: func(_ context.Context, step InstallStep) error {
+-			steps = append(steps, step)
+-
+-			return nil
+-		},
+-	})
++func runningMachine(t *testing.T) *Machine {
++	m := installMachine(t)
+ 
+-	require.NoError(t, m.Install(t.Context()))
+-	require.NoError(t, m.InstallNext(t.Context()))
+-	require.NoError(t, m.InstallFail(t.Context()))
+-	require.NoError(t, m.Install(t.Context()))
++	require.NoError(t, m.Start(t.Context()))
++	require.NoError(t, m.Started(t.Context()))
+ 
+-	require.Equal(
+-		t,
+-		[]MachineStatus{
+-			MachineStatusInstalling,
+-			MachineStatusInstallFailed,
+-			MachineStatusInstalling,
+-		},
+-		statuses,
+-	)
+-	require.Equal(
+-		t,
+-		[]InstallStep{
+-			InstallStepDownloading,
+-			InstallStepStarting,
+-			InstallStepDownloading,
+-		},
+-		steps,
+-	)
++	return m
+ }
+ 
+-func TestMachineInstallCancel(t *testing.T) {
++func TestMachineFlushStatusInstalling(t *testing.T) {
+ 	var (
+-		statuses []MachineStatus
+-		steps    []InstallStep
++		status MachineStatus
++		step   InstallStep
+ 	)
+ 
+-	m := newTestingMachine(t, &MachineHooks{
+-		OnStatusChange: func(_ context.Context, status MachineStatus) error {
+-			statuses = append(statuses, status)
++	m := NewMachine(t.Context(), slogt.New(t), &MachineHooks{
++		OnStatusChange: func(_ context.Context, s MachineStatus) error {
++			status = s
+ 
+ 			return nil
+ 		},
+-		OnInstallStepChange: func(_ context.Context, step InstallStep) error {
+-			steps = append(steps, step)
++		OnInstallStepChange: func(_ context.Context, s InstallStep) error {
++			step = s
+ 
+ 			return nil
+ 		},
+ 	})
+ 
+ 	require.NoError(t, m.Install(t.Context()))
+-	require.NoError(t, m.InstallCancel(t.Context()))
++	require.NoError(t, m.FlushStatus(t.Context()))
+ 
+-	require.Equal(t, []MachineStatus{MachineStatusInstalling, MachineStatusNotInstalled}, statuses)
+-	require.Equal(t, []InstallStep{InstallStepDownloading}, steps)
++	require.Equal(t, MachineStatusInstalling, status)
++	require.Equal(t, InstallStepDownloading, step)
+ }
+ 
+-func TestMachineStart(t *testing.T) {
+-	var (
+-		statuses []MachineStatus
+-	)
+-
+-	m := newTestingMachine(t, &MachineHooks{
+-		OnStatusChange: func(_ context.Context, status MachineStatus) error {
+-			statuses = append(statuses, status)
+-
+-			return nil
+-		},
+-		OnInstallStepChange: func(_ context.Context, _ InstallStep) error {
+-			return nil
+-		},
+-	})
+-
+-	require.NoError(t, m.Install(t.Context()))
+-
+-	for range installSteps {
+-		require.NoError(t, m.InstallNext(t.Context()))
+-	}
+-
+-	require.NoError(t, m.Start(t.Context()))
+-	require.NoError(t, m.Started(t.Context()))
+-
+-	require.Equal(
+-		t,
+-		[]MachineStatus{
+-			MachineStatusInstalling,
+-			MachineStatusStopped,
+-			MachineStatusStarting,
+-			MachineStatusRunning,
++func TestMachineInstalledAndActive(t *testing.T) {
++	var machineInstalledAndActiveTests = []struct {
++		name      string
++		machine   func(t *testing.T) *Machine
++		installed bool
++		active    bool
++	}{
++		{
++			name:    "not installed",
++			machine: newTestingMachine,
+ 		},
+-		statuses,
+-	)
+-}
+-
+-func TestMachineStop(t *testing.T) {
+-	var (
+-		statuses []MachineStatus
+-	)
++		{
++			name: "install failed",
++			machine: func(t *testing.T) *Machine {
++				m := newTestingMachine(t)
+ 
+-	m := newTestingMachine(t, &MachineHooks{
+-		OnStatusChange: func(_ context.Context, status MachineStatus) error {
+-			statuses = append(statuses, status)
++				require.NoError(t, m.Install(t.Context()))
++				require.NoError(t, m.InstallFail(t.Context()))
+ 
+-			return nil
++				return m
++			},
+ 		},
+-		OnInstallStepChange: func(_ context.Context, _ InstallStep) error {
+-			return nil
++		{
++			name:      "stopped",
++			machine:   installMachine,
++			installed: true,
+ 		},
+-	})
+-
+-	require.NoError(t, m.Install(t.Context()))
+-
+-	for range installSteps {
+-		require.NoError(t, m.InstallNext(t.Context()))
+-	}
++		{
++			name: "starting",
++			machine: func(t *testing.T) *Machine {
++				m := installMachine(t)
+ 
+-	require.NoError(t, m.Start(t.Context()))
+-	require.NoError(t, m.Started(t.Context()))
+-	require.NoError(t, m.Stop(t.Context()))
+-	require.NoError(t, m.Stopped(t.Context()))
++				require.NoError(t, m.Start(t.Context()))
+ 
+-	require.Equal(
+-		t,
+-		[]MachineStatus{
+-			MachineStatusInstalling,
+-			MachineStatusStopped,
+-			MachineStatusStarting,
+-			MachineStatusRunning,
+-			MachineStatusStopping,
+-			MachineStatusStopped,
++				return m
++			},
++			installed: true,
++			active:    true,
+ 		},
+-		statuses,
+-	)
+-}
+-
+-func TestMachineRestart(t *testing.T) {
+-	var (
+-		statuses []MachineStatus
+-	)
+-
+-	m := newTestingMachine(t, &MachineHooks{
+-		OnStatusChange: func(_ context.Context, status MachineStatus) error {
+-			statuses = append(statuses, status)
+-
+-			return nil
+-		},
+-		OnInstallStepChange: func(_ context.Context, _ InstallStep) error {
+-			return nil
++		{
++			name:      "running",
++			machine:   runningMachine,
++			installed: true,
++			active:    true,
+ 		},
+-	})
+-
+-	require.NoError(t, m.Install(t.Context()))
+-
+-	for range installSteps {
+-		require.NoError(t, m.InstallNext(t.Context()))
+-	}
++		{
++			name: "stopping",
++			machine: func(t *testing.T) *Machine {
++				m := runningMachine(t)
+ 
+-	require.NoError(t, m.Start(t.Context()))
+-	require.NoError(t, m.Started(t.Context()))
+-	require.NoError(t, m.Restart(t.Context()))
+-	require.NoError(t, m.Restarted(t.Context()))
++				require.NoError(t, m.Stop(t.Context()))
+ 
+-	require.Equal(
+-		t,
+-		[]MachineStatus{
+-			MachineStatusInstalling,
+-			MachineStatusStopped,
+-			MachineStatusStarting,
+-			MachineStatusRunning,
+-			MachineStatusRestarting,
+-			MachineStatusRunning,
++				return m
++			},
++			installed: true,
+ 		},
+-		statuses,
+-	)
+-}
+-
+-func TestMachineStopDuringRestart(t *testing.T) {
+-	var (
+-		statuses []MachineStatus
+-	)
++		{
++			name: "restarting",
++			machine: func(t *testing.T) *Machine {
++				m := runningMachine(t)
+ 
+-	m := newTestingMachine(t, &MachineHooks{
+-		OnStatusChange: func(_ context.Context, status MachineStatus) error {
+-			statuses = append(statuses, status)
++				require.NoError(t, m.Restart(t.Context()))
+ 
+-			return nil
+-		},
+-		OnInstallStepChange: func(_ context.Context, _ InstallStep) error {
+-			return nil
++				return m
++			},
++			installed: true,
++			active:    true,
+ 		},
+-	})
+-
+-	require.NoError(t, m.Install(t.Context()))
+-
+-	for range installSteps {
+-		require.NoError(t, m.InstallNext(t.Context()))
+-	}
++		{
++			name: "updating agent",
++			machine: func(t *testing.T) *Machine {
++				m := runningMachine(t)
+ 
+-	require.NoError(t, m.Start(t.Context()))
+-	require.NoError(t, m.Started(t.Context()))
+-	require.NoError(t, m.Restart(t.Context()))
+-	require.NoError(t, m.Stop(t.Context()))
+-	require.NoError(t, m.Stopped(t.Context()))
++				require.NoError(t, m.UpdateAgent(t.Context()))
+ 
+-	require.Equal(
+-		t,
+-		[]MachineStatus{
+-			MachineStatusInstalling,
+-			MachineStatusStopped,
+-			MachineStatusStarting,
+-			MachineStatusRunning,
+-			MachineStatusRestarting,
+-			MachineStatusStopping,
+-			MachineStatusStopped,
++				return m
++			},
++			installed: true,
++			active:    true,
+ 		},
+-		statuses,
+-	)
+-}
+-
+-func TestMachineUpdateAgentRunning(t *testing.T) {
+-	var (
+-		statuses []MachineStatus
+-	)
+-
+-	m := newTestingMachine(t, &MachineHooks{
+-		OnStatusChange: func(_ context.Context, status MachineStatus) error {
+-			statuses = append(statuses, status)
+-
+-			return nil
+-		},
+-		OnInstallStepChange: func(_ context.Context, _ InstallStep) error {
+-			return nil
+-		},
+-	})
+-
+-	require.NoError(t, m.Install(t.Context()))
+-
+-	for range installSteps {
+-		require.NoError(t, m.InstallNext(t.Context()))
+ 	}
+ 
+-	require.NoError(t, m.Start(t.Context()))
+-	require.NoError(t, m.Started(t.Context()))
+-	require.NoError(t, m.UpdateAgent(t.Context()))
+-	require.NoError(t, m.AgentUpdated(t.Context()))
+-
+-	require.Equal(
+-		t,
+-		[]MachineStatus{
+-			MachineStatusInstalling,
+-			MachineStatusStopped,
+-			MachineStatusStarting,
+-			MachineStatusRunning,
+-			MachineStatusUpdatingAgent,
+-			MachineStatusRunning,
+-		},
+-		statuses,
+-	)
+-}
+-
+-func TestMachineUpdateAgentStopped(t *testing.T) {
+-	var (
+-		statuses []MachineStatus
+-	)
++	for _, tt := range machineInstalledAndActiveTests {
++		t.Run(tt.name, func(t *testing.T) {
++			m := tt.machine(t)
+ 
+-	m := newTestingMachine(t, &MachineHooks{
+-		OnStatusChange: func(_ context.Context, status MachineStatus) error {
+-			statuses = append(statuses, status)
+-
+-			return nil
+-		},
+-		OnInstallStepChange: func(_ context.Context, _ InstallStep) error {
+-			return nil
+-		},
+-	})
+-
+-	require.NoError(t, m.Install(t.Context()))
+-
+-	for range installSteps {
+-		require.NoError(t, m.InstallNext(t.Context()))
++			require.Equal(t, tt.installed, m.Installed())
++			require.Equal(t, tt.installed, m.Linkable())
++			require.Equal(t, tt.active, m.Active())
++		})
+ 	}
+-
+-	require.NoError(t, m.UpdateAgent(t.Context()))
+-	require.NoError(t, m.AgentUpdated(t.Context()))
+-
+-	require.Equal(
+-		t,
+-		[]MachineStatus{
+-			MachineStatusInstalling,
+-			MachineStatusStopped,
+-			MachineStatusUpdatingAgent,
+-			MachineStatusStopped,
+-		},
+-		statuses,
+-	)
+-}
+-
+-func TestMachineFlushStatusInstall(t *testing.T) {
+-	var (
+-		statuses []MachineStatus
+-		steps    []InstallStep
+-	)
+-
+-	m := newTestingMachine(t, &MachineHooks{
+-		OnStatusChange: func(_ context.Context, status MachineStatus) error {
+-			statuses = append(statuses, status)
+-
+-			return nil
+-		},
+-		OnInstallStepChange: func(_ context.Context, step InstallStep) error {
+-			steps = append(steps, step)
+-
+-			return nil
+-		},
+-	})
+-
+-	require.NoError(t, m.Install(t.Context()))
+-	require.NoError(t, m.FlushStatus(t.Context()))
+-
+-	require.Equal(t, []MachineStatus{MachineStatusInstalling, MachineStatusInstalling}, statuses)
+-	require.Equal(t, []InstallStep{InstallStepDownloading, InstallStepDownloading}, steps)
+ }
+
