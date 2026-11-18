@@ -1,0 +1,458 @@
+From 11c2cfa3a34489a1d2a16900d6f167b991262537 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Tue, 17 Nov 2026 22:07:56 -0700
+Subject: [PATCH] feat: Add state machine for requests
+---
+diff --git a/cmd/phial-graphs/main.go b/cmd/phial-graphs/main.go
+index afc07b22b63beabcf783002bfaadaabfcc814297..a6c5b96f66c413e07b259aad005097811bf6e6d0 100644
+--- a/cmd/phial-graphs/main.go
++++ b/cmd/phial-graphs/main.go
+@@ -27,6 +27,7 @@ 		"session": state.NewSession(ctx, slog.Default(), &state.SessionHooks{}).ToGraph(),
+ 		"host":    state.NewHost(ctx, slog.Default(), &state.HostHooks{}).ToGraph(),
+ 		"machine": state.NewMachine(ctx, slog.Default(), &state.MachineHooks{}).ToGraph(),
+ 		"grant":   state.NewGrant(ctx, slog.Default(), &state.GrantHooks{}, 1, time.Time{}, false).ToGraph(),
++		"request": state.NewRequest(ctx, slog.Default(), &state.RequestHooks{}, 0, time.Time{}, false, time.Time{}).ToGraph(),
+ 	}
+ 
+ 	for name, graph := range machines {
+diff --git a/pkg/state/constants.go b/pkg/state/constants.go
+index db8416703af1c0403a674498db834de608555ec6..7340c652804d88a1f85f82f81977761393f219a1 100644
+--- a/pkg/state/constants.go
++++ b/pkg/state/constants.go
+@@ -1,5 +1,9 @@
+ package state
+ 
++import (
++	"time"
++)
++
+ type sessionState string
+ 
+ const (
+@@ -102,6 +106,31 @@ 	triggerGrantExtend  grantTrigger = "extend"
+ 	triggerGrantAddUses grantTrigger = "addUses"
+ )
+ 
++type requestState string
++
++const (
++	requestPending              requestState = "pending"
++	requestAwaitingConfirmation requestState = "awaitingConfirmation"
++	requestApproved             requestState = "approved"
++	requestDenied               requestState = "denied"
++	requestTimedOut             requestState = "timedOut"
++)
++
++type requestTrigger string
++
++const (
++	triggerRequestApprove requestTrigger = "approve"
++	triggerRequestConfirm requestTrigger = "confirm"
++	triggerRequestCancel  requestTrigger = "cancel"
++	triggerRequestDeny    requestTrigger = "deny"
++	triggerRequestTimeout requestTrigger = "timeout"
++)
++
++const (
++	ConfirmationThresholdUses     = 10
++	ConfirmationThresholdDuration = time.Hour * 24 * 7
++)
++
+ type HostStatus string
+ 
+ const (
+@@ -144,6 +173,16 @@ const (
+ 	GrantStatusActive  GrantStatus = "active"
+ 	GrantStatusRevoked GrantStatus = "revoked"
+ 	GrantStatusEnded   GrantStatus = "ended"
++)
++
++type RequestStatus string
++
++const (
++	RequestStatusPending              RequestStatus = "pending"
++	RequestStatusAwaitingConfirmation RequestStatus = "awaitingConfirmation"
++	RequestStatusApproved             RequestStatus = "approved"
++	RequestStatusDenied               RequestStatus = "denied"
++	RequestStatusTimedOut             RequestStatus = "timedOut"
+ )
+ 
+ type SetupPage string
+diff --git a/pkg/state/request.go b/pkg/state/request.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..5b589387cc2b0132f958973414d967134b4d3f7d
+--- /dev/null
++++ b/pkg/state/request.go
+@@ -0,0 +1,175 @@
++package state
++
++import (
++	"context"
++	"log/slog"
++	"time"
++
++	"github.com/qmuntal/stateless"
++)
++
++type RequestHooks struct {
++	OnStatusChange func(ctx context.Context, status RequestStatus) error
++}
++
++type Request struct {
++	persistent bool
++	maxUses    int
++	expiresAt  time.Time
++	deadline   time.Time
++
++	ctx   context.Context
++	log   *slog.Logger
++	hooks *RequestHooks
++
++	machine *stateless.StateMachine
++}
++
++func NewRequest(ctx context.Context, log *slog.Logger, hooks *RequestHooks, maxUses int, expiresAt time.Time, persistent bool, deadline time.Time) *Request {
++	r := &Request{
++		persistent: persistent,
++		maxUses:    maxUses,
++		expiresAt:  expiresAt,
++		deadline:   deadline,
++
++		ctx:   ctx,
++		log:   log,
++		hooks: hooks,
++
++		machine: stateless.NewStateMachine(requestPending),
++	}
++
++	r.machine.
++		Configure(requestPending).
++		Permit(triggerRequestApprove, requestAwaitingConfirmation, r.confirmationRequired).
++		Permit(triggerRequestApprove, requestApproved).
++		Permit(triggerRequestDeny, requestDenied).
++		Permit(triggerRequestTimeout, requestTimedOut)
++
++	r.machine.
++		Configure(requestAwaitingConfirmation).
++		Permit(triggerRequestConfirm, requestApproved).
++		Permit(triggerRequestCancel, requestPending).
++		Permit(triggerRequestDeny, requestDenied).
++		Permit(triggerRequestTimeout, requestTimedOut)
++
++	r.machine.
++		Configure(requestPending).
++		OnEntry(r.onPending)
++
++	r.machine.
++		Configure(requestAwaitingConfirmation).
++		OnEntry(r.onAwaitingConfirmation)
++
++	r.machine.
++		Configure(requestApproved).
++		OnEntry(r.onApproved)
++
++	r.machine.
++		Configure(requestDenied).
++		OnEntry(r.onDenied)
++
++	r.machine.
++		Configure(requestTimedOut).
++		OnEntry(r.onTimedOut)
++
++	return r
++}
++
++func (r *Request) ToGraph() string {
++	return r.machine.ToGraph()
++}
++
++func (r *Request) String() string {
++	return r.machine.String()
++}
++
++func (r *Request) FlushStatus(ctx context.Context) error {
++	return r.onStatus(ctx, RequestStatus(r.machine.MustState().(requestState)))
++}
++
++func (r *Request) Due(now time.Time) bool {
++	return !r.deadline.IsZero() && !now.Before(r.deadline)
++}
++
++func (r *Request) onStatus(ctx context.Context, status RequestStatus) error {
++	r.log.InfoContext(r.ctx, "Calling onStatusChange hook", "status", status)
++
++	return r.hooks.OnStatusChange(ctx, status)
++}
++
++func (r *Request) confirmationRequired(ctx context.Context, _ ...any) bool {
++	return r.NeedsConfirmation(time.Now())
++}
++
++func (r *Request) onPending(ctx context.Context, _ ...any) error {
++	return r.onStatus(ctx, RequestStatusPending)
++}
++
++func (r *Request) onAwaitingConfirmation(ctx context.Context, _ ...any) error {
++	return r.onStatus(ctx, RequestStatusAwaitingConfirmation)
++}
++
++func (r *Request) onApproved(ctx context.Context, _ ...any) error {
++	return r.onStatus(ctx, RequestStatusApproved)
++}
++
++func (r *Request) onDenied(ctx context.Context, _ ...any) error {
++	return r.onStatus(ctx, RequestStatusDenied)
++}
++
++func (r *Request) onTimedOut(ctx context.Context, _ ...any) error {
++	return r.onStatus(ctx, RequestStatusTimedOut)
++}
++
++func (r *Request) Approve(ctx context.Context) error {
++	return r.machine.FireCtx(ctx, triggerRequestApprove)
++}
++
++func (r *Request) Confirm(ctx context.Context) error {
++	return r.machine.FireCtx(ctx, triggerRequestConfirm)
++}
++
++func (r *Request) Cancel(ctx context.Context) error {
++	return r.machine.FireCtx(ctx, triggerRequestCancel)
++}
++
++func (r *Request) Deny(ctx context.Context) error {
++	return r.machine.FireCtx(ctx, triggerRequestDeny)
++}
++
++func (r *Request) Timeout(ctx context.Context) error {
++	return r.machine.FireCtx(ctx, triggerRequestTimeout)
++}
++
++func (r *Request) Persistent() bool {
++	return r.persistent
++}
++
++func (r *Request) MaxUses() int {
++	return r.maxUses
++}
++
++func (r *Request) ExpiresAt() time.Time {
++	return r.expiresAt
++}
++
++func (r *Request) Unbounded() bool {
++	return r.maxUses == 0 && r.expiresAt.IsZero()
++}
++
++func (r *Request) NeedsConfirmation(now time.Time) bool {
++	if r.persistent {
++		return true
++	}
++
++	if r.maxUses == 0 || r.maxUses > ConfirmationThresholdUses {
++		return true
++	}
++
++	if r.expiresAt.IsZero() {
++		return true
++	}
++
++	return r.expiresAt.Sub(now) > ConfirmationThresholdDuration
++}
+diff --git a/pkg/state/request_test.go b/pkg/state/request_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..5c165780f847d3f823fccc00aba0e6b09cdd1e6c
+--- /dev/null
++++ b/pkg/state/request_test.go
+@@ -0,0 +1,190 @@
++package state
++
++import (
++	"context"
++	"testing"
++	"time"
++
++	"github.com/neilotoole/slogt/v2"
++	"github.com/stretchr/testify/require"
++)
++
++func newTestingRequest(t *testing.T, maxUses int, expiresAt time.Time, persistent bool, deadline time.Time) *Request {
++	return NewRequest(t.Context(), slogt.New(t), &RequestHooks{
++		OnStatusChange: func(_ context.Context, _ RequestStatus) error { return nil },
++	}, maxUses, expiresAt, persistent, deadline)
++}
++
++func TestRequestDue(t *testing.T) {
++	deadline := time.Unix(1_000, 0)
++
++	var requestDueTests = []struct {
++		name     string
++		deadline time.Time
++		now      time.Time
++		want     bool
++	}{
++		{
++			name:     "request without deadline is never due",
++			deadline: time.Time{},
++			now:      deadline,
++			want:     false,
++		},
++		{
++			name:     "request is not due before its deadline",
++			deadline: deadline,
++			now:      deadline.Add(-time.Second),
++			want:     false,
++		},
++		{
++			name:     "request is due at its deadline",
++			deadline: deadline,
++			now:      deadline,
++			want:     true,
++		},
++		{
++			name:     "request is due after its deadline",
++			deadline: deadline,
++			now:      deadline.Add(time.Second),
++			want:     true,
++		},
++	}
++
++	for _, tt := range requestDueTests {
++		t.Run(
++			tt.name,
++			func(t *testing.T) {
++				require.Equal(
++					t,
++					tt.want,
++					newTestingRequest(t, 0, time.Time{}, false, tt.deadline).Due(tt.now),
++				)
++			},
++		)
++	}
++}
++
++func TestRequestUnbounded(t *testing.T) {
++	expiresAt := time.Unix(1_000, 0)
++
++	var requestUnboundedTests = []struct {
++		name      string
++		maxUses   int
++		expiresAt time.Time
++		want      bool
++	}{
++		{
++			name:    "request without use limit and without expiry is unbounded",
++			maxUses: 0,
++			want:    true,
++		},
++		{
++			name:    "request with a use limit is bounded",
++			maxUses: 1,
++			want:    false,
++		},
++		{
++			name:      "request with an expiry is bounded",
++			expiresAt: expiresAt,
++			want:      false,
++		},
++		{
++			name:      "request with a use limit and an expiry is bounded",
++			maxUses:   1,
++			expiresAt: expiresAt,
++			want:      false,
++		},
++	}
++
++	for _, tt := range requestUnboundedTests {
++		t.Run(
++			tt.name,
++			func(t *testing.T) {
++				require.Equal(
++					t,
++					tt.want,
++					newTestingRequest(t, tt.maxUses, tt.expiresAt, false, time.Time{}).Unbounded(),
++				)
++			},
++		)
++	}
++}
++
++func TestRequestNeedsConfirmation(t *testing.T) {
++	now := time.Unix(1_000, 0)
++
++	var requestNeedsConfirmationTests = []struct {
++		name       string
++		maxUses    int
++		expiresIn  time.Duration
++		persistent bool
++		want       bool
++	}{
++		{
++			name:      "single use for a short time needs no confirmation",
++			maxUses:   1,
++			expiresIn: time.Hour,
++			want:      false,
++		},
++		{
++			name:      "single use for the threshold duration needs no confirmation",
++			maxUses:   1,
++			expiresIn: ConfirmationThresholdDuration,
++			want:      false,
++		},
++		{
++			name:      "single use for longer than the threshold duration needs confirmation",
++			maxUses:   1,
++			expiresIn: ConfirmationThresholdDuration + time.Second,
++			want:      true,
++		},
++		{
++			name:      "use limit at the threshold needs no confirmation",
++			maxUses:   ConfirmationThresholdUses,
++			expiresIn: time.Hour,
++			want:      false,
++		},
++		{
++			name:      "use limit above the threshold needs confirmation",
++			maxUses:   ConfirmationThresholdUses + 1,
++			expiresIn: time.Hour,
++			want:      true,
++		},
++		{
++			name:      "request without use limit needs confirmation",
++			maxUses:   0,
++			expiresIn: time.Hour,
++			want:      true,
++		},
++		{
++			name:    "request without expiry needs confirmation",
++			maxUses: 1,
++			want:    true,
++		},
++		{
++			name:       "persistent request needs confirmation",
++			maxUses:    1,
++			expiresIn:  time.Hour,
++			persistent: true,
++			want:       true,
++		},
++	}
++
++	for _, tt := range requestNeedsConfirmationTests {
++		t.Run(
++			tt.name,
++			func(t *testing.T) {
++				var expiresAt time.Time
++				if tt.expiresIn != 0 {
++					expiresAt = now.Add(tt.expiresIn)
++				}
++
++				require.Equal(
++					t,
++					tt.want,
++					newTestingRequest(t, tt.maxUses, expiresAt, tt.persistent, time.Time{}).NeedsConfirmation(now),
++				)
++			},
++		)
++	}
++}
+
