@@ -1,0 +1,444 @@
+From 5be29a2f493836e32caf2a26a220b3fe03e3f0b4 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Tue, 17 Nov 2026 17:27:06 -0700
+Subject: [PATCH] test: Test only our custom validators and logic for grants, not callbacks
+---
+diff --git a/pkg/state/grant_test.go b/pkg/state/grant_test.go
+index 349a1c379c21b92aff3770e8d90bac3e3d9d5bdd..613c16a955155d1bfa6811adf1d25640bb2dfa95 100644
+--- a/pkg/state/grant_test.go
++++ b/pkg/state/grant_test.go
+@@ -9,203 +9,277 @@ 	"github.com/neilotoole/slogt/v2"
+ 	"github.com/stretchr/testify/require"
+ )
+ 
+-func newTestingGrant(t *testing.T, hooks *GrantHooks, maxUses int, expiresAt time.Time, persistent bool) *Grant {
+-	return NewGrant(t.Context(), slogt.New(t), hooks, maxUses, expiresAt, persistent)
++func newTestingGrant(t *testing.T, maxUses int, expiresAt time.Time, persistent bool) *Grant {
++	return NewGrant(t.Context(), slogt.New(t), &GrantHooks{
++		OnStatusChange: func(_ context.Context, _ GrantStatus) error { return nil },
++	}, maxUses, expiresAt, persistent)
+ }
+ 
+-func TestGrantFlushStatus(t *testing.T) {
+-	var (
+-		statuses []GrantStatus
+-	)
++func TestGrantHasExpiry(t *testing.T) {
++	require.False(t, newTestingGrant(t, 0, time.Time{}, false).hasExpiry(t.Context()))
++	require.True(t, newTestingGrant(t, 0, time.Unix(1, 0), false).hasExpiry(t.Context()))
++}
+ 
+-	g := newTestingGrant(t, &GrantHooks{
+-		OnStatusChange: func(_ context.Context, status GrantStatus) error {
+-			statuses = append(statuses, status)
++func TestGrantUseEnds(t *testing.T) {
++	var grantUseEndsTests = []struct {
++		name          string
++		maxUses       int
++		remainingUses int
++		want          bool
++	}{
++		{
++			name:    "no use limit never ends",
++			maxUses: 0,
++			want:    false,
++		},
++		{
++			name:          "last use of a single use grant",
++			maxUses:       1,
++			remainingUses: 1,
++			want:          true,
++		},
++		{
++			name:          "last use of a many use grant",
++			maxUses:       3,
++			remainingUses: 1,
++			want:          true,
++		},
++		{
++			name:          "earlier use",
++			maxUses:       3,
++			remainingUses: 2,
++			want:          false,
++		},
++	}
+ 
+-			return nil
+-		},
+-	}, 1, time.Time{}, false)
++	for _, tt := range grantUseEndsTests {
++		t.Run(tt.name, func(t *testing.T) {
++			g := newTestingGrant(t, tt.maxUses, time.Time{}, false)
++			g.remainingUses = tt.remainingUses
+ 
+-	require.NoError(t, g.FlushStatus(t.Context()))
+-	require.Equal(t, []GrantStatus{GrantStatusActive}, statuses)
++			require.Equal(t, tt.want, g.useEnds(t.Context()))
++		})
++	}
+ }
+ 
+-func TestGrantRevoke(t *testing.T) {
+-	var (
+-		statuses []GrantStatus
+-	)
++func TestGrantUseContinues(t *testing.T) {
++	var grantUseContinuesTests = []struct {
++		name          string
++		maxUses       int
++		remainingUses int
++		want          bool
++	}{
++		{
++			name:    "no use limit",
++			maxUses: 0,
++			want:    true,
++		},
++		{
++			name:          "last use of a single use grant",
++			maxUses:       1,
++			remainingUses: 1,
++			want:          false,
++		},
++		{
++			name:          "earlier use",
++			maxUses:       3,
++			remainingUses: 2,
++			want:          true,
++		},
++	}
+ 
+-	g := newTestingGrant(t, &GrantHooks{
+-		OnStatusChange: func(_ context.Context, status GrantStatus) error {
+-			statuses = append(statuses, status)
++	for _, tt := range grantUseContinuesTests {
++		t.Run(tt.name, func(t *testing.T) {
++			g := newTestingGrant(t, tt.maxUses, time.Time{}, false)
++			g.remainingUses = tt.remainingUses
+ 
+-			return nil
+-		},
+-	}, 1, time.Time{}, false)
+-
+-	require.NoError(t, g.Revoke(t.Context()))
+-	require.Equal(t, []GrantStatus{GrantStatusRevoked}, statuses)
++			require.Equal(t, tt.want, g.useContinues(t.Context()))
++		})
++	}
+ }
+ 
+-func TestGrantRestore(t *testing.T) {
+-	var (
+-		statuses []GrantStatus
+-	)
+-
+-	g := newTestingGrant(t, &GrantHooks{
+-		OnStatusChange: func(_ context.Context, status GrantStatus) error {
+-			statuses = append(statuses, status)
+-
+-			return nil
+-		},
+-	}, 1, time.Time{}, true)
+-
+-	require.NoError(t, g.Revoke(t.Context()))
+-	require.NoError(t, g.Restore(t.Context()))
+-	require.Equal(t, []GrantStatus{GrantStatusRevoked, GrantStatusActive}, statuses)
++func TestGrantIsPersistent(t *testing.T) {
++	require.False(t, newTestingGrant(t, 0, time.Time{}, false).isPersistent(t.Context()))
++	require.True(t, newTestingGrant(t, 0, time.Time{}, true).isPersistent(t.Context()))
+ }
+ 
+-func TestGrantExpire(t *testing.T) {
+-	var (
+-		statuses []GrantStatus
+-	)
+-
+-	g := newTestingGrant(t, &GrantHooks{
+-		OnStatusChange: func(_ context.Context, status GrantStatus) error {
+-			statuses = append(statuses, status)
+-
+-			return nil
++func TestGrantValidExpiry(t *testing.T) {
++	var grantValidExpiryTests = []struct {
++		name      string
++		expiresAt time.Time
++		args      []any
++		want      bool
++	}{
++		{
++			name:      "no argument",
++			expiresAt: time.Unix(2, 0),
++			want:      false,
+ 		},
+-	}, 1, time.Unix(1, 0), false)
+-
+-	require.NoError(t, g.Expire(t.Context()))
+-	require.Equal(t, []GrantStatus{GrantStatusEnded}, statuses)
+-}
+-
+-func TestGrantUseOnce(t *testing.T) {
+-	var (
+-		statuses []GrantStatus
+-	)
+-
+-	g := newTestingGrant(t, &GrantHooks{
+-		OnStatusChange: func(_ context.Context, status GrantStatus) error {
+-			statuses = append(statuses, status)
+-
+-			return nil
++		{
++			name:      "wrong argument type",
++			expiresAt: time.Unix(2, 0),
++			args:      []any{"3"},
++			want:      false,
+ 		},
+-	}, 1, time.Time{}, false)
+-
+-	require.NoError(t, g.Use(t.Context()))
+-	require.Equal(t, []GrantStatus{GrantStatusEnded}, statuses)
+-}
++		{
++			name: "no current expiry",
++			args: []any{time.Unix(3, 0)},
++			want: false,
++		},
++		{
++			name:      "earlier expiry",
++			expiresAt: time.Unix(2, 0),
++			args:      []any{time.Unix(1, 0)},
++			want:      false,
++		},
++		{
++			name:      "unchanged expiry",
++			expiresAt: time.Unix(2, 0),
++			args:      []any{time.Unix(2, 0)},
++			want:      false,
++		},
++		{
++			name:      "later expiry",
++			expiresAt: time.Unix(2, 0),
++			args:      []any{time.Unix(3, 0)},
++			want:      true,
++		},
++	}
+ 
+-func TestGrantUseMany(t *testing.T) {
+-	var (
+-		statuses []GrantStatus
+-	)
++	for _, tt := range grantValidExpiryTests {
++		t.Run(tt.name, func(t *testing.T) {
++			g := newTestingGrant(t, 0, tt.expiresAt, false)
+ 
+-	g := newTestingGrant(t, &GrantHooks{
+-		OnStatusChange: func(_ context.Context, status GrantStatus) error {
+-			statuses = append(statuses, status)
++			require.Equal(t, tt.want, g.validExpiry(t.Context(), tt.args...))
++		})
++	}
++}
+ 
+-			return nil
++func TestGrantValidUses(t *testing.T) {
++	var grantValidUsesTests = []struct {
++		name    string
++		maxUses int
++		args    []any
++		want    bool
++	}{
++		{
++			name:    "no argument",
++			maxUses: 1,
++			want:    false,
++		},
++		{
++			name:    "wrong argument type",
++			maxUses: 1,
++			args:    []any{"2"},
++			want:    false,
++		},
++		{
++			name:    "no use limit",
++			maxUses: 0,
++			args:    []any{2},
++			want:    false,
++		},
++		{
++			name:    "no uses",
++			maxUses: 1,
++			args:    []any{0},
++			want:    false,
++		},
++		{
++			name:    "negative uses",
++			maxUses: 1,
++			args:    []any{-1},
++			want:    false,
+ 		},
+-	}, 3, time.Time{}, false)
++		{
++			name:    "additional uses",
++			maxUses: 1,
++			args:    []any{2},
++			want:    true,
++		},
++	}
+ 
+-	require.NoError(t, g.Use(t.Context()))
+-	require.NoError(t, g.Use(t.Context()))
+-	require.NoError(t, g.Use(t.Context()))
+-	require.Equal(t, []GrantStatus{GrantStatusActive, GrantStatusActive, GrantStatusEnded}, statuses)
++	for _, tt := range grantValidUsesTests {
++		t.Run(tt.name, func(t *testing.T) {
++			g := newTestingGrant(t, tt.maxUses, time.Time{}, false)
++
++			require.Equal(t, tt.want, g.validUses(t.Context(), tt.args...))
++		})
++	}
+ }
+ 
+-func TestGrantUseUnbounded(t *testing.T) {
+-	var (
+-		statuses []GrantStatus
+-	)
+-
+-	g := newTestingGrant(t, &GrantHooks{
+-		OnStatusChange: func(_ context.Context, status GrantStatus) error {
+-			statuses = append(statuses, status)
+-
+-			return nil
++func TestGrantUnbounded(t *testing.T) {
++	var grantUnboundedTests = []struct {
++		name      string
++		maxUses   int
++		expiresAt time.Time
++		want      bool
++	}{
++		{
++			name:    "no use limit and no time limit",
++			maxUses: 0,
++			want:    true,
++		},
++		{
++			name:    "use limit",
++			maxUses: 1,
++			want:    false,
++		},
++		{
++			name:      "time limit",
++			expiresAt: time.Unix(1, 0),
++			want:      false,
++		},
++		{
++			name:      "use limit and time limit",
++			maxUses:   1,
++			expiresAt: time.Unix(1, 0),
++			want:      false,
+ 		},
+-	}, 0, time.Time{}, false)
+-
+-	require.NoError(t, g.Use(t.Context()))
+-	require.NoError(t, g.Use(t.Context()))
+-	require.NoError(t, g.Use(t.Context()))
+-	require.Equal(t, []GrantStatus{GrantStatusActive, GrantStatusActive, GrantStatusActive}, statuses)
+-}
++	}
+ 
+-func TestGrantRevokeAfterUse(t *testing.T) {
+-	var (
+-		statuses []GrantStatus
+-	)
++	for _, tt := range grantUnboundedTests {
++		t.Run(tt.name, func(t *testing.T) {
++			g := newTestingGrant(t, tt.maxUses, tt.expiresAt, false)
+ 
+-	g := newTestingGrant(t, &GrantHooks{
+-		OnStatusChange: func(_ context.Context, status GrantStatus) error {
+-			statuses = append(statuses, status)
++			require.Equal(t, tt.want, g.Unbounded())
++		})
++	}
++}
+ 
+-			return nil
+-		},
+-	}, 2, time.Time{}, false)
++func TestGrantUseDecrementsRemainingUses(t *testing.T) {
++	g := newTestingGrant(t, 3, time.Time{}, false)
+ 
+ 	require.NoError(t, g.Use(t.Context()))
+-	require.NoError(t, g.Revoke(t.Context()))
+-	require.Equal(t, []GrantStatus{GrantStatusActive, GrantStatusRevoked}, statuses)
+-}
+ 
+-func TestGrantExpireAfterUse(t *testing.T) {
+-	var (
+-		statuses []GrantStatus
+-	)
+-
+-	g := newTestingGrant(t, &GrantHooks{
+-		OnStatusChange: func(_ context.Context, status GrantStatus) error {
+-			statuses = append(statuses, status)
++	require.Equal(t, 2, g.RemainingUses())
++}
+ 
+-			return nil
+-		},
+-	}, 2, time.Unix(1, 0), false)
++func TestGrantUseWithoutLimitKeepsNoRemainingUses(t *testing.T) {
++	g := newTestingGrant(t, 0, time.Time{}, false)
+ 
+ 	require.NoError(t, g.Use(t.Context()))
+-	require.NoError(t, g.Expire(t.Context()))
+-	require.Equal(t, []GrantStatus{GrantStatusActive, GrantStatusEnded}, statuses)
+-}
+ 
+-func TestGrantExtend(t *testing.T) {
+-	var (
+-		statuses []GrantStatus
+-	)
++	require.Equal(t, 0, g.RemainingUses())
++}
+ 
+-	g := newTestingGrant(t, &GrantHooks{
+-		OnStatusChange: func(_ context.Context, status GrantStatus) error {
+-			statuses = append(statuses, status)
++func TestGrantAddUses(t *testing.T) {
++	g := newTestingGrant(t, 1, time.Time{}, false)
+ 
+-			return nil
+-		},
+-	}, 1, time.Unix(1, 0), false)
++	require.NoError(t, g.AddUses(t.Context(), 2))
+ 
+-	require.NoError(t, g.Extend(t.Context(), time.Unix(2, 0)))
+-	require.Equal(t, []GrantStatus{GrantStatusActive}, statuses)
++	require.Equal(t, 3, g.MaxUses())
++	require.Equal(t, 3, g.RemainingUses())
+ }
+ 
+-func TestGrantAddUses(t *testing.T) {
++func TestGrantExtend(t *testing.T) {
+ 	var (
+-		statuses []GrantStatus
++		expiresAt = time.Unix(2, 0)
+ 	)
+ 
+-	g := newTestingGrant(t, &GrantHooks{
+-		OnStatusChange: func(_ context.Context, status GrantStatus) error {
+-			statuses = append(statuses, status)
++	g := newTestingGrant(t, 1, time.Unix(1, 0), false)
+ 
+-			return nil
+-		},
+-	}, 1, time.Time{}, false)
++	require.NoError(t, g.Extend(t.Context(), expiresAt))
+ 
+-	require.NoError(t, g.AddUses(t.Context(), 2))
+-	require.NoError(t, g.Use(t.Context()))
+-	require.NoError(t, g.Use(t.Context()))
+-	require.NoError(t, g.Use(t.Context()))
+-	require.Equal(t, []GrantStatus{GrantStatusActive, GrantStatusActive, GrantStatusActive, GrantStatusEnded}, statuses)
++	require.Equal(t, expiresAt, g.ExpiresAt())
+ }
+
