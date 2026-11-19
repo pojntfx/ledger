@@ -1,0 +1,196 @@
+From 48744804add6b76b224260d495ecd221ee80d46f Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Wed, 18 Nov 2026 19:42:17 -0700
+Subject: [PATCH] feat: Store last known good machines configuration in GSettings
+---
+diff --git a/assets/resources/index.go b/assets/resources/index.go
+index 762e42590aa877d7c1e86070793e6eb8aeabfb3a..1901f5683da93f13e3ad5ef1d7642d0431aa9fff 100644
+--- a/assets/resources/index.go
++++ b/assets/resources/index.go
+@@ -15,6 +15,9 @@ 	AppID      = "com.pojtinger.felicitas.Phial"
+ 	AppVersion = "0.1.0"
+ 
+ 	SchemaOnboardedKey = "onboarded"
++
++	SchemaMachinesFolderKey     = "machines-folder"
++	SchemaHostMachinesFolderKey = "host-machines-folder"
+ )
+ 
+ //go:generate sh -c "blueprint-compiler batch-compile . . *.blp && glib-compile-resources *.gresource.xml"
+diff --git a/assets/resources/index.gschema.xml b/assets/resources/index.gschema.xml
+index b3c3d51d3d1956b67669fc478ecc454273ae6ecb..5b8c5115b10d1ea11fb3c8cdd25e35447e331136 100644
+--- a/assets/resources/index.gschema.xml
++++ b/assets/resources/index.gschema.xml
+@@ -6,5 +6,15 @@             <default>false</default>
+             <summary>Onboarded</summary>
+             <description>Whether the setup wizard completed</description>
+         </key>
++        <key name="machines-folder" type="s">
++            <default>""</default>
++            <summary>Machines folder</summary>
++            <description>Folder that Phial keeps the machines and their configurations in</description>
++        </key>
++        <key name="host-machines-folder" type="s">
++            <default>""</default>
++            <summary>Host service machines folder</summary>
++            <description>Folder that the host service was last verified with</description>
++        </key>
+     </schema>
+ </schemalist>
+\ No newline at end of file
+diff --git a/internal/components/application.go b/internal/components/application.go
+index b5b64221f6014c6f91c66423572b53b7582f5a84..ad784e475c1b730591146112ef96b413972191db 100644
+--- a/internal/components/application.go
++++ b/internal/components/application.go
+@@ -129,10 +129,26 @@
+ 				return
+ 			}
+ 
+-			if err := store.Boot(phialApp.ctx, phialApp.settings.GetBoolean(resources.SchemaOnboardedKey)); err != nil {
++			onboarded := phialApp.settings.GetBoolean(resources.SchemaOnboardedKey)
++
++			if err := store.Boot(phialApp.ctx, onboarded); err != nil {
+ 				phialApp.log.Error("Could not boot store", "err", err)
+ 
+ 				return
++			}
++
++			if onboarded {
++				machinesFolder := phialApp.settings.GetString(resources.SchemaMachinesFolderKey)
++				if machinesFolder == "" {
++					machinesFolder = store.SuggestedMachinesFolder()
++					phialApp.settings.SetString(resources.SchemaMachinesFolderKey, machinesFolder)
++				}
++
++				if err := store.SetMachinesFolder(phialApp.ctx, machinesFolder); err != nil {
++					phialApp.log.Error("Could not restore machines folder", "err", err)
++
++					return
++				}
+ 			}
+ 
+ 			obj := NewMainWindow(phialApp.ctx, &phialApp.Application, phialApp.log, phialApp.settings, store, "application", app)
+diff --git a/internal/components/setup_dialog.go b/internal/components/setup_dialog.go
+index bf555d9f3be7d0658c7a4f64950df9da44200c9d..4fc5fb4d8ff705c8c7c32e454f968c3f70593c63 100644
+--- a/internal/components/setup_dialog.go
++++ b/internal/components/setup_dialog.go
+@@ -150,13 +150,20 @@ 	onVerifyConnection := func(adw.ButtonRow) {
+ 		dialog.setVerifying(true)
+ 
+ 		go func() {
+-			if err := dialog.store.RetryHost(dialog.ctx); err != nil {
+-				dialog.log.Error("Could not verify host connection", "err", err)
++			verifyErr := dialog.store.RetryHost(dialog.ctx)
++			if verifyErr != nil {
++				dialog.log.Error("Could not verify host connection", "err", verifyErr)
+ 			}
+ 
+ 			var fn glib.SourceFunc
+ 			fn = glib.SourceFunc(func(uintptr) bool {
+ 				defer glib.UnrefCallback(&fn)
++
++				if verifyErr == nil && dialog.store.HostStatus() == state.HostStatusOnline {
++					if !dialog.settings.SetString(resources.SchemaHostMachinesFolderKey, dialog.store.MachinesFolder()) {
++						dialog.log.Error("Could not write host machines folder setting")
++					}
++				}
+ 
+ 				dialog.setVerifying(false)
+ 
+@@ -227,6 +234,12 @@ 			}
+ 
+ 			if err := dialog.store.SetMachinesFolder(dialog.ctx, file.GetPath()); err != nil {
+ 				dialog.log.Error("Could not set machines folder", "err", err)
++
++				return
++			}
++
++			if !dialog.settings.SetString(resources.SchemaMachinesFolderKey, file.GetPath()) {
++				dialog.log.Error("Could not write machines folder setting")
+ 
+ 				return
+ 			}
+diff --git a/po/phial.pot b/po/phial.pot
+index 6a0fea3181a0689d121fa243616c99673e029ede..0385e26456e81cc3e87d1b091b9a0bd33111e592 100644
+--- a/po/phial.pot
++++ b/po/phial.pot
+@@ -43,7 +43,7 @@ msgid "Machines Folder"
+ msgstr ""
+ 
+ #: ../assets/resources/setup-dialog.blp:63
+-#: ../internal/components/setup_dialog.go:400
++#: ../internal/components/setup_dialog.go:413
+ msgid "Not selected"
+ msgstr ""
+ 
+@@ -156,37 +156,37 @@ #: ../assets/resources/window.blp:115
+ msgid "_About Phial"
+ msgstr ""
+ 
+-#. TRANSLATORS: Replace "translator-credits" with your name/username, and optionally an email or URL.
+-#: ../internal/components/application.go:90
+-msgid "translator-credits"
+-msgstr ""
+-
+-#: ../internal/components/setup_dialog.go:246
++#: ../internal/components/setup_dialog.go:259
+ msgid "Choose the Machines Folder"
+ msgstr ""
+ 
+-#: ../internal/components/setup_dialog.go:382
++#: ../internal/components/setup_dialog.go:395
+ msgid "Welcome"
+ msgstr ""
+ 
+-#: ../internal/components/setup_dialog.go:384
++#: ../internal/components/setup_dialog.go:397
+ msgid "Storage"
+ msgstr ""
+ 
+-#: ../internal/components/setup_dialog.go:386
++#: ../internal/components/setup_dialog.go:399
+ msgid "Host Access"
+ msgstr ""
+ 
+-#: ../internal/components/setup_dialog.go:388
++#: ../internal/components/setup_dialog.go:401
+ msgid "Host Service"
+ msgstr ""
+ 
+-#: ../internal/components/setup_dialog.go:390
++#: ../internal/components/setup_dialog.go:403
+ msgid "System Setup"
+ msgstr ""
+ 
+-#: ../internal/components/setup_dialog.go:392
++#: ../internal/components/setup_dialog.go:405
+ msgid "Done"
++msgstr ""
++
++#. TRANSLATORS: Replace "translator-credits" with your name/username, and optionally an email or URL.
++#: ../internal/components/application.go:90
++msgid "translator-credits"
+ msgstr ""
+ 
+ #. TRANSLATORS: Search terms to find this application.
+@@ -251,3 +251,19 @@
+ #: ../assets/resources/index.gschema.xml:7
+ msgid "Whether the setup wizard completed"
+ msgstr ""
++
++#: ../assets/resources/index.gschema.xml:11
++msgid "Machines folder"
++msgstr ""
++
++#: ../assets/resources/index.gschema.xml:12
++msgid "Folder that Phial keeps the machines and their configurations in"
++msgstr ""
++
++#: ../assets/resources/index.gschema.xml:16
++msgid "Host service machines folder"
++msgstr ""
++
++#: ../assets/resources/index.gschema.xml:17
++msgid "Folder that the host service was last verified with"
++msgstr ""
+
