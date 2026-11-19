@@ -1,0 +1,67 @@
+From 7f13a62ad3ff5e2f2ad22c1a3b15ce4e6b417c1a Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Wed, 18 Nov 2026 18:01:35 -0700
+Subject: [PATCH] feat: Add comments for mocks inline
+---
+diff --git a/internal/components/application.go b/internal/components/application.go
+index ba0bbd4724e8c82f7eb173283b6633599790f319..0512bcf97e1de62cbb1cd3283ed81eecb6cbab2e 100644
+--- a/internal/components/application.go
++++ b/internal/components/application.go
+@@ -4,6 +4,7 @@ import (
+ 	"context"
+ 	"log/slog"
+ 	"runtime"
++	"time"
+ 	"unsafe"
+ 
+ 	"codeberg.org/pojntfx/phial/assets/resources"
+@@ -111,7 +112,14 @@
+ 						return nil
+ 					},
+ 				},
+-				func(_ context.Context) (bool, error) {
++				// TODO: Remove this mock once actual implementation exists
++				func(ctx context.Context) (bool, error) {
++					select {
++					case <-ctx.Done():
++						return false, ctx.Err()
++					case <-time.After(time.Millisecond * 750):
++					}
++
+ 					return false, nil
+ 				},
+ 			)
+diff --git a/internal/components/setup_dialog.go b/internal/components/setup_dialog.go
+index ebd3251a4d201e3b54be63ceeed3be6a066fa15a..41d90855dc99b9984f73e31ba12df186bfe6d288 100644
+--- a/internal/components/setup_dialog.go
++++ b/internal/components/setup_dialog.go
+@@ -6,7 +6,6 @@ 	"log/slog"
+ 	"os"
+ 	"path/filepath"
+ 	"runtime"
+-	"time"
+ 	"unsafe"
+ 
+ 	"codeberg.org/pojntfx/phial/assets/resources"
+@@ -159,8 +158,6 @@ 		go func() {
+ 			if err := dialog.store.RetryHost(dialog.ctx); err != nil {
+ 				dialog.log.Error("Could not verify host connection", "err", err)
+ 			}
+-
+-			time.Sleep(time.Millisecond * 750)
+ 
+ 			var fn glib.SourceFunc
+ 			fn = glib.SourceFunc(func(uintptr) bool {
+diff --git a/pkg/state/constants.go b/pkg/state/constants.go
+index fa4853673a68e81b20e123f7bda1d4b9b5d79ae8..7629c6eace74c1f29595d2c5a97f93b01d5d3393 100644
+--- a/pkg/state/constants.go
++++ b/pkg/state/constants.go
+@@ -218,6 +218,7 @@
+ const (
+ 	storeTickInterval = time.Second
+ 
++	// TODO: Remove this mock once actual implementation exists
+ 	setupCommandPrefix = "run0 phial-placeholder"
+ 	systemSetupCommand = setupCommandPrefix + " --usb-devices"
+ )
+
