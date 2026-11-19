@@ -1,0 +1,1209 @@
+From 4539f9d53e6816bfe0b3aac643655f158a743c3b Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Wed, 18 Nov 2026 17:38:45 -0700
+Subject: [PATCH] feat: Add setup dialog and wire store to it
+---
+diff --git a/assets/resources/index.go b/assets/resources/index.go
+index 0730e6f6c11466a889b9a3da589c02f714825dfb..15803c29cf80fd748031d1460b5653e55c075975 100644
+--- a/assets/resources/index.go
++++ b/assets/resources/index.go
+@@ -29,6 +29,8 @@ 	AppArtists    = []string{"Felicitas Pojtinger"}
+ 	AppCopyright  = "© 2026 " + strings.Join(AppDevelopers, ", ")
+ 
+ 	ResourceWindowUIPath          = path.Join(AppPath, "window.ui")
++	ResourceSetupDialogUIPath     = path.Join(AppPath, "setup-dialog.ui")
+ 	ResourceShortcutsDialogUIPath = path.Join(AppPath, "shortcuts-dialog.ui")
+ 	ResourceMetainfoPath          = path.Join(AppPath, "metainfo.xml")
++	ResourceIconPath              = path.Join(AppPath, "icon.svg")
+ )
+diff --git a/assets/resources/index.gresource.xml b/assets/resources/index.gresource.xml
+index 1a8f6f4b0c8087dececaa67ab8189dcf69fe9e9c..173ad1e86c7310579469210365303029e05a1ac9 100644
+--- a/assets/resources/index.gresource.xml
++++ b/assets/resources/index.gresource.xml
+@@ -2,7 +2,9 @@ <?xml version="1.0" encoding="utf-8"?>
+ <gresources>
+     <gresource prefix="/com/pojtinger/felicitas/Phial">
+         <file>window.ui</file>
++        <file>setup-dialog.ui</file>
+         <file>shortcuts-dialog.ui</file>
+         <file>metainfo.xml</file>
++        <file alias="icon.svg">../meta/icon.svg</file>
+     </gresource>
+ </gresources>
+\ No newline at end of file
+diff --git a/assets/resources/setup-dialog.blp b/assets/resources/setup-dialog.blp
+new file mode 100644
+index 0000000000000000000000000000000000000000..b8b73da544ef4063fadd9455dabac1ea762cb054
+--- /dev/null
++++ b/assets/resources/setup-dialog.blp
+@@ -0,0 +1,242 @@
++using Gtk 4.0;
++using Adw 1;
++
++template $PhialSetupDialog: Adw.Dialog {
++  title: _("Set Up Phial");
++  can-close: false;
++  content-width: 600;
++  content-height: 480;
++
++  child: Adw.ToolbarView {
++    [top]
++    Adw.HeaderBar dialog_header_bar {
++      show-start-title-buttons: false;
++      show-end-title-buttons: false;
++
++      [start]
++      Button dialog_cancel_button {
++        visible: false;
++        label: _("_Cancel");
++        use-underline: true;
++      }
++
++      [start]
++      Button dialog_back_button {
++        label: _("_Back");
++        use-underline: true;
++      }
++
++      title-widget: Adw.WindowTitle dialog_title {};
++
++      [end]
++      Button dialog_next_button {
++        styles [
++          "suggested-action",
++        ]
++
++        Box {
++          spacing: 6;
++
++          Adw.Spinner verify_spinner {
++            visible: false;
++          }
++          Label {
++            label: _("_Continue");
++            use-underline: true;
++          }
++        }
++      }
++    }
++
++    content: Stack dialog_stack {
++      transition-type: slide_left_right;
++
++      StackPage {
++        name: "storage";
++        child: Adw.PreferencesPage {
++          Adw.PreferencesGroup {
++            description: _("Phial keeps its machines and their configurations in this folder");
++
++            Adw.ActionRow machines_folder_row {
++              title: _("Machines Folder");
++              subtitle: _("Not selected");
++
++              [prefix]
++              Image {
++                icon-name: "folder-symbolic";
++              }
++
++              [suffix]
++              Button machines_folder_button {
++                label: _("_Choose...");
++                use-underline: true;
++                valign: center;
++              }
++            }
++          }
++        };
++      }
++
++      StackPage {
++        name: "disclosure";
++        child: Adw.PreferencesPage {
++          Adw.PreferencesGroup {
++            description: _("The host service runs your machines on this computer, outside the application sandbox. It is the only part of Phial that touches the system.");
++
++            Adw.ActionRow {
++              title: _("Runs your machines <b>outside the application sandbox</b>");
++              use-markup: true;
++              activatable-widget: disclosure_sandbox_check;
++
++              [prefix]
++              CheckButton disclosure_sandbox_check {
++                valign: center;
++              }
++            }
++
++            Adw.ActionRow {
++              title: _("Reads and writes only the <b>machines folder</b>");
++              use-markup: true;
++              activatable-widget: disclosure_folders_check;
++
++              [prefix]
++              CheckButton disclosure_folders_check {
++                valign: center;
++              }
++            }
++
++            Adw.ActionRow {
++              title: _("Uses the <b>SSH and PGP agents</b> and the secret service of the host");
++              use-markup: true;
++              activatable-widget: disclosure_agents_check;
++
++              [prefix]
++              CheckButton disclosure_agents_check {
++                valign: center;
++              }
++            }
++
++            Adw.ActionRow {
++              title: _("Uses the <b>virtualisation tools</b> of the host");
++              use-markup: true;
++              activatable-widget: disclosure_tools_check;
++
++              [prefix]
++              CheckButton disclosure_tools_check {
++                valign: center;
++              }
++            }
++
++            Adw.ActionRow {
++              title: _("Runs fixed <b>administrator commands</b>, which you approve each time");
++              use-markup: true;
++              activatable-widget: disclosure_root_check;
++
++              [prefix]
++              CheckButton disclosure_root_check {
++                valign: center;
++              }
++            }
++          }
++        };
++      }
++
++      StackPage {
++        name: "host";
++        child: Adw.PreferencesPage {
++          Adw.PreferencesGroup {
++            description: _("Run this command in a terminal. It installs the host service and starts it.");
++
++            Gtk.ListBoxRow {
++              activatable: false;
++              selectable: false;
++
++              Box {
++                margin-top: 12;
++                margin-bottom: 12;
++                margin-start: 12;
++                margin-end: 12;
++
++                Label host_command_label {
++                  selectable: true;
++                  wrap: true;
++                  xalign: 0;
++                  styles [
++                    "monospace",
++                  ]
++                }
++              }
++            }
++
++            Adw.ButtonRow host_copy_row {
++              title: _("_Copy Command");
++              use-underline: true;
++              start-icon-name: "edit-copy-symbolic";
++            }
++
++            Adw.ButtonRow verify_connection_row {
++              title: _("_Verify Connection");
++              use-underline: true;
++              start-icon-name: "view-refresh-symbolic";
++            }
++          }
++        };
++      }
++
++      StackPage {
++        name: "system";
++        child: Adw.PreferencesPage {
++          Adw.PreferencesGroup {
++            description: _("Run this command in a terminal. It adds the rules for the USB devices and needs your password.");
++
++            Gtk.ListBoxRow {
++              activatable: false;
++              selectable: false;
++
++              Box {
++                margin-top: 12;
++                margin-bottom: 12;
++                margin-start: 12;
++                margin-end: 12;
++
++                Label system_command_label {
++                  selectable: true;
++                  wrap: true;
++                  xalign: 0;
++                  styles [
++                    "monospace",
++                  ]
++                }
++              }
++            }
++
++            Adw.ButtonRow system_copy_row {
++              title: _("_Copy Command");
++              use-underline: true;
++              start-icon-name: "edit-copy-symbolic";
++            }
++          }
++        };
++      }
++
++      StackPage {
++        name: "finish";
++        child: Adw.StatusPage {
++          icon-name: "object-select-symbolic";
++          title: _("You're Ready");
++          description: _("Now make a machine your own");
++
++          Button dialog_finish_button {
++            halign: center;
++            label: _("_Finish");
++            use-underline: true;
++            styles [
++              "suggested-action",
++              "pill",
++            ]
++          }
++        };
++      }
++    };
++  };
++}
+diff --git a/assets/resources/window.blp b/assets/resources/window.blp
+index 64a7a782ca0aa3ffcde8093a81711b26f66e7b27..0c79cca17e1ebff4c76ac924fa9895d334707d2c 100644
+--- a/assets/resources/window.blp
++++ b/assets/resources/window.blp
+@@ -2,38 +2,75 @@ using Gtk 4.0;
+ using Adw 1;
+ 
+ template $PhialMainWindow: Adw.ApplicationWindow {
+-  default-width: 360;
+-  default-height: 380;
++  default-width: 1024;
++  default-height: 600;
+   title: _("Phial");
+ 
+-  content: Adw.ToolbarView {
+-    [top]
+-    Adw.HeaderBar {
+-      title-widget: Adw.WindowTitle {
+-        title: _("Phial");
++  content: Stack content_stack {
++    transition-type: crossfade;
++
++    StackPage {
++      name: "setup";
++      child: Adw.ToolbarView {
++        [top]
++        Adw.HeaderBar {
++          title-widget: Adw.WindowTitle {
++            title: _("Phial");
++          };
++
++          [end]
++          MenuButton {
++            icon-name: "open-menu-symbolic";
++            tooltip-text: _("Main Menu");
++            primary: true;
++            menu-model: main_menu;
++          }
++        }
++
++        content: Adw.StatusPage welcome_status_page {
++          icon-name: "drive-harddisk-symbolic";
++          title: _("Welcome to Phial");
++          description: _("Run development machines safely");
++
++          Button {
++            halign: center;
++            action-name: "win.setupNext";
++            label: _("_Get Started");
++            use-underline: true;
++            styles [
++              "suggested-action",
++              "pill",
++            ]
++          }
++        };
+       };
+-
+-      [end]
+-      MenuButton menu_button {
+-        icon-name: "open-menu-symbolic";
+-        tooltip-text: _("Main Menu");
+-        primary: true;
+-        menu-model: main_menu;
+-      }
+     }
+ 
+-    content: Box {
+-      orientation: vertical;
+-      halign: center;
+-      valign: center;
++    StackPage {
++      name: "ready";
++      child: Adw.ToolbarView {
++        [top]
++        Adw.HeaderBar {
++          title-widget: Adw.WindowTitle {
++            title: _("Phial");
++          };
+ 
+-      Label {
+-        label: _("Hello, World!");
+-        styles [
+-          "title-1",
+-        ]
+-      }
+-    };
++          [end]
++          MenuButton {
++            icon-name: "open-menu-symbolic";
++            tooltip-text: _("Main Menu");
++            primary: true;
++            menu-model: main_menu;
++          }
++        }
++
++        content: Adw.StatusPage {
++          icon-name: "drive-harddisk-symbolic";
++          title: _("Phial");
++          description: _("Add a machine to get started");
++        };
++      };
++    }
+   };
+ }
+ 
+diff --git a/internal/components/application.go b/internal/components/application.go
+index f78bf91f18076139c9fba1f63ac8247d3ba4937a..ba0bbd4724e8c82f7eb173283b6633599790f319 100644
+--- a/internal/components/application.go
++++ b/internal/components/application.go
+@@ -7,6 +7,7 @@ 	"runtime"
+ 	"unsafe"
+ 
+ 	"codeberg.org/pojntfx/phial/assets/resources"
++	"codeberg.org/pojntfx/phial/pkg/state"
+ 	"codeberg.org/puregotk/puregotk/v4/adw"
+ 	"codeberg.org/puregotk/puregotk/v4/gio"
+ 	"codeberg.org/puregotk/puregotk/v4/glib"
+@@ -90,9 +91,46 @@
+ 			var app gtk.Application
+ 			a.Cast(&app)
+ 
+-			obj := NewMainWindow(phialApp.ctx, &phialApp.Application, phialApp.log, phialApp.settings, "application", app)
++			store, err := state.NewStore(
++				phialApp.ctx,
++				phialApp.log,
++				&state.StoreHooks{
++					OnChange: func(ctx context.Context) error {
++						var fn glib.SourceFunc
++						fn = glib.SourceFunc(func(u uintptr) bool {
++							defer glib.UnrefCallback(&fn)
++
++							if phialApp.window != nil {
++								phialApp.window.refresh()
++							}
++
++							return false
++						})
++						glib.IdleAdd(&fn, 0)
++
++						return nil
++					},
++				},
++				func(_ context.Context) (bool, error) {
++					return false, nil
++				},
++			)
++			if err != nil {
++				phialApp.log.Error("Could not create store", "err", err)
++
++				return
++			}
++
++			obj := NewMainWindow(phialApp.ctx, &phialApp.Application, phialApp.log, phialApp.settings, store, "application", app)
+ 
+ 			phialApp.window = (*MainWindow)(unsafe.Pointer(obj.GetData(dataKeyGoInstance)))
++
++			if err := store.Boot(phialApp.ctx, false); err != nil {
++				phialApp.log.Error("Could not boot store", "err", err)
++
++				return
++			}
++			go store.Run()
+ 
+ 			openAboutAction := gio.NewSimpleAction("openAbout", nil)
+ 			onOpenAbout := func(gio.SimpleAction, uintptr) {
+diff --git a/internal/components/main_window.go b/internal/components/main_window.go
+index 4b3a51078e6cbf8fe3d383d6726c6c81313b6ade..fbee4fc817dbcb4cc7400b60bcc08211eaa36758 100644
+--- a/internal/components/main_window.go
++++ b/internal/components/main_window.go
+@@ -7,13 +7,20 @@ 	"runtime"
+ 	"unsafe"
+ 
+ 	"codeberg.org/pojntfx/phial/assets/resources"
++	"codeberg.org/pojntfx/phial/pkg/state"
+ 	"codeberg.org/puregotk/puregotk/v4/adw"
++	"codeberg.org/puregotk/puregotk/v4/gdk"
+ 	"codeberg.org/puregotk/puregotk/v4/gio"
+ 	"codeberg.org/puregotk/puregotk/v4/glib"
+ 	"codeberg.org/puregotk/puregotk/v4/gobject"
+ 	"codeberg.org/puregotk/puregotk/v4/gtk"
+ )
+ 
++const (
++	contentPageSetup = "setup"
++	contentPageReady = "ready"
++)
++
+ var (
+ 	gTypeMainWindow gobject.Type
+ )
+@@ -25,12 +32,19 @@ 	ctx      context.Context
+ 	settings *gio.Settings
+ 	log      *slog.Logger
+ 
+-	app *adw.Application
++	app   *adw.Application
++	store *state.Store
++
++	contentStack gtk.Stack
++
++	welcomeStatusPage *adw.StatusPage
++
++	setupDialog *SetupDialog
+ 
+ 	callbacks []interface{}
+ }
+ 
+-func NewMainWindow(ctx context.Context, app *adw.Application, log *slog.Logger, settings *gio.Settings, FirstPropertyNameVar string, varArgs ...interface{}) MainWindow {
++func NewMainWindow(ctx context.Context, app *adw.Application, log *slog.Logger, settings *gio.Settings, store *state.Store, FirstPropertyNameVar string, varArgs ...interface{}) MainWindow {
+ 	obj := gobject.NewObject(gTypeMainWindow, FirstPropertyNameVar, varArgs...)
+ 
+ 	var v MainWindow
+@@ -41,9 +55,29 @@ 	window.settings = settings
+ 	window.log = log
+ 
+ 	window.app = app
++	window.store = store
+ 
+ 	window.ctx = ctx
+ 
++	setupDialog := NewSetupDialog(window.ctx, window.store, window.log, &window.ApplicationWindow.Widget)
++	window.setupDialog = (*SetupDialog)(unsafe.Pointer(setupDialog.Widget.GetData(dataKeyGoInstance)))
++
++	setupNextAction := gio.NewSimpleAction("setupNext", nil)
++	onSetupNext := func(gio.SimpleAction, uintptr) {
++		if window.store.Page() == state.SetupPageWelcome {
++			if err := window.store.SetupNext(window.ctx); err != nil {
++				window.log.Error("Could not continue setup", "err", err)
++			}
++		}
++
++		window.setupDialog.Present(&window.ApplicationWindow.Widget)
++
++		window.refresh()
++	}
++	window.callbacks = append(window.callbacks, &onSetupNext)
++	setupNextAction.ConnectActivate(&onSetupNext)
++	window.AddAction(setupNextAction)
++
+ 	closeWindowAction := gio.NewSimpleAction("closeWindow", nil)
+ 	onCloseWindow := func(gio.SimpleAction, uintptr) {
+ 		window.Close()
+@@ -54,13 +88,35 @@ 	window.AddAction(closeWindowAction)
+ 
+ 	window.app.SetAccelsForAction("win.closeWindow", []string{`<Primary>w`})
+ 
++	if texture := gdk.NewTextureFromResource(resources.ResourceIconPath); texture != nil {
++		window.welcomeStatusPage.SetPaintable(texture)
++	}
++
++	window.refresh()
++
+ 	return v
+ }
+ 
++func (w *MainWindow) refresh() {
++	if w.store == nil {
++		return
++	}
++
++	if w.store.Ready() || w.store.Page() == state.SetupPageFinish {
++		w.contentStack.SetVisibleChildName(contentPageReady)
++	} else {
++		w.contentStack.SetVisibleChildName(contentPageSetup)
++	}
++
++	w.setupDialog.Refresh()
++}
++
+ func init() {
+ 	var windowClassInit gobject.ClassInitFunc = func(tc *gobject.TypeClass, u uintptr) {
+ 		typeClass := (*gtk.WidgetClass)(unsafe.Pointer(tc))
+ 		typeClass.SetTemplateFromResource(resources.ResourceWindowUIPath)
++		typeClass.BindTemplateChildFull("content_stack", false, 0)
++		typeClass.BindTemplateChildFull("welcome_status_page", false, 0)
+ 
+ 		objClass := (*gobject.ObjectClass)(unsafe.Pointer(tc))
+ 
+@@ -73,8 +129,26 @@ 			o.Cast(&parent)
+ 
+ 			parent.InitTemplate()
+ 
++			var (
++				contentStack      gtk.Stack
++				welcomeStatusPage adw.StatusPage
++			)
++
++			parent.Widget.GetTemplateChild(
++				gTypeMainWindow,
++				"content_stack",
++			).Cast(&contentStack)
++			parent.Widget.GetTemplateChild(
++				gTypeMainWindow,
++				"welcome_status_page",
++			).Cast(&welcomeStatusPage)
++
+ 			w := &MainWindow{
+ 				ApplicationWindow: parent,
++
++				contentStack: contentStack,
++
++				welcomeStatusPage: &welcomeStatusPage,
+ 
+ 				callbacks: []interface{}{},
+ 			}
+@@ -87,6 +161,10 @@ 				for _, callback := range w.callbacks {
+ 					if err := glib.UnrefCallback(callback); err != nil {
+ 						w.log.Error("Could not unref callback", "err", err)
+ 					}
++				}
++
++				if w.setupDialog != nil {
++					w.setupDialog.Widget.Object.Unref()
+ 				}
+ 
+ 				pinner.Unpin()
+diff --git a/internal/components/setup_dialog.go b/internal/components/setup_dialog.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..ebd3251a4d201e3b54be63ceeed3be6a066fa15a
+--- /dev/null
++++ b/internal/components/setup_dialog.go
+@@ -0,0 +1,604 @@
++package components
++
++import (
++	"context"
++	"log/slog"
++	"os"
++	"path/filepath"
++	"runtime"
++	"time"
++	"unsafe"
++
++	"codeberg.org/pojntfx/phial/assets/resources"
++	"codeberg.org/pojntfx/phial/pkg/state"
++	"codeberg.org/puregotk/puregotk/v4/adw"
++	"codeberg.org/puregotk/puregotk/v4/gdk"
++	"codeberg.org/puregotk/puregotk/v4/gio"
++	"codeberg.org/puregotk/puregotk/v4/glib"
++	"codeberg.org/puregotk/puregotk/v4/gobject"
++	"codeberg.org/puregotk/puregotk/v4/gtk"
++	. "github.com/pojntfx/go-gettext/pkg/i18n"
++)
++
++var (
++	gTypeSetupDialog gobject.Type
++)
++
++type SetupDialog struct {
++	adw.Dialog
++
++	ctx    context.Context
++	log    *slog.Logger
++	store  *state.Store
++	parent *gtk.Widget
++
++	dialogStack        gtk.Stack
++	dialogHeaderBar    *adw.HeaderBar
++	dialogTitle        *adw.WindowTitle
++	dialogCancelButton *gtk.Button
++	dialogBackButton   *gtk.Button
++	dialogNextButton   *gtk.Button
++	dialogFinishButton *gtk.Button
++
++	verifySpinner *adw.Spinner
++
++	machinesFolderRow    *adw.ActionRow
++	machinesFolderButton *gtk.Button
++
++	hostCommandLabel   *gtk.Label
++	systemCommandLabel *gtk.Label
++
++	disclosureSandboxCheck *gtk.CheckButton
++	disclosureFoldersCheck *gtk.CheckButton
++	disclosureAgentsCheck  *gtk.CheckButton
++	disclosureToolsCheck   *gtk.CheckButton
++	disclosureRootCheck    *gtk.CheckButton
++
++	hostCopyRow         *adw.ButtonRow
++	systemCopyRow       *adw.ButtonRow
++	verifyConnectionRow *adw.ButtonRow
++
++	verifying bool
++
++	callbacks []interface{}
++}
++
++func NewSetupDialog(ctx context.Context, store *state.Store, log *slog.Logger, parent *gtk.Widget) SetupDialog {
++	obj := gobject.NewObject(gTypeSetupDialog, "css-name")
++	gobject.IncreaseRef(obj.GoPointer())
++
++	var v SetupDialog
++	obj.Cast(&v)
++
++	dialog := (*SetupDialog)(unsafe.Pointer(obj.GetData(dataKeyGoInstance)))
++	dialog.ctx = ctx
++	dialog.log = log
++	dialog.store = store
++	dialog.parent = parent
++
++	closeDialog := func() {
++		if dialog.store.Page() == state.SetupPageFinish {
++			canSetupFinish, err := dialog.store.CanSetupFinish(dialog.ctx)
++			if err != nil {
++				dialog.log.Error("Could not determine whether setup can finish", "err", err)
++			} else if canSetupFinish {
++				if err := dialog.store.SetupFinish(dialog.ctx); err != nil {
++					dialog.log.Error("Could not finish setup", "err", err)
++				}
++			}
++		}
++
++		dialog.ForceClose()
++	}
++
++	onBack := func(gtk.Button) {
++		if err := dialog.store.SetupBack(dialog.ctx); err != nil {
++			dialog.log.Error("Could not go back in setup", "err", err)
++
++			return
++		}
++
++		dialog.Refresh()
++	}
++	dialog.callbacks = append(dialog.callbacks, &onBack)
++	dialog.dialogBackButton.ConnectClicked(&onBack)
++
++	onNext := func(gtk.Button) {
++		if err := dialog.store.SetupNext(dialog.ctx); err != nil {
++			dialog.log.Error("Could not continue setup", "err", err)
++
++			return
++		}
++
++		dialog.Refresh()
++	}
++	dialog.callbacks = append(dialog.callbacks, &onNext)
++	dialog.dialogNextButton.ConnectClicked(&onNext)
++
++	onCancel := func(gtk.Button) {
++		closeDialog()
++	}
++	dialog.callbacks = append(dialog.callbacks, &onCancel)
++	dialog.dialogCancelButton.ConnectClicked(&onCancel)
++
++	onCloseAttempt := func(adw.Dialog) {
++		closeDialog()
++	}
++	dialog.callbacks = append(dialog.callbacks, &onCloseAttempt)
++	dialog.ConnectCloseAttempt(&onCloseAttempt)
++
++	onCopy := func(adw.ButtonRow) {
++		var command string
++		switch dialog.store.Page() {
++		case state.SetupPageHost:
++			command = dialog.store.HostCommand()
++		case state.SetupPageSystem:
++			command = dialog.store.SystemCommand()
++		default:
++			return
++		}
++
++		dialog.parent.GetClipboard().SetText(command)
++
++		if err := dialog.store.SetupCopy(dialog.ctx); err != nil {
++			dialog.log.Error("Could not copy setup command", "err", err)
++
++			return
++		}
++
++		dialog.Refresh()
++	}
++	dialog.callbacks = append(dialog.callbacks, &onCopy)
++	dialog.hostCopyRow.ConnectActivated(&onCopy)
++	dialog.systemCopyRow.ConnectActivated(&onCopy)
++
++	onVerifyConnection := func(adw.ButtonRow) {
++		dialog.setVerifying(true)
++
++		go func() {
++			if err := dialog.store.RetryHost(dialog.ctx); err != nil {
++				dialog.log.Error("Could not verify host connection", "err", err)
++			}
++
++			time.Sleep(time.Millisecond * 750)
++
++			var fn glib.SourceFunc
++			fn = glib.SourceFunc(func(uintptr) bool {
++				defer glib.UnrefCallback(&fn)
++
++				dialog.setVerifying(false)
++
++				return false
++			})
++			glib.IdleAdd(&fn, 0)
++		}()
++	}
++	dialog.callbacks = append(dialog.callbacks, &onVerifyConnection)
++	dialog.verifyConnectionRow.ConnectActivated(&onVerifyConnection)
++
++	onFinish := func(gtk.Button) {
++		canSetupFinish, err := dialog.store.CanSetupFinish(dialog.ctx)
++		if err != nil {
++			dialog.log.Error("Could not determine whether setup can finish", "err", err)
++
++			return
++		}
++
++		if !canSetupFinish {
++			return
++		}
++
++		if err := dialog.store.SetupFinish(dialog.ctx); err != nil {
++			dialog.log.Error("Could not finish setup", "err", err)
++
++			return
++		}
++
++		dialog.ForceClose()
++	}
++	dialog.callbacks = append(dialog.callbacks, &onFinish)
++	dialog.dialogFinishButton.ConnectClicked(&onFinish)
++
++	connectDisclosureCheck := func(item state.DisclosureItem, check *gtk.CheckButton) {
++		onToggled := func(gtk.CheckButton) {
++			if err := dialog.store.SetDisclosureAcknowledged(dialog.ctx, item, check.GetActive()); err != nil {
++				dialog.log.Error("Could not acknowledge the host service disclosure", "err", err)
++
++				return
++			}
++
++			dialog.Refresh()
++		}
++
++		dialog.callbacks = append(dialog.callbacks, &onToggled)
++		check.ConnectToggled(&onToggled)
++	}
++	connectDisclosureCheck(state.DisclosureSandbox, dialog.disclosureSandboxCheck)
++	connectDisclosureCheck(state.DisclosureFolders, dialog.disclosureFoldersCheck)
++	connectDisclosureCheck(state.DisclosureAgents, dialog.disclosureAgentsCheck)
++	connectDisclosureCheck(state.DisclosureTools, dialog.disclosureToolsCheck)
++	connectDisclosureCheck(state.DisclosureRoot, dialog.disclosureRootCheck)
++
++	chooseMachinesFolder := func(title string, initial string) {
++		fileDialog := gtk.NewFileDialog()
++		fileDialog.SetTitle(title)
++
++		if initial == "" {
++			initial = dialog.store.SuggestedMachinesFolder()
++		}
++
++		if _, err := os.Stat(initial); err != nil {
++			initial = filepath.Dir(initial)
++		}
++
++		if _, err := os.Stat(initial); err == nil {
++			fileDialog.SetInitialFolder(gio.FileNewForPath(initial))
++		}
++
++		var onFolderChosen gio.AsyncReadyCallback
++		onFolderChosen = gio.AsyncReadyCallback(func(_ uintptr, resultPtr uintptr, _ uintptr) {
++			result := gio.AsyncResultBase{Ptr: resultPtr}
++
++			file, err := fileDialog.SelectFolderFinish(&result)
++			if err != nil {
++				dialog.log.Error("Could not choose folder", "err", err)
++
++				return
++			}
++
++			if err := dialog.store.SetMachinesFolder(dialog.ctx, file.GetPath()); err != nil {
++				dialog.log.Error("Could not set machines folder", "err", err)
++
++				return
++			}
++
++			dialog.Refresh()
++		})
++		dialog.callbacks = append(dialog.callbacks, &onFolderChosen)
++
++		var parentWindow gtk.Window
++		dialog.parent.Cast(&parentWindow)
++
++		fileDialog.SelectFolder(&parentWindow, nil, &onFolderChosen, 0)
++	}
++
++	onMachinesFolderClicked := func(gtk.Button) {
++		chooseMachinesFolder(
++			L("Choose the Machines Folder"),
++			dialog.store.MachinesFolder(),
++		)
++	}
++	dialog.callbacks = append(dialog.callbacks, &onMachinesFolderClicked)
++	dialog.machinesFolderButton.ConnectClicked(&onMachinesFolderClicked)
++
++	onKeyPressed := func(_ gtk.EventControllerKey, keyval uint32, _ uint32, _ gdk.ModifierType) bool {
++		if int32(keyval) == gdk.KEY_Escape {
++			closeDialog()
++
++			return true
++		}
++
++		return false
++	}
++	dialog.callbacks = append(dialog.callbacks, &onKeyPressed)
++
++	keyController := gtk.NewEventControllerKey()
++	keyController.SetPropagationPhase(gtk.PhaseCaptureValue)
++	keyController.ConnectKeyPressed(&onKeyPressed)
++	dialog.Widget.AddController(&keyController.EventController)
++
++	onClosed := func(adw.Dialog) {
++		dialog.verifying = false
++		dialog.verifySpinner.SetVisible(false)
++	}
++	dialog.callbacks = append(dialog.callbacks, &onClosed)
++	dialog.ConnectClosed(&onClosed)
++
++	dialog.Refresh()
++
++	return v
++}
++
++func (w *SetupDialog) Refresh() {
++	if w.store == nil {
++		return
++	}
++
++	page := w.store.Page()
++
++	if page == "" || page == state.SetupPageWelcome || w.store.Ready() {
++		return
++	}
++
++	w.dialogStack.SetVisibleChildName(string(page))
++
++	w.dialogTitle.SetTitle(setupPageTitle(page))
++
++	w.dialogCancelButton.SetVisible(page == state.SetupPageStorage)
++	w.dialogBackButton.SetVisible(page != state.SetupPageStorage && page != state.SetupPageFinish)
++	w.dialogNextButton.SetVisible(page != state.SetupPageFinish)
++
++	w.dialogHeaderBar.SetShowEndTitleButtons(page == state.SetupPageFinish)
++
++	w.hostCommandLabel.SetText(w.store.HostCommand())
++	w.systemCommandLabel.SetText(w.store.SystemCommand())
++
++	setFolderRowSubtitle(w.machinesFolderRow, w.store.MachinesFolder())
++
++	setCheckButtonActive := func(check *gtk.CheckButton, active bool) {
++		if check.GetActive() != active {
++			check.SetActive(active)
++		}
++	}
++	setCheckButtonActive(w.disclosureSandboxCheck, w.store.DisclosureAcknowledged(state.DisclosureSandbox))
++	setCheckButtonActive(w.disclosureFoldersCheck, w.store.DisclosureAcknowledged(state.DisclosureFolders))
++	setCheckButtonActive(w.disclosureAgentsCheck, w.store.DisclosureAcknowledged(state.DisclosureAgents))
++	setCheckButtonActive(w.disclosureToolsCheck, w.store.DisclosureAcknowledged(state.DisclosureTools))
++	setCheckButtonActive(w.disclosureRootCheck, w.store.DisclosureAcknowledged(state.DisclosureRoot))
++
++	w.verifyConnectionRow.SetSensitive(w.store.HostCommandCopied() && !w.verifying)
++
++	canSetupNext, err := w.store.CanSetupNext(w.ctx)
++	if err != nil {
++		w.log.Error("Could not determine whether setup can continue", "err", err)
++
++		return
++	}
++	w.dialogNextButton.SetSensitive(canSetupNext && !w.verifying)
++
++	canSetupBack, err := w.store.CanSetupBack(w.ctx)
++	if err != nil {
++		w.log.Error("Could not determine whether setup can go back", "err", err)
++
++		return
++	}
++	w.dialogBackButton.SetSensitive(canSetupBack)
++
++	canSetupFinish, err := w.store.CanSetupFinish(w.ctx)
++	if err != nil {
++		w.log.Error("Could not determine whether setup can finish", "err", err)
++
++		return
++	}
++	w.dialogFinishButton.SetSensitive(canSetupFinish)
++}
++
++func (w *SetupDialog) setVerifying(verifying bool) {
++	w.verifying = verifying
++	w.verifySpinner.SetVisible(verifying)
++
++	w.Refresh()
++}
++
++func setupPageTitle(page state.SetupPage) string {
++	switch page {
++	case state.SetupPageWelcome:
++		return L("Welcome")
++	case state.SetupPageStorage:
++		return L("Storage")
++	case state.SetupPageDisclosure:
++		return L("Host Access")
++	case state.SetupPageHost:
++		return L("Host Service")
++	case state.SetupPageSystem:
++		return L("System Setup")
++	case state.SetupPageFinish:
++		return L("Done")
++	}
++
++	return ""
++}
++
++func setFolderRowSubtitle(row *adw.ActionRow, path string) {
++	if path == "" {
++		row.SetSubtitle(L("Not selected"))
++
++		return
++	}
++
++	row.SetSubtitle(path)
++}
++
++func init() {
++	var dialogClassInit gobject.ClassInitFunc = func(tc *gobject.TypeClass, u uintptr) {
++		typeClass := (*gtk.WidgetClass)(unsafe.Pointer(tc))
++		typeClass.SetTemplateFromResource(resources.ResourceSetupDialogUIPath)
++		typeClass.BindTemplateChildFull("dialog_stack", false, 0)
++		typeClass.BindTemplateChildFull("dialog_header_bar", false, 0)
++		typeClass.BindTemplateChildFull("dialog_title", false, 0)
++		typeClass.BindTemplateChildFull("dialog_cancel_button", false, 0)
++		typeClass.BindTemplateChildFull("dialog_back_button", false, 0)
++		typeClass.BindTemplateChildFull("dialog_next_button", false, 0)
++		typeClass.BindTemplateChildFull("dialog_finish_button", false, 0)
++		typeClass.BindTemplateChildFull("verify_spinner", false, 0)
++		typeClass.BindTemplateChildFull("machines_folder_row", false, 0)
++		typeClass.BindTemplateChildFull("machines_folder_button", false, 0)
++		typeClass.BindTemplateChildFull("host_command_label", false, 0)
++		typeClass.BindTemplateChildFull("system_command_label", false, 0)
++		typeClass.BindTemplateChildFull("disclosure_sandbox_check", false, 0)
++		typeClass.BindTemplateChildFull("disclosure_folders_check", false, 0)
++		typeClass.BindTemplateChildFull("disclosure_agents_check", false, 0)
++		typeClass.BindTemplateChildFull("disclosure_tools_check", false, 0)
++		typeClass.BindTemplateChildFull("disclosure_root_check", false, 0)
++		typeClass.BindTemplateChildFull("host_copy_row", false, 0)
++		typeClass.BindTemplateChildFull("system_copy_row", false, 0)
++		typeClass.BindTemplateChildFull("verify_connection_row", false, 0)
++
++		objClass := (*gobject.ObjectClass)(unsafe.Pointer(tc))
++
++		objClass.OverrideConstructed(func(o *gobject.Object) {
++			parentObjClass := (*gobject.ObjectClass)(unsafe.Pointer(tc.PeekParent()))
++			parentObjClass.GetConstructed()(o)
++
++			var parent adw.Dialog
++			o.Cast(&parent)
++
++			parent.InitTemplate()
++
++			var (
++				dialogStack            gtk.Stack
++				dialogHeaderBar        adw.HeaderBar
++				dialogTitle            adw.WindowTitle
++				dialogCancelButton     gtk.Button
++				dialogBackButton       gtk.Button
++				dialogNextButton       gtk.Button
++				dialogFinishButton     gtk.Button
++				verifySpinner          adw.Spinner
++				machinesFolderRow      adw.ActionRow
++				machinesFolderButton   gtk.Button
++				hostCommandLabel       gtk.Label
++				systemCommandLabel     gtk.Label
++				disclosureSandboxCheck gtk.CheckButton
++				disclosureFoldersCheck gtk.CheckButton
++				disclosureAgentsCheck  gtk.CheckButton
++				disclosureToolsCheck   gtk.CheckButton
++				disclosureRootCheck    gtk.CheckButton
++				hostCopyRow            adw.ButtonRow
++				systemCopyRow          adw.ButtonRow
++				verifyConnectionRow    adw.ButtonRow
++			)
++
++			parent.Widget.GetTemplateChild(
++				gTypeSetupDialog,
++				"dialog_stack",
++			).Cast(&dialogStack)
++			parent.Widget.GetTemplateChild(
++				gTypeSetupDialog,
++				"dialog_header_bar",
++			).Cast(&dialogHeaderBar)
++			parent.Widget.GetTemplateChild(
++				gTypeSetupDialog,
++				"dialog_title",
++			).Cast(&dialogTitle)
++			parent.Widget.GetTemplateChild(
++				gTypeSetupDialog,
++				"dialog_cancel_button",
++			).Cast(&dialogCancelButton)
++			parent.Widget.GetTemplateChild(
++				gTypeSetupDialog,
++				"dialog_back_button",
++			).Cast(&dialogBackButton)
++			parent.Widget.GetTemplateChild(
++				gTypeSetupDialog,
++				"dialog_next_button",
++			).Cast(&dialogNextButton)
++			parent.Widget.GetTemplateChild(
++				gTypeSetupDialog,
++				"dialog_finish_button",
++			).Cast(&dialogFinishButton)
++			parent.Widget.GetTemplateChild(
++				gTypeSetupDialog,
++				"verify_spinner",
++			).Cast(&verifySpinner)
++			parent.Widget.GetTemplateChild(
++				gTypeSetupDialog,
++				"machines_folder_row",
++			).Cast(&machinesFolderRow)
++			parent.Widget.GetTemplateChild(
++				gTypeSetupDialog,
++				"machines_folder_button",
++			).Cast(&machinesFolderButton)
++			parent.Widget.GetTemplateChild(
++				gTypeSetupDialog,
++				"host_command_label",
++			).Cast(&hostCommandLabel)
++			parent.Widget.GetTemplateChild(
++				gTypeSetupDialog,
++				"system_command_label",
++			).Cast(&systemCommandLabel)
++			parent.Widget.GetTemplateChild(
++				gTypeSetupDialog,
++				"disclosure_sandbox_check",
++			).Cast(&disclosureSandboxCheck)
++			parent.Widget.GetTemplateChild(
++				gTypeSetupDialog,
++				"disclosure_folders_check",
++			).Cast(&disclosureFoldersCheck)
++			parent.Widget.GetTemplateChild(
++				gTypeSetupDialog,
++				"disclosure_agents_check",
++			).Cast(&disclosureAgentsCheck)
++			parent.Widget.GetTemplateChild(
++				gTypeSetupDialog,
++				"disclosure_tools_check",
++			).Cast(&disclosureToolsCheck)
++			parent.Widget.GetTemplateChild(
++				gTypeSetupDialog,
++				"disclosure_root_check",
++			).Cast(&disclosureRootCheck)
++			parent.Widget.GetTemplateChild(
++				gTypeSetupDialog,
++				"host_copy_row",
++			).Cast(&hostCopyRow)
++			parent.Widget.GetTemplateChild(
++				gTypeSetupDialog,
++				"system_copy_row",
++			).Cast(&systemCopyRow)
++			parent.Widget.GetTemplateChild(
++				gTypeSetupDialog,
++				"verify_connection_row",
++			).Cast(&verifyConnectionRow)
++
++			w := &SetupDialog{
++				Dialog: parent,
++
++				dialogStack:        dialogStack,
++				dialogHeaderBar:    &dialogHeaderBar,
++				dialogTitle:        &dialogTitle,
++				dialogCancelButton: &dialogCancelButton,
++				dialogBackButton:   &dialogBackButton,
++				dialogNextButton:   &dialogNextButton,
++				dialogFinishButton: &dialogFinishButton,
++
++				verifySpinner: &verifySpinner,
++
++				machinesFolderRow:    &machinesFolderRow,
++				machinesFolderButton: &machinesFolderButton,
++
++				hostCommandLabel:   &hostCommandLabel,
++				systemCommandLabel: &systemCommandLabel,
++
++				disclosureSandboxCheck: &disclosureSandboxCheck,
++				disclosureFoldersCheck: &disclosureFoldersCheck,
++				disclosureAgentsCheck:  &disclosureAgentsCheck,
++				disclosureToolsCheck:   &disclosureToolsCheck,
++				disclosureRootCheck:    &disclosureRootCheck,
++
++				hostCopyRow:         &hostCopyRow,
++				systemCopyRow:       &systemCopyRow,
++				verifyConnectionRow: &verifyConnectionRow,
++
++				callbacks: []interface{}{},
++			}
++
++			var pinner runtime.Pinner
++			pinner.Pin(w)
++
++			var cleanupCallback glib.DestroyNotify = func(data uintptr) {
++				for _, callback := range w.callbacks {
++					if err := glib.UnrefCallback(callback); err != nil {
++						w.log.Error("Could not unref callback", "err", err)
++					}
++				}
++
++				pinner.Unpin()
++			}
++			o.SetDataFull(dataKeyGoInstance, uintptr(unsafe.Pointer(w)), &cleanupCallback)
++		})
++	}
++
++	var dialogInstanceInit gobject.InstanceInitFunc = func(ti *gobject.TypeInstance, tc *gobject.TypeClass) {}
++
++	var dialogParentQuery gobject.TypeQuery
++	gobject.NewTypeQuery(adw.DialogGLibType(), &dialogParentQuery)
++
++	gTypeSetupDialog = gobject.TypeRegisterStaticSimple(
++		dialogParentQuery.Type,
++		"PhialSetupDialog",
++		dialogParentQuery.ClassSize,
++		&dialogClassInit,
++		dialogParentQuery.InstanceSize,
++		&dialogInstanceInit,
++		0,
++	)
++}
+
