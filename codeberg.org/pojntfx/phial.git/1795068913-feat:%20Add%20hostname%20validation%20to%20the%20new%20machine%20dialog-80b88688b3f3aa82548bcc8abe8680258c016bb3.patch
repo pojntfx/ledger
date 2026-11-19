@@ -1,0 +1,527 @@
+From 80b88688b3f3aa82548bcc8abe8680258c016bb3 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Wed, 18 Nov 2026 23:15:13 -0700
+Subject: [PATCH] feat: Add hostname validation to the new machine dialog
+---
+diff --git a/assets/resources/create-machine-dialog.blp b/assets/resources/create-machine-dialog.blp
+index 61bc596fc6beca51ae7778ca3c5e7bb0ce07e083..a483369de90ddeb78d0d9f0fd2563e5812fd3631 100644
+--- a/assets/resources/create-machine-dialog.blp
++++ b/assets/resources/create-machine-dialog.blp
+@@ -39,10 +39,23 @@       Adw.PreferencesGroup {
+         title: _("Identity");
+         description: _("The name becomes the SSH host alias");
+ 
+-        Adw.EntryRow {
++        Adw.EntryRow name_row {
+           title: _("_Name");
+           use-underline: true;
+           activates-default: true;
++
++          [suffix]
++          MenuButton name_error_button {
++            visible: false;
++            icon-name: "dialog-warning-symbolic";
++            tooltip-text: _("Show Error");
++            valign: center;
++            popover: name_error_popover;
++            styles [
++              "flat",
++              "circular",
++            ]
++          }
+         }
+       }
+ 
+@@ -97,3 +110,14 @@       }
+     };
+   };
+ }
++
++Popover name_error_popover {
++  Label {
++    label: _("Use a hostname like dev-vm or dev.example");
++    wrap: true;
++    max-width-chars: 40;
++    xalign: 0;
++    selectable: true;
++    accessible-role: alert;
++  }
++}
+diff --git a/go.mod b/go.mod
+index c67a683235b7f80b211cca8fa871f55b5623e619..0041a4debcb059238a1f113e81705097d8617e0b 100644
+--- a/go.mod
++++ b/go.mod
+@@ -1,12 +1,13 @@
+ module codeberg.org/pojntfx/phial
+ 
+-go 1.25.0
++go 1.26.0
+ 
+ tool github.com/dennwc/flatpak-go-mod
+ 
+ require (
+ 	codeberg.org/puregotk/puregotk v0.0.0-20260420231554-98419d54d2d2
+ 	github.com/adrg/xdg v0.5.3
++	github.com/go-playground/validator/v10 v10.30.6
+ 	github.com/neilotoole/slogt/v2 v2.0.0
+ 	github.com/pojntfx/go-gettext v0.4.2
+ 	github.com/qmuntal/stateless v1.8.0
+@@ -16,8 +17,14 @@
+ require (
+ 	codeberg.org/puregotk/purego v0.0.0-20260224095105-2513c838cb80 // indirect
+ 	github.com/dennwc/flatpak-go-mod v0.1.1-0.20250809093520-ddf8d84264aa // indirect
++	github.com/gabriel-vasile/mimetype v1.4.16 // indirect
++	github.com/go-playground/locales v0.14.2 // indirect
++	github.com/go-playground/universal-translator v0.18.2 // indirect
+ 	github.com/goccy/go-yaml v1.18.0 // indirect
++	github.com/leodido/go-urn v1.5.0 // indirect
+ 	go.yaml.in/yaml/v3 v3.0.5 // indirect
+-	golang.org/x/mod v0.27.0 // indirect
+-	golang.org/x/sys v0.26.0 // indirect
++	golang.org/x/crypto v0.58.0 // indirect
++	golang.org/x/mod v0.41.0 // indirect
++	golang.org/x/sys v0.49.0 // indirect
++	golang.org/x/text v0.43.0 // indirect
+ )
+diff --git a/go.mod.json b/go.mod.json
+index 77fbb2216d2da8689385336ae993f142c990982f..e8940f1ce7f1c5fb10a1fa2c146dafce11df4f7a 100644
+--- a/go.mod.json
++++ b/go.mod.json
+@@ -19,6 +19,13 @@     "type": "archive",
+     "url": "https://proxy.golang.org/github.com/adrg/xdg/@v/v0.5.3.zip"
+   },
+   {
++    "dest": "vendor/github.com/go-playground/validator/v10",
++    "sha256": "39863f25c9e88d60dc79632167dfcaaf947caeef3960dd1aea5c72bb66c3edee",
++    "strip-components": 4,
++    "type": "archive",
++    "url": "https://proxy.golang.org/github.com/go-playground/validator/v10/@v/v10.30.6.zip"
++  },
++  {
+     "dest": "vendor/github.com/neilotoole/slogt/v2",
+     "sha256": "1d01098208c0f72673a60496c0351710f1f1d3d44e549bbf737b709fc9151d76",
+     "strip-components": 4,
+@@ -61,6 +68,27 @@     "type": "archive",
+     "url": "https://proxy.golang.org/github.com/dennwc/flatpak-go-mod/@v/v0.1.1-0.20250809093520-ddf8d84264aa.zip"
+   },
+   {
++    "dest": "vendor/github.com/gabriel-vasile/mimetype",
++    "sha256": "8b5a6b5e60c462072f9214676dc9a773f8c38844fa16eebeb37a2901abf26d3e",
++    "strip-components": 3,
++    "type": "archive",
++    "url": "https://proxy.golang.org/github.com/gabriel-vasile/mimetype/@v/v1.4.16.zip"
++  },
++  {
++    "dest": "vendor/github.com/go-playground/locales",
++    "sha256": "44c84d533c1c7b628dc11d8f885b27f096ab0e57ef5e775f10bf19b3694188f7",
++    "strip-components": 3,
++    "type": "archive",
++    "url": "https://proxy.golang.org/github.com/go-playground/locales/@v/v0.14.2.zip"
++  },
++  {
++    "dest": "vendor/github.com/go-playground/universal-translator",
++    "sha256": "56dd8c231c3c8814a9875c8791a4ed22bfae85da5b4445dd755c69fc3c1262d9",
++    "strip-components": 3,
++    "type": "archive",
++    "url": "https://proxy.golang.org/github.com/go-playground/universal-translator/@v/v0.18.2.zip"
++  },
++  {
+     "dest": "vendor/github.com/goccy/go-yaml",
+     "sha256": "51bf59a85a7e3e2b8e83e5f376a3229b01b673a39601c99e3a2c05931cc3e339",
+     "strip-components": 3,
+@@ -68,6 +96,13 @@     "type": "archive",
+     "url": "https://proxy.golang.org/github.com/goccy/go-yaml/@v/v1.18.0.zip"
+   },
+   {
++    "dest": "vendor/github.com/leodido/go-urn",
++    "sha256": "ceb338b7fe7c8e45fd8da9fa3c26005de833d9968d21415ebaaba603ea36f44a",
++    "strip-components": 3,
++    "type": "archive",
++    "url": "https://proxy.golang.org/github.com/leodido/go-urn/@v/v1.5.0.zip"
++  },
++  {
+     "dest": "vendor/go.yaml.in/yaml/v3",
+     "sha256": "f2d70caa35f66283aec58b889af8c5f07c374c5934be27a738c1215263e19205",
+     "strip-components": 3,
+@@ -75,17 +110,31 @@     "type": "archive",
+     "url": "https://proxy.golang.org/go.yaml.in/yaml/v3/@v/v3.0.5.zip"
+   },
+   {
++    "dest": "vendor/golang.org/x/crypto",
++    "sha256": "b0a45594cda20ddb4264d84aeff9b588b8570bf6a2833c51a0b821734a298d95",
++    "strip-components": 3,
++    "type": "archive",
++    "url": "https://proxy.golang.org/golang.org/x/crypto/@v/v0.58.0.zip"
++  },
++  {
+     "dest": "vendor/golang.org/x/mod",
+-    "sha256": "19fb241d46e4397d3193b5fa899e2a9d62bb5d1c41f73d09d29c17c3c0d3953c",
++    "sha256": "201e678d0a35b18b246abe58d80017b75d60be21cbaf4cbb9e963b48872565a9",
+     "strip-components": 3,
+     "type": "archive",
+-    "url": "https://proxy.golang.org/golang.org/x/mod/@v/v0.27.0.zip"
++    "url": "https://proxy.golang.org/golang.org/x/mod/@v/v0.41.0.zip"
+   },
+   {
+     "dest": "vendor/golang.org/x/sys",
+-    "sha256": "f44842acff792af010dcb5a24308b72272ebd57c74e00d5f530c9e5d55b86979",
++    "sha256": "e73a06591ca0d7016ce3ccb45c36a8ed7128468aecc1a357f94d815c760c6b31",
+     "strip-components": 3,
+     "type": "archive",
+-    "url": "https://proxy.golang.org/golang.org/x/sys/@v/v0.26.0.zip"
++    "url": "https://proxy.golang.org/golang.org/x/sys/@v/v0.49.0.zip"
++  },
++  {
++    "dest": "vendor/golang.org/x/text",
++    "sha256": "b75131f628f6e2e4892fd638d33127e952a5027775e0162b94ba069cb4e13863",
++    "strip-components": 3,
++    "type": "archive",
++    "url": "https://proxy.golang.org/golang.org/x/text/@v/v0.43.0.zip"
+   }
+ ]
+diff --git a/go.sum b/go.sum
+index d3a1980132f7c1cbd84a1dfed53be0725cda727f..5c60ca8f1bb25607d960cd0bfff994dd59c4e471 100644
+--- a/go.sum
++++ b/go.sum
+@@ -6,8 +6,20 @@ github.com/adrg/xdg v0.5.3 h1:xRnxJXne7+oWDatRhR1JLnvuccuIeCoBu2rtuLqQB78=
+ github.com/adrg/xdg v0.5.3/go.mod h1:nlTsY+NNiCBGCK2tpm09vRqfVzrc2fLmXGpBLF0zlTQ=
+ github.com/dennwc/flatpak-go-mod v0.1.1-0.20250809093520-ddf8d84264aa h1:c5k0CB16zFqMTKviySxusHVRFAnggzX3l6JK3Cw6fiQ=
+ github.com/dennwc/flatpak-go-mod v0.1.1-0.20250809093520-ddf8d84264aa/go.mod h1:4akg2uvMr36H/vDzQSPofcff2LBk4u+bTAPy2bxVoOo=
++github.com/gabriel-vasile/mimetype v1.4.16 h1:5izNFuvA37st1dDRAcA7TtmngBmRgiIPDmTtiEvjx1E=
++github.com/gabriel-vasile/mimetype v1.4.16/go.mod h1:3oFFwxX8kTklZwzIl2aQEDZT0lKY8xH92ST88bAwba4=
++github.com/go-playground/assert/v2 v2.2.0 h1:JvknZsQTYeFEAhQwI4qEt9cyV5ONwRHC+lYKSsYSR8s=
++github.com/go-playground/assert/v2 v2.2.0/go.mod h1:VDjEfimB/XKnb+ZQfWdccd7VUvScMdVu0Titje2rxJ4=
++github.com/go-playground/locales v0.14.2 h1:d8UmcrM6Nip0hfGZKLGpAvZH37XB4TS0xzK9B56YNCY=
++github.com/go-playground/locales v0.14.2/go.mod h1:hxrqLVvrK65+Rwrd5Fc6F2O76J/NuW9t0sjnWqG1slY=
++github.com/go-playground/universal-translator v0.18.2 h1:LCsMLC9RzmbUMNUPVYD15dmcjwYAJhmX8mPZRW4rAVU=
++github.com/go-playground/universal-translator v0.18.2/go.mod h1:67VZIMp5lQpDWlnStOct22q1bkdJGJqHghbOtmkawxk=
++github.com/go-playground/validator/v10 v10.30.6 h1:E+mymlPNRzAMNz1FShrRvLeGWcprF5w305eLLgWieuo=
++github.com/go-playground/validator/v10 v10.30.6/go.mod h1:jPLL8SKCXGe/g87QmEyNw3NO28nmGt5GCnZnufm7rj4=
+ github.com/goccy/go-yaml v1.18.0 h1:8W7wMFS12Pcas7KU+VVkaiCng+kG8QiFeFwzFb+rwuw=
+ github.com/goccy/go-yaml v1.18.0/go.mod h1:XBurs7gK8ATbW4ZPGKgcbrY1Br56PdM69F7LkFRi1kA=
++github.com/leodido/go-urn v1.5.0 h1:pLqT2kq1zpHW/1D18QMjMpdtX7cekxqtJJjg5ANyWw0=
++github.com/leodido/go-urn v1.5.0/go.mod h1:9BORnCDhdPBJNDEX+w1bJisa8yOKYi116VeO96s4ifE=
+ github.com/neilotoole/slogt/v2 v2.0.0 h1:Kz8VWdkjXZnkVvN1hsGYI1ervWhlcDcIcVizUJbLbH8=
+ github.com/neilotoole/slogt/v2 v2.0.0/go.mod h1:M/RN37tAuM3cpb/wD6lCpOSvphLMjuAzA/IV2hqJh3E=
+ github.com/pojntfx/go-gettext v0.4.2 h1:mYWcztN4idj11/GCNg+N2zNyJSpFKnIAr5ilksyIMtU=
+@@ -18,7 +30,11 @@ github.com/stretchr/testify v1.12.1 h1:EuwCh5fleGS7H32xRwO3wRGT7DxrDhLAT6FF8MpWDWE=
+ github.com/stretchr/testify v1.12.1/go.mod h1:MDEgiDPPsNp5cuIrHPPCyornHKgEVbtFUmoNlxoYthg=
+ go.yaml.in/yaml/v3 v3.0.5 h1:N6y/pJk8buWs9NY5ERU2HSMfm+IuD/OtfdAnq6kESPw=
+ go.yaml.in/yaml/v3 v3.0.5/go.mod h1:HVTZu1O7/Vkt2N+BFy8Zza+lnLsABggaTM2ZpNIGuKg=
+-golang.org/x/mod v0.27.0 h1:kb+q2PyFnEADO2IEF935ehFUXlWiNjJWtRNgBLSfbxQ=
+-golang.org/x/mod v0.27.0/go.mod h1:rWI627Fq0DEoudcK+MBkNkCe0EetEaDSwJJkCcjpazc=
+-golang.org/x/sys v0.26.0 h1:KHjCJyddX0LoSTb3J+vWpupP9p0oznkqVk/IfjymZbo=
+-golang.org/x/sys v0.26.0/go.mod h1:/VUhepiaJMQUp4+oa/7Zr1D23ma6VTLIYjOOTFZPUcA=
++golang.org/x/crypto v0.58.0 h1:COkYLr4k7nDI4r6QtMML2AfzeIswWHAJthLS6K/M/54=
++golang.org/x/crypto v0.58.0/go.mod h1:Xh+kl5A+M0gMiWDytH2Hhr5Z7WbNCpv/eB/EFgfSk+w=
++golang.org/x/mod v0.41.0 h1:qJmnOUb4YB+FsEuM3HcWucdZASCPGhsX6uljO6pog0c=
++golang.org/x/mod v0.41.0/go.mod h1:Ek9pY8RKWXwsWvd3rQiHYtMqkjSUV+s1Rj7j4H5Ur6o=
++golang.org/x/sys v0.49.0 h1:XbzkgYJHdqh/8m2Uu0W/dQv8nktxx4BFHp1M0gROTXA=
++golang.org/x/sys v0.49.0/go.mod h1:hNLxWAXmnKAxqDtdwIYC4bM9oQPEecfsnNMuSxOs3og=
++golang.org/x/text v0.43.0 h1:1QivrlhwAsnMOcqgOdl9my7s9OyZl8O5/UGUTJVXoWc=
++golang.org/x/text v0.43.0/go.mod h1:hbSIYA/amXcRXTFSZqh8tWHEoqRvvbKPJ2uz/KU+a+s=
+diff --git a/internal/components/create_machine_dialog.go b/internal/components/create_machine_dialog.go
+index 92b66bc34111050a628ad0fd3e4491a2fbd8e5db..d812883ee18c62fc16d5687ff817988cf413da93 100644
+--- a/internal/components/create_machine_dialog.go
++++ b/internal/components/create_machine_dialog.go
+@@ -1,6 +1,7 @@
+ package components
+ 
+ import (
++	"log/slog"
+ 	"runtime"
+ 	"unsafe"
+ 
+@@ -9,14 +10,22 @@ 	"codeberg.org/puregotk/puregotk/v4/adw"
+ 	"codeberg.org/puregotk/puregotk/v4/glib"
+ 	"codeberg.org/puregotk/puregotk/v4/gobject"
+ 	"codeberg.org/puregotk/puregotk/v4/gtk"
++	"github.com/go-playground/validator/v10"
++	. "github.com/pojntfx/go-gettext/pkg/i18n"
+ )
+ 
+ var (
+ 	gTypeCreateMachineDialog gobject.Type
++	hostnameValidator        = validator.New()
+ )
+ 
+ type CreateMachineDialog struct {
+ 	adw.Dialog
++
++	nameRow         *adw.EntryRow
++	nameErrorButton *gtk.MenuButton
++
++	callbacks []interface{}
+ }
+ 
+ func NewCreateMachineDialog() CreateMachineDialog {
+@@ -26,13 +35,38 @@
+ 	var v CreateMachineDialog
+ 	obj.Cast(&v)
+ 
++	dialog := (*CreateMachineDialog)(unsafe.Pointer(obj.GetData(dataKeyGoInstance)))
++
++	onAliasChanged := func() {
++		dialog.validateAlias()
++	}
++	dialog.callbacks = append(dialog.callbacks, &onAliasChanged)
++	dialog.nameRow.PreferencesRow.ListBoxRow.Widget.InitiallyUnowned.Object.ConnectSignal("changed", &onAliasChanged)
++
+ 	return v
+ }
+ 
++func (w *CreateMachineDialog) validateAlias() {
++	name := w.nameRow.GetText()
++	if name == "" || hostnameValidator.Var(name, "hostname_rfc1123,max=253") == nil {
++		w.nameRow.RemoveCssClass("error")
++		w.nameRow.SetTooltipText("")
++		w.nameErrorButton.SetVisible(false)
++
++		return
++	}
++
++	w.nameRow.AddCssClass("error")
++	w.nameRow.SetTooltipText(L("Use a hostname like dev-vm or dev.example"))
++	w.nameErrorButton.SetVisible(true)
++}
++
+ func init() {
+ 	var dialogClassInit gobject.ClassInitFunc = func(tc *gobject.TypeClass, u uintptr) {
+ 		typeClass := (*gtk.WidgetClass)(unsafe.Pointer(tc))
+ 		typeClass.SetTemplateFromResource(resources.ResourceCreateMachineDialogUIPath)
++		typeClass.BindTemplateChildFull("name_row", false, 0)
++		typeClass.BindTemplateChildFull("name_error_button", false, 0)
+ 
+ 		objClass := (*gobject.ObjectClass)(unsafe.Pointer(tc))
+ 
+@@ -45,14 +79,39 @@ 			o.Cast(&parent)
+ 
+ 			parent.InitTemplate()
+ 
++			var (
++				nameRow         adw.EntryRow
++				nameErrorButton gtk.MenuButton
++			)
++
++			parent.Widget.GetTemplateChild(
++				gTypeCreateMachineDialog,
++				"name_row",
++			).Cast(&nameRow)
++			parent.Widget.GetTemplateChild(
++				gTypeCreateMachineDialog,
++				"name_error_button",
++			).Cast(&nameErrorButton)
++
+ 			d := &CreateMachineDialog{
+ 				Dialog: parent,
++
++				nameRow:         &nameRow,
++				nameErrorButton: &nameErrorButton,
++
++				callbacks: []interface{}{},
+ 			}
+ 
+ 			var pinner runtime.Pinner
+ 			pinner.Pin(d)
+ 
+ 			var cleanupCallback glib.DestroyNotify = func(data uintptr) {
++				for _, callback := range d.callbacks {
++					if err := glib.UnrefCallback(callback); err != nil {
++						slog.Default().Error("Could not unref callback", "err", err)
++					}
++				}
++
+ 				pinner.Unpin()
+ 			}
+ 			o.SetDataFull(dataKeyGoInstance, uintptr(unsafe.Pointer(d)), &cleanupCallback)
+diff --git a/modules.txt b/modules.txt
+index a202bb7df42d524b41dfc6aee23b2216e387bfa5..35e8eccc60d7acbc29cc44e5fc18d1e28e223538 100644
+--- a/modules.txt
++++ b/modules.txt
+@@ -30,6 +30,27 @@ github.com/adrg/xdg/internal/userdirs
+ # github.com/dennwc/flatpak-go-mod v0.1.1-0.20250809093520-ddf8d84264aa
+ ## explicit; go 1.24.4
+ github.com/dennwc/flatpak-go-mod
++# github.com/gabriel-vasile/mimetype v1.4.16
++## explicit; go 1.24
++github.com/gabriel-vasile/mimetype
++github.com/gabriel-vasile/mimetype/internal/cdf
++github.com/gabriel-vasile/mimetype/internal/charset
++github.com/gabriel-vasile/mimetype/internal/csv
++github.com/gabriel-vasile/mimetype/internal/json
++github.com/gabriel-vasile/mimetype/internal/magic
++github.com/gabriel-vasile/mimetype/internal/markup
++github.com/gabriel-vasile/mimetype/internal/mp3
++github.com/gabriel-vasile/mimetype/internal/scan
++# github.com/go-playground/locales v0.14.2
++## explicit; go 1.17
++github.com/go-playground/locales
++github.com/go-playground/locales/currency
++# github.com/go-playground/universal-translator v0.18.2
++## explicit; go 1.26
++github.com/go-playground/universal-translator
++# github.com/go-playground/validator/v10 v10.30.6
++## explicit; go 1.26.0
++github.com/go-playground/validator/v10
+ # github.com/goccy/go-yaml v1.18.0
+ ## explicit; go 1.21.0
+ github.com/goccy/go-yaml
+@@ -41,6 +62,10 @@ github.com/goccy/go-yaml/parser
+ github.com/goccy/go-yaml/printer
+ github.com/goccy/go-yaml/scanner
+ github.com/goccy/go-yaml/token
++# github.com/leodido/go-urn v1.5.0
++## explicit; go 1.24.0
++github.com/leodido/go-urn
++github.com/leodido/go-urn/scim/schema
+ # github.com/neilotoole/slogt/v2 v2.0.0
+ ## explicit; go 1.25
+ github.com/neilotoole/slogt/v2
+@@ -60,12 +85,22 @@ github.com/stretchr/testify/require
+ # go.yaml.in/yaml/v3 v3.0.5
+ ## explicit; go 1.16
+ go.yaml.in/yaml/v3
+-# golang.org/x/mod v0.27.0
+-## explicit; go 1.23.0
++# golang.org/x/crypto v0.58.0
++## explicit; go 1.26.0
++golang.org/x/crypto/sha3
++# golang.org/x/mod v0.41.0
++## explicit; go 1.26.0
+ golang.org/x/mod/internal/lazyregexp
+ golang.org/x/mod/modfile
+ golang.org/x/mod/module
+ golang.org/x/mod/semver
+-# golang.org/x/sys v0.26.0
+-## explicit; go 1.18
++# golang.org/x/sys v0.49.0
++## explicit; go 1.26.0
++golang.org/x/sys/cpu
+ golang.org/x/sys/windows
++# golang.org/x/text v0.43.0
++## explicit; go 1.26.0
++golang.org/x/text/internal/language
++golang.org/x/text/internal/language/compact
++golang.org/x/text/internal/tag
++golang.org/x/text/language
+diff --git a/po/phial.pot b/po/phial.pot
+index a9e6ec52e82a8ce4aa60a1c0e6e3deef3644a970..4cf4f7e80d6f7553b11f20a526a3c1b52fd53678 100644
+--- a/po/phial.pot
++++ b/po/phial.pot
+@@ -127,49 +127,6 @@ #: ../assets/resources/shortcuts-dialog.blp:29
+ msgid "Quit"
+ msgstr ""
+ 
+-#: ../assets/resources/create-machine-dialog.blp:5
+-#: ../assets/resources/create-machine-dialog.blp:23
+-#: ../assets/resources/window.blp:102 ../assets/resources/window.blp:109
+-msgid "New Machine"
+-msgstr ""
+-
+-#: ../assets/resources/create-machine-dialog.blp:29
+-msgid "_Create"
+-msgstr ""
+-
+-#: ../assets/resources/create-machine-dialog.blp:39
+-msgid "Identity"
+-msgstr ""
+-
+-#: ../assets/resources/create-machine-dialog.blp:40
+-msgid "The name becomes the SSH host alias"
+-msgstr ""
+-
+-#: ../assets/resources/create-machine-dialog.blp:43
+-msgid "_Name"
+-msgstr ""
+-
+-#: ../assets/resources/create-machine-dialog.blp:50
+-msgid "Resources"
+-msgstr ""
+-
+-#: ../assets/resources/create-machine-dialog.blp:51
+-msgid "Phial allocates the disk image on the first start"
+-msgstr ""
+-
+-#: ../assets/resources/create-machine-dialog.blp:54
+-msgid "Memory"
+-msgstr ""
+-
+-#: ../assets/resources/create-machine-dialog.blp:67
+-#: ../assets/resources/create-machine-dialog.blp:89
+-msgid "GiB"
+-msgstr ""
+-
+-#: ../assets/resources/create-machine-dialog.blp:76
+-msgid "Disk Size"
+-msgstr ""
+-
+ #: ../assets/resources/window.blp:7 ../assets/resources/window.blp:25
+ #: ../assets/resources/window.blp:55 ../assets/resources/window.blp:94
+ #: ../assets/resources/window.blp:114 ../assets/resources/window.blp:155
+@@ -205,6 +162,12 @@ #: ../assets/resources/window.blp:75
+ msgid "_Get Started"
+ msgstr ""
+ 
++#: ../assets/resources/window.blp:102 ../assets/resources/window.blp:109
++#: ../assets/resources/create-machine-dialog.blp:5
++#: ../assets/resources/create-machine-dialog.blp:23
++msgid "New Machine"
++msgstr ""
++
+ #: ../assets/resources/window.blp:130 ../assets/resources/window.blp:161
+ msgid "Machines"
+ msgstr ""
+@@ -257,6 +220,52 @@ msgstr ""
+ 
+ #: ../assets/resources/window.blp:240
+ msgid "_About Phial"
++msgstr ""
++
++#: ../assets/resources/create-machine-dialog.blp:29
++msgid "_Create"
++msgstr ""
++
++#: ../assets/resources/create-machine-dialog.blp:39
++msgid "Identity"
++msgstr ""
++
++#: ../assets/resources/create-machine-dialog.blp:40
++msgid "The name becomes the SSH host alias"
++msgstr ""
++
++#: ../assets/resources/create-machine-dialog.blp:43
++msgid "_Name"
++msgstr ""
++
++#: ../assets/resources/create-machine-dialog.blp:51
++msgid "Show Error"
++msgstr ""
++
++#: ../assets/resources/create-machine-dialog.blp:63
++msgid "Resources"
++msgstr ""
++
++#: ../assets/resources/create-machine-dialog.blp:64
++msgid "Phial allocates the disk image on the first start"
++msgstr ""
++
++#: ../assets/resources/create-machine-dialog.blp:67
++msgid "Memory"
++msgstr ""
++
++#: ../assets/resources/create-machine-dialog.blp:80
++#: ../assets/resources/create-machine-dialog.blp:102
++msgid "GiB"
++msgstr ""
++
++#: ../assets/resources/create-machine-dialog.blp:89
++msgid "Disk Size"
++msgstr ""
++
++#: ../assets/resources/create-machine-dialog.blp:116
++#: ../internal/components/create_machine_dialog.go:60
++msgid "Use a hostname like dev-vm or dev.example"
+ msgstr ""
+ 
+ #. TRANSLATORS: Replace "translator-credits" with your name/username, and optionally an email or URL.
+
