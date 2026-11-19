@@ -1,0 +1,666 @@
+From 4f7f712b4e6c3221a8e565ec93da4bfc24094125 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Wed, 18 Nov 2026 21:48:49 -0700
+Subject: [PATCH] feat: Add minimal reworked preferences dialog for the machines folder
+---
+diff --git a/assets/resources/preferences-dialog.blp b/assets/resources/preferences-dialog.blp
+index b4f407aa635c81b30c7cf23bbf315b5c2becb48c..e777a06d8886d56ce671931be77fcf3aa6e391f7 100644
+--- a/assets/resources/preferences-dialog.blp
++++ b/assets/resources/preferences-dialog.blp
+@@ -3,22 +3,15 @@ using Adw 1;
+ 
+ template $PhialPreferencesDialog: Adw.PreferencesDialog {
+   title: _("Preferences");
+-  search-enabled: true;
+ 
+-  Adw.PreferencesPage preferences_page {
++  Adw.PreferencesPage {
+     title: _("General");
+ 
+-    banner: Adw.Banner host_service_banner {
+-      title: _("Host service needs reconfiguration");
+-      revealed: false;
+-    };
+-
+     Adw.PreferencesGroup {
+       description: _("Phial keeps its machines and their configurations in this folder");
+ 
+       Adw.ActionRow machines_folder_row {
+         title: _("Machines Folder");
+-        subtitle: _("Not selected");
+ 
+         [prefix]
+         Image {
+@@ -31,44 +24,6 @@           label: _("_Choose...");
+           use-underline: true;
+           valign: center;
+         }
+-      }
+-    }
+-
+-    Adw.PreferencesGroup host_service_group {
+-      title: _("Host Service");
+-      description: _("Run this command in a terminal to reconfigure the host service for the new machines folder");
+-
+-      Gtk.ListBoxRow host_command_row {
+-        activatable: false;
+-        selectable: false;
+-
+-        Box {
+-          margin-top: 12;
+-          margin-bottom: 12;
+-          margin-start: 12;
+-          margin-end: 12;
+-
+-          Label host_command_label {
+-            selectable: true;
+-            wrap: true;
+-            xalign: 0;
+-            styles [
+-              "monospace",
+-            ]
+-          }
+-        }
+-      }
+-
+-      Adw.ButtonRow host_copy_row {
+-        title: _("_Copy Command");
+-        use-underline: true;
+-        start-icon-name: "edit-copy-symbolic";
+-      }
+-
+-      Adw.ButtonRow host_verify_row {
+-        title: _("_Verify Connection");
+-        use-underline: true;
+-        start-icon-name: "view-refresh-symbolic";
+       }
+     }
+   }
+diff --git a/assets/resources/window.blp b/assets/resources/window.blp
+index 404f57318afefa9dca2d3f479d736e062f2f9dfb..67362ff03196c9746f36937a90773ff233404ef3 100644
+--- a/assets/resources/window.blp
++++ b/assets/resources/window.blp
+@@ -94,14 +94,6 @@             menu-model: main_menu;
+           }
+         }
+ 
+-        [top]
+-        Adw.Banner host_banner {
+-          title: _("Host service needs reconfiguration");
+-          button-label: _("Open Preferences");
+-          action-name: "app.openPreferences";
+-          revealed: false;
+-        }
+-
+         content: Adw.StatusPage {
+           icon-name: "drive-harddisk-symbolic";
+           title: _("Phial");
+@@ -117,6 +109,7 @@   section {
+     item {
+       label: _("_Preferences");
+       action: "app.openPreferences";
++      hidden-when: "action-disabled";
+     }
+ 
+     item {
+diff --git a/internal/components/application.go b/internal/components/application.go
+index 46b6d46a84c6746474ac5145db6d2a17f349f18b..50b66bee23064262a02dede4b29333c14a38e060 100644
+--- a/internal/components/application.go
++++ b/internal/components/application.go
+@@ -156,10 +156,8 @@ 			obj := NewMainWindow(phialApp.ctx, &phialApp.Application, phialApp.log, phialApp.settings, store, "application", app)
+ 
+ 			phialApp.window = (*MainWindow)(unsafe.Pointer(obj.GetData(dataKeyGoInstance)))
+ 
+-			preferencesDialog := NewPreferencesDialog(phialApp.ctx, store, phialApp.settings, phialApp.log, &phialApp.window.ApplicationWindow.Widget, phialApp.window.refresh)
++			preferencesDialog := NewPreferencesDialog(phialApp.ctx, store, phialApp.settings, phialApp.log, &phialApp.window.ApplicationWindow.Widget)
+ 			phialApp.preferencesDialog = (*PreferencesDialog)(unsafe.Pointer(preferencesDialog.Widget.GetData(dataKeyGoInstance)))
+-
+-			phialApp.window.SetPreferencesDialog(phialApp.preferencesDialog)
+ 
+ 			go store.Run()
+ 
+@@ -178,6 +176,8 @@ 				phialApp.preferencesDialog.Present(&phialApp.window.ApplicationWindow.Widget)
+ 			}
+ 			openPreferencesAction.ConnectActivate(&onOpenPreferences)
+ 			phialApp.Application.AddAction(openPreferencesAction)
++
++			phialApp.window.SetPreferencesAction(openPreferencesAction)
+ 
+ 			quitAction := gio.NewSimpleAction("quit", nil)
+ 			onQuit := func(gio.SimpleAction, uintptr) {
+diff --git a/internal/components/main_window.go b/internal/components/main_window.go
+index c2cd7f7768a31c1b79b49cc7eb09a71fa9b22fef..5c75b3528f4975e74c4efd17fc9748477fb71c9a 100644
+--- a/internal/components/main_window.go
++++ b/internal/components/main_window.go
+@@ -38,13 +38,11 @@ 	store *state.Store
+ 
+ 	contentStack gtk.Stack
+ 
+-	hostBanner adw.Banner
+-
+ 	welcomeStatusPage *adw.StatusPage
+ 
+ 	setupDialog *SetupDialog
+ 
+-	preferencesDialog *PreferencesDialog
++	preferencesAction *gio.SimpleAction
+ 
+ 	callbacks []interface{}
+ }
+@@ -102,8 +100,10 @@
+ 	return v
+ }
+ 
+-func (w *MainWindow) SetPreferencesDialog(d *PreferencesDialog) {
+-	w.preferencesDialog = d
++func (w *MainWindow) SetPreferencesAction(action *gio.SimpleAction) {
++	w.preferencesAction = action
++
++	w.refresh()
+ }
+ 
+ func (w *MainWindow) refresh() {
+@@ -111,8 +111,9 @@ 	if w.store == nil {
+ 		return
+ 	}
+ 
+-	pending := hostReconfigurationPending(w.settings)
+-	w.hostBanner.SetRevealed(pending && (w.preferencesDialog == nil || !w.preferencesDialog.Visible()))
++	if w.preferencesAction != nil {
++		w.preferencesAction.SetEnabled(w.store.Ready() || w.store.Page() == state.SetupPageFinish)
++	}
+ 
+ 	if w.store.HostStatus() == state.HostStatusConnecting {
+ 		w.contentStack.SetVisibleChildName(contentPageConnecting)
+@@ -130,7 +131,6 @@ 	var windowClassInit gobject.ClassInitFunc = func(tc *gobject.TypeClass, u uintptr) {
+ 		typeClass := (*gtk.WidgetClass)(unsafe.Pointer(tc))
+ 		typeClass.SetTemplateFromResource(resources.ResourceWindowUIPath)
+ 		typeClass.BindTemplateChildFull("content_stack", false, 0)
+-		typeClass.BindTemplateChildFull("host_banner", false, 0)
+ 		typeClass.BindTemplateChildFull("welcome_status_page", false, 0)
+ 
+ 		objClass := (*gobject.ObjectClass)(unsafe.Pointer(tc))
+@@ -146,7 +146,6 @@ 			parent.InitTemplate()
+ 
+ 			var (
+ 				contentStack      gtk.Stack
+-				hostBanner        adw.Banner
+ 				welcomeStatusPage adw.StatusPage
+ 			)
+ 
+@@ -156,10 +155,6 @@ 				"content_stack",
+ 			).Cast(&contentStack)
+ 			parent.Widget.GetTemplateChild(
+ 				gTypeMainWindow,
+-				"host_banner",
+-			).Cast(&hostBanner)
+-			parent.Widget.GetTemplateChild(
+-				gTypeMainWindow,
+ 				"welcome_status_page",
+ 			).Cast(&welcomeStatusPage)
+ 
+@@ -167,8 +162,6 @@ 			w := &MainWindow{
+ 				ApplicationWindow: parent,
+ 
+ 				contentStack: contentStack,
+-
+-				hostBanner: hostBanner,
+ 
+ 				welcomeStatusPage: &welcomeStatusPage,
+ 
+diff --git a/internal/components/preferences_dialog.go b/internal/components/preferences_dialog.go
+index c2db6c3353fad1fb5ca89bf52734703a567ad06d..fbe599ea78b6f3c1d1a964f229cb84bfb30d27fd 100644
+--- a/internal/components/preferences_dialog.go
++++ b/internal/components/preferences_dialog.go
+@@ -31,29 +31,15 @@ 	log      *slog.Logger
+ 
+ 	store *state.Store
+ 
+-	parent   *gtk.Widget
+-	onChange func()
+-
+-	preferencesPage      adw.PreferencesPage
+-	machinesFolderRow    adw.ActionRow
+-	machinesFolderButton gtk.Button
+-	hostServiceBanner    adw.Banner
+-	hostServiceGroup     adw.PreferencesGroup
+-	hostCommandLabel     gtk.Label
+-	hostCopyRow          adw.ButtonRow
+-	hostVerifyRow        adw.ButtonRow
+-
+-	hostServiceAttached bool
+-
+-	open bool
++	parent *gtk.Widget
+ 
+-	copied    bool
+-	verifying bool
++	machinesFolderRow    *adw.ActionRow
++	machinesFolderButton *gtk.Button
+ 
+ 	callbacks []interface{}
+ }
+ 
+-func NewPreferencesDialog(ctx context.Context, store *state.Store, settings *gio.Settings, log *slog.Logger, parent *gtk.Widget, onChange func()) PreferencesDialog {
++func NewPreferencesDialog(ctx context.Context, store *state.Store, settings *gio.Settings, log *slog.Logger, parent *gtk.Widget) PreferencesDialog {
+ 	obj := gobject.NewObject(gTypePreferencesDialog, "css-name")
+ 	gobject.IncreaseRef(obj.GoPointer())
+ 
+@@ -66,13 +52,13 @@ 	dialog.settings = settings
+ 	dialog.log = log
+ 	dialog.store = store
+ 	dialog.parent = parent
+-	dialog.onChange = onChange
+ 
+ 	onChooseFolder := func(gtk.Button) {
+ 		fileDialog := gtk.NewFileDialog()
+ 		fileDialog.SetTitle(L("Choose the Machines Folder"))
+ 
+ 		initial := dialog.store.MachinesFolder()
++
+ 		if initial == "" {
+ 			initial = dialog.store.SuggestedMachinesFolder()
+ 		}
+@@ -112,85 +98,13 @@ 	}
+ 	dialog.callbacks = append(dialog.callbacks, &onChooseFolder)
+ 	dialog.machinesFolderButton.ConnectClicked(&onChooseFolder)
+ 
+-	onCopy := func(adw.ButtonRow) {
+-		dialog.parent.GetClipboard().SetText(dialog.store.HostCommand())
+-
+-		dialog.copied = true
+-
+-		dialog.Refresh()
+-	}
+-	dialog.callbacks = append(dialog.callbacks, &onCopy)
+-	dialog.hostCopyRow.ConnectActivated(&onCopy)
+-
+-	onVerifyConnection := func(adw.ButtonRow) {
+-		if !dialog.copied || dialog.verifying {
+-			return
+-		}
+-
+-		dialog.verifying = true
+-
+-		dialog.Refresh()
+-
+-		go func() {
+-			verifyErr := dialog.store.RetryHost(dialog.ctx)
+-			if verifyErr != nil {
+-				dialog.log.Error("Could not verify host connection", "err", verifyErr)
+-			}
+-
+-			var fn glib.SourceFunc
+-			fn = glib.SourceFunc(func(uintptr) bool {
+-				defer glib.UnrefCallback(&fn)
+-
+-				if verifyErr == nil && dialog.store.HostStatus() == state.HostStatusOnline {
+-					if !dialog.settings.SetString(resources.SchemaHostMachinesFolderKey, dialog.store.MachinesFolder()) {
+-						dialog.log.Error("Could not write host machines folder setting")
+-					}
+-				}
+-
+-				dialog.verifying = false
+-				dialog.copied = false
+-
+-				dialog.Refresh()
+-
+-				if dialog.onChange != nil {
+-					dialog.onChange()
+-				}
+-
+-				return false
+-			})
+-			glib.IdleAdd(&fn, 0)
+-		}()
+-	}
+-	dialog.callbacks = append(dialog.callbacks, &onVerifyConnection)
+-	dialog.hostVerifyRow.ConnectActivated(&onVerifyConnection)
+-
+-	onClosed := func(adw.Dialog) {
+-		dialog.open = false
+-
+-		if dialog.onChange != nil {
+-			dialog.onChange()
+-		}
+-	}
+-	dialog.callbacks = append(dialog.callbacks, &onClosed)
+-	dialog.ConnectClosed(&onClosed)
+-
+ 	dialog.Refresh()
+ 
+ 	return v
+ }
+ 
+ func (w *PreferencesDialog) Present(parent *gtk.Widget) {
+-	w.open = true
+-
+ 	w.PreferencesDialog.Present(parent)
+-
+-	if w.onChange != nil {
+-		w.onChange()
+-	}
+-}
+-
+-func (w *PreferencesDialog) Visible() bool {
+-	return w.open
+ }
+ 
+ func (w *PreferencesDialog) setMachinesFolder(path string) {
+@@ -206,13 +120,7 @@
+ 		return
+ 	}
+ 
+-	w.copied = false
+-
+ 	w.Refresh()
+-
+-	if w.onChange != nil {
+-		w.onChange()
+-	}
+ }
+ 
+ func (w *PreferencesDialog) Refresh() {
+@@ -220,51 +128,15 @@ 	if w.store == nil {
+ 		return
+ 	}
+ 
+-	if folder := w.store.MachinesFolder(); folder == "" {
+-		w.machinesFolderRow.SetSubtitle(L("Not selected"))
+-	} else {
+-		w.machinesFolderRow.SetSubtitle(folder)
+-	}
+-
+-	w.hostCommandLabel.SetText(w.store.HostCommand())
+-
+-	pending := hostReconfigurationPending(w.settings)
+-
+-	w.hostServiceBanner.SetRevealed(pending)
+-
+-	if pending && !w.hostServiceAttached {
+-		w.preferencesPage.Add(&w.hostServiceGroup)
+-
+-		w.hostServiceAttached = true
+-	} else if !pending && w.hostServiceAttached {
+-		w.preferencesPage.Remove(&w.hostServiceGroup)
+-
+-		w.hostServiceAttached = false
+-	}
+-
+-	w.hostCopyRow.SetSensitive(!w.verifying)
+-	w.hostVerifyRow.SetSensitive(w.copied && !w.verifying)
+-}
+-
+-func hostReconfigurationPending(settings *gio.Settings) bool {
+-	machinesFolder := settings.GetString(resources.SchemaMachinesFolderKey)
+-	hostMachinesFolder := settings.GetString(resources.SchemaHostMachinesFolderKey)
+-
+-	return machinesFolder != "" && machinesFolder != hostMachinesFolder
++	w.machinesFolderRow.SetSubtitle(w.store.MachinesFolder())
+ }
+ 
+ func init() {
+ 	var classInit gobject.ClassInitFunc = func(tc *gobject.TypeClass, u uintptr) {
+ 		typeClass := (*gtk.WidgetClass)(unsafe.Pointer(tc))
+ 		typeClass.SetTemplateFromResource(resources.ResourcePreferencesDialogUIPath)
+-		typeClass.BindTemplateChildFull("preferences_page", false, 0)
+ 		typeClass.BindTemplateChildFull("machines_folder_row", false, 0)
+ 		typeClass.BindTemplateChildFull("machines_folder_button", false, 0)
+-		typeClass.BindTemplateChildFull("host_service_banner", false, 0)
+-		typeClass.BindTemplateChildFull("host_service_group", false, 0)
+-		typeClass.BindTemplateChildFull("host_command_label", false, 0)
+-		typeClass.BindTemplateChildFull("host_copy_row", false, 0)
+-		typeClass.BindTemplateChildFull("host_verify_row", false, 0)
+ 
+ 		objClass := (*gobject.ObjectClass)(unsafe.Pointer(tc))
+ 
+@@ -278,61 +150,26 @@
+ 			parent.InitTemplate()
+ 
+ 			var (
+-				preferencesPage      adw.PreferencesPage
+ 				machinesFolderRow    adw.ActionRow
+ 				machinesFolderButton gtk.Button
+-				hostServiceBanner    adw.Banner
+-				hostServiceGroup     adw.PreferencesGroup
+-				hostCommandLabel     gtk.Label
+-				hostCopyRow          adw.ButtonRow
+-				hostVerifyRow        adw.ButtonRow
+ 			)
+ 
+ 			parent.Widget.GetTemplateChild(
+ 				gTypePreferencesDialog,
+-				"preferences_page",
+-			).Cast(&preferencesPage)
+-			parent.Widget.GetTemplateChild(
+-				gTypePreferencesDialog,
+ 				"machines_folder_row",
+ 			).Cast(&machinesFolderRow)
+ 			parent.Widget.GetTemplateChild(
+ 				gTypePreferencesDialog,
+ 				"machines_folder_button",
+ 			).Cast(&machinesFolderButton)
+-			parent.Widget.GetTemplateChild(
+-				gTypePreferencesDialog,
+-				"host_service_banner",
+-			).Cast(&hostServiceBanner)
+-			parent.Widget.GetTemplateChild(
+-				gTypePreferencesDialog,
+-				"host_service_group",
+-			).Cast(&hostServiceGroup)
+-			parent.Widget.GetTemplateChild(
+-				gTypePreferencesDialog,
+-				"host_command_label",
+-			).Cast(&hostCommandLabel)
+-			parent.Widget.GetTemplateChild(
+-				gTypePreferencesDialog,
+-				"host_copy_row",
+-			).Cast(&hostCopyRow)
+-			parent.Widget.GetTemplateChild(
+-				gTypePreferencesDialog,
+-				"host_verify_row",
+-			).Cast(&hostVerifyRow)
+ 
+ 			w := &PreferencesDialog{
+-				PreferencesDialog:    parent,
+-				preferencesPage:      preferencesPage,
+-				machinesFolderRow:    machinesFolderRow,
+-				machinesFolderButton: machinesFolderButton,
+-				hostServiceBanner:    hostServiceBanner,
+-				hostServiceGroup:     hostServiceGroup,
+-				hostCommandLabel:     hostCommandLabel,
+-				hostCopyRow:          hostCopyRow,
+-				hostVerifyRow:        hostVerifyRow,
+-				hostServiceAttached:  true,
+-				callbacks:            []interface{}{},
++				PreferencesDialog: parent,
++
++				machinesFolderRow:    &machinesFolderRow,
++				machinesFolderButton: &machinesFolderButton,
++
++				callbacks: []interface{}{},
+ 			}
+ 
+ 			var pinner runtime.Pinner
+diff --git a/po/phial.pot b/po/phial.pot
+index f7fe41a80780206a44a9659aeec09b234ffbba24..a1317529d473707835dcea609d6ab16b98be349c 100644
+--- a/po/phial.pot
++++ b/po/phial.pot
+@@ -1,5 +1,5 @@
+ #: ../assets/resources/shortcuts-dialog.blp:6
+-#: ../assets/resources/preferences-dialog.blp:9
++#: ../assets/resources/preferences-dialog.blp:8
+ msgid "General"
+ msgstr ""
+ 
+@@ -36,24 +36,22 @@ msgid "_Continue"
+ msgstr ""
+ 
+ #: ../assets/resources/setup-dialog.blp:59
+-#: ../assets/resources/preferences-dialog.blp:17
++#: ../assets/resources/preferences-dialog.blp:11
+ msgid "Phial keeps its machines and their configurations in this folder"
+ msgstr ""
+ 
+ #: ../assets/resources/setup-dialog.blp:62
+-#: ../assets/resources/preferences-dialog.blp:20
++#: ../assets/resources/preferences-dialog.blp:14
+ msgid "Machines Folder"
+ msgstr ""
+ 
+ #: ../assets/resources/setup-dialog.blp:63
+-#: ../assets/resources/preferences-dialog.blp:21
+ #: ../internal/components/setup_dialog.go:413
+-#: ../internal/components/preferences_dialog.go:224
+ msgid "Not selected"
+ msgstr ""
+ 
+ #: ../assets/resources/setup-dialog.blp:72
+-#: ../assets/resources/preferences-dialog.blp:30
++#: ../assets/resources/preferences-dialog.blp:23
+ msgid "_Choose..."
+ msgstr ""
+ 
+@@ -64,23 +62,28 @@ "application sandbox. It is the only part of Phial that touches the system."
+ msgstr ""
+ 
+ #: ../assets/resources/setup-dialog.blp:88
+-msgid "Runs your machines <b>outside the application sandbox</b>"
++msgid ""
++"I understand it <b>runs your machines outside the application sandbox</b>"
+ msgstr ""
+ 
+ #: ../assets/resources/setup-dialog.blp:99
+-msgid "Reads and writes only the <b>machines folder</b>"
++msgid "I understand it <b>reads and writes to the machines folder</b>"
+ msgstr ""
+ 
+ #: ../assets/resources/setup-dialog.blp:110
+-msgid "Uses the <b>SSH and PGP agents</b> and the secret service of the host"
++msgid ""
++"I understand it <b>uses the SSH and PGP agents and the secret service of the "
++"host</b>"
+ msgstr ""
+ 
+ #: ../assets/resources/setup-dialog.blp:121
+-msgid "Uses the <b>virtualisation tools</b> of the host"
++msgid "I understand it <b>uses the virtualisation tools of the host</b>"
+ msgstr ""
+ 
+ #: ../assets/resources/setup-dialog.blp:132
+-msgid "Runs fixed <b>administrator commands</b>, which you approve each time"
++msgid ""
++"I understand it <b>runs fixed administrator commands, which you approve each "
++"time</b>"
+ msgstr ""
+ 
+ #: ../assets/resources/setup-dialog.blp:149
+@@ -90,12 +93,10 @@ msgstr ""
+ 
+ #: ../assets/resources/setup-dialog.blp:173
+ #: ../assets/resources/setup-dialog.blp:215
+-#: ../assets/resources/preferences-dialog.blp:63
+ msgid "_Copy Command"
+ msgstr ""
+ 
+ #: ../assets/resources/setup-dialog.blp:179
+-#: ../assets/resources/preferences-dialog.blp:69
+ msgid "_Verify Connection"
+ msgstr ""
+ 
+@@ -117,9 +118,13 @@ #: ../assets/resources/setup-dialog.blp:232
+ msgid "_Finish"
+ msgstr ""
+ 
++#: ../assets/resources/preferences-dialog.blp:5
++msgid "Preferences"
++msgstr ""
++
+ #: ../assets/resources/window.blp:7 ../assets/resources/window.blp:18
+ #: ../assets/resources/window.blp:48 ../assets/resources/window.blp:85
+-#: ../assets/resources/window.blp:107
++#: ../assets/resources/window.blp:99
+ #: ../assets/meta/com.pojtinger.felicitas.Phial.desktop.in:4
+ #: ../assets/resources/metainfo.xml.in:7
+ msgid "Phial"
+@@ -150,50 +155,31 @@ msgstr ""
+ 
+ #: ../assets/resources/window.blp:68
+ msgid "_Get Started"
+-msgstr ""
+-
+-#: ../assets/resources/window.blp:99
+-#: ../assets/resources/preferences-dialog.blp:12
+-msgid "Host service needs reconfiguration"
+ msgstr ""
+ 
+ #: ../assets/resources/window.blp:100
+-msgid "Open Preferences"
+-msgstr ""
+-
+-#: ../assets/resources/window.blp:108
+ msgid "Add a machine to get started"
+ msgstr ""
+ 
+-#: ../assets/resources/window.blp:118
++#: ../assets/resources/window.blp:110
+ msgid "_Preferences"
+ msgstr ""
+ 
+-#: ../assets/resources/window.blp:123
++#: ../assets/resources/window.blp:116
+ msgid "_Keyboard Shortcuts"
+ msgstr ""
+ 
+-#: ../assets/resources/window.blp:128
++#: ../assets/resources/window.blp:121
+ msgid "_About Phial"
+ msgstr ""
+ 
+-#: ../assets/resources/preferences-dialog.blp:5
+-msgid "Preferences"
++#. TRANSLATORS: Replace "translator-credits" with your name/username, and optionally an email or URL.
++#: ../internal/components/application.go:91
++msgid "translator-credits"
+ msgstr ""
+ 
+-#: ../assets/resources/preferences-dialog.blp:38
+-#: ../internal/components/setup_dialog.go:401
+-msgid "Host Service"
+-msgstr ""
+-
+-#: ../assets/resources/preferences-dialog.blp:39
+-msgid ""
+-"Run this command in a terminal to reconfigure the host service for the new "
+-"machines folder"
+-msgstr ""
+-
++#: ../internal/components/preferences_dialog.go:58
+ #: ../internal/components/setup_dialog.go:259
+-#: ../internal/components/preferences_dialog.go:73
+ msgid "Choose the Machines Folder"
+ msgstr ""
+ 
+@@ -209,17 +195,16 @@ #: ../internal/components/setup_dialog.go:399
+ msgid "Host Access"
+ msgstr ""
+ 
++#: ../internal/components/setup_dialog.go:401
++msgid "Host Service"
++msgstr ""
++
+ #: ../internal/components/setup_dialog.go:403
+ msgid "System Setup"
+ msgstr ""
+ 
+ #: ../internal/components/setup_dialog.go:405
+ msgid "Done"
+-msgstr ""
+-
+-#. TRANSLATORS: Replace "translator-credits" with your name/username, and optionally an email or URL.
+-#: ../internal/components/application.go:91
+-msgid "translator-credits"
+ msgstr ""
+ 
+ #. TRANSLATORS: Search terms to find this application.
+
