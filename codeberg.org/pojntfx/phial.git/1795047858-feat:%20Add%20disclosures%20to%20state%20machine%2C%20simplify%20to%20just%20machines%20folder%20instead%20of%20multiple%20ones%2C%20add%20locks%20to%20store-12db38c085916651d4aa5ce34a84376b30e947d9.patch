@@ -1,0 +1,1059 @@
+From 12db38c085916651d4aa5ce34a84376b30e947d9 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Wed, 18 Nov 2026 17:24:18 -0700
+Subject: [PATCH] feat: Add disclosures to state machine, simplify to just machines folder instead of multiple ones, add locks to store
+---
+diff --git a/go.mod b/go.mod
+index f416befbfe31b716379d2f9bd82c05f1b31f9b0c..c67a683235b7f80b211cca8fa871f55b5623e619 100644
+--- a/go.mod
++++ b/go.mod
+@@ -6,6 +6,7 @@ tool github.com/dennwc/flatpak-go-mod
+ 
+ require (
+ 	codeberg.org/puregotk/puregotk v0.0.0-20260420231554-98419d54d2d2
++	github.com/adrg/xdg v0.5.3
+ 	github.com/neilotoole/slogt/v2 v2.0.0
+ 	github.com/pojntfx/go-gettext v0.4.2
+ 	github.com/qmuntal/stateless v1.8.0
+@@ -18,4 +19,5 @@ 	github.com/dennwc/flatpak-go-mod v0.1.1-0.20250809093520-ddf8d84264aa // indirect
+ 	github.com/goccy/go-yaml v1.18.0 // indirect
+ 	go.yaml.in/yaml/v3 v3.0.5 // indirect
+ 	golang.org/x/mod v0.27.0 // indirect
++	golang.org/x/sys v0.26.0 // indirect
+ )
+diff --git a/go.mod.json b/go.mod.json
+index 85622e7e935f618a774b032dca4968088b33822b..77fbb2216d2da8689385336ae993f142c990982f 100644
+--- a/go.mod.json
++++ b/go.mod.json
+@@ -12,6 +12,20 @@     "type": "archive",
+     "url": "https://proxy.golang.org/codeberg.org/puregotk/puregotk/@v/v0.0.0-20260420231554-98419d54d2d2.zip"
+   },
+   {
++    "dest": "vendor/github.com/adrg/xdg",
++    "sha256": "52847b48afcd46cfd312bc857a8df08643cfffc4103d59a40c3ce648e0196c13",
++    "strip-components": 3,
++    "type": "archive",
++    "url": "https://proxy.golang.org/github.com/adrg/xdg/@v/v0.5.3.zip"
++  },
++  {
++    "dest": "vendor/github.com/neilotoole/slogt/v2",
++    "sha256": "1d01098208c0f72673a60496c0351710f1f1d3d44e549bbf737b709fc9151d76",
++    "strip-components": 4,
++    "type": "archive",
++    "url": "https://proxy.golang.org/github.com/neilotoole/slogt/v2/@v/v2.0.0.zip"
++  },
++  {
+     "dest": "vendor/github.com/pojntfx/go-gettext",
+     "sha256": "df8924f8c5945ac2157739497e85168322b20f2a4337c114315b2c384cb028a0",
+     "strip-components": 3,
+@@ -19,6 +33,20 @@     "type": "archive",
+     "url": "https://proxy.golang.org/github.com/pojntfx/go-gettext/@v/v0.4.2.zip"
+   },
+   {
++    "dest": "vendor/github.com/qmuntal/stateless",
++    "sha256": "155b18f498fd08b3984e1e0cd34d70ddf4b5136e82d8d57694b4decb5e7eac59",
++    "strip-components": 3,
++    "type": "archive",
++    "url": "https://proxy.golang.org/github.com/qmuntal/stateless/@v/v1.8.0.zip"
++  },
++  {
++    "dest": "vendor/github.com/stretchr/testify",
++    "sha256": "6874ed1c4b0b7e9feb27989b16c179b36590020633436ae260cefc5f5565589f",
++    "strip-components": 3,
++    "type": "archive",
++    "url": "https://proxy.golang.org/github.com/stretchr/testify/@v/v1.12.1.zip"
++  },
++  {
+     "dest": "vendor/codeberg.org/puregotk/purego",
+     "sha256": "0d5fb9e11934b151ac357a9c0660e4dcd287d2f93db0829356415f6e6a8ef84b",
+     "strip-components": 3,
+@@ -40,10 +68,24 @@     "type": "archive",
+     "url": "https://proxy.golang.org/github.com/goccy/go-yaml/@v/v1.18.0.zip"
+   },
+   {
++    "dest": "vendor/go.yaml.in/yaml/v3",
++    "sha256": "f2d70caa35f66283aec58b889af8c5f07c374c5934be27a738c1215263e19205",
++    "strip-components": 3,
++    "type": "archive",
++    "url": "https://proxy.golang.org/go.yaml.in/yaml/v3/@v/v3.0.5.zip"
++  },
++  {
+     "dest": "vendor/golang.org/x/mod",
+     "sha256": "19fb241d46e4397d3193b5fa899e2a9d62bb5d1c41f73d09d29c17c3c0d3953c",
+     "strip-components": 3,
+     "type": "archive",
+     "url": "https://proxy.golang.org/golang.org/x/mod/@v/v0.27.0.zip"
++  },
++  {
++    "dest": "vendor/golang.org/x/sys",
++    "sha256": "f44842acff792af010dcb5a24308b72272ebd57c74e00d5f530c9e5d55b86979",
++    "strip-components": 3,
++    "type": "archive",
++    "url": "https://proxy.golang.org/golang.org/x/sys/@v/v0.26.0.zip"
+   }
+ ]
+diff --git a/go.sum b/go.sum
+index 6d2695be8882e151b16345f5524c8828cd19631c..d3a1980132f7c1cbd84a1dfed53be0725cda727f 100644
+--- a/go.sum
++++ b/go.sum
+@@ -2,6 +2,8 @@ codeberg.org/puregotk/purego v0.0.0-20260224095105-2513c838cb80 h1:y5ZxMLLOjl4xc2tBl02olxZQ06xbbKiR+2ipBfDrVcs=
+ codeberg.org/puregotk/purego v0.0.0-20260224095105-2513c838cb80/go.mod h1:hVVM4ddvYRlc3IcK3CXJPlMwd/vaLj7gdDBZ6oPgT8w=
+ codeberg.org/puregotk/puregotk v0.0.0-20260420231554-98419d54d2d2 h1:i2Z8LWUE+bunEy9O43+CeQeFj3SvAtkiIzJibDp0XxY=
+ codeberg.org/puregotk/puregotk v0.0.0-20260420231554-98419d54d2d2/go.mod h1:KDQjaDscQiL2OiLWuBFBF4l/x/1DW+M0lPcQTa0Id0o=
++github.com/adrg/xdg v0.5.3 h1:xRnxJXne7+oWDatRhR1JLnvuccuIeCoBu2rtuLqQB78=
++github.com/adrg/xdg v0.5.3/go.mod h1:nlTsY+NNiCBGCK2tpm09vRqfVzrc2fLmXGpBLF0zlTQ=
+ github.com/dennwc/flatpak-go-mod v0.1.1-0.20250809093520-ddf8d84264aa h1:c5k0CB16zFqMTKviySxusHVRFAnggzX3l6JK3Cw6fiQ=
+ github.com/dennwc/flatpak-go-mod v0.1.1-0.20250809093520-ddf8d84264aa/go.mod h1:4akg2uvMr36H/vDzQSPofcff2LBk4u+bTAPy2bxVoOo=
+ github.com/goccy/go-yaml v1.18.0 h1:8W7wMFS12Pcas7KU+VVkaiCng+kG8QiFeFwzFb+rwuw=
+@@ -18,3 +20,5 @@ go.yaml.in/yaml/v3 v3.0.5 h1:N6y/pJk8buWs9NY5ERU2HSMfm+IuD/OtfdAnq6kESPw=
+ go.yaml.in/yaml/v3 v3.0.5/go.mod h1:HVTZu1O7/Vkt2N+BFy8Zza+lnLsABggaTM2ZpNIGuKg=
+ golang.org/x/mod v0.27.0 h1:kb+q2PyFnEADO2IEF935ehFUXlWiNjJWtRNgBLSfbxQ=
+ golang.org/x/mod v0.27.0/go.mod h1:rWI627Fq0DEoudcK+MBkNkCe0EetEaDSwJJkCcjpazc=
++golang.org/x/sys v0.26.0 h1:KHjCJyddX0LoSTb3J+vWpupP9p0oznkqVk/IfjymZbo=
++golang.org/x/sys v0.26.0/go.mod h1:/VUhepiaJMQUp4+oa/7Zr1D23ma6VTLIYjOOTFZPUcA=
+diff --git a/modules.txt b/modules.txt
+index 17740e246f7f658182e508f440c45533d574a3f5..a202bb7df42d524b41dfc6aee23b2216e387bfa5 100644
+--- a/modules.txt
++++ b/modules.txt
+@@ -22,6 +22,11 @@ codeberg.org/puregotk/puregotk/v4/graphene
+ codeberg.org/puregotk/puregotk/v4/gsk
+ codeberg.org/puregotk/puregotk/v4/gtk
+ codeberg.org/puregotk/puregotk/v4/pango
++# github.com/adrg/xdg v0.5.3
++## explicit; go 1.19
++github.com/adrg/xdg
++github.com/adrg/xdg/internal/pathutil
++github.com/adrg/xdg/internal/userdirs
+ # github.com/dennwc/flatpak-go-mod v0.1.1-0.20250809093520-ddf8d84264aa
+ ## explicit; go 1.24.4
+ github.com/dennwc/flatpak-go-mod
+@@ -36,12 +41,31 @@ github.com/goccy/go-yaml/parser
+ github.com/goccy/go-yaml/printer
+ github.com/goccy/go-yaml/scanner
+ github.com/goccy/go-yaml/token
++# github.com/neilotoole/slogt/v2 v2.0.0
++## explicit; go 1.25
++github.com/neilotoole/slogt/v2
+ # github.com/pojntfx/go-gettext v0.4.2
+ ## explicit; go 1.25.0
+ github.com/pojntfx/go-gettext/pkg/i18n
++# github.com/qmuntal/stateless v1.8.0
++## explicit; go 1.24
++github.com/qmuntal/stateless
++# github.com/stretchr/testify v1.12.1
++## explicit; go 1.17
++github.com/stretchr/testify/assert
++github.com/stretchr/testify/assert/yaml
++github.com/stretchr/testify/internal/difflib
++github.com/stretchr/testify/internal/spew
++github.com/stretchr/testify/require
++# go.yaml.in/yaml/v3 v3.0.5
++## explicit; go 1.16
++go.yaml.in/yaml/v3
+ # golang.org/x/mod v0.27.0
+ ## explicit; go 1.23.0
+ golang.org/x/mod/internal/lazyregexp
+ golang.org/x/mod/modfile
+ golang.org/x/mod/module
+ golang.org/x/mod/semver
++# golang.org/x/sys v0.26.0
++## explicit; go 1.18
++golang.org/x/sys/windows
+diff --git a/pkg/state/constants.go b/pkg/state/constants.go
+index a464a58d9b27a883fddd5bfbcf856a8ceeb2e970..fa4853673a68e81b20e123f7bda1d4b9b5d79ae8 100644
+--- a/pkg/state/constants.go
++++ b/pkg/state/constants.go
+@@ -10,11 +10,12 @@ const (
+ 	sessionBooting sessionState = "booting"
+ 	sessionSetup   sessionState = "setup"
+ 
+-	sessionSetupWelcome sessionState = "setup-welcome"
+-	sessionSetupFolders sessionState = "setup-folders"
+-	sessionSetupHost    sessionState = "setup-host"
+-	sessionSetupSystem  sessionState = "setup-system"
+-	sessionSetupFinish  sessionState = "setup-finish"
++	sessionSetupWelcome    sessionState = "setup-welcome"
++	sessionSetupStorage    sessionState = "setup-storage"
++	sessionSetupDisclosure sessionState = "setup-disclosure"
++	sessionSetupHost       sessionState = "setup-host"
++	sessionSetupSystem     sessionState = "setup-system"
++	sessionSetupFinish     sessionState = "setup-finish"
+ 
+ 	sessionReady sessionState = "ready"
+ )
+@@ -188,19 +189,35 @@
+ type SetupPage string
+ 
+ const (
+-	SetupPageWelcome SetupPage = "welcome"
+-	SetupPageFolders SetupPage = "folders"
+-	SetupPageHost    SetupPage = "host"
+-	SetupPageSystem  SetupPage = "system"
+-	SetupPageFinish  SetupPage = "finish"
++	SetupPageWelcome    SetupPage = "welcome"
++	SetupPageStorage    SetupPage = "storage"
++	SetupPageDisclosure SetupPage = "disclosure"
++	SetupPageHost       SetupPage = "host"
++	SetupPageSystem     SetupPage = "system"
++	SetupPageFinish     SetupPage = "finish"
+ )
+ 
+-type FolderKind string
++type DisclosureItem string
+ 
+ const (
+-	FolderConfig FolderKind = "config"
+-	FolderData   FolderKind = "data"
+-	FolderSSH    FolderKind = "ssh"
++	DisclosureSandbox DisclosureItem = "sandbox"
++	DisclosureFolders DisclosureItem = "folders"
++	DisclosureAgents  DisclosureItem = "agents"
++	DisclosureTools   DisclosureItem = "tools"
++	DisclosureRoot    DisclosureItem = "root"
+ )
+ 
+-const storeTickInterval = time.Second
++var DisclosureItems = []DisclosureItem{
++	DisclosureSandbox,
++	DisclosureFolders,
++	DisclosureAgents,
++	DisclosureTools,
++	DisclosureRoot,
++}
++
++const (
++	storeTickInterval = time.Second
++
++	setupCommandPrefix = "run0 phial-placeholder"
++	systemSetupCommand = setupCommandPrefix + " --usb-devices"
++)
+diff --git a/pkg/state/session.go b/pkg/state/session.go
+index e9e05c5ac66d87a7e4c2b5220c2dab3b042a08ea..e147a9a312013aa60b75dba06e406154be1fc002 100644
+--- a/pkg/state/session.go
++++ b/pkg/state/session.go
+@@ -3,9 +3,11 @@
+ import (
+ 	"context"
+ 	"log/slog"
++	"path/filepath"
+ 	"reflect"
+ 	"strings"
+ 
++	"github.com/adrg/xdg"
+ 	"github.com/qmuntal/stateless"
+ )
+ 
+@@ -14,14 +16,10 @@ 	OnSetupStep func(ctx context.Context, page SetupPage) error
+ 	OnReady     func(ctx context.Context) error
+ }
+ 
+-type Folders struct {
+-	Config string
+-	Data   string
+-	SSH    string
+-}
++type Session struct {
++	machinesFolder string
+ 
+-type Session struct {
+-	folders Folders
++	disclosureAcknowledged map[DisclosureItem]bool
+ 
+ 	hostCommandCopied   bool
+ 	systemCommandCopied bool
+@@ -31,6 +29,10 @@ 	log   *slog.Logger
+ 	hooks *SessionHooks
+ 
+ 	machine *stateless.StateMachine
++}
++
++func defaultMachinesFolder() string {
++	return filepath.Join(xdg.DataHome, "phial")
+ }
+ 
+ func NewSession(ctx context.Context, log *slog.Logger, hooks *SessionHooks) *Session {
+@@ -39,6 +41,8 @@ 		ctx:   ctx,
+ 		log:   log,
+ 		hooks: hooks,
+ 
++		disclosureAcknowledged: map[DisclosureItem]bool{},
++
+ 		machine: stateless.NewStateMachine(sessionBooting),
+ 	}
+ 
+@@ -55,21 +59,28 @@ 	s.machine.
+ 		Configure(sessionSetupWelcome).
+ 		SubstateOf(sessionSetup).
+ 		OnEntry(s.onSetupWelcome).
+-		Permit(triggerSetupNext, sessionSetupFolders)
++		Permit(triggerSetupNext, sessionSetupStorage)
+ 
+ 	s.machine.
+-		Configure(sessionSetupFolders).
++		Configure(sessionSetupStorage).
+ 		SubstateOf(sessionSetup).
+-		OnEntry(s.onSetupFolders).
+-		Permit(triggerSetupNext, sessionSetupHost, s.foldersValid).
++		OnEntry(s.onSetupStorage).
++		Permit(triggerSetupNext, sessionSetupDisclosure, s.machinesFolderValid).
+ 		Permit(triggerSetupBack, sessionSetupWelcome)
+ 
+ 	s.machine.
++		Configure(sessionSetupDisclosure).
++		SubstateOf(sessionSetup).
++		OnEntry(s.onSetupDisclosure).
++		Permit(triggerSetupNext, sessionSetupHost, s.disclosureAcknowledgedGuard).
++		Permit(triggerSetupBack, sessionSetupStorage)
++
++	s.machine.
+ 		Configure(sessionSetupHost).
+ 		SubstateOf(sessionSetup).
+ 		OnEntry(s.onSetupHost).
+ 		Permit(triggerSetupNext, sessionSetupSystem, hostReady, s.hostCommandCopiedGuard).
+-		Permit(triggerSetupBack, sessionSetupFolders)
++		Permit(triggerSetupBack, sessionSetupDisclosure)
+ 
+ 	s.machine.
+ 		Configure(sessionSetupSystem).
+@@ -128,9 +139,9 @@
+ 	return ok && ready
+ }
+ 
+-func (s *Session) foldersValid(_ context.Context, _ ...any) bool {
+-	for _, path := range []string{s.folders.Config, s.folders.Data, s.folders.SSH} {
+-		if strings.TrimSpace(path) == "" {
++func (s *Session) disclosureAcknowledgedGuard(_ context.Context, _ ...any) bool {
++	for _, item := range DisclosureItems {
++		if !s.disclosureAcknowledged[item] {
+ 			return false
+ 		}
+ 	}
+@@ -138,6 +149,10 @@
+ 	return true
+ }
+ 
++func (s *Session) machinesFolderValid(_ context.Context, _ ...any) bool {
++	return strings.TrimSpace(s.machinesFolder) != ""
++}
++
+ func (s *Session) hostCommandCopiedGuard(_ context.Context, _ ...any) bool {
+ 	return s.hostCommandCopied
+ }
+@@ -156,8 +171,12 @@ func (s *Session) onSetupWelcome(ctx context.Context, _ ...any) error {
+ 	return s.onSetupStep(ctx, SetupPageWelcome)
+ }
+ 
+-func (s *Session) onSetupFolders(ctx context.Context, _ ...any) error {
+-	return s.onSetupStep(ctx, SetupPageFolders)
++func (s *Session) onSetupStorage(ctx context.Context, _ ...any) error {
++	return s.onSetupStep(ctx, SetupPageStorage)
++}
++
++func (s *Session) onSetupDisclosure(ctx context.Context, _ ...any) error {
++	return s.onSetupStep(ctx, SetupPageDisclosure)
+ }
+ 
+ func (s *Session) onSetupHost(ctx context.Context, _ ...any) error {
+@@ -206,17 +225,24 @@ func (s *Session) CanSetupFinish(ctx context.Context) (bool, error) {
+ 	return s.machine.CanFireCtx(ctx, triggerFinish)
+ }
+ 
+-func (s *Session) SetFolder(kind FolderKind, path string) {
+-	switch kind {
+-	case FolderConfig:
+-		s.folders.Config = path
+-	case FolderData:
+-		s.folders.Data = path
+-	case FolderSSH:
+-		s.folders.SSH = path
+-	default:
+-		return
+-	}
++func (s *Session) DisclosureAcknowledged(item DisclosureItem) bool {
++	return s.disclosureAcknowledged[item]
++}
++
++func (s *Session) SetDisclosureAcknowledged(item DisclosureItem, acknowledged bool) {
++	s.disclosureAcknowledged[item] = acknowledged
++}
++
++func (s *Session) HostCommandCopied() bool {
++	return s.hostCommandCopied
++}
++
++func (s *Session) MachinesFolder() string {
++	return s.machinesFolder
++}
++
++func (s *Session) SetMachinesFolder(path string) {
++	s.machinesFolder = path
+ 
+ 	s.hostCommandCopied = false
+ 	s.systemCommandCopied = false
+diff --git a/pkg/state/session_test.go b/pkg/state/session_test.go
+index 13678638f83f1ac8a9ba17411cc75cf7e629a5ae..4e25396075414f51961ec917c442d88ef68b0ca9 100644
+--- a/pkg/state/session_test.go
++++ b/pkg/state/session_test.go
+@@ -33,54 +33,53 @@ 	require.True(t, hostReady(t.Context(), true))
+ 	require.False(t, hostReady(t.Context(), false))
+ }
+ 
+-func TestFoldersValid(t *testing.T) {
+-	var foldersValidTests = []struct {
+-		name    string
+-		folders Folders
+-		want    bool
++func TestMachinesFolderValid(t *testing.T) {
++	var machinesFolderValidTests = []struct {
++		name   string
++		folder string
++		want   bool
+ 	}{
+ 		{
+-			name:    "all folders set",
+-			folders: Folders{Config: "/tmp/config", Data: "/tmp/data", SSH: "/tmp/ssh"},
+-			want:    true,
+-		},
+-		{
+-			name:    "no folders set",
+-			folders: Folders{},
+-			want:    false,
+-		},
+-		{
+-			name:    "config folder missing",
+-			folders: Folders{Data: "/tmp/data", SSH: "/tmp/ssh"},
+-			want:    false,
++			name:   "machines folder set",
++			folder: "/tmp/phial",
++			want:   true,
+ 		},
+ 		{
+-			name:    "data folder missing",
+-			folders: Folders{Config: "/tmp/config", SSH: "/tmp/ssh"},
+-			want:    false,
++			name:   "no machines folder set",
++			folder: "",
++			want:   false,
+ 		},
+ 		{
+-			name:    "ssh folder missing",
+-			folders: Folders{Config: "/tmp/config", Data: "/tmp/data"},
+-			want:    false,
+-		},
+-		{
+-			name:    "whitespace only folder",
+-			folders: Folders{Config: " ", Data: "/tmp/data", SSH: "/tmp/ssh"},
+-			want:    false,
++			name:   "machines folder is whitespace",
++			folder: "   ",
++			want:   false,
+ 		},
+ 	}
+ 
+-	for _, tt := range foldersValidTests {
++	for _, tt := range machinesFolderValidTests {
+ 		t.Run(tt.name, func(t *testing.T) {
+ 			s := newTestingSession(t)
+-			s.folders = tt.folders
++			s.machinesFolder = tt.folder
+ 
+-			require.Equal(t, tt.want, s.foldersValid(t.Context()))
++			require.Equal(t, tt.want, s.machinesFolderValid(t.Context()))
+ 		})
+ 	}
+ }
+ 
++func TestDisclosureAcknowledgedGuard(t *testing.T) {
++	s := newTestingSession(t)
++
++	require.False(t, s.disclosureAcknowledgedGuard(t.Context()))
++
++	for _, item := range DisclosureItems {
++		require.False(t, s.disclosureAcknowledgedGuard(t.Context()), "acknowledging %v must not be enough", item)
++
++		s.SetDisclosureAcknowledged(item, true)
++	}
++
++	require.True(t, s.disclosureAcknowledgedGuard(t.Context()))
++}
++
+ func TestHostCommandCopiedGuard(t *testing.T) {
+ 	s := newTestingSession(t)
+ 
+@@ -101,22 +100,20 @@
+ 	require.True(t, s.systemCommandCopiedGuard(t.Context()))
+ }
+ 
+-func TestSetFolder(t *testing.T) {
++func TestSetMachinesFolder(t *testing.T) {
+ 	s := newTestingSession(t)
+ 
+-	s.SetFolder(FolderConfig, "/tmp/config")
+-	s.SetFolder(FolderData, "/tmp/data")
+-	s.SetFolder(FolderSSH, "/tmp/ssh")
++	s.SetMachinesFolder("/tmp/phial")
+ 
+-	require.Equal(t, Folders{Config: "/tmp/config", Data: "/tmp/data", SSH: "/tmp/ssh"}, s.folders)
++	require.Equal(t, "/tmp/phial", s.machinesFolder)
+ }
+ 
+-func TestSetFolderResetsCopiedCommands(t *testing.T) {
++func TestSetMachinesFolderResetsCopiedCommands(t *testing.T) {
+ 	s := newTestingSession(t)
+ 	s.hostCommandCopied = true
+ 	s.systemCommandCopied = true
+ 
+-	s.SetFolder(FolderConfig, "/tmp/config")
++	s.SetMachinesFolder("/tmp/phial")
+ 
+ 	require.False(t, s.hostCommandCopiedGuard(t.Context()))
+ 	require.False(t, s.systemCommandCopiedGuard(t.Context()))
+diff --git a/pkg/state/store.go b/pkg/state/store.go
+index 1edc9e82cabccbf03b4347cb3a0d810208dd2ec2..21497a0bdeede1859f8814cff26eb2b4372d22a1 100644
+--- a/pkg/state/store.go
++++ b/pkg/state/store.go
+@@ -3,6 +3,7 @@
+ import (
+ 	"context"
+ 	"log/slog"
++	"sync"
+ 	"time"
+ )
+ 
+@@ -13,6 +14,8 @@
+ type HostProbe func(ctx context.Context) (outdated bool, err error)
+ 
+ type Store struct {
++	mu sync.Mutex
++
+ 	ctx   context.Context
+ 	log   *slog.Logger
+ 	hooks *StoreHooks
+@@ -29,7 +32,8 @@
+ 	sessionPage  SetupPage
+ 	sessionReady bool
+ 
+-	hostStatus HostStatus
++	hostStatus   HostStatus
++	hostVerified bool
+ 
+ 	machineStatuses map[string]MachineStatus
+ 	installSteps    map[string]InstallStep
+@@ -112,42 +116,148 @@ 	}()
+ }
+ 
+ func (s *Store) Boot(ctx context.Context, onboarded bool) error {
++	s.mu.Lock()
++	defer s.mu.Unlock()
++
+ 	return s.session.Boot(ctx, onboarded)
+ }
+ 
+ func (s *Store) SetupNext(ctx context.Context) error {
+-	return s.session.SetupNext(ctx, s.hostStatus == HostStatusOnline)
++	s.mu.Lock()
++	defer s.mu.Unlock()
++
++	return s.session.SetupNext(ctx, s.hostVerified && s.hostStatus == HostStatusOnline)
+ }
+ 
+ func (s *Store) SetupBack(ctx context.Context) error {
++	s.mu.Lock()
++	defer s.mu.Unlock()
++
+ 	return s.session.SetupBack(ctx)
+ }
+ 
+ func (s *Store) SetupFinish(ctx context.Context) error {
++	s.mu.Lock()
++	defer s.mu.Unlock()
++
+ 	return s.session.SetupFinish(ctx)
+ }
+ 
+ func (s *Store) CanSetupNext(ctx context.Context) (bool, error) {
+-	return s.session.CanSetupNext(ctx, s.hostStatus == HostStatusOnline)
++	s.mu.Lock()
++	defer s.mu.Unlock()
++
++	return s.session.CanSetupNext(ctx, s.hostVerified && s.hostStatus == HostStatusOnline)
+ }
+ 
+ func (s *Store) CanSetupBack(ctx context.Context) (bool, error) {
++	s.mu.Lock()
++	defer s.mu.Unlock()
++
+ 	return s.session.CanSetupBack(ctx)
+ }
+ 
+ func (s *Store) CanSetupFinish(ctx context.Context) (bool, error) {
++	s.mu.Lock()
++	defer s.mu.Unlock()
++
+ 	return s.session.CanSetupFinish(ctx)
+ }
+ 
+-func (s *Store) SetFolder(kind FolderKind, path string) {
+-	s.session.SetFolder(kind, path)
++func (s *Store) SetMachinesFolder(ctx context.Context, path string) error {
++	s.mu.Lock()
++	defer s.mu.Unlock()
++
++	s.session.SetMachinesFolder(path)
++
++	return s.onChange(ctx)
++}
++
++func (s *Store) SetDisclosureAcknowledged(ctx context.Context, item DisclosureItem, acknowledged bool) error {
++	s.mu.Lock()
++	defer s.mu.Unlock()
++
++	s.session.SetDisclosureAcknowledged(item, acknowledged)
++
++	return s.onChange(ctx)
+ }
+ 
+-func (s *Store) SetupCopy() {
++func (s *Store) DisclosureAcknowledged(item DisclosureItem) bool {
++	s.mu.Lock()
++	defer s.mu.Unlock()
++
++	return s.session.DisclosureAcknowledged(item)
++}
++
++func (s *Store) SetupCopy(ctx context.Context) error {
++	s.mu.Lock()
++	defer s.mu.Unlock()
++
+ 	s.session.SetupCopy()
++
++	return s.onChange(ctx)
++}
++
++func (s *Store) Page() SetupPage {
++	s.mu.Lock()
++	defer s.mu.Unlock()
++
++	return s.sessionPage
++}
++
++func (s *Store) Ready() bool {
++	s.mu.Lock()
++	defer s.mu.Unlock()
++
++	return s.sessionReady
++}
++
++func (s *Store) MachinesFolder() string {
++	s.mu.Lock()
++	defer s.mu.Unlock()
++
++	return s.session.MachinesFolder()
++}
++
++func (s *Store) SuggestedMachinesFolder() string {
++	return defaultMachinesFolder()
++}
++
++func (s *Store) HostCommand() string {
++	s.mu.Lock()
++	defer s.mu.Unlock()
++
++	return setupCommandPrefix + " --machines-dir=" + s.session.MachinesFolder()
++}
++
++func (s *Store) SystemCommand() string {
++	return systemSetupCommand
++}
++
++func (s *Store) HostCommandCopied() bool {
++	s.mu.Lock()
++	defer s.mu.Unlock()
++
++	return s.session.HostCommandCopied()
++}
++
++func (s *Store) RetryHost(ctx context.Context) error {
++	if err := s.connectHost(ctx); err != nil {
++		return err
++	}
++
++	s.mu.Lock()
++	defer s.mu.Unlock()
++
++	s.hostVerified = s.hostStatus == HostStatusOnline
++
++	return nil
+ }
+ 
+ func (s *Store) AddMachine(ctx context.Context, id string) error {
++	s.mu.Lock()
++	defer s.mu.Unlock()
++
+ 	if _, ok := s.machines[id]; ok {
+ 		return ErrCouldNotAddMachine
+ 	}
+@@ -170,6 +280,9 @@ 	return m.FlushStatus(ctx)
+ }
+ 
+ func (s *Store) Install(ctx context.Context, id string) error {
++	s.mu.Lock()
++	defer s.mu.Unlock()
++
+ 	m, err := s.machine(id)
+ 	if err != nil {
+ 		return err
+@@ -179,6 +292,9 @@ 	return m.Install(ctx)
+ }
+ 
+ func (s *Store) InstallNext(ctx context.Context, id string) error {
++	s.mu.Lock()
++	defer s.mu.Unlock()
++
+ 	m, err := s.machine(id)
+ 	if err != nil {
+ 		return err
+@@ -188,6 +304,9 @@ 	return m.InstallNext(ctx)
+ }
+ 
+ func (s *Store) InstallFail(ctx context.Context, id string) error {
++	s.mu.Lock()
++	defer s.mu.Unlock()
++
+ 	m, err := s.machine(id)
+ 	if err != nil {
+ 		return err
+@@ -197,6 +316,9 @@ 	return m.InstallFail(ctx)
+ }
+ 
+ func (s *Store) InstallCancel(ctx context.Context, id string) error {
++	s.mu.Lock()
++	defer s.mu.Unlock()
++
+ 	m, err := s.machine(id)
+ 	if err != nil {
+ 		return err
+@@ -206,6 +328,9 @@ 	return m.InstallCancel(ctx)
+ }
+ 
+ func (s *Store) Start(ctx context.Context, id string) error {
++	s.mu.Lock()
++	defer s.mu.Unlock()
++
+ 	m, err := s.machine(id)
+ 	if err != nil {
+ 		return err
+@@ -215,6 +340,9 @@ 	return m.Start(ctx)
+ }
+ 
+ func (s *Store) Started(ctx context.Context, id string) error {
++	s.mu.Lock()
++	defer s.mu.Unlock()
++
+ 	m, err := s.machine(id)
+ 	if err != nil {
+ 		return err
+@@ -224,6 +352,9 @@ 	return m.Started(ctx)
+ }
+ 
+ func (s *Store) Stop(ctx context.Context, id string) error {
++	s.mu.Lock()
++	defer s.mu.Unlock()
++
+ 	m, err := s.machine(id)
+ 	if err != nil {
+ 		return err
+@@ -233,6 +364,9 @@ 	return m.Stop(ctx)
+ }
+ 
+ func (s *Store) Stopped(ctx context.Context, id string) error {
++	s.mu.Lock()
++	defer s.mu.Unlock()
++
+ 	m, err := s.machine(id)
+ 	if err != nil {
+ 		return err
+@@ -242,6 +376,9 @@ 	return m.Stopped(ctx)
+ }
+ 
+ func (s *Store) Restart(ctx context.Context, id string) error {
++	s.mu.Lock()
++	defer s.mu.Unlock()
++
+ 	m, err := s.machine(id)
+ 	if err != nil {
+ 		return err
+@@ -251,6 +388,9 @@ 	return m.Restart(ctx)
+ }
+ 
+ func (s *Store) Restarted(ctx context.Context, id string) error {
++	s.mu.Lock()
++	defer s.mu.Unlock()
++
+ 	m, err := s.machine(id)
+ 	if err != nil {
+ 		return err
+@@ -260,6 +400,9 @@ 	return m.Restarted(ctx)
+ }
+ 
+ func (s *Store) UpdateAgent(ctx context.Context, id string) error {
++	s.mu.Lock()
++	defer s.mu.Unlock()
++
+ 	m, err := s.machine(id)
+ 	if err != nil {
+ 		return err
+@@ -269,6 +412,9 @@ 	return m.UpdateAgent(ctx)
+ }
+ 
+ func (s *Store) AgentUpdated(ctx context.Context, id string) error {
++	s.mu.Lock()
++	defer s.mu.Unlock()
++
+ 	m, err := s.machine(id)
+ 	if err != nil {
+ 		return err
+@@ -278,6 +424,9 @@ 	return m.AgentUpdated(ctx)
+ }
+ 
+ func (s *Store) AddRequest(ctx context.Context, id string, maxUses int, expiresAt time.Time, persistent bool, deadline time.Time) error {
++	s.mu.Lock()
++	defer s.mu.Unlock()
++
+ 	if _, ok := s.requests[id]; ok {
+ 		return ErrCouldNotAddRequest
+ 	}
+@@ -303,6 +452,9 @@ 	return r.FlushStatus(ctx)
+ }
+ 
+ func (s *Store) ApproveRequest(ctx context.Context, id string) error {
++	s.mu.Lock()
++	defer s.mu.Unlock()
++
+ 	r, err := s.request(id)
+ 	if err != nil {
+ 		return err
+@@ -312,6 +464,9 @@ 	return r.Approve(ctx)
+ }
+ 
+ func (s *Store) ConfirmRequest(ctx context.Context, id string) error {
++	s.mu.Lock()
++	defer s.mu.Unlock()
++
+ 	r, err := s.request(id)
+ 	if err != nil {
+ 		return err
+@@ -321,6 +476,9 @@ 	return r.Confirm(ctx)
+ }
+ 
+ func (s *Store) CancelRequest(ctx context.Context, id string) error {
++	s.mu.Lock()
++	defer s.mu.Unlock()
++
+ 	r, err := s.request(id)
+ 	if err != nil {
+ 		return err
+@@ -330,6 +488,9 @@ 	return r.Cancel(ctx)
+ }
+ 
+ func (s *Store) DenyRequest(ctx context.Context, id string) error {
++	s.mu.Lock()
++	defer s.mu.Unlock()
++
+ 	r, err := s.request(id)
+ 	if err != nil {
+ 		return err
+@@ -339,6 +500,9 @@ 	return r.Deny(ctx)
+ }
+ 
+ func (s *Store) RevokeGrant(ctx context.Context, id string) error {
++	s.mu.Lock()
++	defer s.mu.Unlock()
++
+ 	g, err := s.grant(id)
+ 	if err != nil {
+ 		return err
+@@ -348,6 +512,9 @@ 	return g.Revoke(ctx)
+ }
+ 
+ func (s *Store) RestoreGrant(ctx context.Context, id string) error {
++	s.mu.Lock()
++	defer s.mu.Unlock()
++
+ 	g, err := s.grant(id)
+ 	if err != nil {
+ 		return err
+@@ -357,6 +524,9 @@ 	return g.Restore(ctx)
+ }
+ 
+ func (s *Store) UseGrant(ctx context.Context, id string) error {
++	s.mu.Lock()
++	defer s.mu.Unlock()
++
+ 	g, err := s.grant(id)
+ 	if err != nil {
+ 		return err
+@@ -366,6 +536,9 @@ 	return g.Use(ctx)
+ }
+ 
+ func (s *Store) ExtendGrant(ctx context.Context, id string, expiresAt time.Time) error {
++	s.mu.Lock()
++	defer s.mu.Unlock()
++
+ 	g, err := s.grant(id)
+ 	if err != nil {
+ 		return err
+@@ -375,6 +548,9 @@ 	return g.Extend(ctx, expiresAt)
+ }
+ 
+ func (s *Store) AddGrantUses(ctx context.Context, id string, uses int) error {
++	s.mu.Lock()
++	defer s.mu.Unlock()
++
+ 	g, err := s.grant(id)
+ 	if err != nil {
+ 		return err
+@@ -384,6 +560,9 @@ 	return g.AddUses(ctx, uses)
+ }
+ 
+ func (s *Store) RemoveGrant(id string) {
++	s.mu.Lock()
++	defer s.mu.Unlock()
++
+ 	delete(s.grants, id)
+ 	delete(s.grantStatuses, id)
+ }
+@@ -433,13 +612,32 @@ 	return g.FlushStatus(ctx)
+ }
+ 
+ func (s *Store) connectHost(ctx context.Context) error {
+-	outdated, err := s.hostProbe(ctx)
+-	if err != nil {
+-		s.log.ErrorContext(ctx, "Could not probe host", "err", err)
++	outdated, probeErr := s.hostProbe(ctx)
++
++	s.mu.Lock()
++	defer s.mu.Unlock()
++
++	if probeErr != nil {
++		s.log.ErrorContext(ctx, "Could not probe host", "err", probeErr)
++
++		if s.hostStatus == HostStatusError || s.hostStatus == HostStatusUpdating {
++			return nil
++		}
+ 
+ 		return s.host.Fail(ctx)
+ 	}
+ 
++	switch s.hostStatus {
++	case HostStatusOnline:
++		if outdated {
++			return s.host.MarkOutdated(ctx)
++		}
++
++		return nil
++	case HostStatusOutdated, HostStatusUpdating:
++		return nil
++	}
++
+ 	if err := s.host.Connect(ctx); err != nil {
+ 		return err
+ 	}
+@@ -452,6 +650,9 @@ 	return nil
+ }
+ 
+ func (s *Store) advance(ctx context.Context) error {
++	s.mu.Lock()
++	defer s.mu.Unlock()
++
+ 	now := time.Now()
+ 
+ 	for id, status := range s.requestStatuses {
+diff --git a/pkg/state/store_test.go b/pkg/state/store_test.go
+index 56978c544914c83fd266053fefe121f77e177c7a..8af86716c6425353dbc908642c6c18c4864d1525 100644
+--- a/pkg/state/store_test.go
++++ b/pkg/state/store_test.go
+@@ -34,6 +34,7 @@
+ func TestStoreConnectHost(t *testing.T) {
+ 	var storeConnectHostTests = []struct {
+ 		name     string
++		connect  bool
+ 		outdated bool
+ 		probeErr error
+ 		want     HostStatus
+@@ -52,6 +53,23 @@ 			name:     "probe error puts the host into error",
+ 			probeErr: errors.New("dial failed"),
+ 			want:     HostStatusError,
+ 		},
++		{
++			name:    "retry while online keeps the host online",
++			connect: true,
++			want:    HostStatusOnline,
++		},
++		{
++			name:     "retry while online with an outdated probe marks the host outdated",
++			connect:  true,
++			outdated: true,
++			want:     HostStatusOutdated,
++		},
++		{
++			name:     "retry while in error with a failing probe keeps the host in error",
++			connect:  true,
++			probeErr: errors.New("dial failed"),
++			want:     HostStatusError,
++		},
+ 	}
+ 
+ 	for _, tt := range storeConnectHostTests {
+@@ -62,6 +80,10 @@ 				s := newTestingStore(t, func(_ context.Context) (bool, error) {
+ 					return tt.outdated, tt.probeErr
+ 				})
+ 
++				if tt.connect {
++					require.NoError(t, s.connectHost(t.Context()))
++				}
++
+ 				require.NoError(t, s.connectHost(t.Context()))
+ 
+ 				require.Equal(t, tt.want, s.hostStatus)
+@@ -70,25 +92,33 @@ 		)
+ 	}
+ }
+ 
+-func TestStoreSetupNextRequiresOnlineHost(t *testing.T) {
++func TestStoreSetupNextRequiresVerifiedHost(t *testing.T) {
+ 	s := newTestingStore(t, func(_ context.Context) (bool, error) { return false, nil })
+ 
+ 	require.NoError(t, s.Boot(t.Context(), false))
+ 	require.NoError(t, s.SetupNext(t.Context()))
+ 
+-	s.SetFolder(FolderConfig, "/config")
+-	s.SetFolder(FolderData, "/data")
+-	s.SetFolder(FolderSSH, "/ssh")
++	require.NoError(t, s.SetMachinesFolder(t.Context(), "/machines"))
+ 
+ 	require.NoError(t, s.SetupNext(t.Context()))
+-	s.SetupCopy()
+ 
+ 	canSetupNext, err := s.CanSetupNext(t.Context())
+ 	require.NoError(t, err)
+ 	require.False(t, canSetupNext)
++
++	for _, item := range DisclosureItems {
++		require.NoError(t, s.SetDisclosureAcknowledged(t.Context(), item, true))
++	}
++	require.NoError(t, s.SetupNext(t.Context()))
++
++	require.NoError(t, s.SetupCopy(t.Context()))
++
++	canSetupNext, err = s.CanSetupNext(t.Context())
++	require.NoError(t, err)
++	require.False(t, canSetupNext, "copying the command must not enable the system page")
+ 	require.Error(t, s.SetupNext(t.Context()))
+ 
+-	require.NoError(t, s.connectHost(t.Context()))
++	require.NoError(t, s.RetryHost(t.Context()))
+ 
+ 	canSetupNext, err = s.CanSetupNext(t.Context())
+ 	require.NoError(t, err)
+
