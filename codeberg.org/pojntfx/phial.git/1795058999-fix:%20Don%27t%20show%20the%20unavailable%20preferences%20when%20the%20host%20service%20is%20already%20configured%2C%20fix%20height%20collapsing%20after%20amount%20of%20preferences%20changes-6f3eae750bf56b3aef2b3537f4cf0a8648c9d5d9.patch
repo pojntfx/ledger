@@ -1,0 +1,127 @@
+From 6f3eae750bf56b3aef2b3537f4cf0a8648c9d5d9 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Wed, 18 Nov 2026 20:29:59 -0700
+Subject: [PATCH] fix: Don't show the unavailable preferences when the host service is already configured, fix height collapsing after amount of preferences changes
+---
+diff --git a/assets/resources/preferences-dialog.blp b/assets/resources/preferences-dialog.blp
+index e6b661267f117c745e6534f1824fff626c82a274..b4f407aa635c81b30c7cf23bbf315b5c2becb48c 100644
+--- a/assets/resources/preferences-dialog.blp
++++ b/assets/resources/preferences-dialog.blp
+@@ -5,7 +5,7 @@ template $PhialPreferencesDialog: Adw.PreferencesDialog {
+   title: _("Preferences");
+   search-enabled: true;
+ 
+-  Adw.PreferencesPage {
++  Adw.PreferencesPage preferences_page {
+     title: _("General");
+ 
+     banner: Adw.Banner host_service_banner {
+diff --git a/internal/components/preferences_dialog.go b/internal/components/preferences_dialog.go
+index 55d266211c25fdd838bdbf5acd64c41d1a7360be..c2db6c3353fad1fb5ca89bf52734703a567ad06d 100644
+--- a/internal/components/preferences_dialog.go
++++ b/internal/components/preferences_dialog.go
+@@ -34,6 +34,7 @@
+ 	parent   *gtk.Widget
+ 	onChange func()
+ 
++	preferencesPage      adw.PreferencesPage
+ 	machinesFolderRow    adw.ActionRow
+ 	machinesFolderButton gtk.Button
+ 	hostServiceBanner    adw.Banner
+@@ -41,6 +42,8 @@ 	hostServiceGroup     adw.PreferencesGroup
+ 	hostCommandLabel     gtk.Label
+ 	hostCopyRow          adw.ButtonRow
+ 	hostVerifyRow        adw.ButtonRow
++
++	hostServiceAttached bool
+ 
+ 	open bool
+ 
+@@ -225,8 +228,19 @@ 	}
+ 
+ 	w.hostCommandLabel.SetText(w.store.HostCommand())
+ 
+-	w.hostServiceBanner.SetRevealed(hostReconfigurationPending(w.settings))
+-	w.hostServiceGroup.SetVisible(hostReconfigurationPending(w.settings))
++	pending := hostReconfigurationPending(w.settings)
++
++	w.hostServiceBanner.SetRevealed(pending)
++
++	if pending && !w.hostServiceAttached {
++		w.preferencesPage.Add(&w.hostServiceGroup)
++
++		w.hostServiceAttached = true
++	} else if !pending && w.hostServiceAttached {
++		w.preferencesPage.Remove(&w.hostServiceGroup)
++
++		w.hostServiceAttached = false
++	}
+ 
+ 	w.hostCopyRow.SetSensitive(!w.verifying)
+ 	w.hostVerifyRow.SetSensitive(w.copied && !w.verifying)
+@@ -243,6 +257,7 @@ func init() {
+ 	var classInit gobject.ClassInitFunc = func(tc *gobject.TypeClass, u uintptr) {
+ 		typeClass := (*gtk.WidgetClass)(unsafe.Pointer(tc))
+ 		typeClass.SetTemplateFromResource(resources.ResourcePreferencesDialogUIPath)
++		typeClass.BindTemplateChildFull("preferences_page", false, 0)
+ 		typeClass.BindTemplateChildFull("machines_folder_row", false, 0)
+ 		typeClass.BindTemplateChildFull("machines_folder_button", false, 0)
+ 		typeClass.BindTemplateChildFull("host_service_banner", false, 0)
+@@ -263,6 +278,7 @@
+ 			parent.InitTemplate()
+ 
+ 			var (
++				preferencesPage      adw.PreferencesPage
+ 				machinesFolderRow    adw.ActionRow
+ 				machinesFolderButton gtk.Button
+ 				hostServiceBanner    adw.Banner
+@@ -274,6 +290,10 @@ 			)
+ 
+ 			parent.Widget.GetTemplateChild(
+ 				gTypePreferencesDialog,
++				"preferences_page",
++			).Cast(&preferencesPage)
++			parent.Widget.GetTemplateChild(
++				gTypePreferencesDialog,
+ 				"machines_folder_row",
+ 			).Cast(&machinesFolderRow)
+ 			parent.Widget.GetTemplateChild(
+@@ -303,6 +323,7 @@ 			).Cast(&hostVerifyRow)
+ 
+ 			w := &PreferencesDialog{
+ 				PreferencesDialog:    parent,
++				preferencesPage:      preferencesPage,
+ 				machinesFolderRow:    machinesFolderRow,
+ 				machinesFolderButton: machinesFolderButton,
+ 				hostServiceBanner:    hostServiceBanner,
+@@ -310,6 +331,7 @@ 				hostServiceGroup:     hostServiceGroup,
+ 				hostCommandLabel:     hostCommandLabel,
+ 				hostCopyRow:          hostCopyRow,
+ 				hostVerifyRow:        hostVerifyRow,
++				hostServiceAttached:  true,
+ 				callbacks:            []interface{}{},
+ 			}
+ 
+diff --git a/po/phial.pot b/po/phial.pot
+index 695a838850aa805265b28cdc2cb6dd8cf50eafaa..f7fe41a80780206a44a9659aeec09b234ffbba24 100644
+--- a/po/phial.pot
++++ b/po/phial.pot
+@@ -48,7 +48,7 @@
+ #: ../assets/resources/setup-dialog.blp:63
+ #: ../assets/resources/preferences-dialog.blp:21
+ #: ../internal/components/setup_dialog.go:413
+-#: ../internal/components/preferences_dialog.go:221
++#: ../internal/components/preferences_dialog.go:224
+ msgid "Not selected"
+ msgstr ""
+ 
+@@ -193,7 +193,7 @@ "machines folder"
+ msgstr ""
+ 
+ #: ../internal/components/setup_dialog.go:259
+-#: ../internal/components/preferences_dialog.go:70
++#: ../internal/components/preferences_dialog.go:73
+ msgid "Choose the Machines Folder"
+ msgstr ""
+ 
+
