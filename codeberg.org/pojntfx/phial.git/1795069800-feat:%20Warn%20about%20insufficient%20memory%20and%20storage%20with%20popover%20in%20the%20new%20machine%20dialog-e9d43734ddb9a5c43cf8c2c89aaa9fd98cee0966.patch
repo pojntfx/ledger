@@ -1,0 +1,259 @@
+From e9d43734ddb9a5c43cf8c2c89aaa9fd98cee0966 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Wed, 18 Nov 2026 23:30:00 -0700
+Subject: [PATCH] feat: Warn about insufficient memory and storage with popover in the new machine dialog
+---
+diff --git a/assets/resources/create-machine-dialog.blp b/assets/resources/create-machine-dialog.blp
+index 751e1e455f008c1249688369c0cc3e38e39f72f6..56c88cf6ff1efb880c7df8b03a38f3e556ac51af 100644
+--- a/assets/resources/create-machine-dialog.blp
++++ b/assets/resources/create-machine-dialog.blp
+@@ -84,6 +84,19 @@             styles [
+               "dim-label",
+             ]
+           }
++
++          [suffix]
++          MenuButton memory_warning_button {
++            visible: false;
++            icon-name: "dialog-warning-symbolic";
++            tooltip-text: _("Show Error");
++            valign: center;
++            popover: memory_warning_popover;
++            styles [
++              "flat",
++              "circular",
++            ]
++          }
+         }
+ 
+         Adw.SpinRow disk_row {
+@@ -107,6 +120,19 @@             styles [
+               "dim-label",
+             ]
+           }
++
++          [suffix]
++          MenuButton disk_warning_button {
++            visible: false;
++            icon-name: "dialog-warning-symbolic";
++            tooltip-text: _("Show Error");
++            valign: center;
++            popover: disk_warning_popover;
++            styles [
++              "flat",
++              "circular",
++            ]
++          }
+         }
+       }
+     };
+@@ -123,3 +149,25 @@     selectable: true;
+     accessible-role: alert;
+   }
+ }
++
++Popover memory_warning_popover {
++  Label {
++    label: _("Not enough memory available. A machine needs at least 1 GiB of free memory.");
++    wrap: true;
++    max-width-chars: 40;
++    xalign: 0;
++    selectable: true;
++    accessible-role: alert;
++  }
++}
++
++Popover disk_warning_popover {
++  Label {
++    label: _("Not enough storage available. A machine needs at least 8 GiB of free storage.");
++    wrap: true;
++    max-width-chars: 40;
++    xalign: 0;
++    selectable: true;
++    accessible-role: alert;
++  }
++}
+diff --git a/internal/components/create_machine_dialog.go b/internal/components/create_machine_dialog.go
+index 01ac1a3d74eedb6933d160291ad975715b5d1963..3743bd366415da31a8ff074e62e2f0d48a34addb 100644
+--- a/internal/components/create_machine_dialog.go
++++ b/internal/components/create_machine_dialog.go
+@@ -37,10 +37,12 @@
+ 	store *state.Store
+ 	log   *slog.Logger
+ 
+-	nameRow         *adw.EntryRow
+-	nameErrorButton *gtk.MenuButton
+-	memoryRow       *adw.SpinRow
+-	diskRow         *adw.SpinRow
++	nameRow             *adw.EntryRow
++	nameErrorButton     *gtk.MenuButton
++	memoryRow           *adw.SpinRow
++	memoryWarningButton *gtk.MenuButton
++	diskRow             *adw.SpinRow
++	diskWarningButton   *gtk.MenuButton
+ 
+ 	memoryLimitKnown bool
+ 	diskLimitKnown   bool
+@@ -107,6 +109,8 @@ 	} else {
+ 		w.diskLimitKnown = false
+ 	}
+ 
++	w.updateMemoryWarning()
++	w.updateDiskWarning()
+ 	w.updateMemoryTooltip()
+ 	w.updateDiskTooltip()
+ 	w.validateAlias()
+@@ -133,6 +137,33 @@ 		adjustment.GetPageSize(),
+ 	)
+ }
+ 
++func (w *CreateMachineDialog) updateMemoryWarning() {
++	w.updateResourceWarning(w.memoryRow, w.memoryWarningButton, minimumMemoryGiB, w.memoryLimitKnown)
++}
++
++func (w *CreateMachineDialog) updateDiskWarning() {
++	w.updateResourceWarning(w.diskRow, w.diskWarningButton, minimumDiskGiB, w.diskLimitKnown)
++}
++
++func (w *CreateMachineDialog) updateResourceWarning(row *adw.SpinRow, button *gtk.MenuButton, minimum float64, known bool) {
++	if !known {
++		row.RemoveCssClass("error")
++		button.SetVisible(false)
++
++		return
++	}
++
++	if row.GetAdjustment().GetUpper() < minimum {
++		row.AddCssClass("error")
++		button.SetVisible(true)
++
++		return
++	}
++
++	row.RemoveCssClass("error")
++	button.SetVisible(false)
++}
++
+ func (w *CreateMachineDialog) updateMemoryTooltip() {
+ 	w.updateUpperTooltip(w.memoryRow, L("No more memory available"), w.memoryLimitKnown)
+ }
+@@ -215,7 +246,9 @@ 		typeClass.SetTemplateFromResource(resources.ResourceCreateMachineDialogUIPath)
+ 		typeClass.BindTemplateChildFull("name_row", false, 0)
+ 		typeClass.BindTemplateChildFull("name_error_button", false, 0)
+ 		typeClass.BindTemplateChildFull("memory_row", false, 0)
++		typeClass.BindTemplateChildFull("memory_warning_button", false, 0)
+ 		typeClass.BindTemplateChildFull("disk_row", false, 0)
++		typeClass.BindTemplateChildFull("disk_warning_button", false, 0)
+ 
+ 		objClass := (*gobject.ObjectClass)(unsafe.Pointer(tc))
+ 
+@@ -229,10 +262,12 @@
+ 			parent.InitTemplate()
+ 
+ 			var (
+-				nameRow         adw.EntryRow
+-				nameErrorButton gtk.MenuButton
+-				memoryRow       adw.SpinRow
+-				diskRow         adw.SpinRow
++				nameRow             adw.EntryRow
++				nameErrorButton     gtk.MenuButton
++				memoryRow           adw.SpinRow
++				memoryWarningButton gtk.MenuButton
++				diskRow             adw.SpinRow
++				diskWarningButton   gtk.MenuButton
+ 			)
+ 
+ 			parent.Widget.GetTemplateChild(
+@@ -249,16 +284,26 @@ 				"memory_row",
+ 			).Cast(&memoryRow)
+ 			parent.Widget.GetTemplateChild(
+ 				gTypeCreateMachineDialog,
++				"memory_warning_button",
++			).Cast(&memoryWarningButton)
++			parent.Widget.GetTemplateChild(
++				gTypeCreateMachineDialog,
+ 				"disk_row",
+ 			).Cast(&diskRow)
++			parent.Widget.GetTemplateChild(
++				gTypeCreateMachineDialog,
++				"disk_warning_button",
++			).Cast(&diskWarningButton)
+ 
+ 			d := &CreateMachineDialog{
+ 				Dialog: parent,
+ 
+-				nameRow:         &nameRow,
+-				nameErrorButton: &nameErrorButton,
+-				memoryRow:       &memoryRow,
+-				diskRow:         &diskRow,
++				nameRow:             &nameRow,
++				nameErrorButton:     &nameErrorButton,
++				memoryRow:           &memoryRow,
++				memoryWarningButton: &memoryWarningButton,
++				diskRow:             &diskRow,
++				diskWarningButton:   &diskWarningButton,
+ 
+ 				callbacks: []interface{}{},
+ 			}
+diff --git a/po/phial.pot b/po/phial.pot
+index 1c1d3923afe8865191d554633c42ce8e0a2ae05b..c458b4e1e41dacbbbfb70a4b42378ef74fcf5b2e 100644
+--- a/po/phial.pot
++++ b/po/phial.pot
+@@ -239,6 +239,8 @@ msgid "_Name"
+ msgstr ""
+ 
+ #: ../assets/resources/create-machine-dialog.blp:51
++#: ../assets/resources/create-machine-dialog.blp:92
++#: ../assets/resources/create-machine-dialog.blp:128
+ msgid "Show Error"
+ msgstr ""
+ 
+@@ -255,19 +257,29 @@ msgid "Memory"
+ msgstr ""
+ 
+ #: ../assets/resources/create-machine-dialog.blp:81
+-#: ../assets/resources/create-machine-dialog.blp:104
++#: ../assets/resources/create-machine-dialog.blp:117
+ msgid "GiB"
+ msgstr ""
+ 
+-#: ../assets/resources/create-machine-dialog.blp:90
++#: ../assets/resources/create-machine-dialog.blp:103
+ msgid "Disk Size"
+ msgstr ""
+ 
+-#: ../assets/resources/create-machine-dialog.blp:118
+-#: ../internal/components/create_machine_dialog.go:176
++#: ../assets/resources/create-machine-dialog.blp:144
++#: ../internal/components/create_machine_dialog.go:203
+ msgid "Use a hostname like dev-vm or dev.example"
+ msgstr ""
+ 
++#: ../assets/resources/create-machine-dialog.blp:155
++msgid ""
++"Not enough memory available. A machine needs at least 1 GiB of free memory."
++msgstr ""
++
++#: ../assets/resources/create-machine-dialog.blp:166
++msgid ""
++"Not enough storage available. A machine needs at least 8 GiB of free storage."
++msgstr ""
++
+ #. TRANSLATORS: Replace "translator-credits" with your name/username, and optionally an email or URL.
+ #: ../internal/components/application.go:91
+ msgid "translator-credits"
+@@ -302,11 +314,11 @@ #: ../internal/components/setup_dialog.go:405
+ msgid "Done"
+ msgstr ""
+ 
+-#: ../internal/components/create_machine_dialog.go:141
++#: ../internal/components/create_machine_dialog.go:168
+ msgid "No more memory available"
+ msgstr ""
+ 
+-#: ../internal/components/create_machine_dialog.go:145
++#: ../internal/components/create_machine_dialog.go:172
+ msgid "No more storage available"
+ msgstr ""
+ 
+
