@@ -1,0 +1,538 @@
+From a55b62ec1c534d8e4c9943b7e0625a6fa92c3b4e Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Wed, 18 Nov 2026 22:37:04 -0700
+Subject: [PATCH] feat: Add new machine buttons and prototype create dialog
+---
+diff --git a/assets/resources/create-machine-dialog.blp b/assets/resources/create-machine-dialog.blp
+new file mode 100644
+index 0000000000000000000000000000000000000000..61bc596fc6beca51ae7778ca3c5e7bb0ce07e083
+--- /dev/null
++++ b/assets/resources/create-machine-dialog.blp
+@@ -0,0 +1,99 @@
++using Gtk 4.0;
++using Adw 1;
++
++template $PhialCreateMachineDialog: Adw.Dialog {
++  title: _("New Machine");
++  content-width: 640;
++  content-height: 600;
++
++  child: Adw.ToolbarView {
++    [top]
++    Adw.HeaderBar {
++      show-start-title-buttons: false;
++      show-end-title-buttons: false;
++
++      [start]
++      Button {
++        label: _("_Cancel");
++        use-underline: true;
++        action-name: "window.close";
++      }
++
++      title-widget: Adw.WindowTitle {
++        title: _("New Machine");
++      };
++
++      [end]
++      Button create_machine_button {
++        sensitive: false;
++        label: _("_Create");
++        use-underline: true;
++        styles [
++          "suggested-action",
++        ]
++      }
++    }
++
++    content: Adw.PreferencesPage {
++      Adw.PreferencesGroup {
++        title: _("Identity");
++        description: _("The name becomes the SSH host alias");
++
++        Adw.EntryRow {
++          title: _("_Name");
++          use-underline: true;
++          activates-default: true;
++        }
++      }
++
++      Adw.PreferencesGroup {
++        title: _("Resources");
++        description: _("Phial allocates the disk image on the first start");
++
++        Adw.SpinRow {
++          title: _("Memory");
++          numeric: true;
++          digits: 0;
++          adjustment: Adjustment {
++            lower: 1;
++            upper: 256;
++            value: 16;
++            step-increment: 1;
++            page-increment: 10;
++          };
++
++          [suffix]
++          Label {
++            label: _("GiB");
++            margin-end: 8;
++            styles [
++              "dim-label",
++            ]
++          }
++        }
++
++        Adw.SpinRow {
++          title: _("Disk Size");
++          numeric: true;
++          digits: 0;
++          adjustment: Adjustment {
++            lower: 8;
++            upper: 2048;
++            value: 48;
++            step-increment: 1;
++            page-increment: 10;
++          };
++
++          [suffix]
++          Label {
++            label: _("GiB");
++            margin-end: 8;
++            styles [
++              "dim-label",
++            ]
++          }
++        }
++      }
++    };
++  };
++}
+diff --git a/assets/resources/index.go b/assets/resources/index.go
+index 439418522787693304d356b413dae61c49c4f3b1..376d9918ebb89c15bce7b6a2f31fcf42be2e032d 100644
+--- a/assets/resources/index.go
++++ b/assets/resources/index.go
+@@ -33,10 +33,11 @@ 	AppDevelopers = []string{"Felicitas Pojtinger"}
+ 	AppArtists    = []string{"Felicitas Pojtinger"}
+ 	AppCopyright  = "© 2026 " + strings.Join(AppDevelopers, ", ")
+ 
+-	ResourceWindowUIPath            = path.Join(AppPath, "window.ui")
+-	ResourceSetupDialogUIPath       = path.Join(AppPath, "setup-dialog.ui")
+-	ResourcePreferencesDialogUIPath = path.Join(AppPath, "preferences-dialog.ui")
+-	ResourceShortcutsDialogUIPath   = path.Join(AppPath, "shortcuts-dialog.ui")
+-	ResourceMetainfoPath            = path.Join(AppPath, "metainfo.xml")
+-	ResourceIconPath                = path.Join(AppPath, "icon.svg")
++	ResourceWindowUIPath              = path.Join(AppPath, "window.ui")
++	ResourceSetupDialogUIPath         = path.Join(AppPath, "setup-dialog.ui")
++	ResourcePreferencesDialogUIPath   = path.Join(AppPath, "preferences-dialog.ui")
++	ResourceCreateMachineDialogUIPath = path.Join(AppPath, "create-machine-dialog.ui")
++	ResourceShortcutsDialogUIPath     = path.Join(AppPath, "shortcuts-dialog.ui")
++	ResourceMetainfoPath              = path.Join(AppPath, "metainfo.xml")
++	ResourceIconPath                  = path.Join(AppPath, "icon.svg")
+ )
+diff --git a/assets/resources/index.gresource.xml b/assets/resources/index.gresource.xml
+index 699f17f3ae2d567199c1e59f4e3a359e5d821957..4104b8fa286fff2d29a89fa463e9f2fc0fd738e4 100644
+--- a/assets/resources/index.gresource.xml
++++ b/assets/resources/index.gresource.xml
+@@ -4,6 +4,7 @@     <gresource prefix="/com/pojtinger/felicitas/Phial">
+         <file>window.ui</file>
+         <file>setup-dialog.ui</file>
+         <file>preferences-dialog.ui</file>
++        <file>create-machine-dialog.ui</file>
+         <file>shortcuts-dialog.ui</file>
+         <file>metainfo.xml</file>
+         <file alias="icon.svg">../meta/icon.svg</file>
+diff --git a/assets/resources/shortcuts-dialog.blp b/assets/resources/shortcuts-dialog.blp
+index d27b73d2f879e4facc227c331f9dadfee2eb51f7..527d5d60d53230d23cc4299f1a909d931ff17ba9 100644
+--- a/assets/resources/shortcuts-dialog.blp
++++ b/assets/resources/shortcuts-dialog.blp
+@@ -11,6 +11,11 @@       accelerator: "F10";
+     }
+ 
+     Adw.ShortcutsItem {
++      title: _("New machine");
++      action-name: "win.newMachine";
++    }
++
++    Adw.ShortcutsItem {
+       title: _("Show keyboard shortcuts");
+       action-name: "app.shortcuts";
+     }
+diff --git a/assets/resources/window.blp b/assets/resources/window.blp
+index e03e886ec7bd49c3b39bbde304270c7fe08e6fdd..825223b67637a01f319726818bcd42ed06dc22b7 100644
+--- a/assets/resources/window.blp
++++ b/assets/resources/window.blp
+@@ -96,6 +96,20 @@
+             child: Adw.ToolbarView {
+               [top]
+               Adw.HeaderBar {
++                [start]
++                Button {
++                  icon-name: "list-add-symbolic";
++                  tooltip-text: _("New Machine");
++                  action-name: "win.newMachine";
++                  styles [
++                    "flat",
++                  ]
++
++                  accessibility {
++                    label: _("New Machine");
++                  }
++                }
++
+                 title-widget: Adw.WindowTitle {
+                   title: _("Phial");
+                 };
+@@ -155,6 +169,17 @@                   content: Adw.StatusPage {
+                     icon-name: "computer-symbolic";
+                     title: _("No Machines");
+                     description: _("Run virtual machines on your desktop");
++
++                    Button {
++                      halign: center;
++                      action-name: "win.newMachine";
++                      label: _("_New Machine...");
++                      use-underline: true;
++                      styles [
++                        "suggested-action",
++                        "pill",
++                      ]
++                    }
+                   };
+                 };
+               }
+diff --git a/internal/components/create_machine_dialog.go b/internal/components/create_machine_dialog.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..92b66bc34111050a628ad0fd3e4491a2fbd8e5db
+--- /dev/null
++++ b/internal/components/create_machine_dialog.go
+@@ -0,0 +1,76 @@
++package components
++
++import (
++	"runtime"
++	"unsafe"
++
++	"codeberg.org/pojntfx/phial/assets/resources"
++	"codeberg.org/puregotk/puregotk/v4/adw"
++	"codeberg.org/puregotk/puregotk/v4/glib"
++	"codeberg.org/puregotk/puregotk/v4/gobject"
++	"codeberg.org/puregotk/puregotk/v4/gtk"
++)
++
++var (
++	gTypeCreateMachineDialog gobject.Type
++)
++
++type CreateMachineDialog struct {
++	adw.Dialog
++}
++
++func NewCreateMachineDialog() CreateMachineDialog {
++	obj := gobject.NewObject(gTypeCreateMachineDialog, "css-name")
++	gobject.IncreaseRef(obj.GoPointer())
++
++	var v CreateMachineDialog
++	obj.Cast(&v)
++
++	return v
++}
++
++func init() {
++	var dialogClassInit gobject.ClassInitFunc = func(tc *gobject.TypeClass, u uintptr) {
++		typeClass := (*gtk.WidgetClass)(unsafe.Pointer(tc))
++		typeClass.SetTemplateFromResource(resources.ResourceCreateMachineDialogUIPath)
++
++		objClass := (*gobject.ObjectClass)(unsafe.Pointer(tc))
++
++		objClass.OverrideConstructed(func(o *gobject.Object) {
++			parentObjClass := (*gobject.ObjectClass)(unsafe.Pointer(tc.PeekParent()))
++			parentObjClass.GetConstructed()(o)
++
++			var parent adw.Dialog
++			o.Cast(&parent)
++
++			parent.InitTemplate()
++
++			d := &CreateMachineDialog{
++				Dialog: parent,
++			}
++
++			var pinner runtime.Pinner
++			pinner.Pin(d)
++
++			var cleanupCallback glib.DestroyNotify = func(data uintptr) {
++				pinner.Unpin()
++			}
++			o.SetDataFull(dataKeyGoInstance, uintptr(unsafe.Pointer(d)), &cleanupCallback)
++		})
++	}
++
++	var dialogInstanceInit gobject.InstanceInitFunc = func(ti *gobject.TypeInstance, tc *gobject.TypeClass) {}
++
++	var dialogParentQuery gobject.TypeQuery
++	gobject.NewTypeQuery(adw.DialogGLibType(), &dialogParentQuery)
++
++	gTypeCreateMachineDialog = gobject.TypeRegisterStaticSimple(
++		dialogParentQuery.Type,
++		"PhialCreateMachineDialog",
++		dialogParentQuery.ClassSize,
++		&dialogClassInit,
++		dialogParentQuery.InstanceSize,
++		&dialogInstanceInit,
++		0,
++	)
++}
+diff --git a/internal/components/main_window.go b/internal/components/main_window.go
+index 8bfb4aed5c91107c668b45895fd9b0f0eebeefbb..27cbdf23c17bff9b7efcf748230c67f85e60e781 100644
+--- a/internal/components/main_window.go
++++ b/internal/components/main_window.go
+@@ -58,6 +58,9 @@ 	welcomeStatusPage *adw.StatusPage
+ 
+ 	setupDialog *SetupDialog
+ 
++	createMachineDialog *CreateMachineDialog
++	createMachineAction *gio.SimpleAction
++
+ 	preferencesAction *gio.SimpleAction
+ 
+ 	callbacks []interface{}
+@@ -105,6 +108,21 @@
+ 	setupDialog := NewSetupDialog(window.ctx, window.store, window.settings, window.log, &window.ApplicationWindow.Widget)
+ 	window.setupDialog = (*SetupDialog)(unsafe.Pointer(setupDialog.Widget.GetData(dataKeyGoInstance)))
+ 
++	createMachineDialog := NewCreateMachineDialog()
++	window.createMachineDialog = (*CreateMachineDialog)(unsafe.Pointer(createMachineDialog.Widget.GetData(dataKeyGoInstance)))
++
++	createMachineAction := gio.NewSimpleAction("newMachine", nil)
++	onCreateMachine := func(gio.SimpleAction, uintptr) {
++		window.createMachineDialog.Present(&window.ApplicationWindow.Widget)
++	}
++	window.callbacks = append(window.callbacks, &onCreateMachine)
++	createMachineAction.ConnectActivate(&onCreateMachine)
++	createMachineAction.SetEnabled(false)
++	window.createMachineAction = createMachineAction
++	window.AddAction(createMachineAction)
++
++	window.app.SetAccelsForAction("win.newMachine", []string{`<Primary>n`})
++
+ 	setupNextAction := gio.NewSimpleAction("setupNext", nil)
+ 	onSetupNext := func(gio.SimpleAction, uintptr) {
+ 		if window.store.Page() == state.SetupPageWelcome {
+@@ -153,6 +171,10 @@ 	}
+ 
+ 	if w.preferencesAction != nil {
+ 		w.preferencesAction.SetEnabled(w.store.Ready() || w.store.Page() == state.SetupPageFinish)
++	}
++
++	if w.createMachineAction != nil {
++		w.createMachineAction.SetEnabled(w.store.Ready())
+ 	}
+ 
+ 	if w.store.HostStatus() == state.HostStatusConnecting {
+@@ -270,6 +292,10 @@ 				}
+ 
+ 				if w.setupDialog != nil {
+ 					w.setupDialog.Widget.Object.Unref()
++				}
++
++				if w.createMachineDialog != nil {
++					w.createMachineDialog.Widget.Object.Unref()
+ 				}
+ 
+ 				pinner.Unpin()
+diff --git a/po/phial.pot b/po/phial.pot
+index 406dcbbfefd6345f2e32a98d0217ee664244e8eb..a9e6ec52e82a8ce4aa60a1c0e6e3deef3644a970 100644
+--- a/po/phial.pot
++++ b/po/phial.pot
+@@ -1,29 +1,9 @@
+-#: ../assets/resources/shortcuts-dialog.blp:6
+-#: ../assets/resources/preferences-dialog.blp:8
+-msgid "General"
+-msgstr ""
+-
+-#: ../assets/resources/shortcuts-dialog.blp:9
+-msgid "Open menu"
+-msgstr ""
+-
+-#: ../assets/resources/shortcuts-dialog.blp:14
+-msgid "Show keyboard shortcuts"
+-msgstr ""
+-
+-#: ../assets/resources/shortcuts-dialog.blp:19
+-msgid "Close window"
+-msgstr ""
+-
+-#: ../assets/resources/shortcuts-dialog.blp:24
+-msgid "Quit"
+-msgstr ""
+-
+ #: ../assets/resources/setup-dialog.blp:5
+ msgid "Set Up Phial"
+ msgstr ""
+ 
+ #: ../assets/resources/setup-dialog.blp:19
++#: ../assets/resources/create-machine-dialog.blp:17
+ msgid "_Cancel"
+ msgstr ""
+ 
+@@ -122,16 +102,84 @@ #: ../assets/resources/preferences-dialog.blp:5
+ msgid "Preferences"
+ msgstr ""
+ 
++#: ../assets/resources/preferences-dialog.blp:8
++#: ../assets/resources/shortcuts-dialog.blp:6
++msgid "General"
++msgstr ""
++
++#: ../assets/resources/shortcuts-dialog.blp:9
++msgid "Open menu"
++msgstr ""
++
++#: ../assets/resources/shortcuts-dialog.blp:14
++msgid "New machine"
++msgstr ""
++
++#: ../assets/resources/shortcuts-dialog.blp:19
++msgid "Show keyboard shortcuts"
++msgstr ""
++
++#: ../assets/resources/shortcuts-dialog.blp:24
++msgid "Close window"
++msgstr ""
++
++#: ../assets/resources/shortcuts-dialog.blp:29
++msgid "Quit"
++msgstr ""
++
++#: ../assets/resources/create-machine-dialog.blp:5
++#: ../assets/resources/create-machine-dialog.blp:23
++#: ../assets/resources/window.blp:102 ../assets/resources/window.blp:109
++msgid "New Machine"
++msgstr ""
++
++#: ../assets/resources/create-machine-dialog.blp:29
++msgid "_Create"
++msgstr ""
++
++#: ../assets/resources/create-machine-dialog.blp:39
++msgid "Identity"
++msgstr ""
++
++#: ../assets/resources/create-machine-dialog.blp:40
++msgid "The name becomes the SSH host alias"
++msgstr ""
++
++#: ../assets/resources/create-machine-dialog.blp:43
++msgid "_Name"
++msgstr ""
++
++#: ../assets/resources/create-machine-dialog.blp:50
++msgid "Resources"
++msgstr ""
++
++#: ../assets/resources/create-machine-dialog.blp:51
++msgid "Phial allocates the disk image on the first start"
++msgstr ""
++
++#: ../assets/resources/create-machine-dialog.blp:54
++msgid "Memory"
++msgstr ""
++
++#: ../assets/resources/create-machine-dialog.blp:67
++#: ../assets/resources/create-machine-dialog.blp:89
++msgid "GiB"
++msgstr ""
++
++#: ../assets/resources/create-machine-dialog.blp:76
++msgid "Disk Size"
++msgstr ""
++
+ #: ../assets/resources/window.blp:7 ../assets/resources/window.blp:25
+ #: ../assets/resources/window.blp:55 ../assets/resources/window.blp:94
+-#: ../assets/resources/window.blp:100 ../assets/resources/window.blp:141
++#: ../assets/resources/window.blp:114 ../assets/resources/window.blp:155
+ #: ../assets/meta/com.pojtinger.felicitas.Phial.desktop.in:4
+ #: ../assets/resources/metainfo.xml.in:7
+ msgid "Phial"
+ msgstr ""
+ 
+ #: ../assets/resources/window.blp:31 ../assets/resources/window.blp:61
+-#: ../assets/resources/window.blp:106
++#: ../assets/resources/window.blp:120
+ msgid "Main Menu"
+ msgstr ""
+ 
+@@ -157,53 +205,57 @@ #: ../assets/resources/window.blp:75
+ msgid "_Get Started"
+ msgstr ""
+ 
+-#: ../assets/resources/window.blp:116 ../assets/resources/window.blp:147
++#: ../assets/resources/window.blp:130 ../assets/resources/window.blp:161
+ msgid "Machines"
+ msgstr ""
+ 
+-#: ../assets/resources/window.blp:119
++#: ../assets/resources/window.blp:133
+ msgid "Get Started"
+ msgstr ""
+ 
+-#: ../assets/resources/window.blp:121
++#: ../assets/resources/window.blp:135
+ msgid "Create your first machine"
+ msgstr ""
+ 
+-#: ../assets/resources/window.blp:127 ../assets/resources/window.blp:163
+-#: ../assets/resources/window.blp:172
++#: ../assets/resources/window.blp:141 ../assets/resources/window.blp:188
++#: ../assets/resources/window.blp:197
+ msgid "Secrets"
+ msgstr ""
+ 
+-#: ../assets/resources/window.blp:132 ../assets/resources/window.blp:179
+-#: ../assets/resources/window.blp:188
++#: ../assets/resources/window.blp:146 ../assets/resources/window.blp:204
++#: ../assets/resources/window.blp:213
+ msgid "Grants"
+ msgstr ""
+ 
+-#: ../assets/resources/window.blp:156
++#: ../assets/resources/window.blp:170
+ msgid "No Machines"
+ msgstr ""
+ 
+-#: ../assets/resources/window.blp:157
++#: ../assets/resources/window.blp:171
+ msgid "Run virtual machines on your desktop"
+ msgstr ""
+ 
+-#: ../assets/resources/window.blp:173
++#: ../assets/resources/window.blp:176
++msgid "_New Machine..."
++msgstr ""
++
++#: ../assets/resources/window.blp:198
+ msgid "Tokens and keys that a machine can use"
+ msgstr ""
+ 
+-#: ../assets/resources/window.blp:189
++#: ../assets/resources/window.blp:214
+ msgid "Access that a machine has to a token or key"
+ msgstr ""
+ 
+-#: ../assets/resources/window.blp:204
++#: ../assets/resources/window.blp:229
+ msgid "_Preferences"
+ msgstr ""
+ 
+-#: ../assets/resources/window.blp:210
++#: ../assets/resources/window.blp:235
+ msgid "_Keyboard Shortcuts"
+ msgstr ""
+ 
+-#: ../assets/resources/window.blp:215
++#: ../assets/resources/window.blp:240
+ msgid "_About Phial"
+ msgstr ""
+ 
+
