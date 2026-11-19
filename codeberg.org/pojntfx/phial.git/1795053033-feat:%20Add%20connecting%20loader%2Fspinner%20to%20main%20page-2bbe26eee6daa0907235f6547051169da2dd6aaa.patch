@@ -1,0 +1,241 @@
+From 2bbe26eee6daa0907235f6547051169da2dd6aaa Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Wed, 18 Nov 2026 18:50:33 -0700
+Subject: [PATCH] feat: Add connecting loader/spinner to main page
+---
+diff --git a/assets/resources/window.blp b/assets/resources/window.blp
+index 0c79cca17e1ebff4c76ac924fa9895d334707d2c..00bdb849b6b5d2ff3355043e63fc3ecb4d0bf2b0 100644
+--- a/assets/resources/window.blp
++++ b/assets/resources/window.blp
+@@ -10,6 +10,36 @@   content: Stack content_stack {
+     transition-type: crossfade;
+ 
+     StackPage {
++      name: "connecting";
++      child: Adw.ToolbarView {
++        [top]
++        Adw.HeaderBar {
++          title-widget: Adw.WindowTitle {
++            title: _("Phial");
++          };
++
++          [end]
++          MenuButton {
++            icon-name: "open-menu-symbolic";
++            tooltip-text: _("Main Menu");
++            primary: true;
++            menu-model: main_menu;
++          }
++        }
++
++        content: Adw.StatusPage {
++          title: _("Starting Phial");
++          description: _("Connecting to the host service");
++
++          Adw.Spinner {
++            width-request: 48;
++            height-request: 48;
++          }
++        };
++      };
++    }
++
++    StackPage {
+       name: "setup";
+       child: Adw.ToolbarView {
+         [top]
+diff --git a/internal/components/main_window.go b/internal/components/main_window.go
+index 332d7ac9a2c250dc9f0e10179b52684a3a204b29..42d1c0e7caa202bb98845bf096f67798e174443f 100644
+--- a/internal/components/main_window.go
++++ b/internal/components/main_window.go
+@@ -17,8 +17,9 @@ 	"codeberg.org/puregotk/puregotk/v4/gtk"
+ )
+ 
+ const (
+-	contentPageSetup = "setup"
+-	contentPageReady = "ready"
++	contentPageConnecting = "connecting"
++	contentPageSetup      = "setup"
++	contentPageReady      = "ready"
+ )
+ 
+ var (
+@@ -102,7 +103,9 @@ 	if w.store == nil {
+ 		return
+ 	}
+ 
+-	if w.store.Ready() || w.store.Page() == state.SetupPageFinish {
++	if w.store.HostStatus() == state.HostStatusConnecting {
++		w.contentStack.SetVisibleChildName(contentPageConnecting)
++	} else if w.store.Ready() || w.store.Page() == state.SetupPageFinish {
+ 		w.contentStack.SetVisibleChildName(contentPageReady)
+ 	} else {
+ 		w.contentStack.SetVisibleChildName(contentPageSetup)
+diff --git a/pkg/state/store.go b/pkg/state/store.go
+index 21497a0bdeede1859f8814cff26eb2b4372d22a1..a8f747d5132392de95fed72f67c9f7533fb57db8 100644
+--- a/pkg/state/store.go
++++ b/pkg/state/store.go
+@@ -212,6 +212,13 @@
+ 	return s.sessionReady
+ }
+ 
++func (s *Store) HostStatus() HostStatus {
++	s.mu.Lock()
++	defer s.mu.Unlock()
++
++	return s.hostStatus
++}
++
+ func (s *Store) MachinesFolder() string {
+ 	s.mu.Lock()
+ 	defer s.mu.Unlock()
+diff --git a/po/phial.pot b/po/phial.pot
+index dcdd74af55a636d28292eda79b6ce1abdeed7a2d..6a0fea3181a0689d121fa243616c99673e029ede 100644
+--- a/po/phial.pot
++++ b/po/phial.pot
+@@ -18,43 +18,6 @@ #: ../assets/resources/shortcuts-dialog.blp:24
+ msgid "Quit"
+ msgstr ""
+ 
+-#: ../assets/resources/window.blp:7 ../assets/resources/window.blp:18
+-#: ../assets/resources/window.blp:55 ../assets/resources/window.blp:69
+-#: ../assets/meta/com.pojtinger.felicitas.Phial.desktop.in:4
+-#: ../assets/resources/metainfo.xml.in:7
+-msgid "Phial"
+-msgstr ""
+-
+-#: ../assets/resources/window.blp:24 ../assets/resources/window.blp:61
+-msgid "Main Menu"
+-msgstr ""
+-
+-#: ../assets/resources/window.blp:32
+-msgid "Welcome to Phial"
+-msgstr ""
+-
+-#: ../assets/resources/window.blp:33
+-#: ../assets/meta/com.pojtinger.felicitas.Phial.desktop.in:5
+-#: ../assets/resources/metainfo.xml.in:8
+-msgid "Run development machines safely"
+-msgstr ""
+-
+-#: ../assets/resources/window.blp:38
+-msgid "_Get Started"
+-msgstr ""
+-
+-#: ../assets/resources/window.blp:70
+-msgid "Add a machine to get started"
+-msgstr ""
+-
+-#: ../assets/resources/window.blp:80
+-msgid "_Keyboard Shortcuts"
+-msgstr ""
+-
+-#: ../assets/resources/window.blp:85
+-msgid "_About Phial"
+-msgstr ""
+-
+ #: ../assets/resources/setup-dialog.blp:5
+ msgid "Set Up Phial"
+ msgstr ""
+@@ -80,7 +43,7 @@ msgid "Machines Folder"
+ msgstr ""
+ 
+ #: ../assets/resources/setup-dialog.blp:63
+-#: ../internal/components/setup_dialog.go:394
++#: ../internal/components/setup_dialog.go:400
+ msgid "Not selected"
+ msgstr ""
+ 
+@@ -146,36 +109,83 @@ #: ../assets/resources/setup-dialog.blp:232
+ msgid "_Finish"
+ msgstr ""
+ 
++#: ../assets/resources/window.blp:7 ../assets/resources/window.blp:18
++#: ../assets/resources/window.blp:48 ../assets/resources/window.blp:85
++#: ../assets/resources/window.blp:99
++#: ../assets/meta/com.pojtinger.felicitas.Phial.desktop.in:4
++#: ../assets/resources/metainfo.xml.in:7
++msgid "Phial"
++msgstr ""
++
++#: ../assets/resources/window.blp:24 ../assets/resources/window.blp:54
++#: ../assets/resources/window.blp:91
++msgid "Main Menu"
++msgstr ""
++
++#: ../assets/resources/window.blp:31
++msgid "Starting Phial"
++msgstr ""
++
++#: ../assets/resources/window.blp:32
++msgid "Connecting to the host service"
++msgstr ""
++
++#: ../assets/resources/window.blp:62
++msgid "Welcome to Phial"
++msgstr ""
++
++#: ../assets/resources/window.blp:63
++#: ../assets/meta/com.pojtinger.felicitas.Phial.desktop.in:5
++#: ../assets/resources/metainfo.xml.in:8
++msgid "Run development machines safely"
++msgstr ""
++
++#: ../assets/resources/window.blp:68
++msgid "_Get Started"
++msgstr ""
++
++#: ../assets/resources/window.blp:100
++msgid "Add a machine to get started"
++msgstr ""
++
++#: ../assets/resources/window.blp:110
++msgid "_Keyboard Shortcuts"
++msgstr ""
++
++#: ../assets/resources/window.blp:115
++msgid "_About Phial"
++msgstr ""
++
+ #. TRANSLATORS: Replace "translator-credits" with your name/username, and optionally an email or URL.
+-#: ../internal/components/application.go:89
++#: ../internal/components/application.go:90
+ msgid "translator-credits"
+ msgstr ""
+ 
+-#: ../internal/components/setup_dialog.go:267
++#: ../internal/components/setup_dialog.go:246
+ msgid "Choose the Machines Folder"
+ msgstr ""
+ 
+-#: ../internal/components/setup_dialog.go:376
++#: ../internal/components/setup_dialog.go:382
+ msgid "Welcome"
+ msgstr ""
+ 
+-#: ../internal/components/setup_dialog.go:378
++#: ../internal/components/setup_dialog.go:384
+ msgid "Storage"
+ msgstr ""
+ 
+-#: ../internal/components/setup_dialog.go:380
++#: ../internal/components/setup_dialog.go:386
+ msgid "Host Access"
+ msgstr ""
+ 
+-#: ../internal/components/setup_dialog.go:382
++#: ../internal/components/setup_dialog.go:388
+ msgid "Host Service"
+ msgstr ""
+ 
+-#: ../internal/components/setup_dialog.go:384
++#: ../internal/components/setup_dialog.go:390
+ msgid "System Setup"
+ msgstr ""
+ 
+-#: ../internal/components/setup_dialog.go:386
++#: ../internal/components/setup_dialog.go:392
+ msgid "Done"
+ msgstr ""
+ 
+
