@@ -1,0 +1,634 @@
+From 061a556cdc0d3980a0a4ec1e0bdfd141dbf582de Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Wed, 18 Nov 2026 23:25:38 -0700
+Subject: [PATCH] feat: Limit machine resources in create dialog to available memory and storage
+---
+diff --git a/assets/resources/create-machine-dialog.blp b/assets/resources/create-machine-dialog.blp
+index a483369de90ddeb78d0d9f0fd2563e5812fd3631..751e1e455f008c1249688369c0cc3e38e39f72f6 100644
+--- a/assets/resources/create-machine-dialog.blp
++++ b/assets/resources/create-machine-dialog.blp
+@@ -63,10 +63,11 @@       Adw.PreferencesGroup {
+         title: _("Resources");
+         description: _("Phial allocates the disk image on the first start");
+ 
+-        Adw.SpinRow {
++        Adw.SpinRow memory_row {
+           title: _("Memory");
+           numeric: true;
+           digits: 0;
++          sensitive: false;
+           adjustment: Adjustment {
+             lower: 1;
+             upper: 256;
+@@ -85,10 +86,11 @@             ]
+           }
+         }
+ 
+-        Adw.SpinRow {
++        Adw.SpinRow disk_row {
+           title: _("Disk Size");
+           numeric: true;
+           digits: 0;
++          sensitive: false;
+           adjustment: Adjustment {
+             lower: 8;
+             upper: 2048;
+diff --git a/go.mod b/go.mod
+index 0041a4debcb059238a1f113e81705097d8617e0b..dae1ce81662b006630302d7126da591741e34143 100644
+--- a/go.mod
++++ b/go.mod
+@@ -11,17 +11,25 @@ 	github.com/go-playground/validator/v10 v10.30.6
+ 	github.com/neilotoole/slogt/v2 v2.0.0
+ 	github.com/pojntfx/go-gettext v0.4.2
+ 	github.com/qmuntal/stateless v1.8.0
++	github.com/shirou/gopsutil/v4 v4.26.10
+ 	github.com/stretchr/testify v1.12.1
+ )
+ 
+ require (
+ 	codeberg.org/puregotk/purego v0.0.0-20260224095105-2513c838cb80 // indirect
+ 	github.com/dennwc/flatpak-go-mod v0.1.1-0.20250809093520-ddf8d84264aa // indirect
++	github.com/ebitengine/purego v0.11.2 // indirect
+ 	github.com/gabriel-vasile/mimetype v1.4.16 // indirect
++	github.com/go-ole/go-ole v1.2.6 // indirect
+ 	github.com/go-playground/locales v0.14.2 // indirect
+ 	github.com/go-playground/universal-translator v0.18.2 // indirect
+ 	github.com/goccy/go-yaml v1.18.0 // indirect
+ 	github.com/leodido/go-urn v1.5.0 // indirect
++	github.com/lufia/plan9stats v0.0.0-20211012122336-39d0f177ccd0 // indirect
++	github.com/power-devops/perfstat v0.0.0-20260805114148-88456608a4f6 // indirect
++	github.com/tklauser/go-sysconf v0.4.0 // indirect
++	github.com/tklauser/numcpus v0.12.0 // indirect
++	github.com/yusufpapurcu/wmi v1.2.4 // indirect
+ 	go.yaml.in/yaml/v3 v3.0.5 // indirect
+ 	golang.org/x/crypto v0.58.0 // indirect
+ 	golang.org/x/mod v0.41.0 // indirect
+diff --git a/go.mod.json b/go.mod.json
+index e8940f1ce7f1c5fb10a1fa2c146dafce11df4f7a..43e758ecec0c55eb74040662ef53a36f9cb53924 100644
+--- a/go.mod.json
++++ b/go.mod.json
+@@ -47,6 +47,13 @@     "type": "archive",
+     "url": "https://proxy.golang.org/github.com/qmuntal/stateless/@v/v1.8.0.zip"
+   },
+   {
++    "dest": "vendor/github.com/shirou/gopsutil/v4",
++    "sha256": "7e4bf82f0b6dfb18d36c86d2f599536595e8ab7277f567cdc650c7596755dd50",
++    "strip-components": 4,
++    "type": "archive",
++    "url": "https://proxy.golang.org/github.com/shirou/gopsutil/v4/@v/v4.26.10.zip"
++  },
++  {
+     "dest": "vendor/github.com/stretchr/testify",
+     "sha256": "6874ed1c4b0b7e9feb27989b16c179b36590020633436ae260cefc5f5565589f",
+     "strip-components": 3,
+@@ -66,6 +73,13 @@     "sha256": "30c89a77609df65ae4c1bfc183935a7df443da219827370c07d0c743f1d76709",
+     "strip-components": 3,
+     "type": "archive",
+     "url": "https://proxy.golang.org/github.com/dennwc/flatpak-go-mod/@v/v0.1.1-0.20250809093520-ddf8d84264aa.zip"
++  },
++  {
++    "dest": "vendor/github.com/ebitengine/purego",
++    "sha256": "7e2ff99dfccb8b74a35fbe06da88c2ec47f280cd20ca50f8f3233e1b086990f5",
++    "strip-components": 3,
++    "type": "archive",
++    "url": "https://proxy.golang.org/github.com/ebitengine/purego/@v/v0.11.2.zip"
+   },
+   {
+     "dest": "vendor/github.com/gabriel-vasile/mimetype",
+@@ -75,6 +89,13 @@     "type": "archive",
+     "url": "https://proxy.golang.org/github.com/gabriel-vasile/mimetype/@v/v1.4.16.zip"
+   },
+   {
++    "dest": "vendor/github.com/go-ole/go-ole",
++    "sha256": "95b192df81ca16f0fb7d2d98ff6596d70256d73e49e899c55fabd511fd6768ef",
++    "strip-components": 3,
++    "type": "archive",
++    "url": "https://proxy.golang.org/github.com/go-ole/go-ole/@v/v1.2.6.zip"
++  },
++  {
+     "dest": "vendor/github.com/go-playground/locales",
+     "sha256": "44c84d533c1c7b628dc11d8f885b27f096ab0e57ef5e775f10bf19b3694188f7",
+     "strip-components": 3,
+@@ -101,6 +122,41 @@     "sha256": "ceb338b7fe7c8e45fd8da9fa3c26005de833d9968d21415ebaaba603ea36f44a",
+     "strip-components": 3,
+     "type": "archive",
+     "url": "https://proxy.golang.org/github.com/leodido/go-urn/@v/v1.5.0.zip"
++  },
++  {
++    "dest": "vendor/github.com/lufia/plan9stats",
++    "sha256": "94730432c565c238cb839bb4fa55bec3b3a19b592af0f7d1418a26a48f8359c6",
++    "strip-components": 3,
++    "type": "archive",
++    "url": "https://proxy.golang.org/github.com/lufia/plan9stats/@v/v0.0.0-20211012122336-39d0f177ccd0.zip"
++  },
++  {
++    "dest": "vendor/github.com/power-devops/perfstat",
++    "sha256": "ebf0c4738c23a53c04fc836d42dcf3b52d3b2abcfa7d08dffca770fe4c2254ad",
++    "strip-components": 3,
++    "type": "archive",
++    "url": "https://proxy.golang.org/github.com/power-devops/perfstat/@v/v0.0.0-20260805114148-88456608a4f6.zip"
++  },
++  {
++    "dest": "vendor/github.com/tklauser/go-sysconf",
++    "sha256": "61e89253bc4d7091170601be12633dc02e94a3bc30470b081a2449944fa18784",
++    "strip-components": 3,
++    "type": "archive",
++    "url": "https://proxy.golang.org/github.com/tklauser/go-sysconf/@v/v0.4.0.zip"
++  },
++  {
++    "dest": "vendor/github.com/tklauser/numcpus",
++    "sha256": "56c22a112976df3a4d8db776b41288658070650ae6382ec86d0a32fc07af0276",
++    "strip-components": 3,
++    "type": "archive",
++    "url": "https://proxy.golang.org/github.com/tklauser/numcpus/@v/v0.12.0.zip"
++  },
++  {
++    "dest": "vendor/github.com/yusufpapurcu/wmi",
++    "sha256": "c2a0a12203162ef8fd6f65e191aac359823d370e113122cbd8e80711ddc9c1f9",
++    "strip-components": 3,
++    "type": "archive",
++    "url": "https://proxy.golang.org/github.com/yusufpapurcu/wmi/@v/v1.2.4.zip"
+   },
+   {
+     "dest": "vendor/go.yaml.in/yaml/v3",
+diff --git a/go.sum b/go.sum
+index 5c60ca8f1bb25607d960cd0bfff994dd59c4e471..2085ffa9d57a4b70029190bca567a8354a3f5eb8 100644
+--- a/go.sum
++++ b/go.sum
+@@ -6,8 +6,12 @@ github.com/adrg/xdg v0.5.3 h1:xRnxJXne7+oWDatRhR1JLnvuccuIeCoBu2rtuLqQB78=
+ github.com/adrg/xdg v0.5.3/go.mod h1:nlTsY+NNiCBGCK2tpm09vRqfVzrc2fLmXGpBLF0zlTQ=
+ github.com/dennwc/flatpak-go-mod v0.1.1-0.20250809093520-ddf8d84264aa h1:c5k0CB16zFqMTKviySxusHVRFAnggzX3l6JK3Cw6fiQ=
+ github.com/dennwc/flatpak-go-mod v0.1.1-0.20250809093520-ddf8d84264aa/go.mod h1:4akg2uvMr36H/vDzQSPofcff2LBk4u+bTAPy2bxVoOo=
++github.com/ebitengine/purego v0.11.2 h1:WWiTx8rD8zYdOwSj8O/NiNbsOvSAgJMTlyV1XlbUSeU=
++github.com/ebitengine/purego v0.11.2/go.mod h1:DCHPP08djqhNSoTfImcnHYQRZmd0qhakvrozqaEYhGQ=
+ github.com/gabriel-vasile/mimetype v1.4.16 h1:5izNFuvA37st1dDRAcA7TtmngBmRgiIPDmTtiEvjx1E=
+ github.com/gabriel-vasile/mimetype v1.4.16/go.mod h1:3oFFwxX8kTklZwzIl2aQEDZT0lKY8xH92ST88bAwba4=
++github.com/go-ole/go-ole v1.2.6 h1:/Fpf6oFPoeFik9ty7siob0G6Ke8QvQEuVcuChpwXzpY=
++github.com/go-ole/go-ole v1.2.6/go.mod h1:pprOEPIfldk/42T2oK7lQ4v4JSDwmV0As9GaiUsvbm0=
+ github.com/go-playground/assert/v2 v2.2.0 h1:JvknZsQTYeFEAhQwI4qEt9cyV5ONwRHC+lYKSsYSR8s=
+ github.com/go-playground/assert/v2 v2.2.0/go.mod h1:VDjEfimB/XKnb+ZQfWdccd7VUvScMdVu0Titje2rxJ4=
+ github.com/go-playground/locales v0.14.2 h1:d8UmcrM6Nip0hfGZKLGpAvZH37XB4TS0xzK9B56YNCY=
+@@ -18,23 +22,41 @@ github.com/go-playground/validator/v10 v10.30.6 h1:E+mymlPNRzAMNz1FShrRvLeGWcprF5w305eLLgWieuo=
+ github.com/go-playground/validator/v10 v10.30.6/go.mod h1:jPLL8SKCXGe/g87QmEyNw3NO28nmGt5GCnZnufm7rj4=
+ github.com/goccy/go-yaml v1.18.0 h1:8W7wMFS12Pcas7KU+VVkaiCng+kG8QiFeFwzFb+rwuw=
+ github.com/goccy/go-yaml v1.18.0/go.mod h1:XBurs7gK8ATbW4ZPGKgcbrY1Br56PdM69F7LkFRi1kA=
++github.com/google/go-cmp v0.5.6/go.mod h1:v8dTdLbMG2kIc/vJvl+f65V22dbkXbowE6jgT/gNBxE=
++github.com/google/go-cmp v0.7.0 h1:wk8382ETsv4JYUZwIsn6YpYiWiBsYLSJiTsyBybVuN8=
++github.com/google/go-cmp v0.7.0/go.mod h1:pXiqmnSA92OHEEa9HXL2W4E7lf9JzCmGVUdgjX3N/iU=
+ github.com/leodido/go-urn v1.5.0 h1:pLqT2kq1zpHW/1D18QMjMpdtX7cekxqtJJjg5ANyWw0=
+ github.com/leodido/go-urn v1.5.0/go.mod h1:9BORnCDhdPBJNDEX+w1bJisa8yOKYi116VeO96s4ifE=
++github.com/lufia/plan9stats v0.0.0-20211012122336-39d0f177ccd0 h1:6E+4a0GO5zZEnZ81pIr0yLvtUWk2if982qA3F3QD6H4=
++github.com/lufia/plan9stats v0.0.0-20211012122336-39d0f177ccd0/go.mod h1:zJYVVT2jmtg6P3p1VtQj7WsuWi/y4VnjVBn7F8KPB3I=
+ github.com/neilotoole/slogt/v2 v2.0.0 h1:Kz8VWdkjXZnkVvN1hsGYI1ervWhlcDcIcVizUJbLbH8=
+ github.com/neilotoole/slogt/v2 v2.0.0/go.mod h1:M/RN37tAuM3cpb/wD6lCpOSvphLMjuAzA/IV2hqJh3E=
+ github.com/pojntfx/go-gettext v0.4.2 h1:mYWcztN4idj11/GCNg+N2zNyJSpFKnIAr5ilksyIMtU=
+ github.com/pojntfx/go-gettext v0.4.2/go.mod h1:YztK1MAxD+AUmeEb+X4KUYOHEF0FmDaLoBZBBmxNC3Y=
++github.com/power-devops/perfstat v0.0.0-20260805114148-88456608a4f6 h1:jL3a8soXdzuTCcRnKhOmtcsVOObdDTFf4O2B403HPRU=
++github.com/power-devops/perfstat v0.0.0-20260805114148-88456608a4f6/go.mod h1:OmDBASR4679mdNQnz2pUhc2G8CO2JrUAVFDRBDP/hJE=
+ github.com/qmuntal/stateless v1.8.0 h1:9+Eg/7bWLKxUxs/vysNYAelFAh85kTyueC3ee6v8im8=
+ github.com/qmuntal/stateless v1.8.0/go.mod h1:KWa8KVzIBD/ZS0EdzL5oU79sGq7fKwH9WEFijTC5AWw=
++github.com/shirou/gopsutil/v4 v4.26.10 h1:MJN6euesJx53MVEjscYeyRSRcrdIcy3sz5k9nosjldg=
++github.com/shirou/gopsutil/v4 v4.26.10/go.mod h1:XpkIrcUMQhwte/dGxu57KtnMMFsbKelI7PP23zweKBk=
+ github.com/stretchr/testify v1.12.1 h1:EuwCh5fleGS7H32xRwO3wRGT7DxrDhLAT6FF8MpWDWE=
+ github.com/stretchr/testify v1.12.1/go.mod h1:MDEgiDPPsNp5cuIrHPPCyornHKgEVbtFUmoNlxoYthg=
++github.com/tklauser/go-sysconf v0.4.0 h1:7H0uAN+7RkwWRaxhYXDLqa5V3LPrJeV8wmD9dRUgPQU=
++github.com/tklauser/go-sysconf v0.4.0/go.mod h1:8mTNWyog7H+MpKijp4VmKJAd2bbYQ2zuUwkYRbUArPI=
++github.com/tklauser/numcpus v0.12.0 h1:NR85qdvHA9pFse3x3weVZ0r0ST8R6l5RHbZrlRaqob4=
++github.com/tklauser/numcpus v0.12.0/go.mod h1:ABHeXzJnr/qqwguhClkZKT1/8VABcYrsyUiUGobwWJg=
++github.com/yusufpapurcu/wmi v1.2.4 h1:zFUKzehAFReQwLys1b/iSMl+JQGSCSjtVqQn9bBrPo0=
++github.com/yusufpapurcu/wmi v1.2.4/go.mod h1:SBZ9tNy3G9/m5Oi98Zks0QjeHVDvuK0qfxQmPyzfmi0=
+ go.yaml.in/yaml/v3 v3.0.5 h1:N6y/pJk8buWs9NY5ERU2HSMfm+IuD/OtfdAnq6kESPw=
+ go.yaml.in/yaml/v3 v3.0.5/go.mod h1:HVTZu1O7/Vkt2N+BFy8Zza+lnLsABggaTM2ZpNIGuKg=
+ golang.org/x/crypto v0.58.0 h1:COkYLr4k7nDI4r6QtMML2AfzeIswWHAJthLS6K/M/54=
+ golang.org/x/crypto v0.58.0/go.mod h1:Xh+kl5A+M0gMiWDytH2Hhr5Z7WbNCpv/eB/EFgfSk+w=
+ golang.org/x/mod v0.41.0 h1:qJmnOUb4YB+FsEuM3HcWucdZASCPGhsX6uljO6pog0c=
+ golang.org/x/mod v0.41.0/go.mod h1:Ek9pY8RKWXwsWvd3rQiHYtMqkjSUV+s1Rj7j4H5Ur6o=
++golang.org/x/sys v0.0.0-20190916202348-b4ddaad3f8a3/go.mod h1:h1NjWce9XRLGQEsW7wpKNCjG9DtNlClVuFLEZdDNbEs=
++golang.org/x/sys v0.0.0-20201204225414-ed752295db88/go.mod h1:h1NjWce9XRLGQEsW7wpKNCjG9DtNlClVuFLEZdDNbEs=
+ golang.org/x/sys v0.49.0 h1:XbzkgYJHdqh/8m2Uu0W/dQv8nktxx4BFHp1M0gROTXA=
+ golang.org/x/sys v0.49.0/go.mod h1:hNLxWAXmnKAxqDtdwIYC4bM9oQPEecfsnNMuSxOs3og=
+ golang.org/x/text v0.43.0 h1:1QivrlhwAsnMOcqgOdl9my7s9OyZl8O5/UGUTJVXoWc=
+ golang.org/x/text v0.43.0/go.mod h1:hbSIYA/amXcRXTFSZqh8tWHEoqRvvbKPJ2uz/KU+a+s=
++golang.org/x/xerrors v0.0.0-20191204190536-9bdfabe68543/go.mod h1:I/5z698sn9Ka8TeJc9MKroUUfqBBauWjQqLJ2OPfmY0=
+diff --git a/internal/components/create_machine_dialog.go b/internal/components/create_machine_dialog.go
+index d812883ee18c62fc16d5687ff817988cf413da93..01ac1a3d74eedb6933d160291ad975715b5d1963 100644
+--- a/internal/components/create_machine_dialog.go
++++ b/internal/components/create_machine_dialog.go
+@@ -1,17 +1,24 @@
+ package components
+ 
+ import (
++	"errors"
++	"io/fs"
+ 	"log/slog"
++	"math"
++	"path/filepath"
+ 	"runtime"
+ 	"unsafe"
+ 
+ 	"codeberg.org/pojntfx/phial/assets/resources"
++	"codeberg.org/pojntfx/phial/pkg/state"
+ 	"codeberg.org/puregotk/puregotk/v4/adw"
+ 	"codeberg.org/puregotk/puregotk/v4/glib"
+ 	"codeberg.org/puregotk/puregotk/v4/gobject"
+ 	"codeberg.org/puregotk/puregotk/v4/gtk"
+ 	"github.com/go-playground/validator/v10"
+ 	. "github.com/pojntfx/go-gettext/pkg/i18n"
++	"github.com/shirou/gopsutil/v4/disk"
++	"github.com/shirou/gopsutil/v4/mem"
+ )
+ 
+ var (
+@@ -19,16 +26,29 @@ 	gTypeCreateMachineDialog gobject.Type
+ 	hostnameValidator        = validator.New()
+ )
+ 
++const (
++	minimumMemoryGiB = 1
++	minimumDiskGiB   = 8
++)
++
+ type CreateMachineDialog struct {
+ 	adw.Dialog
+ 
++	store *state.Store
++	log   *slog.Logger
++
+ 	nameRow         *adw.EntryRow
+ 	nameErrorButton *gtk.MenuButton
++	memoryRow       *adw.SpinRow
++	diskRow         *adw.SpinRow
++
++	memoryLimitKnown bool
++	diskLimitKnown   bool
+ 
+ 	callbacks []interface{}
+ }
+ 
+-func NewCreateMachineDialog() CreateMachineDialog {
++func NewCreateMachineDialog(store *state.Store, log *slog.Logger) CreateMachineDialog {
+ 	obj := gobject.NewObject(gTypeCreateMachineDialog, "css-name")
+ 	gobject.IncreaseRef(obj.GoPointer())
+ 
+@@ -36,6 +56,8 @@ 	var v CreateMachineDialog
+ 	obj.Cast(&v)
+ 
+ 	dialog := (*CreateMachineDialog)(unsafe.Pointer(obj.GetData(dataKeyGoInstance)))
++	dialog.store = store
++	dialog.log = log
+ 
+ 	onAliasChanged := func() {
+ 		dialog.validateAlias()
+@@ -43,9 +65,99 @@ 	}
+ 	dialog.callbacks = append(dialog.callbacks, &onAliasChanged)
+ 	dialog.nameRow.PreferencesRow.ListBoxRow.Widget.InitiallyUnowned.Object.ConnectSignal("changed", &onAliasChanged)
+ 
++	onMemoryChanged := func(gtk.Adjustment) {
++		dialog.updateMemoryTooltip()
++	}
++	dialog.callbacks = append(dialog.callbacks, &onMemoryChanged)
++	dialog.memoryRow.GetAdjustment().ConnectValueChanged(&onMemoryChanged)
++
++	onDiskChanged := func(gtk.Adjustment) {
++		dialog.updateDiskTooltip()
++	}
++	dialog.callbacks = append(dialog.callbacks, &onDiskChanged)
++	dialog.diskRow.GetAdjustment().ConnectValueChanged(&onDiskChanged)
++
++	dialog.Refresh()
++
+ 	return v
+ }
+ 
++func (w *CreateMachineDialog) Refresh() {
++	w.memoryRow.SetSensitive(false)
++	w.diskRow.SetSensitive(false)
++
++	folder := w.store.MachinesFolder()
++	if folder == "" {
++		folder = w.store.SuggestedMachinesFolder()
++	}
++
++	if memory, ok := availableMemoryGiB(); ok {
++		w.memoryLimitKnown = true
++		w.setUpper(w.memoryRow, memory, minimumMemoryGiB)
++		w.memoryRow.SetSensitive(true)
++	} else {
++		w.memoryLimitKnown = false
++	}
++
++	if diskFree, ok := freeDiskGiB(folder); ok {
++		w.diskLimitKnown = true
++		w.setUpper(w.diskRow, diskFree, minimumDiskGiB)
++		w.diskRow.SetSensitive(true)
++	} else {
++		w.diskLimitKnown = false
++	}
++
++	w.updateMemoryTooltip()
++	w.updateDiskTooltip()
++	w.validateAlias()
++}
++
++func (w *CreateMachineDialog) setUpper(row *adw.SpinRow, value float64, minimum float64) {
++	adjustment := row.GetAdjustment()
++
++	upper := math.Max(0, math.Floor(value))
++	lower := minimum
++	if upper < lower {
++		lower = upper
++	}
++
++	value = math.Min(math.Max(adjustment.GetValue(), lower), upper)
++
++	adjustment.Configure(
++		value,
++		lower,
++		upper,
++		adjustment.GetStepIncrement(),
++		adjustment.GetPageIncrement(),
++		adjustment.GetPageSize(),
++	)
++}
++
++func (w *CreateMachineDialog) updateMemoryTooltip() {
++	w.updateUpperTooltip(w.memoryRow, L("No more memory available"), w.memoryLimitKnown)
++}
++
++func (w *CreateMachineDialog) updateDiskTooltip() {
++	w.updateUpperTooltip(w.diskRow, L("No more storage available"), w.diskLimitKnown)
++}
++
++func (w *CreateMachineDialog) updateUpperTooltip(row *adw.SpinRow, message string, known bool) {
++	if !known {
++		row.SetTooltipText("")
++
++		return
++	}
++
++	adjustment := row.GetAdjustment()
++	if adjustment.GetValue() >= adjustment.GetUpper() {
++		row.SetTooltipText(message)
++
++		return
++	}
++
++	row.SetTooltipText("")
++}
++
+ func (w *CreateMachineDialog) validateAlias() {
+ 	name := w.nameRow.GetText()
+ 	if name == "" || hostnameValidator.Var(name, "hostname_rfc1123,max=253") == nil {
+@@ -61,12 +173,49 @@ 	w.nameRow.SetTooltipText(L("Use a hostname like dev-vm or dev.example"))
+ 	w.nameErrorButton.SetVisible(true)
+ }
+ 
++func availableMemoryGiB() (float64, bool) {
++	stat, err := mem.VirtualMemory()
++	if err != nil {
++		return 0, false
++	}
++
++	return float64(stat.Available) / (1024 * 1024 * 1024), true
++}
++
++func freeDiskGiB(path string) (float64, bool) {
++	if path == "" {
++		return 0, false
++	}
++
++	path = filepath.Clean(path)
++
++	for {
++		usage, err := disk.Usage(path)
++		if err == nil {
++			return float64(usage.Free) / (1024 * 1024 * 1024), true
++		}
++
++		if !errors.Is(err, fs.ErrNotExist) {
++			return 0, false
++		}
++
++		parent := filepath.Dir(path)
++		if parent == path || parent == "/" {
++			return 0, false
++		}
++
++		path = parent
++	}
++}
++
+ func init() {
+ 	var dialogClassInit gobject.ClassInitFunc = func(tc *gobject.TypeClass, u uintptr) {
+ 		typeClass := (*gtk.WidgetClass)(unsafe.Pointer(tc))
+ 		typeClass.SetTemplateFromResource(resources.ResourceCreateMachineDialogUIPath)
+ 		typeClass.BindTemplateChildFull("name_row", false, 0)
+ 		typeClass.BindTemplateChildFull("name_error_button", false, 0)
++		typeClass.BindTemplateChildFull("memory_row", false, 0)
++		typeClass.BindTemplateChildFull("disk_row", false, 0)
+ 
+ 		objClass := (*gobject.ObjectClass)(unsafe.Pointer(tc))
+ 
+@@ -82,6 +231,8 @@
+ 			var (
+ 				nameRow         adw.EntryRow
+ 				nameErrorButton gtk.MenuButton
++				memoryRow       adw.SpinRow
++				diskRow         adw.SpinRow
+ 			)
+ 
+ 			parent.Widget.GetTemplateChild(
+@@ -92,12 +243,22 @@ 			parent.Widget.GetTemplateChild(
+ 				gTypeCreateMachineDialog,
+ 				"name_error_button",
+ 			).Cast(&nameErrorButton)
++			parent.Widget.GetTemplateChild(
++				gTypeCreateMachineDialog,
++				"memory_row",
++			).Cast(&memoryRow)
++			parent.Widget.GetTemplateChild(
++				gTypeCreateMachineDialog,
++				"disk_row",
++			).Cast(&diskRow)
+ 
+ 			d := &CreateMachineDialog{
+ 				Dialog: parent,
+ 
+ 				nameRow:         &nameRow,
+ 				nameErrorButton: &nameErrorButton,
++				memoryRow:       &memoryRow,
++				diskRow:         &diskRow,
+ 
+ 				callbacks: []interface{}{},
+ 			}
+@@ -108,7 +269,7 @@
+ 			var cleanupCallback glib.DestroyNotify = func(data uintptr) {
+ 				for _, callback := range d.callbacks {
+ 					if err := glib.UnrefCallback(callback); err != nil {
+-						slog.Default().Error("Could not unref callback", "err", err)
++						d.log.Error("Could not unref callback", "err", err)
+ 					}
+ 				}
+ 
+diff --git a/internal/components/main_window.go b/internal/components/main_window.go
+index 27cbdf23c17bff9b7efcf748230c67f85e60e781..73cb204f51ab6c41ebf5ef71ad6f55c82742af0c 100644
+--- a/internal/components/main_window.go
++++ b/internal/components/main_window.go
+@@ -108,11 +108,12 @@
+ 	setupDialog := NewSetupDialog(window.ctx, window.store, window.settings, window.log, &window.ApplicationWindow.Widget)
+ 	window.setupDialog = (*SetupDialog)(unsafe.Pointer(setupDialog.Widget.GetData(dataKeyGoInstance)))
+ 
+-	createMachineDialog := NewCreateMachineDialog()
++	createMachineDialog := NewCreateMachineDialog(window.store, window.log)
+ 	window.createMachineDialog = (*CreateMachineDialog)(unsafe.Pointer(createMachineDialog.Widget.GetData(dataKeyGoInstance)))
+ 
+ 	createMachineAction := gio.NewSimpleAction("newMachine", nil)
+ 	onCreateMachine := func(gio.SimpleAction, uintptr) {
++		window.createMachineDialog.Refresh()
+ 		window.createMachineDialog.Present(&window.ApplicationWindow.Widget)
+ 	}
+ 	window.callbacks = append(window.callbacks, &onCreateMachine)
+@@ -165,17 +166,11 @@ 	w.refresh()
+ }
+ 
+ func (w *MainWindow) refresh() {
+-	if w.store == nil {
+-		return
+-	}
+-
+ 	if w.preferencesAction != nil {
+ 		w.preferencesAction.SetEnabled(w.store.Ready() || w.store.Page() == state.SetupPageFinish)
+ 	}
+ 
+-	if w.createMachineAction != nil {
+-		w.createMachineAction.SetEnabled(w.store.Ready())
+-	}
++	w.createMachineAction.SetEnabled(w.store.Ready())
+ 
+ 	if w.store.HostStatus() == state.HostStatusConnecting {
+ 		w.contentStack.SetVisibleChildName(contentPageConnecting)
+diff --git a/modules.txt b/modules.txt
+index 35e8eccc60d7acbc29cc44e5fc18d1e28e223538..b3d1f985f284bc1a0ee4713e4499cd0df53c01d3 100644
+--- a/modules.txt
++++ b/modules.txt
+@@ -30,6 +30,12 @@ github.com/adrg/xdg/internal/userdirs
+ # github.com/dennwc/flatpak-go-mod v0.1.1-0.20250809093520-ddf8d84264aa
+ ## explicit; go 1.24.4
+ github.com/dennwc/flatpak-go-mod
++# github.com/ebitengine/purego v0.11.2
++## explicit; go 1.25.0
++github.com/ebitengine/purego
++github.com/ebitengine/purego/internal/cgo
++github.com/ebitengine/purego/internal/fakecgo
++github.com/ebitengine/purego/internal/strings
+ # github.com/gabriel-vasile/mimetype v1.4.16
+ ## explicit; go 1.24
+ github.com/gabriel-vasile/mimetype
+@@ -41,6 +47,10 @@ github.com/gabriel-vasile/mimetype/internal/magic
+ github.com/gabriel-vasile/mimetype/internal/markup
+ github.com/gabriel-vasile/mimetype/internal/mp3
+ github.com/gabriel-vasile/mimetype/internal/scan
++# github.com/go-ole/go-ole v1.2.6
++## explicit; go 1.12
++github.com/go-ole/go-ole
++github.com/go-ole/go-ole/oleutil
+ # github.com/go-playground/locales v0.14.2
+ ## explicit; go 1.17
+ github.com/go-playground/locales
+@@ -66,15 +76,27 @@ # github.com/leodido/go-urn v1.5.0
+ ## explicit; go 1.24.0
+ github.com/leodido/go-urn
+ github.com/leodido/go-urn/scim/schema
++# github.com/lufia/plan9stats v0.0.0-20211012122336-39d0f177ccd0
++## explicit; go 1.16
++github.com/lufia/plan9stats
+ # github.com/neilotoole/slogt/v2 v2.0.0
+ ## explicit; go 1.25
+ github.com/neilotoole/slogt/v2
+ # github.com/pojntfx/go-gettext v0.4.2
+ ## explicit; go 1.25.0
+ github.com/pojntfx/go-gettext/pkg/i18n
++# github.com/power-devops/perfstat v0.0.0-20260805114148-88456608a4f6
++## explicit; go 1.14
++github.com/power-devops/perfstat
+ # github.com/qmuntal/stateless v1.8.0
+ ## explicit; go 1.24
+ github.com/qmuntal/stateless
++# github.com/shirou/gopsutil/v4 v4.26.10
++## explicit; go 1.26.0
++github.com/shirou/gopsutil/v4/common
++github.com/shirou/gopsutil/v4/disk
++github.com/shirou/gopsutil/v4/internal/common
++github.com/shirou/gopsutil/v4/mem
+ # github.com/stretchr/testify v1.12.1
+ ## explicit; go 1.17
+ github.com/stretchr/testify/assert
+@@ -82,6 +104,15 @@ github.com/stretchr/testify/assert/yaml
+ github.com/stretchr/testify/internal/difflib
+ github.com/stretchr/testify/internal/spew
+ github.com/stretchr/testify/require
++# github.com/tklauser/go-sysconf v0.4.0
++## explicit; go 1.25.0
++github.com/tklauser/go-sysconf
++# github.com/tklauser/numcpus v0.12.0
++## explicit; go 1.25.0
++github.com/tklauser/numcpus
++# github.com/yusufpapurcu/wmi v1.2.4
++## explicit; go 1.16
++github.com/yusufpapurcu/wmi
+ # go.yaml.in/yaml/v3 v3.0.5
+ ## explicit; go 1.16
+ go.yaml.in/yaml/v3
+@@ -97,7 +128,9 @@ golang.org/x/mod/semver
+ # golang.org/x/sys v0.49.0
+ ## explicit; go 1.26.0
+ golang.org/x/sys/cpu
++golang.org/x/sys/unix
+ golang.org/x/sys/windows
++golang.org/x/sys/windows/registry
+ # golang.org/x/text v0.43.0
+ ## explicit; go 1.26.0
+ golang.org/x/text/internal/language
+diff --git a/po/phial.pot b/po/phial.pot
+index 4cf4f7e80d6f7553b11f20a526a3c1b52fd53678..1c1d3923afe8865191d554633c42ce8e0a2ae05b 100644
+--- a/po/phial.pot
++++ b/po/phial.pot
+@@ -254,17 +254,17 @@ #: ../assets/resources/create-machine-dialog.blp:67
+ msgid "Memory"
+ msgstr ""
+ 
+-#: ../assets/resources/create-machine-dialog.blp:80
+-#: ../assets/resources/create-machine-dialog.blp:102
++#: ../assets/resources/create-machine-dialog.blp:81
++#: ../assets/resources/create-machine-dialog.blp:104
+ msgid "GiB"
+ msgstr ""
+ 
+-#: ../assets/resources/create-machine-dialog.blp:89
++#: ../assets/resources/create-machine-dialog.blp:90
+ msgid "Disk Size"
+ msgstr ""
+ 
+-#: ../assets/resources/create-machine-dialog.blp:116
+-#: ../internal/components/create_machine_dialog.go:60
++#: ../assets/resources/create-machine-dialog.blp:118
++#: ../internal/components/create_machine_dialog.go:176
+ msgid "Use a hostname like dev-vm or dev.example"
+ msgstr ""
+ 
+@@ -300,6 +300,14 @@ msgstr ""
+ 
+ #: ../internal/components/setup_dialog.go:405
+ msgid "Done"
++msgstr ""
++
++#: ../internal/components/create_machine_dialog.go:141
++msgid "No more memory available"
++msgstr ""
++
++#: ../internal/components/create_machine_dialog.go:145
++msgid "No more storage available"
+ msgstr ""
+ 
+ #. TRANSLATORS: Search terms to find this application.
+
