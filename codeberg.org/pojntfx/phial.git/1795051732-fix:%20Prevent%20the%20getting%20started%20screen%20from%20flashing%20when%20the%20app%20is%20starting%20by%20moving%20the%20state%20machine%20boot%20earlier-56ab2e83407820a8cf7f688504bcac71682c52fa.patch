@@ -1,0 +1,166 @@
+From 56ab2e83407820a8cf7f688504bcac71682c52fa Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Wed, 18 Nov 2026 18:28:52 -0700
+Subject: [PATCH] fix: Prevent the getting started screen from flashing when the app is starting by moving the state machine boot earlier
+---
+diff --git a/assets/resources/index.go b/assets/resources/index.go
+index 15803c29cf80fd748031d1460b5653e55c075975..762e42590aa877d7c1e86070793e6eb8aeabfb3a 100644
+--- a/assets/resources/index.go
++++ b/assets/resources/index.go
+@@ -13,6 +13,8 @@
+ const (
+ 	AppID      = "com.pojtinger.felicitas.Phial"
+ 	AppVersion = "0.1.0"
++
++	SchemaOnboardedKey = "onboarded"
+ )
+ 
+ //go:generate sh -c "blueprint-compiler batch-compile . . *.blp && glib-compile-resources *.gresource.xml"
+diff --git a/internal/components/application.go b/internal/components/application.go
+index 0512bcf97e1de62cbb1cd3283ed81eecb6cbab2e..b5b64221f6014c6f91c66423572b53b7582f5a84 100644
+--- a/internal/components/application.go
++++ b/internal/components/application.go
+@@ -129,15 +129,16 @@
+ 				return
+ 			}
+ 
++			if err := store.Boot(phialApp.ctx, phialApp.settings.GetBoolean(resources.SchemaOnboardedKey)); err != nil {
++				phialApp.log.Error("Could not boot store", "err", err)
++
++				return
++			}
++
+ 			obj := NewMainWindow(phialApp.ctx, &phialApp.Application, phialApp.log, phialApp.settings, store, "application", app)
+ 
+ 			phialApp.window = (*MainWindow)(unsafe.Pointer(obj.GetData(dataKeyGoInstance)))
+ 
+-			if err := store.Boot(phialApp.ctx, false); err != nil {
+-				phialApp.log.Error("Could not boot store", "err", err)
+-
+-				return
+-			}
+ 			go store.Run()
+ 
+ 			openAboutAction := gio.NewSimpleAction("openAbout", nil)
+diff --git a/internal/components/main_window.go b/internal/components/main_window.go
+index fbee4fc817dbcb4cc7400b60bcc08211eaa36758..332d7ac9a2c250dc9f0e10179b52684a3a204b29 100644
+--- a/internal/components/main_window.go
++++ b/internal/components/main_window.go
+@@ -59,7 +59,7 @@ 	window.store = store
+ 
+ 	window.ctx = ctx
+ 
+-	setupDialog := NewSetupDialog(window.ctx, window.store, window.log, &window.ApplicationWindow.Widget)
++	setupDialog := NewSetupDialog(window.ctx, window.store, window.settings, window.log, &window.ApplicationWindow.Widget)
+ 	window.setupDialog = (*SetupDialog)(unsafe.Pointer(setupDialog.Widget.GetData(dataKeyGoInstance)))
+ 
+ 	setupNextAction := gio.NewSimpleAction("setupNext", nil)
+diff --git a/internal/components/setup_dialog.go b/internal/components/setup_dialog.go
+index 41d90855dc99b9984f73e31ba12df186bfe6d288..bf555d9f3be7d0658c7a4f64950df9da44200c9d 100644
+--- a/internal/components/setup_dialog.go
++++ b/internal/components/setup_dialog.go
+@@ -26,10 +26,11 @@
+ type SetupDialog struct {
+ 	adw.Dialog
+ 
+-	ctx    context.Context
+-	log    *slog.Logger
+-	store  *state.Store
+-	parent *gtk.Widget
++	ctx      context.Context
++	log      *slog.Logger
++	settings *gio.Settings
++	store    *state.Store
++	parent   *gtk.Widget
+ 
+ 	dialogStack        gtk.Stack
+ 	dialogHeaderBar    *adw.HeaderBar
+@@ -62,7 +63,7 @@
+ 	callbacks []interface{}
+ }
+ 
+-func NewSetupDialog(ctx context.Context, store *state.Store, log *slog.Logger, parent *gtk.Widget) SetupDialog {
++func NewSetupDialog(ctx context.Context, store *state.Store, settings *gio.Settings, log *slog.Logger, parent *gtk.Widget) SetupDialog {
+ 	obj := gobject.NewObject(gTypeSetupDialog, "css-name")
+ 	gobject.IncreaseRef(obj.GoPointer())
+ 
+@@ -72,19 +73,13 @@
+ 	dialog := (*SetupDialog)(unsafe.Pointer(obj.GetData(dataKeyGoInstance)))
+ 	dialog.ctx = ctx
+ 	dialog.log = log
++	dialog.settings = settings
+ 	dialog.store = store
+ 	dialog.parent = parent
+ 
+ 	closeDialog := func() {
+-		if dialog.store.Page() == state.SetupPageFinish {
+-			canSetupFinish, err := dialog.store.CanSetupFinish(dialog.ctx)
+-			if err != nil {
+-				dialog.log.Error("Could not determine whether setup can finish", "err", err)
+-			} else if canSetupFinish {
+-				if err := dialog.store.SetupFinish(dialog.ctx); err != nil {
+-					dialog.log.Error("Could not finish setup", "err", err)
+-				}
+-			}
++		if dialog.store.Page() == state.SetupPageFinish && !dialog.finishSetup() {
++			return
+ 		}
+ 
+ 		dialog.ForceClose()
+@@ -174,20 +169,7 @@ 	dialog.callbacks = append(dialog.callbacks, &onVerifyConnection)
+ 	dialog.verifyConnectionRow.ConnectActivated(&onVerifyConnection)
+ 
+ 	onFinish := func(gtk.Button) {
+-		canSetupFinish, err := dialog.store.CanSetupFinish(dialog.ctx)
+-		if err != nil {
+-			dialog.log.Error("Could not determine whether setup can finish", "err", err)
+-
+-			return
+-		}
+-
+-		if !canSetupFinish {
+-			return
+-		}
+-
+-		if err := dialog.store.SetupFinish(dialog.ctx); err != nil {
+-			dialog.log.Error("Could not finish setup", "err", err)
+-
++		if !dialog.finishSetup() {
+ 			return
+ 		}
+ 
+@@ -294,6 +276,33 @@
+ 	dialog.Refresh()
+ 
+ 	return v
++}
++
++func (w *SetupDialog) finishSetup() bool {
++	canSetupFinish, err := w.store.CanSetupFinish(w.ctx)
++	if err != nil {
++		w.log.Error("Could not determine whether setup can finish", "err", err)
++
++		return false
++	}
++
++	if !canSetupFinish {
++		return false
++	}
++
++	if err := w.store.SetupFinish(w.ctx); err != nil {
++		w.log.Error("Could not finish setup", "err", err)
++
++		return false
++	}
++
++	if !w.settings.SetBoolean(resources.SchemaOnboardedKey, true) {
++		w.log.Error("Could not write onboarded setting")
++
++		return true
++	}
++
++	return true
+ }
+ 
+ func (w *SetupDialog) Refresh() {
+
