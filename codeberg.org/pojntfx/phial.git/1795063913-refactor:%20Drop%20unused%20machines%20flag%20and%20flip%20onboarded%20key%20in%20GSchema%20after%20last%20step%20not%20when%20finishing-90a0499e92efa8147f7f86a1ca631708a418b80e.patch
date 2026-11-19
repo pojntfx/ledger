@@ -1,0 +1,52 @@
+From 90a0499e92efa8147f7f86a1ca631708a418b80e Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Wed, 18 Nov 2026 21:51:53 -0700
+Subject: [PATCH] refactor: Drop unused machines flag and flip onboarded key in GSchema after last step not when finishing
+---
+diff --git a/internal/components/setup_dialog.go b/internal/components/setup_dialog.go
+index 4fc5fb4d8ff705c8c7c32e454f968c3f70593c63..bf7085b0179af37527e582eeeaf7653370dcf1ee 100644
+--- a/internal/components/setup_dialog.go
++++ b/internal/components/setup_dialog.go
+@@ -309,12 +309,6 @@
+ 		return false
+ 	}
+ 
+-	if !w.settings.SetBoolean(resources.SchemaOnboardedKey, true) {
+-		w.log.Error("Could not write onboarded setting")
+-
+-		return true
+-	}
+-
+ 	return true
+ }
+ 
+@@ -327,6 +321,12 @@ 	page := w.store.Page()
+ 
+ 	if page == "" || page == state.SetupPageWelcome || w.store.Ready() {
+ 		return
++	}
++
++	if page == state.SetupPageFinish && !w.settings.GetBoolean(resources.SchemaOnboardedKey) {
++		if !w.settings.SetBoolean(resources.SchemaOnboardedKey, true) {
++			w.log.Error("Could not write onboarded setting")
++		}
+ 	}
+ 
+ 	w.dialogStack.SetVisibleChildName(string(page))
+diff --git a/pkg/state/store.go b/pkg/state/store.go
+index a8f747d5132392de95fed72f67c9f7533fb57db8..a5c9c288c74e2d994e32329cc8d2349ee9bde80d 100644
+--- a/pkg/state/store.go
++++ b/pkg/state/store.go
+@@ -231,10 +231,7 @@ 	return defaultMachinesFolder()
+ }
+ 
+ func (s *Store) HostCommand() string {
+-	s.mu.Lock()
+-	defer s.mu.Unlock()
+-
+-	return setupCommandPrefix + " --machines-dir=" + s.session.MachinesFolder()
++	return setupCommandPrefix
+ }
+ 
+ func (s *Store) SystemCommand() string {
+
