@@ -1,0 +1,409 @@
+From ae1c12dd4a1836d29b26125603b96137654b4a71 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Sat, 21 Nov 2026 02:04:13 -0700
+Subject: [PATCH] refactor: Reference GPG agent socket directly instead of the full GPG home
+---
+diff --git a/assets/resources/index.go b/assets/resources/index.go
+index 91a697628b7a9552337b07a636a9f919f1f473d9..6e5c114ee942660dcd1e9257d64d338d8f5a4c75 100644
+--- a/assets/resources/index.go
++++ b/assets/resources/index.go
+@@ -19,7 +19,7 @@
+ 	SchemaMachinesFolderKey     = "machines-folder"
+ 	SchemaHostMachinesFolderKey = "host-machines-folder"
+ 	SchemaSSHAgentSocketsKey    = "ssh-agent-sockets"
+-	SchemaGPGHomeKey            = "gpg-home"
++	SchemaPGPAgentSocketKey     = "pgp-agent-socket"
+ )
+ 
+ //go:generate sh -c "blueprint-compiler batch-compile . . *.blp && glib-compile-resources *.gresource.xml"
+diff --git a/assets/resources/index.gschema.xml b/assets/resources/index.gschema.xml
+index e21088e52ea0de42c229e29806f5fe43834dce4c..4c974c764fe4b59ab0040d3170c2d435a737f22a 100644
+--- a/assets/resources/index.gschema.xml
++++ b/assets/resources/index.gschema.xml
+@@ -21,10 +21,10 @@             <default>[]</default>
+             <summary>SSH agent sockets</summary>
+             <description>Sockets of the SSH agents that machines can use</description>
+         </key>
+-        <key name="gpg-home" type="s">
++        <key name="pgp-agent-socket" type="s">
+             <default>""</default>
+-            <summary>GPG home</summary>
+-            <description>Home folder of the PGP keyring</description>
++            <summary>PGP agent socket</summary>
++            <description>Path to the PGP agent socket (S.gpg-agent)</description>
+         </key>
+     </schema>
+ </schemalist>
+\ No newline at end of file
+diff --git a/internal/components/preferences_dialog.go b/internal/components/preferences_dialog.go
+index 649fec186dd974fdefed8fb73a730b5647c97360..899271237f7c205ed64a6c704786f1854634b255 100644
+--- a/internal/components/preferences_dialog.go
++++ b/internal/components/preferences_dialog.go
+@@ -81,14 +81,14 @@ 	secretsPreferences := NewSecretsPreferences(
+ 		dialog.parent,
+ 		dialog.log,
+ 		dialog.settings.GetStrv(resources.SchemaSSHAgentSocketsKey),
+-		dialog.settings.GetString(resources.SchemaGPGHomeKey),
+-		func(sockets []string, gpgHome string) {
++		dialog.settings.GetString(resources.SchemaPGPAgentSocketKey),
++		func(sockets []string, pgpAgentSocket string) {
+ 			if !dialog.settings.SetStrv(resources.SchemaSSHAgentSocketsKey, sockets) {
+ 				dialog.log.Error("Could not write SSH agent sockets setting")
+ 			}
+ 
+-			if !dialog.settings.SetString(resources.SchemaGPGHomeKey, gpgHome) {
+-				dialog.log.Error("Could not write GPG home setting")
++			if !dialog.settings.SetString(resources.SchemaPGPAgentSocketKey, pgpAgentSocket) {
++				dialog.log.Error("Could not write PGP agent socket setting")
+ 			}
+ 		},
+ 	)
+@@ -119,7 +119,7 @@
+ 	w.machinesPreferences.SetMachinesFolder(w.store.MachinesFolder())
+ 
+ 	w.secretsPreferences.SetSSHAgentSockets(w.settings.GetStrv(resources.SchemaSSHAgentSocketsKey))
+-	w.secretsPreferences.SetGPGHome(w.settings.GetString(resources.SchemaGPGHomeKey))
++	w.secretsPreferences.SetPGPAgentSocket(w.settings.GetString(resources.SchemaPGPAgentSocketKey))
+ }
+ 
+ func init() {
+diff --git a/internal/components/secrets_preferences.go b/internal/components/secrets_preferences.go
+index 8d12a87413c146ecd92c66936fb16d4ef0755642..16217fda8b5553eba0d8efd739ec148f253fa95f 100644
+--- a/internal/components/secrets_preferences.go
++++ b/internal/components/secrets_preferences.go
+@@ -46,13 +46,13 @@ 	parent *gtk.Widget
+ 	log    *slog.Logger
+ 
+ 	sshAgentSockets []string
+-	gpgHome         string
++	pgpAgentSocket  string
+ 
+-	onChanged func(sockets []string, gpgHome string)
++	onChanged func(sockets []string, pgpAgentSocket string)
+ 
+-	sshAgentGroup *adw.PreferencesGroup
+-	gpgGroup      *adw.PreferencesGroup
+-	gpgHomeRow    *adw.ActionRow
++	sshAgentGroup     *adw.PreferencesGroup
++	pgpAgentGroup     *adw.PreferencesGroup
++	pgpAgentSocketRow *adw.ActionRow
+ 
+ 	callbacks       []interface{}
+ 	socketCallbacks []interface{}
+@@ -62,7 +62,7 @@
+ 	closed bool
+ }
+ 
+-func NewSecretsPreferences(parent *gtk.Widget, log *slog.Logger, sshAgentSockets []string, gpgHome string, onChanged func(sockets []string, gpgHome string)) *SecretsPreferences {
++func NewSecretsPreferences(parent *gtk.Widget, log *slog.Logger, sshAgentSockets []string, pgpAgentSocket string, onChanged func(sockets []string, pgpAgentSocket string)) *SecretsPreferences {
+ 	a := &SecretsPreferences{
+ 		parent:    parent,
+ 		log:       log,
+@@ -76,41 +76,41 @@ 	a.sshAgentGroup = adw.NewPreferencesGroup()
+ 	a.sshAgentGroup.SetTitle(L("SSH Agents"))
+ 	a.sshAgentGroup.SetDescription(L("Sockets of the SSH agents that machines can use"))
+ 
+-	a.gpgGroup = adw.NewPreferencesGroup()
+-	a.gpgGroup.SetTitle(L("PGP Keyring"))
+-	a.gpgGroup.SetDescription(L("Home folder of the PGP keyring"))
++	a.pgpAgentGroup = adw.NewPreferencesGroup()
++	a.pgpAgentGroup.SetTitle(L("PGP Agent"))
++	a.pgpAgentGroup.SetDescription(L("Socket that lets machines use your PGP keys"))
+ 
+-	a.gpgHomeRow = adw.NewActionRow()
+-	a.gpgHomeRow.SetTitle(L("Keyring Folder"))
+-	a.gpgHomeRow.SetSubtitle(L("Not selected"))
++	a.pgpAgentSocketRow = adw.NewActionRow()
++	a.pgpAgentSocketRow.SetTitle(L("PGP agent socket"))
++	a.pgpAgentSocketRow.SetSubtitle(L("Not selected"))
+ 
+-	gpgHomeIcon := gtk.NewImageFromIconName("folder-symbolic")
+-	gpgHomeIcon.SetValign(gtk.AlignCenterValue)
+-	a.gpgHomeRow.AddPrefix(&gpgHomeIcon.Widget)
++	pgpAgentSocketIcon := gtk.NewImageFromIconName("channel-secure-symbolic")
++	pgpAgentSocketIcon.SetValign(gtk.AlignCenterValue)
++	a.pgpAgentSocketRow.AddPrefix(&pgpAgentSocketIcon.Widget)
+ 
+-	gpgHomeButton := gtk.NewButtonWithLabel(L("_Choose..."))
+-	gpgHomeButton.SetUseUnderline(true)
+-	gpgHomeButton.SetValign(gtk.AlignCenterValue)
+-	a.gpgHomeRow.AddSuffix(&gpgHomeButton.Widget)
++	pgpAgentSocketButton := gtk.NewButtonWithLabel(L("_Choose..."))
++	pgpAgentSocketButton.SetUseUnderline(true)
++	pgpAgentSocketButton.SetValign(gtk.AlignCenterValue)
++	a.pgpAgentSocketRow.AddSuffix(&pgpAgentSocketButton.Widget)
+ 
+-	onChooseGPGHome := func(gtk.Button) {
+-		a.chooseGPGHome()
++	onChoosePGPAgentSocket := func(gtk.Button) {
++		a.choosePGPAgentSocket()
+ 	}
+-	a.callbacks = append(a.callbacks, &onChooseGPGHome)
+-	gpgHomeButton.ConnectClicked(&onChooseGPGHome)
++	a.callbacks = append(a.callbacks, &onChoosePGPAgentSocket)
++	pgpAgentSocketButton.ConnectClicked(&onChoosePGPAgentSocket)
+ 
+-	a.gpgGroup.Add(&a.gpgHomeRow.Widget)
++	a.pgpAgentGroup.Add(&a.pgpAgentSocketRow.Widget)
+ 
+ 	a.sshAgentSockets = append([]string(nil), sshAgentSockets...)
+ 	a.rebuildSSHAgentSockets()
+-	a.SetGPGHome(gpgHome)
++	a.SetPGPAgentSocket(pgpAgentSocket)
+ 
+ 	return a
+ }
+ 
+ func (a *SecretsPreferences) AddTo(page *adw.PreferencesPage) {
+ 	page.Add(a.sshAgentGroup)
+-	page.Add(a.gpgGroup)
++	page.Add(a.pgpAgentGroup)
+ }
+ 
+ func (a *SecretsPreferences) SetSSHAgentSockets(sockets []string) {
+@@ -123,16 +123,16 @@
+ 	a.rebuildSSHAgentSockets()
+ }
+ 
+-func (a *SecretsPreferences) SetGPGHome(home string) {
+-	a.gpgHome = home
++func (a *SecretsPreferences) SetPGPAgentSocket(socket string) {
++	a.pgpAgentSocket = socket
+ 
+-	if home == "" {
+-		a.gpgHomeRow.SetSubtitle(L("Not selected"))
++	if socket == "" {
++		a.pgpAgentSocketRow.SetSubtitle(L("Not selected"))
+ 
+ 		return
+ 	}
+ 
+-	a.gpgHomeRow.SetSubtitle(home)
++	a.pgpAgentSocketRow.SetSubtitle(socket)
+ }
+ 
+ func (a *SecretsPreferences) Close() {
+@@ -274,13 +274,13 @@ 	a.rebuildSSHAgentSockets()
+ 	a.notifyChanged()
+ }
+ 
+-func (a *SecretsPreferences) setGPGHome(home string) {
+-	a.SetGPGHome(home)
++func (a *SecretsPreferences) setPGPAgentSocket(socket string) {
++	a.SetPGPAgentSocket(socket)
+ 	a.notifyChanged()
+ }
+ 
+ func (a *SecretsPreferences) notifyChanged() {
+-	a.onChanged(append([]string(nil), a.sshAgentSockets...), a.gpgHome)
++	a.onChanged(append([]string(nil), a.sshAgentSockets...), a.pgpAgentSocket)
+ }
+ 
+ func (a *SecretsPreferences) chooseSSHAgentSocket() {
+@@ -318,16 +318,44 @@
+ 	fileDialog.Open(&parentWindow, nil, &onSocketChosen, 0)
+ }
+ 
+-func (a *SecretsPreferences) chooseGPGHome() {
+-	initial := a.gpgHome
++func (a *SecretsPreferences) choosePGPAgentSocket() {
++	initial := a.pgpAgentSocket
+ 	if initial == "" {
+-		initial = state.MockGPGHome()
++		initial = state.MockPGPAgentSocket()
++	}
++
++	fileDialog := gtk.NewFileDialog()
++	fileDialog.SetTitle(L("Choose a PGP Agent Socket"))
++
++	if initial != "" {
++		if folder := initialFolder(filepath.Dir(initial)); folder != "" {
++			fileDialog.SetInitialFolder(gio.FileNewForPath(folder))
++		}
+ 	}
+ 
+-	onGPGHomeChosen := chooseFolder(a.parent, a.log, L("Choose the PGP Keyring Folder"), initial, func(path string) {
+-		a.setGPGHome(path)
++	var onSocketChosen gio.AsyncReadyCallback
++	onSocketChosen = gio.AsyncReadyCallback(func(_ uintptr, resultPtr uintptr, _ uintptr) {
++		result := gio.AsyncResultBase{Ptr: resultPtr}
++
++		file, err := fileDialog.OpenFinish(&result)
++		if err != nil {
++			a.log.Error("Could not choose PGP agent socket", "err", err)
++
++			return
++		}
++
++		if file == nil {
++			return
++		}
++
++		a.setPGPAgentSocket(file.GetPath())
+ 	})
+-	a.callbacks = append(a.callbacks, &onGPGHomeChosen)
++	a.callbacks = append(a.callbacks, &onSocketChosen)
++
++	var parentWindow gtk.Window
++	a.parent.Cast(&parentWindow)
++
++	fileDialog.Open(&parentWindow, nil, &onSocketChosen, 0)
+ }
+ 
+ func init() {
+diff --git a/internal/components/setup_dialog.go b/internal/components/setup_dialog.go
+index 7ef7df043ec1e0a10e7abcb8713f3e47d8ac1216..fb67114b17cc1bc94aa47dbf4b696186f733361d 100644
+--- a/internal/components/setup_dialog.go
++++ b/internal/components/setup_dialog.go
+@@ -82,16 +82,16 @@ 	secretsPreferences := NewSecretsPreferences(
+ 		dialog.parent,
+ 		dialog.log,
+ 		dialog.store.SSHAgentSockets(),
+-		dialog.store.GPGHome(),
+-		func(sockets []string, gpgHome string) {
++		dialog.store.PGPAgentSocket(),
++		func(sockets []string, pgpAgentSocket string) {
+ 			if err := dialog.store.SetSSHAgentSockets(dialog.ctx, sockets); err != nil {
+ 				dialog.log.Error("Could not set SSH agent sockets", "err", err)
+ 
+ 				return
+ 			}
+ 
+-			if err := dialog.store.SetGPGHome(dialog.ctx, gpgHome); err != nil {
+-				dialog.log.Error("Could not set GPG home", "err", err)
++			if err := dialog.store.SetPGPAgentSocket(dialog.ctx, pgpAgentSocket); err != nil {
++				dialog.log.Error("Could not set PGP agent socket", "err", err)
+ 
+ 				return
+ 			}
+@@ -100,8 +100,8 @@ 			if !dialog.settings.SetStrv(resources.SchemaSSHAgentSocketsKey, sockets) {
+ 				dialog.log.Error("Could not write SSH agent sockets setting")
+ 			}
+ 
+-			if !dialog.settings.SetString(resources.SchemaGPGHomeKey, gpgHome) {
+-				dialog.log.Error("Could not write GPG home setting")
++			if !dialog.settings.SetString(resources.SchemaPGPAgentSocketKey, pgpAgentSocket) {
++				dialog.log.Error("Could not write PGP agent socket setting")
+ 			}
+ 
+ 			dialog.Refresh()
+@@ -346,7 +346,7 @@
+ 	setFolderRowSubtitle(w.machinesFolderRow, w.store.MachinesFolder())
+ 
+ 	w.secretsPreferences.SetSSHAgentSockets(w.store.SSHAgentSockets())
+-	w.secretsPreferences.SetGPGHome(w.store.GPGHome())
++	w.secretsPreferences.SetPGPAgentSocket(w.store.PGPAgentSocket())
+ 
+ 	setCheckButtonActive := func(check *gtk.CheckButton, active bool) {
+ 		if check.GetActive() != active {
+diff --git a/pkg/state/secrets.go b/pkg/state/secrets.go
+index 4a0893680fbee8787f1fd03ffba62fa5ae959764..7ba0645127b954215042b2dac233cc233e9cbb06 100644
+--- a/pkg/state/secrets.go
++++ b/pkg/state/secrets.go
+@@ -3,6 +3,8 @@
+ import (
+ 	"os"
+ 	"path/filepath"
++
++	"github.com/adrg/xdg"
+ )
+ 
+ type SecretMode string
+@@ -49,13 +51,8 @@ 	return filepath.Dir(MockSSHAgentSockets()[0])
+ }
+ 
+ // TODO: Remove this mock once actual implementation exists
+-func MockGPGHome() string {
+-	home, err := os.UserHomeDir()
+-	if err != nil {
+-		return ""
+-	}
+-
+-	return filepath.Join(home, ".gnupg")
++func MockPGPAgentSocket() string {
++	return filepath.Join(xdg.RuntimeDir, "gnupg", "S.gpg-agent")
+ }
+ 
+ // TODO: Remove this mock once actual implementation exists
+diff --git a/pkg/state/session.go b/pkg/state/session.go
+index a148781adab8406505be8927fe74d5e75babd1ba..2bbf50047b9af584510506755b48187766f5a759 100644
+--- a/pkg/state/session.go
++++ b/pkg/state/session.go
+@@ -25,7 +25,7 @@ 	hostCommandCopied   bool
+ 	systemCommandCopied bool
+ 
+ 	sshAgentSockets []string
+-	gpgHome         string
++	pgpAgentSocket  string
+ 
+ 	ctx   context.Context
+ 	log   *slog.Logger
+@@ -172,7 +172,7 @@ 	return s.systemCommandCopied
+ }
+ 
+ func (s *Session) secretsConfiguredGuard(_ context.Context, _ ...any) bool {
+-	return len(s.sshAgentSockets) > 0 && s.gpgHome != ""
++	return len(s.sshAgentSockets) > 0 && s.pgpAgentSocket != ""
+ }
+ 
+ func (s *Session) onSetupStep(ctx context.Context, page SetupPage) error {
+@@ -291,12 +291,12 @@
+ 	s.sshAgentSockets = cleaned
+ }
+ 
+-func (s *Session) GPGHome() string {
+-	return s.gpgHome
++func (s *Session) PGPAgentSocket() string {
++	return s.pgpAgentSocket
+ }
+ 
+-func (s *Session) SetGPGHome(home string) {
+-	s.gpgHome = strings.TrimSpace(home)
++func (s *Session) SetPGPAgentSocket(socket string) {
++	s.pgpAgentSocket = strings.TrimSpace(socket)
+ }
+ 
+ func (s *Session) SetupCopy() {
+diff --git a/pkg/state/session_test.go b/pkg/state/session_test.go
+index cc0639f85ec0b365f6f115592d284cc2fd0b147e..5cbfb6cffc0f854a7645aaa09e41cae696dc9919 100644
+--- a/pkg/state/session_test.go
++++ b/pkg/state/session_test.go
+@@ -119,7 +119,7 @@
+ 	s.sshAgentSockets = []string{"/run/user/1000/keyring/ssh"}
+ 	require.False(t, s.secretsConfiguredGuard(t.Context()))
+ 
+-	s.gpgHome = "/home/pojntfx/.gnupg"
++	s.pgpAgentSocket = "/run/user/1000/gnupg/S.gpg-agent"
+ 	require.True(t, s.secretsConfiguredGuard(t.Context()))
+ 
+ 	s.sshAgentSockets = nil
+diff --git a/pkg/state/store.go b/pkg/state/store.go
+index 59116821350a1efdce96632674ab920c4143c4e0..3a33b742bfc5774cb0e5551a47958622bf5ae86c 100644
+--- a/pkg/state/store.go
++++ b/pkg/state/store.go
+@@ -220,20 +220,20 @@
+ 	return s.session.SSHAgentSockets()
+ }
+ 
+-func (s *Store) SetGPGHome(ctx context.Context, home string) error {
++func (s *Store) SetPGPAgentSocket(ctx context.Context, socket string) error {
+ 	s.mu.Lock()
+ 	defer s.mu.Unlock()
+ 
+-	s.session.SetGPGHome(home)
++	s.session.SetPGPAgentSocket(socket)
+ 
+ 	return s.onChange(ctx)
+ }
+ 
+-func (s *Store) GPGHome() string {
++func (s *Store) PGPAgentSocket() string {
+ 	s.mu.Lock()
+ 	defer s.mu.Unlock()
+ 
+-	return s.session.GPGHome()
++	return s.session.PGPAgentSocket()
+ }
+ 
+ func (s *Store) Page() SetupPage {
+
