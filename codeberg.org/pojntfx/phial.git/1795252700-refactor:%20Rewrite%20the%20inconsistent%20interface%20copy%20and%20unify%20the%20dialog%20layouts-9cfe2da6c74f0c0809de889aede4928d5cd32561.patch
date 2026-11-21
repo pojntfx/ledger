@@ -1,0 +1,1113 @@
+From 9cfe2da6c74f0c0809de889aede4928d5cd32561 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Sat, 21 Nov 2026 02:18:20 -0700
+Subject: [PATCH] refactor: Rewrite the inconsistent interface copy and unify the dialog layouts
+---
+diff --git a/README.md b/README.md
+index 778f0d669e83d8c15383d930bc909564ba54e87d..0e8b77a0cf87aa200bf7e58986c26484568f3f44 100644
+--- a/README.md
++++ b/README.md
+@@ -20,7 +20,7 @@
+ It enables you to:
+ 
+ - **Create and install virtual machines** with CPU, memory, disk, and network settings
+-- **Grant time-boxed access to tokens, SSH keys, and GPG keys** without copying them to the machine
++- **Grant time-boxed access to tokens, SSH keys, and PGP keys** without copying them to the machine
+ - **Pass USB devices and shared folders** to a machine
+ - **Open a window with waypipe or a desktop with RDP**
+ 
+diff --git a/assets/meta/com.pojtinger.felicitas.Phial.desktop.in b/assets/meta/com.pojtinger.felicitas.Phial.desktop.in
+index 9e98e5c004a96d62e231d4ec27e307fc2b442ad0..012d3d72b23248e95badb2e9f00707d4a9efb1fe 100644
+--- a/assets/meta/com.pojtinger.felicitas.Phial.desktop.in
++++ b/assets/meta/com.pojtinger.felicitas.Phial.desktop.in
+@@ -10,4 +10,4 @@ # Extra keywords that can be used to search for Phial
+ # TRANSLATORS: Search terms to find this application.
+ #              Do NOT translate or localize the semicolons!
+ #              The list MUST also end with a semicolon!
+-Keywords=virtual machine;secrets;ssh;gpg;usb;waypipe;rdp;
++Keywords=virtual machine;secrets;ssh;pgp;usb;waypipe;rdp;
+diff --git a/assets/resources/create-machine-dialog.blp b/assets/resources/create-machine-dialog.blp
+index 56c88cf6ff1efb880c7df8b03a38f3e556ac51af..32d9ef85d441600c2fe433db160ba4761c0ef588 100644
+--- a/assets/resources/create-machine-dialog.blp
++++ b/assets/resources/create-machine-dialog.blp
+@@ -3,8 +3,6 @@ using Adw 1;
+ 
+ template $PhialCreateMachineDialog: Adw.Dialog {
+   title: _("New Machine");
+-  content-width: 640;
+-  content-height: 600;
+ 
+   child: Adw.ToolbarView {
+     [top]
+@@ -36,9 +34,6 @@     }
+ 
+     content: Adw.PreferencesPage {
+       Adw.PreferencesGroup {
+-        title: _("Identity");
+-        description: _("The name becomes the SSH host alias");
+-
+         Adw.EntryRow name_row {
+           title: _("_Name");
+           use-underline: true;
+@@ -57,11 +52,6 @@               "circular",
+             ]
+           }
+         }
+-      }
+-
+-      Adw.PreferencesGroup {
+-        title: _("Resources");
+-        description: _("Phial allocates the disk image on the first start");
+ 
+         Adw.SpinRow memory_row {
+           title: _("Memory");
+@@ -100,7 +90,7 @@           }
+         }
+ 
+         Adw.SpinRow disk_row {
+-          title: _("Disk Size");
++          title: _("Disk size");
+           numeric: true;
+           digits: 0;
+           sensitive: false;
+@@ -152,7 +142,7 @@ }
+ 
+ Popover memory_warning_popover {
+   Label {
+-    label: _("Not enough memory available. A machine needs at least 1 GiB of free memory.");
++    label: _("A machine needs at least 1 GiB of free memory");
+     wrap: true;
+     max-width-chars: 40;
+     xalign: 0;
+@@ -163,7 +153,7 @@ }
+ 
+ Popover disk_warning_popover {
+   Label {
+-    label: _("Not enough storage available. A machine needs at least 8 GiB of free storage.");
++    label: _("A machine needs at least 8 GiB of free storage");
+     wrap: true;
+     max-width-chars: 40;
+     xalign: 0;
+diff --git a/assets/resources/index.gschema.xml b/assets/resources/index.gschema.xml
+index 4c974c764fe4b59ab0040d3170c2d435a737f22a..2583d1bf12f457a7ebf6db9efd5ea340eeb14579 100644
+--- a/assets/resources/index.gschema.xml
++++ b/assets/resources/index.gschema.xml
+@@ -19,7 +19,7 @@         </key>
+         <key name="ssh-agent-sockets" type="as">
+             <default>[]</default>
+             <summary>SSH agent sockets</summary>
+-            <description>Sockets of the SSH agents that machines can use</description>
++            <description>Sockets that let machines use your SSH keys</description>
+         </key>
+         <key name="pgp-agent-socket" type="s">
+             <default>""</default>
+diff --git a/assets/resources/metainfo.xml.in b/assets/resources/metainfo.xml.in
+index 66d42e455c4e6cb289a23df136d81ddebdc9b68f..c083cd339a8e6c574edbb47dbd55f7709c2624a8 100644
+--- a/assets/resources/metainfo.xml.in
++++ b/assets/resources/metainfo.xml.in
+@@ -12,12 +12,12 @@             host.</p>
+         <p>It enables you to:</p>
+         <ul>
+             <li>Create and install virtual machines</li>
+-            <li>Grant time-boxed access to tokens, SSH keys, and GPG keys without copying them to
++            <li>Grant time-boxed access to tokens, SSH keys, and PGP keys without copying them to
+                 the machine</li>
+             <li>Pass USB devices, USB hubs, and shared folders to a machine</li>
+             <li>Open a window with waypipe, a desktop with RDP, a terminal, or a serial console</li>
+         </ul>
+-        <p>Phial does not create, import, or delete SSH keys or GPG keys. Manage those keys in
++        <p>Phial does not create, import, or delete SSH keys or PGP keys. Manage those keys in
+             Passwords and Keys, then link them to a machine.</p>
+     </description>
+ 
+diff --git a/assets/resources/setup-dialog.blp b/assets/resources/setup-dialog.blp
+index 6ccb55735d2dbd1121dbc3f3f8331de6cfcb2b1c..86de41d944caa7df726adf85aebefd3ebc82c52e 100644
+--- a/assets/resources/setup-dialog.blp
++++ b/assets/resources/setup-dialog.blp
+@@ -4,8 +4,7 @@
+ template $PhialSetupDialog: Adw.Dialog {
+   title: _("Set Up Phial");
+   can-close: false;
+-  content-width: 600;
+-  content-height: 480;
++  width-request: 600;
+ 
+   child: Adw.ToolbarView {
+     [top]
+@@ -56,10 +55,10 @@       StackPage {
+         name: "storage";
+         child: Adw.PreferencesPage {
+           Adw.PreferencesGroup {
+-            description: _("Phial keeps its machines and their configurations in this folder");
++            description: _("Where your machines and their configuration are stored");
+ 
+             Adw.ActionRow machines_folder_row {
+-              title: _("Machines Folder");
++              title: _("Machines folder");
+               subtitle: _("Not selected");
+ 
+               [prefix]
+@@ -82,10 +81,10 @@       StackPage {
+         name: "disclosure";
+         child: Adw.PreferencesPage {
+           Adw.PreferencesGroup {
+-            description: _("The host service runs your machines on this computer, outside the application sandbox. It is the only part of Phial that touches the system.");
++            description: _("A background service runs your machines on this computer. Only that service can access the system.");
+ 
+             Adw.ActionRow {
+-              title: _("I understand it <b>runs your machines outside the application sandbox</b>");
++              title: _("I understand it <b>runs your machines with direct access to this computer</b>");
+               use-markup: true;
+               activatable-widget: disclosure_sandbox_check;
+ 
+@@ -96,7 +95,7 @@               }
+             }
+ 
+             Adw.ActionRow {
+-              title: _("I understand it <b>reads and writes to the machines folder</b>");
++              title: _("I understand it <b>reads and changes files in the machines folder</b>");
+               use-markup: true;
+               activatable-widget: disclosure_folders_check;
+ 
+@@ -107,7 +106,7 @@               }
+             }
+ 
+             Adw.ActionRow {
+-              title: _("I understand it <b>uses the SSH and PGP agents and the secret service of the host</b>");
++              title: _("I understand it <b>uses your SSH keys, PGP keys, and stored tokens</b>");
+               use-markup: true;
+               activatable-widget: disclosure_agents_check;
+ 
+@@ -118,7 +117,7 @@               }
+             }
+ 
+             Adw.ActionRow {
+-              title: _("I understand it <b>uses the virtualisation tools of the host</b>");
++              title: _("I understand it <b>uses the tools that run virtual machines on this computer</b>");
+               use-markup: true;
+               activatable-widget: disclosure_tools_check;
+ 
+@@ -129,7 +128,7 @@               }
+             }
+ 
+             Adw.ActionRow {
+-              title: _("I understand it <b>runs fixed administrator commands, which you approve each time</b>");
++              title: _("I understand it <b>runs administrator commands after you approve each one</b>");
+               use-markup: true;
+               activatable-widget: disclosure_root_check;
+ 
+@@ -230,7 +229,7 @@         name: "finish";
+         child: Adw.StatusPage {
+           icon-name: "object-select-symbolic";
+           title: _("You're Ready");
+-          description: _("Now make a machine your own");
++          description: _("Create your first machine");
+ 
+           Button dialog_finish_button {
+             halign: center;
+diff --git a/assets/resources/window.blp b/assets/resources/window.blp
+index 9095583f209a93e9cae11d1f44a57dcae8214268..ca0fe2ac7b022b16a89e79f62ef9f683ab614f3a 100644
+--- a/assets/resources/window.blp
++++ b/assets/resources/window.blp
+@@ -222,17 +222,14 @@                         margin-end: 12;
+ 
+                         Adw.PreferencesGroup secrets_tokens_group {
+                           title: _("Tokens");
+-                          description: _("Stored in the keyring of this host");
+                         }
+ 
+                         Adw.PreferencesGroup secrets_ssh_keys_group {
+                           title: _("SSH Keys");
+-                          description: _("From the SSH agents");
+                         }
+ 
+-                        Adw.PreferencesGroup secrets_gpg_keys_group {
++                        Adw.PreferencesGroup secrets_pgp_keys_group {
+                           title: _("PGP Keys");
+-                          description: _("From the PGP keyring");
+                         }
+ 
+                         Label secrets_footer_label {
+diff --git a/internal/components/machines_preferences.go b/internal/components/machines_preferences.go
+index 7fbfef8c08e77fa391cd95ac68bbf3e6dad2166e..986bd15c5d1bb781b8f8b5b75d28db3749f36d67 100644
+--- a/internal/components/machines_preferences.go
++++ b/internal/components/machines_preferences.go
+@@ -37,10 +37,10 @@ 		callbacks: []interface{}{},
+ 	}
+ 
+ 	m.group = adw.NewPreferencesGroup()
+-	m.group.SetDescription(L("Phial keeps its machines and their configurations in this folder"))
++	m.group.SetDescription(L("Where your machines and their configuration are stored"))
+ 
+ 	m.row = adw.NewActionRow()
+-	m.row.SetTitle(L("Machines Folder"))
++	m.row.SetTitle(L("Machines folder"))
+ 
+ 	machinesFolderIcon := gtk.NewImageFromIconName("folder-symbolic")
+ 	machinesFolderIcon.SetValign(gtk.AlignCenterValue)
+@@ -95,7 +95,7 @@ 	if initial == "" {
+ 		initial = m.suggestedFolder
+ 	}
+ 
+-	onFolderChosen := chooseFolder(m.parent, m.log, L("Choose the Machines Folder"), initial, func(path string) {
++	onFolderChosen := chooseFolder(m.parent, m.log, L("Choose a Folder for Machines"), initial, func(path string) {
+ 		m.SetMachinesFolder(path)
+ 		m.notifyChanged()
+ 	})
+diff --git a/internal/components/main_window.go b/internal/components/main_window.go
+index 03ffa60aa2d15f675f5e4de2e9cfd6c812607f51..3f8fe7eadcb040cd050e6c45a311967b1c7d25a6 100644
+--- a/internal/components/main_window.go
++++ b/internal/components/main_window.go
+@@ -59,7 +59,7 @@ 	welcomeStatusPage *adw.StatusPage
+ 
+ 	secretsTokensGroup  adw.PreferencesGroup
+ 	secretsSSHKeysGroup adw.PreferencesGroup
+-	secretsGPGKeysGroup adw.PreferencesGroup
++	secretsPGPKeysGroup adw.PreferencesGroup
+ 	secretsFooterLabel  gtk.Label
+ 	secretsCountLabel   gtk.Label
+ 
+@@ -127,6 +127,7 @@ 	createMachineAction := gio.NewSimpleAction("newMachine", nil)
+ 	onCreateMachine := func(gio.SimpleAction, uintptr) {
+ 		window.createMachineDialog.Refresh()
+ 		window.createMachineDialog.Present(&window.ApplicationWindow.Widget)
++		window.createMachineDialog.nameRow.GrabFocus()
+ 	}
+ 	window.callbacks = append(window.callbacks, &onCreateMachine)
+ 	createMachineAction.ConnectActivate(&onCreateMachine)
+@@ -145,6 +146,7 @@ 			}
+ 		}
+ 
+ 		window.setupDialog.Present(&window.ApplicationWindow.Widget)
++		window.setupDialog.machinesFolderButton.GrabFocus()
+ 
+ 		window.refresh()
+ 	}
+@@ -257,7 +259,7 @@ 		typeClass.BindTemplateChildFull("sidebar", false, 0)
+ 		typeClass.BindTemplateChildFull("content_view", false, 0)
+ 		typeClass.BindTemplateChildFull("secrets_tokens_group", false, 0)
+ 		typeClass.BindTemplateChildFull("secrets_ssh_keys_group", false, 0)
+-		typeClass.BindTemplateChildFull("secrets_gpg_keys_group", false, 0)
++		typeClass.BindTemplateChildFull("secrets_pgp_keys_group", false, 0)
+ 		typeClass.BindTemplateChildFull("secrets_footer_label", false, 0)
+ 		typeClass.BindTemplateChildFull("secrets_count_label", false, 0)
+ 
+@@ -280,7 +282,7 @@ 				sidebar             adw.Sidebar
+ 				contentView         adw.NavigationView
+ 				secretsTokensGroup  adw.PreferencesGroup
+ 				secretsSSHKeysGroup adw.PreferencesGroup
+-				secretsGPGKeysGroup adw.PreferencesGroup
++				secretsPGPKeysGroup adw.PreferencesGroup
+ 				secretsFooterLabel  gtk.Label
+ 				secretsCountLabel   gtk.Label
+ 			)
+@@ -315,8 +317,8 @@ 				"secrets_ssh_keys_group",
+ 			).Cast(&secretsSSHKeysGroup)
+ 			parent.Widget.GetTemplateChild(
+ 				gTypeMainWindow,
+-				"secrets_gpg_keys_group",
+-			).Cast(&secretsGPGKeysGroup)
++				"secrets_pgp_keys_group",
++			).Cast(&secretsPGPKeysGroup)
+ 			parent.Widget.GetTemplateChild(
+ 				gTypeMainWindow,
+ 				"secrets_footer_label",
+@@ -339,7 +341,7 @@ 				welcomeStatusPage: &welcomeStatusPage,
+ 
+ 				secretsTokensGroup:  secretsTokensGroup,
+ 				secretsSSHKeysGroup: secretsSSHKeysGroup,
+-				secretsGPGKeysGroup: secretsGPGKeysGroup,
++				secretsPGPKeysGroup: secretsPGPKeysGroup,
+ 				secretsFooterLabel:  secretsFooterLabel,
+ 				secretsCountLabel:   secretsCountLabel,
+ 
+diff --git a/internal/components/secrets.go b/internal/components/secrets.go
+index aeb456c097b0c4dde496cde185c3f3c8de96b733..4326394d9ec8676ff65976c940209d5fc6c7e0a1 100644
+--- a/internal/components/secrets.go
++++ b/internal/components/secrets.go
+@@ -35,7 +35,7 @@
+ const (
+ 	secretsRowToken secretsRowKind = iota
+ 	secretsRowSSHKey
+-	secretsRowGPGKey
++	secretsRowPGPKey
+ 	secretsRowAction
+ 	secretsRowEmpty
+ )
+@@ -99,9 +99,9 @@ 	}
+ 	w.secretsSSHKeysGroup.BindModel(sshKeyModel, &createSecretsRow, 0, &destroySecretsModel)
+ 	sshKeyModel.Unref()
+ 
+-	gpgKeys := w.store.GPGKeys()
+-	gpgKeyModel := gio.NewListStore(gTypeSecretsRowItem)
+-	for _, key := range gpgKeys {
++	pgpKeys := w.store.PGPKeys()
++	pgpKeyModel := gio.NewListStore(gTypeSecretsRowItem)
++	for _, key := range pgpKeys {
+ 		// TODO: Remove this mock once grants reference PGP keys.
+ 		linked := len(key.LinkedTo) > 0
+ 
+@@ -110,13 +110,13 @@ 		if linked {
+ 			subtitle += ", " + fmt.Sprintf(L("linked to %v"), strings.Join(key.LinkedTo, ", "))
+ 		}
+ 
+-		appendSecretsRow(gpgKeyModel, newSecretsRowItem(secretsRowGPGKey, key.UID, subtitle, "security-high-symbolic", linked))
++		appendSecretsRow(pgpKeyModel, newSecretsRowItem(secretsRowPGPKey, key.UID, subtitle, "security-high-symbolic", linked))
+ 	}
+-	if len(gpgKeys) == 0 {
+-		appendSecretsRow(gpgKeyModel, newSecretsRowItem(secretsRowEmpty, L("No PGP Keys"), "", "security-high-symbolic", false))
++	if len(pgpKeys) == 0 {
++		appendSecretsRow(pgpKeyModel, newSecretsRowItem(secretsRowEmpty, L("No PGP Keys"), "", "security-high-symbolic", false))
+ 	}
+-	w.secretsGPGKeysGroup.BindModel(gpgKeyModel, &createSecretsRow, 0, &destroySecretsModel)
+-	gpgKeyModel.Unref()
++	w.secretsPGPKeysGroup.BindModel(pgpKeyModel, &createSecretsRow, 0, &destroySecretsModel)
++	pgpKeyModel.Unref()
+ 
+ 	w.secretsFooterLabel.SetMarkup(
+ 		L("Manage SSH and PGP keys, and optionally tokens, in") + " " + seahorseHelpLink(L("Passwords and Keys")) + ". " +
+diff --git a/internal/components/secrets_preferences.go b/internal/components/secrets_preferences.go
+index 16217fda8b5553eba0d8efd739ec148f253fa95f..bea28ebf5e9072b9b4ec7ff049f5a78da3dcc78c 100644
+--- a/internal/components/secrets_preferences.go
++++ b/internal/components/secrets_preferences.go
+@@ -74,7 +74,7 @@ 	}
+ 
+ 	a.sshAgentGroup = adw.NewPreferencesGroup()
+ 	a.sshAgentGroup.SetTitle(L("SSH Agents"))
+-	a.sshAgentGroup.SetDescription(L("Sockets of the SSH agents that machines can use"))
++	a.sshAgentGroup.SetDescription(L("Sockets that let machines use your SSH keys"))
+ 
+ 	a.pgpAgentGroup = adw.NewPreferencesGroup()
+ 	a.pgpAgentGroup.SetTitle(L("PGP Agent"))
+diff --git a/internal/components/setup_dialog.go b/internal/components/setup_dialog.go
+index fb67114b17cc1bc94aa47dbf4b696186f733361d..1ccc19ceeaef777490a2650ce83f39ebbc611688 100644
+--- a/internal/components/setup_dialog.go
++++ b/internal/components/setup_dialog.go
+@@ -244,7 +244,7 @@ 		if initial == "" {
+ 			initial = dialog.store.SuggestedMachinesFolder()
+ 		}
+ 
+-		onFolderChosen := chooseFolder(dialog.parent, dialog.log, L("Choose the Machines Folder"), initial, func(path string) {
++		onFolderChosen := chooseFolder(dialog.parent, dialog.log, L("Choose a Folder for Machines"), initial, func(path string) {
+ 			if err := dialog.store.SetMachinesFolder(dialog.ctx, path); err != nil {
+ 				dialog.log.Error("Could not set machines folder", "err", err)
+ 
+diff --git a/pkg/state/secrets.go b/pkg/state/secrets.go
+index 7ba0645127b954215042b2dac233cc233e9cbb06..e4a158e76c06b44593d8f1b845f1a6329b2917fa 100644
+--- a/pkg/state/secrets.go
++++ b/pkg/state/secrets.go
+@@ -32,7 +32,7 @@ 	// TODO: Remove this mock once grants reference SSH keys.
+ 	LinkedTo []string
+ }
+ 
+-type GPGKey struct {
++type PGPKey struct {
+ 	UID         string
+ 	Fingerprint string
+ 
+@@ -84,7 +84,7 @@ 			Type:        "ssh-rsa",
+ 		},
+ 	}
+ 
+-	s.gpgKeys = []GPGKey{
++	s.pgpKeys = []PGPKey{
+ 		{
+ 			UID:         "Felicitas Pojtinger <felicitas@pojtinger.com>",
+ 			Fingerprint: "6D7E8F9012345678",
+@@ -111,16 +111,16 @@
+ 	return append([]SSHKey(nil), s.sshKeys...)
+ }
+ 
+-func (s *Store) GPGKeys() []GPGKey {
++func (s *Store) PGPKeys() []PGPKey {
+ 	s.mu.Lock()
+ 	defer s.mu.Unlock()
+ 
+-	return append([]GPGKey(nil), s.gpgKeys...)
++	return append([]PGPKey(nil), s.pgpKeys...)
+ }
+ 
+ func (s *Store) SecretCount() int {
+ 	s.mu.Lock()
+ 	defer s.mu.Unlock()
+ 
+-	return len(s.secrets) + len(s.sshKeys) + len(s.gpgKeys)
++	return len(s.secrets) + len(s.sshKeys) + len(s.pgpKeys)
+ }
+diff --git a/pkg/state/store.go b/pkg/state/store.go
+index 3a33b742bfc5774cb0e5551a47958622bf5ae86c..625cdd4bd67a31c0620503ec744ccdaba61f39a6 100644
+--- a/pkg/state/store.go
++++ b/pkg/state/store.go
+@@ -31,7 +31,7 @@ 	requests map[string]*Request
+ 
+ 	secrets []Secret
+ 	sshKeys []SSHKey
+-	gpgKeys []GPGKey
++	pgpKeys []PGPKey
+ 
+ 	sessionPage  SetupPage
+ 	sessionReady bool
+diff --git a/po/phial.pot b/po/phial.pot
+index f36dbade074e44ed6edb60423f7d77dcc5b03b1e..8c03ce0bbe64b9155dc2adeb57d44d38bad7adbb 100644
+--- a/po/phial.pot
++++ b/po/phial.pot
+@@ -28,284 +28,282 @@ #: ../assets/resources/shortcuts-dialog.blp:33
+ msgid "New machine"
+ msgstr ""
+ 
++#: ../assets/resources/preferences-dialog.blp:5
++#: ../internal/components/secrets.go:123
++msgid "Preferences"
++msgstr ""
++
++#: ../assets/resources/preferences-dialog.blp:16
++#: ../assets/resources/window.blp:141 ../assets/resources/window.blp:196
++#: ../assets/resources/window.blp:203
++#: ../internal/components/setup_dialog.go:409
++msgid "Secrets"
++msgstr ""
++
+ #: ../assets/resources/create-machine-dialog.blp:5
+-#: ../assets/resources/create-machine-dialog.blp:23
++#: ../assets/resources/create-machine-dialog.blp:21
+ #: ../assets/resources/window.blp:102 ../assets/resources/window.blp:109
+ msgid "New Machine"
+ msgstr ""
+ 
+-#: ../assets/resources/create-machine-dialog.blp:17
+-#: ../assets/resources/setup-dialog.blp:19
++#: ../assets/resources/create-machine-dialog.blp:15
++#: ../assets/resources/setup-dialog.blp:18
++#: ../assets/resources/add-token-dialog.blp:15
+ msgid "_Cancel"
+ msgstr ""
+ 
+-#: ../assets/resources/create-machine-dialog.blp:29
++#: ../assets/resources/create-machine-dialog.blp:27
+ msgid "_Create"
+ msgstr ""
+ 
+-#: ../assets/resources/create-machine-dialog.blp:39
+-msgid "Identity"
+-msgstr ""
+-
+-#: ../assets/resources/create-machine-dialog.blp:40
+-msgid "The name becomes the SSH host alias"
+-msgstr ""
+-
+-#: ../assets/resources/create-machine-dialog.blp:43
++#: ../assets/resources/create-machine-dialog.blp:38
++#: ../assets/resources/add-token-dialog.blp:38
+ msgid "_Name"
+ msgstr ""
+ 
+-#: ../assets/resources/create-machine-dialog.blp:51
+-#: ../assets/resources/create-machine-dialog.blp:92
+-#: ../assets/resources/create-machine-dialog.blp:128
++#: ../assets/resources/create-machine-dialog.blp:46
++#: ../assets/resources/create-machine-dialog.blp:82
++#: ../assets/resources/create-machine-dialog.blp:118
+ msgid "Show Error"
+ msgstr ""
+ 
+-#: ../assets/resources/create-machine-dialog.blp:63
+-msgid "Resources"
+-msgstr ""
+-
+-#: ../assets/resources/create-machine-dialog.blp:64
+-msgid "Phial allocates the disk image on the first start"
+-msgstr ""
+-
+-#: ../assets/resources/create-machine-dialog.blp:67
++#: ../assets/resources/create-machine-dialog.blp:57
+ msgid "Memory"
+ msgstr ""
+ 
+-#: ../assets/resources/create-machine-dialog.blp:81
+-#: ../assets/resources/create-machine-dialog.blp:117
++#: ../assets/resources/create-machine-dialog.blp:71
++#: ../assets/resources/create-machine-dialog.blp:107
+ msgid "GiB"
+ msgstr ""
+ 
+-#: ../assets/resources/create-machine-dialog.blp:103
+-msgid "Disk Size"
++#: ../assets/resources/create-machine-dialog.blp:93
++msgid "Disk size"
+ msgstr ""
+ 
+-#: ../assets/resources/create-machine-dialog.blp:144
++#: ../assets/resources/create-machine-dialog.blp:134
+ #: ../internal/components/create_machine_dialog.go:203
+ msgid "Use a hostname like dev-vm or dev.example"
+ msgstr ""
+ 
+-#: ../assets/resources/create-machine-dialog.blp:155
+-msgid ""
+-"Not enough memory available. A machine needs at least 1 GiB of free memory."
++#: ../assets/resources/create-machine-dialog.blp:145
++msgid "A machine needs at least 1 GiB of free memory"
+ msgstr ""
+ 
+-#: ../assets/resources/create-machine-dialog.blp:166
+-msgid ""
+-"Not enough storage available. A machine needs at least 8 GiB of free storage."
++#: ../assets/resources/create-machine-dialog.blp:156
++msgid "A machine needs at least 8 GiB of free storage"
+ msgstr ""
+ 
+-#: ../assets/resources/preferences-dialog.blp:5
+-#: ../internal/components/secrets.go:122
+-msgid "Preferences"
++#: ../assets/resources/window.blp:7 ../assets/resources/window.blp:25
++#: ../assets/resources/window.blp:55 ../assets/resources/window.blp:94
++#: ../assets/resources/window.blp:114 ../assets/resources/window.blp:163
++#: ../assets/meta/com.pojtinger.felicitas.Phial.desktop.in:4
++#: ../assets/resources/metainfo.xml.in:7
++msgid "Phial"
+ msgstr ""
+ 
+-#: ../assets/resources/preferences-dialog.blp:16
+-#: ../assets/resources/window.blp:141 ../assets/resources/window.blp:196
+-#: ../assets/resources/window.blp:203
+-#: ../internal/components/setup_dialog.go:409
+-msgid "Secrets"
++#: ../assets/resources/window.blp:31 ../assets/resources/window.blp:61
++#: ../assets/resources/window.blp:120
++msgid "Main Menu"
+ msgstr ""
+ 
+-#: ../assets/resources/setup-dialog.blp:5
+-msgid "Set Up Phial"
++#: ../assets/resources/window.blp:38
++msgid "Starting Phial"
+ msgstr ""
+ 
+-#: ../assets/resources/setup-dialog.blp:25
+-msgid "_Back"
++#: ../assets/resources/window.blp:39
++msgid "Connecting to the host service"
+ msgstr ""
+ 
+-#: ../assets/resources/setup-dialog.blp:45
+-msgid "_Continue"
++#: ../assets/resources/window.blp:69
++msgid "Welcome to Phial"
+ msgstr ""
+ 
+-#: ../assets/resources/setup-dialog.blp:59
+-#: ../internal/components/machines_preferences.go:40
+-msgid "Phial keeps its machines and their configurations in this folder"
++#: ../assets/resources/window.blp:70
++#: ../assets/meta/com.pojtinger.felicitas.Phial.desktop.in:5
++#: ../assets/resources/metainfo.xml.in:8
++msgid "Run development machines safely"
+ msgstr ""
+ 
+-#: ../assets/resources/setup-dialog.blp:62
+-#: ../internal/components/machines_preferences.go:43
+-msgid "Machines Folder"
++#: ../assets/resources/window.blp:75
++msgid "_Get Started"
+ msgstr ""
+ 
+-#: ../assets/resources/setup-dialog.blp:63
+-#: ../internal/components/setup_dialog.go:419
+-#: ../internal/components/secrets_preferences.go:85
+-#: ../internal/components/secrets_preferences.go:130
+-#: ../internal/components/machines_preferences.go:75
+-msgid "Not selected"
++#: ../assets/resources/window.blp:133
++msgid "Get Started"
+ msgstr ""
+ 
+-#: ../assets/resources/setup-dialog.blp:72
+-#: ../internal/components/secrets_preferences.go:91
+-#: ../internal/components/machines_preferences.go:49
+-msgid "_Choose..."
++#: ../assets/resources/window.blp:135 ../assets/resources/setup-dialog.blp:232
++msgid "Create your first machine"
+ msgstr ""
+ 
+-#: ../assets/resources/setup-dialog.blp:85
+-msgid ""
+-"The host service runs your machines on this computer, outside the "
+-"application sandbox. It is the only part of Phial that touches the system."
++#: ../assets/resources/window.blp:154 ../assets/resources/window.blp:252
++#: ../assets/resources/window.blp:261
++msgid "Grants"
+ msgstr ""
+ 
+-#: ../assets/resources/setup-dialog.blp:88
+-msgid ""
+-"I understand it <b>runs your machines outside the application sandbox</b>"
++#: ../assets/resources/window.blp:178
++msgid "No Machines"
+ msgstr ""
+ 
+-#: ../assets/resources/setup-dialog.blp:99
+-msgid "I understand it <b>reads and writes to the machines folder</b>"
++#: ../assets/resources/window.blp:179
++msgid "Run virtual machines on your desktop"
+ msgstr ""
+ 
+-#: ../assets/resources/setup-dialog.blp:110
+-msgid ""
+-"I understand it <b>uses the SSH and PGP agents and the secret service of the "
+-"host</b>"
++#: ../assets/resources/window.blp:184
++msgid "_New Machine..."
+ msgstr ""
+ 
+-#: ../assets/resources/setup-dialog.blp:121
+-msgid "I understand it <b>uses the virtualisation tools of the host</b>"
++#: ../assets/resources/window.blp:224
++msgid "Tokens"
+ msgstr ""
+ 
+-#: ../assets/resources/setup-dialog.blp:132
+-msgid ""
+-"I understand it <b>runs fixed administrator commands, which you approve each "
+-"time</b>"
++#: ../assets/resources/window.blp:228
++msgid "SSH Keys"
+ msgstr ""
+ 
+-#: ../assets/resources/setup-dialog.blp:149
+-msgid ""
+-"Run this command in a terminal. It installs the host service and starts it."
++#: ../assets/resources/window.blp:232
++msgid "PGP Keys"
+ msgstr ""
+ 
+-#: ../assets/resources/setup-dialog.blp:173
+-#: ../assets/resources/setup-dialog.blp:215
+-msgid "_Copy Command"
++#: ../assets/resources/window.blp:262
++msgid "Access that a machine has to a token or key"
+ msgstr ""
+ 
+-#: ../assets/resources/setup-dialog.blp:179
+-msgid "_Verify Connection"
++#: ../assets/resources/window.blp:277
++msgid "_Preferences"
+ msgstr ""
+ 
+-#: ../assets/resources/setup-dialog.blp:191
+-msgid ""
+-"Run this command in a terminal. It adds the rules for the USB devices and "
+-"needs your password."
++#: ../assets/resources/window.blp:283
++msgid "_Keyboard Shortcuts"
+ msgstr ""
+ 
+-#: ../assets/resources/setup-dialog.blp:232
+-msgid "You're Ready"
++#: ../assets/resources/window.blp:288
++msgid "_About Phial"
+ msgstr ""
+ 
+-#: ../assets/resources/setup-dialog.blp:233
+-msgid "Now make a machine your own"
++#: ../assets/resources/setup-dialog.blp:5
++msgid "Set Up Phial"
+ msgstr ""
+ 
+-#: ../assets/resources/setup-dialog.blp:237
+-msgid "_Finish"
++#: ../assets/resources/setup-dialog.blp:24
++msgid "_Back"
+ msgstr ""
+ 
+-#: ../assets/resources/window.blp:7 ../assets/resources/window.blp:25
+-#: ../assets/resources/window.blp:55 ../assets/resources/window.blp:94
+-#: ../assets/resources/window.blp:114 ../assets/resources/window.blp:163
+-#: ../assets/meta/com.pojtinger.felicitas.Phial.desktop.in:4
+-#: ../assets/resources/metainfo.xml.in:7
+-msgid "Phial"
++#: ../assets/resources/setup-dialog.blp:44
++msgid "_Continue"
+ msgstr ""
+ 
+-#: ../assets/resources/window.blp:31 ../assets/resources/window.blp:61
+-#: ../assets/resources/window.blp:120
+-msgid "Main Menu"
++#: ../assets/resources/setup-dialog.blp:58
++#: ../internal/components/machines_preferences.go:40
++msgid "Where your machines and their configuration are stored"
+ msgstr ""
+ 
+-#: ../assets/resources/window.blp:38
+-msgid "Starting Phial"
++#: ../assets/resources/setup-dialog.blp:61
++#: ../internal/components/machines_preferences.go:43
++#: ../assets/resources/index.gschema.xml:11
++msgid "Machines folder"
+ msgstr ""
+ 
+-#: ../assets/resources/window.blp:39
+-msgid "Connecting to the host service"
++#: ../assets/resources/setup-dialog.blp:62
++#: ../internal/components/machines_preferences.go:75
++#: ../internal/components/secrets_preferences.go:85
++#: ../internal/components/secrets_preferences.go:130
++#: ../internal/components/setup_dialog.go:419
++msgid "Not selected"
+ msgstr ""
+ 
+-#: ../assets/resources/window.blp:69
+-msgid "Welcome to Phial"
++#: ../assets/resources/setup-dialog.blp:71
++#: ../internal/components/machines_preferences.go:49
++#: ../internal/components/secrets_preferences.go:91
++msgid "_Choose..."
+ msgstr ""
+ 
+-#: ../assets/resources/window.blp:70
+-#: ../assets/meta/com.pojtinger.felicitas.Phial.desktop.in:5
+-#: ../assets/resources/metainfo.xml.in:8
+-msgid "Run development machines safely"
++#: ../assets/resources/setup-dialog.blp:84
++msgid ""
++"A background service runs your machines on this computer. Only that service "
++"can access the system."
+ msgstr ""
+ 
+-#: ../assets/resources/window.blp:75
+-msgid "_Get Started"
++#: ../assets/resources/setup-dialog.blp:87
++msgid ""
++"I understand it <b>runs your machines with direct access to this computer</b>"
+ msgstr ""
+ 
+-#: ../assets/resources/window.blp:133
+-msgid "Get Started"
++#: ../assets/resources/setup-dialog.blp:98
++msgid "I understand it <b>reads and changes files in the machines folder</b>"
+ msgstr ""
+ 
+-#: ../assets/resources/window.blp:135
+-msgid "Create your first machine"
++#: ../assets/resources/setup-dialog.blp:109
++msgid "I understand it <b>uses your SSH keys, PGP keys, and stored tokens</b>"
+ msgstr ""
+ 
+-#: ../assets/resources/window.blp:154 ../assets/resources/window.blp:255
+-#: ../assets/resources/window.blp:264
+-msgid "Grants"
++#: ../assets/resources/setup-dialog.blp:120
++msgid ""
++"I understand it <b>uses the tools that run virtual machines on this "
++"computer</b>"
++msgstr ""
++
++#: ../assets/resources/setup-dialog.blp:131
++msgid ""
++"I understand it <b>runs administrator commands after you approve each one</b>"
+ msgstr ""
+ 
+-#: ../assets/resources/window.blp:178
+-msgid "No Machines"
++#: ../assets/resources/setup-dialog.blp:148
++msgid ""
++"Run this command in a terminal. It installs the host service and starts it."
+ msgstr ""
+ 
+-#: ../assets/resources/window.blp:179
+-msgid "Run virtual machines on your desktop"
++#: ../assets/resources/setup-dialog.blp:172
++#: ../assets/resources/setup-dialog.blp:214
++msgid "_Copy Command"
+ msgstr ""
+ 
+-#: ../assets/resources/window.blp:184
+-msgid "_New Machine..."
++#: ../assets/resources/setup-dialog.blp:178
++msgid "_Verify Connection"
+ msgstr ""
+ 
+-#: ../assets/resources/window.blp:224
+-msgid "Tokens"
++#: ../assets/resources/setup-dialog.blp:190
++msgid ""
++"Run this command in a terminal. It adds the rules for the USB devices and "
++"needs your password."
+ msgstr ""
+ 
+-#: ../assets/resources/window.blp:225
+-msgid "Stored in the keyring of this host"
++#: ../assets/resources/setup-dialog.blp:231
++msgid "You're Ready"
+ msgstr ""
+ 
+-#: ../assets/resources/window.blp:229
+-msgid "SSH Keys"
++#: ../assets/resources/setup-dialog.blp:236
++msgid "_Finish"
+ msgstr ""
+ 
+-#: ../assets/resources/window.blp:230
+-msgid "From the SSH agents"
++#: ../assets/resources/add-token-dialog.blp:5
++#: ../assets/resources/add-token-dialog.blp:21
++msgid "Add Token"
+ msgstr ""
+ 
+-#: ../assets/resources/window.blp:234
+-msgid "PGP Keys"
++#: ../assets/resources/add-token-dialog.blp:27
++msgid "_Add"
+ msgstr ""
+ 
+-#: ../assets/resources/window.blp:235
+-msgid "From the PGP keyring"
++#: ../assets/resources/add-token-dialog.blp:44
++msgid "_Value"
+ msgstr ""
+ 
+-#: ../assets/resources/window.blp:265
+-msgid "Access that a machine has to a token or key"
++#: ../assets/resources/add-token-dialog.blp:50
++msgid "Delivery"
+ msgstr ""
+ 
+-#: ../assets/resources/window.blp:280
+-msgid "_Preferences"
++#: ../assets/resources/add-token-dialog.blp:53
++#: ../internal/components/secrets.go:65
++msgid "Environment file"
+ msgstr ""
+ 
+-#: ../assets/resources/window.blp:286
+-msgid "_Keyboard Shortcuts"
++#: ../assets/resources/add-token-dialog.blp:54
++msgid "Proxy"
+ msgstr ""
+ 
+-#: ../assets/resources/window.blp:291
+-msgid "_About Phial"
++#: ../assets/resources/add-token-dialog.blp:61
++msgid "_Upstream URL"
+ msgstr ""
+ 
+ #: ../internal/components/create_machine_dialog.go:168
+@@ -321,115 +319,87 @@ #: ../internal/components/application.go:91
+ msgid "translator-credits"
+ msgstr ""
+ 
+-#: ../internal/components/secrets.go:64
+-msgid "Environment file"
++#: ../internal/components/machines_preferences.go:98
++#: ../internal/components/setup_dialog.go:247
++msgid "Choose a Folder for Machines"
+ msgstr ""
+ 
+-#: ../internal/components/secrets.go:66
++#: ../internal/components/secrets.go:67
+ msgid "Proxy, %v"
+ msgstr ""
+ 
+-#: ../internal/components/secrets.go:70
++#: ../internal/components/secrets.go:71
+ msgid "granted to %v"
+ msgstr ""
+ 
+-#: ../internal/components/secrets.go:76
++#: ../internal/components/secrets.go:77
+ msgid "No Tokens"
+ msgstr ""
+ 
+-#: ../internal/components/secrets.go:78
++#: ../internal/components/secrets.go:79
+ msgid "_Add Token..."
+ msgstr ""
+ 
+-#: ../internal/components/secrets.go:90 ../internal/components/secrets.go:109
++#: ../internal/components/secrets.go:91 ../internal/components/secrets.go:110
+ msgid "linked to %v"
+ msgstr ""
+ 
+-#: ../internal/components/secrets.go:96
++#: ../internal/components/secrets.go:97
+ msgid "No SSH Keys"
+ msgstr ""
+ 
+-#: ../internal/components/secrets.go:115
++#: ../internal/components/secrets.go:116
+ msgid "No PGP Keys"
+ msgstr ""
+ 
+-#: ../internal/components/secrets.go:121
++#: ../internal/components/secrets.go:122
+ msgid "Manage SSH and PGP keys, and optionally tokens, in"
+ msgstr ""
+ 
+-#: ../internal/components/secrets.go:121
++#: ../internal/components/secrets.go:122
+ msgid "Passwords and Keys"
+ msgstr ""
+ 
+-#: ../internal/components/secrets.go:122
++#: ../internal/components/secrets.go:123
+ msgid "If expected keys are missing, check"
+ msgstr ""
+ 
+-#: ../internal/components/secrets.go:180
++#: ../internal/components/secrets.go:188
+ msgid "Grant Access"
+ msgstr ""
+ 
+-#: ../internal/components/secrets.go:181
++#: ../internal/components/secrets.go:189
+ msgid "Token Menu"
+ msgstr ""
+ 
+-#: ../internal/components/secrets.go:183
++#: ../internal/components/secrets.go:191
+ msgid "Link a Key"
+ msgstr ""
+ 
+-#: ../internal/components/secrets.go:185
++#: ../internal/components/secrets.go:193
+ msgid "Unlink the Key"
+ msgstr ""
+ 
+-#: ../internal/components/setup_dialog.go:247
+-#: ../internal/components/machines_preferences.go:98
+-msgid "Choose the Machines Folder"
+-msgstr ""
+-
+-#: ../internal/components/setup_dialog.go:399
+-msgid "Welcome"
+-msgstr ""
+-
+-#: ../internal/components/setup_dialog.go:401
+-msgid "Storage"
+-msgstr ""
+-
+-#: ../internal/components/setup_dialog.go:403
+-msgid "Host Access"
+-msgstr ""
+-
+-#: ../internal/components/setup_dialog.go:405
+-msgid "Host Service"
+-msgstr ""
+-
+-#: ../internal/components/setup_dialog.go:407
+-msgid "System Setup"
+-msgstr ""
+-
+-#: ../internal/components/setup_dialog.go:411
+-msgid "Done"
+-msgstr ""
+-
+ #: ../internal/components/secrets_preferences.go:76
+ msgid "SSH Agents"
+ msgstr ""
+ 
+ #: ../internal/components/secrets_preferences.go:77
+ #: ../assets/resources/index.gschema.xml:22
+-msgid "Sockets of the SSH agents that machines can use"
++msgid "Sockets that let machines use your SSH keys"
+ msgstr ""
+ 
+ #: ../internal/components/secrets_preferences.go:80
+-msgid "PGP Keyring"
++msgid "PGP Agent"
+ msgstr ""
+ 
+ #: ../internal/components/secrets_preferences.go:81
+-#: ../assets/resources/index.gschema.xml:27
+-msgid "Home folder of the PGP keyring"
++msgid "Socket that lets machines use your PGP keys"
+ msgstr ""
+ 
+ #: ../internal/components/secrets_preferences.go:84
+-msgid "Keyring Folder"
++#: ../assets/resources/index.gschema.xml:26
++msgid "PGP agent socket"
+ msgstr ""
+ 
+ #: ../internal/components/secrets_preferences.go:173
+@@ -448,15 +418,39 @@ #: ../internal/components/secrets_preferences.go:288
+ msgid "Choose an SSH Agent Socket"
+ msgstr ""
+ 
+-#: ../internal/components/secrets_preferences.go:327
+-msgid "Choose the PGP Keyring Folder"
++#: ../internal/components/secrets_preferences.go:328
++msgid "Choose a PGP Agent Socket"
++msgstr ""
++
++#: ../internal/components/setup_dialog.go:399
++msgid "Welcome"
++msgstr ""
++
++#: ../internal/components/setup_dialog.go:401
++msgid "Storage"
++msgstr ""
++
++#: ../internal/components/setup_dialog.go:403
++msgid "Host Access"
++msgstr ""
++
++#: ../internal/components/setup_dialog.go:405
++msgid "Host Service"
++msgstr ""
++
++#: ../internal/components/setup_dialog.go:407
++msgid "System Setup"
++msgstr ""
++
++#: ../internal/components/setup_dialog.go:411
++msgid "Done"
+ msgstr ""
+ 
+ #. TRANSLATORS: Search terms to find this application.
+ #. Do NOT translate or localize the semicolons!
+ #. The list MUST also end with a semicolon!
+ #: ../assets/meta/com.pojtinger.felicitas.Phial.desktop.in:13
+-msgid "virtual machine;secrets;ssh;gpg;usb;waypipe;rdp;"
++msgid "virtual machine;secrets;ssh;pgp;usb;waypipe;rdp;"
+ msgstr ""
+ 
+ #: ../assets/resources/metainfo.xml.in:10
+@@ -475,7 +469,7 @@ msgstr ""
+ 
+ #: ../assets/resources/metainfo.xml.in:15
+ msgid ""
+-"Grant time-boxed access to tokens, SSH keys, and GPG keys without copying "
++"Grant time-boxed access to tokens, SSH keys, and PGP keys without copying "
+ "them to the machine"
+ msgstr ""
+ 
+@@ -491,7 +485,7 @@ msgstr ""
+ 
+ #: ../assets/resources/metainfo.xml.in:20
+ msgid ""
+-"Phial does not create, import, or delete SSH keys or GPG keys. Manage those "
++"Phial does not create, import, or delete SSH keys or PGP keys. Manage those "
+ "keys in Passwords and Keys, then link them to a machine."
+ msgstr ""
+ 
+@@ -515,10 +509,6 @@ #: ../assets/resources/index.gschema.xml:7
+ msgid "Whether the setup wizard completed"
+ msgstr ""
+ 
+-#: ../assets/resources/index.gschema.xml:11
+-msgid "Machines folder"
+-msgstr ""
+-
+ #: ../assets/resources/index.gschema.xml:12
+ msgid "Folder that Phial keeps the machines and their configurations in"
+ msgstr ""
+@@ -535,6 +525,6 @@ #: ../assets/resources/index.gschema.xml:21
+ msgid "SSH agent sockets"
+ msgstr ""
+ 
+-#: ../assets/resources/index.gschema.xml:26
+-msgid "GPG home"
++#: ../assets/resources/index.gschema.xml:27
++msgid "Path to the PGP agent socket (S.gpg-agent)"
+ msgstr ""
+
