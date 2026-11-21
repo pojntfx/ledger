@@ -1,0 +1,220 @@
+From 4cb66e88da5026935f8aa893a1ed302500c6174e Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Fri, 20 Nov 2026 23:44:45 -0700
+Subject: [PATCH] refactor: Decompose the initial folder chooser and re-use it for the machines preferences and setup modal
+---
+diff --git a/internal/components/folder_chooser.go b/internal/components/folder_chooser.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..c70e8973812e0865c0064d769e5eb245775e7044
+--- /dev/null
++++ b/internal/components/folder_chooser.go
+@@ -0,0 +1,65 @@
++package components
++
++import (
++	"log/slog"
++	"os"
++	"path/filepath"
++
++	"codeberg.org/puregotk/puregotk/v4/gio"
++	"codeberg.org/puregotk/puregotk/v4/gtk"
++)
++
++func chooseFolder(parent *gtk.Widget, log *slog.Logger, title string, initial string, onChosen func(path string)) gio.AsyncReadyCallback {
++	fileDialog := gtk.NewFileDialog()
++	fileDialog.SetTitle(title)
++
++	if folder := initialFolder(initial); folder != "" {
++		fileDialog.SetInitialFolder(gio.FileNewForPath(folder))
++	}
++
++	var onFolderChosen gio.AsyncReadyCallback
++	onFolderChosen = gio.AsyncReadyCallback(func(_ uintptr, resultPtr uintptr, _ uintptr) {
++		result := gio.AsyncResultBase{Ptr: resultPtr}
++
++		file, err := fileDialog.SelectFolderFinish(&result)
++		if err != nil {
++			log.Error("Could not choose folder", "err", err)
++
++			return
++		}
++
++		if file == nil {
++			return
++		}
++
++		onChosen(file.GetPath())
++	})
++
++	var parentWindow gtk.Window
++	parent.Cast(&parentWindow)
++
++	fileDialog.SelectFolder(&parentWindow, nil, &onFolderChosen, 0)
++
++	return onFolderChosen
++}
++
++func initialFolder(path string) string {
++	if path == "" {
++		return ""
++	}
++
++	if _, err := os.Stat(path); err == nil {
++		return path
++	}
++
++	parent := filepath.Dir(path)
++	if parent == path {
++		return ""
++	}
++
++	if _, err := os.Stat(parent); err == nil {
++		return parent
++	}
++
++	return ""
++}
+diff --git a/internal/components/machines_preferences.go b/internal/components/machines_preferences.go
+index 97ea820dd28895440a144c26fd8d216bcf8940f7..7fbfef8c08e77fa391cd95ac68bbf3e6dad2166e 100644
+--- a/internal/components/machines_preferences.go
++++ b/internal/components/machines_preferences.go
+@@ -2,11 +2,8 @@ package components
+ 
+ import (
+ 	"log/slog"
+-	"os"
+-	"path/filepath"
+ 
+ 	"codeberg.org/puregotk/puregotk/v4/adw"
+-	"codeberg.org/puregotk/puregotk/v4/gio"
+ 	"codeberg.org/puregotk/puregotk/v4/glib"
+ 	"codeberg.org/puregotk/puregotk/v4/gtk"
+ 	. "github.com/pojntfx/go-gettext/pkg/i18n"
+@@ -93,46 +90,16 @@ 	m.callbacks = nil
+ }
+ 
+ func (m *MachinesPreferences) chooseFolder() {
+-	fileDialog := gtk.NewFileDialog()
+-	fileDialog.SetTitle(L("Choose the Machines Folder"))
+-
+ 	initial := m.machinesFolder
+ 	if initial == "" {
+ 		initial = m.suggestedFolder
+ 	}
+ 
+-	if _, err := os.Stat(initial); err != nil {
+-		initial = filepath.Dir(initial)
+-	}
+-
+-	if _, err := os.Stat(initial); err == nil {
+-		fileDialog.SetInitialFolder(gio.FileNewForPath(initial))
+-	}
+-
+-	var onFolderChosen gio.AsyncReadyCallback
+-	onFolderChosen = gio.AsyncReadyCallback(func(_ uintptr, resultPtr uintptr, _ uintptr) {
+-		result := gio.AsyncResultBase{Ptr: resultPtr}
+-
+-		file, err := fileDialog.SelectFolderFinish(&result)
+-		if err != nil {
+-			m.log.Error("Could not choose machines folder", "err", err)
+-
+-			return
+-		}
+-
+-		if file == nil {
+-			return
+-		}
+-
+-		m.SetMachinesFolder(file.GetPath())
++	onFolderChosen := chooseFolder(m.parent, m.log, L("Choose the Machines Folder"), initial, func(path string) {
++		m.SetMachinesFolder(path)
+ 		m.notifyChanged()
+ 	})
+ 	m.callbacks = append(m.callbacks, &onFolderChosen)
+-
+-	var parentWindow gtk.Window
+-	m.parent.Cast(&parentWindow)
+-
+-	fileDialog.SelectFolder(&parentWindow, nil, &onFolderChosen, 0)
+ }
+ 
+ func (m *MachinesPreferences) notifyChanged() {
+diff --git a/internal/components/setup_dialog.go b/internal/components/setup_dialog.go
+index bf7085b0179af37527e582eeeaf7653370dcf1ee..fcee95d86d888c91bbacfe7d4e17e26b7a22b920 100644
+--- a/internal/components/setup_dialog.go
++++ b/internal/components/setup_dialog.go
+@@ -3,8 +3,6 @@
+ import (
+ 	"context"
+ 	"log/slog"
+-	"os"
+-	"path/filepath"
+ 	"runtime"
+ 	"unsafe"
+ 
+@@ -205,40 +203,20 @@ 	connectDisclosureCheck(state.DisclosureAgents, dialog.disclosureAgentsCheck)
+ 	connectDisclosureCheck(state.DisclosureTools, dialog.disclosureToolsCheck)
+ 	connectDisclosureCheck(state.DisclosureRoot, dialog.disclosureRootCheck)
+ 
+-	chooseMachinesFolder := func(title string, initial string) {
+-		fileDialog := gtk.NewFileDialog()
+-		fileDialog.SetTitle(title)
+-
++	onMachinesFolderClicked := func(gtk.Button) {
++		initial := dialog.store.MachinesFolder()
+ 		if initial == "" {
+ 			initial = dialog.store.SuggestedMachinesFolder()
+ 		}
+ 
+-		if _, err := os.Stat(initial); err != nil {
+-			initial = filepath.Dir(initial)
+-		}
+-
+-		if _, err := os.Stat(initial); err == nil {
+-			fileDialog.SetInitialFolder(gio.FileNewForPath(initial))
+-		}
+-
+-		var onFolderChosen gio.AsyncReadyCallback
+-		onFolderChosen = gio.AsyncReadyCallback(func(_ uintptr, resultPtr uintptr, _ uintptr) {
+-			result := gio.AsyncResultBase{Ptr: resultPtr}
+-
+-			file, err := fileDialog.SelectFolderFinish(&result)
+-			if err != nil {
+-				dialog.log.Error("Could not choose folder", "err", err)
+-
+-				return
+-			}
+-
+-			if err := dialog.store.SetMachinesFolder(dialog.ctx, file.GetPath()); err != nil {
++		onFolderChosen := chooseFolder(dialog.parent, dialog.log, L("Choose the Machines Folder"), initial, func(path string) {
++			if err := dialog.store.SetMachinesFolder(dialog.ctx, path); err != nil {
+ 				dialog.log.Error("Could not set machines folder", "err", err)
+ 
+ 				return
+ 			}
+ 
+-			if !dialog.settings.SetString(resources.SchemaMachinesFolderKey, file.GetPath()) {
++			if !dialog.settings.SetString(resources.SchemaMachinesFolderKey, path) {
+ 				dialog.log.Error("Could not write machines folder setting")
+ 
+ 				return
+@@ -247,18 +225,6 @@
+ 			dialog.Refresh()
+ 		})
+ 		dialog.callbacks = append(dialog.callbacks, &onFolderChosen)
+-
+-		var parentWindow gtk.Window
+-		dialog.parent.Cast(&parentWindow)
+-
+-		fileDialog.SelectFolder(&parentWindow, nil, &onFolderChosen, 0)
+-	}
+-
+-	onMachinesFolderClicked := func(gtk.Button) {
+-		chooseMachinesFolder(
+-			L("Choose the Machines Folder"),
+-			dialog.store.MachinesFolder(),
+-		)
+ 	}
+ 	dialog.callbacks = append(dialog.callbacks, &onMachinesFolderClicked)
+ 	dialog.machinesFolderButton.ConnectClicked(&onMachinesFolderClicked)
+
