@@ -1,0 +1,1366 @@
+From 4923e81042ec90dd759c5c24125e38a2dd0bea1c Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Fri, 20 Nov 2026 23:37:16 -0700
+Subject: [PATCH] feat: Add SSH agent and PGP keyring preferences, move machines preferences into it's own widget
+---
+diff --git a/assets/resources/index.go b/assets/resources/index.go
+index 376d9918ebb89c15bce7b6a2f31fcf42be2e032d..91a697628b7a9552337b07a636a9f919f1f473d9 100644
+--- a/assets/resources/index.go
++++ b/assets/resources/index.go
+@@ -18,6 +18,8 @@ 	SchemaOnboardedKey = "onboarded"
+ 
+ 	SchemaMachinesFolderKey     = "machines-folder"
+ 	SchemaHostMachinesFolderKey = "host-machines-folder"
++	SchemaSSHAgentSocketsKey    = "ssh-agent-sockets"
++	SchemaGPGHomeKey            = "gpg-home"
+ )
+ 
+ //go:generate sh -c "blueprint-compiler batch-compile . . *.blp && glib-compile-resources *.gresource.xml"
+diff --git a/assets/resources/index.gschema.xml b/assets/resources/index.gschema.xml
+index 5b8c5115b10d1ea11fb3c8cdd25e35447e331136..e21088e52ea0de42c229e29806f5fe43834dce4c 100644
+--- a/assets/resources/index.gschema.xml
++++ b/assets/resources/index.gschema.xml
+@@ -16,5 +16,15 @@             <default>""</default>
+             <summary>Host service machines folder</summary>
+             <description>Folder that the host service was last verified with</description>
+         </key>
++        <key name="ssh-agent-sockets" type="as">
++            <default>[]</default>
++            <summary>SSH agent sockets</summary>
++            <description>Sockets of the SSH agents that machines can use</description>
++        </key>
++        <key name="gpg-home" type="s">
++            <default>""</default>
++            <summary>GPG home</summary>
++            <description>Home folder of the PGP keyring</description>
++        </key>
+     </schema>
+ </schemalist>
+\ No newline at end of file
+diff --git a/assets/resources/preferences-dialog.blp b/assets/resources/preferences-dialog.blp
+index e777a06d8886d56ce671931be77fcf3aa6e391f7..5210f1b1fbe72035be5c28a1b2788844159e0393 100644
+--- a/assets/resources/preferences-dialog.blp
++++ b/assets/resources/preferences-dialog.blp
+@@ -3,28 +3,17 @@ using Adw 1;
+ 
+ template $PhialPreferencesDialog: Adw.PreferencesDialog {
+   title: _("Preferences");
+-
+-  Adw.PreferencesPage {
+-    title: _("General");
++  search-enabled: true;
+ 
+-    Adw.PreferencesGroup {
+-      description: _("Phial keeps its machines and their configurations in this folder");
++  Adw.PreferencesPage machines_page {
++    name: "machines";
++    title: _("Machines");
++    icon-name: "computer-symbolic";
++  }
+ 
+-      Adw.ActionRow machines_folder_row {
+-        title: _("Machines Folder");
+-
+-        [prefix]
+-        Image {
+-          icon-name: "folder-symbolic";
+-        }
+-
+-        [suffix]
+-        Button machines_folder_button {
+-          label: _("_Choose...");
+-          use-underline: true;
+-          valign: center;
+-        }
+-      }
+-    }
++  Adw.PreferencesPage secrets_page {
++    name: "secrets";
++    title: _("Secrets");
++    icon-name: "dialog-password-symbolic";
+   }
+ }
+diff --git a/internal/components/machines_preferences.go b/internal/components/machines_preferences.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..97ea820dd28895440a144c26fd8d216bcf8940f7
+--- /dev/null
++++ b/internal/components/machines_preferences.go
+@@ -0,0 +1,140 @@
++package components
++
++import (
++	"log/slog"
++	"os"
++	"path/filepath"
++
++	"codeberg.org/puregotk/puregotk/v4/adw"
++	"codeberg.org/puregotk/puregotk/v4/gio"
++	"codeberg.org/puregotk/puregotk/v4/glib"
++	"codeberg.org/puregotk/puregotk/v4/gtk"
++	. "github.com/pojntfx/go-gettext/pkg/i18n"
++)
++
++type MachinesPreferences struct {
++	parent *gtk.Widget
++	log    *slog.Logger
++
++	machinesFolder  string
++	suggestedFolder string
++
++	onChanged func(path string)
++
++	group  *adw.PreferencesGroup
++	row    *adw.ActionRow
++	button *gtk.Button
++
++	callbacks []interface{}
++}
++
++func NewMachinesPreferences(parent *gtk.Widget, log *slog.Logger, machinesFolder string, suggestedFolder string, onChanged func(path string)) *MachinesPreferences {
++	m := &MachinesPreferences{
++		parent:          parent,
++		log:             log,
++		machinesFolder:  machinesFolder,
++		suggestedFolder: suggestedFolder,
++		onChanged:       onChanged,
++
++		callbacks: []interface{}{},
++	}
++
++	m.group = adw.NewPreferencesGroup()
++	m.group.SetDescription(L("Phial keeps its machines and their configurations in this folder"))
++
++	m.row = adw.NewActionRow()
++	m.row.SetTitle(L("Machines Folder"))
++
++	machinesFolderIcon := gtk.NewImageFromIconName("folder-symbolic")
++	machinesFolderIcon.SetValign(gtk.AlignCenterValue)
++	m.row.AddPrefix(&machinesFolderIcon.Widget)
++
++	m.button = gtk.NewButtonWithLabel(L("_Choose..."))
++	m.button.SetUseUnderline(true)
++	m.button.SetValign(gtk.AlignCenterValue)
++	m.row.AddSuffix(&m.button.Widget)
++
++	onChooseFolder := func(gtk.Button) {
++		m.chooseFolder()
++	}
++	m.callbacks = append(m.callbacks, &onChooseFolder)
++	m.button.ConnectClicked(&onChooseFolder)
++
++	m.group.Add(&m.row.Widget)
++
++	m.SetMachinesFolder(machinesFolder)
++
++	return m
++}
++
++func (m *MachinesPreferences) AddTo(page *adw.PreferencesPage) {
++	page.Add(m.group)
++}
++
++func (m *MachinesPreferences) SetMachinesFolder(path string) {
++	m.machinesFolder = path
++
++	if path == "" {
++		m.row.SetSubtitle(L("Not selected"))
++
++		return
++	}
++
++	m.row.SetSubtitle(path)
++}
++
++func (m *MachinesPreferences) Close() {
++	for _, callback := range m.callbacks {
++		if err := glib.UnrefCallback(callback); err != nil {
++			m.log.Error("Could not unref callback", "err", err)
++		}
++	}
++	m.callbacks = nil
++}
++
++func (m *MachinesPreferences) chooseFolder() {
++	fileDialog := gtk.NewFileDialog()
++	fileDialog.SetTitle(L("Choose the Machines Folder"))
++
++	initial := m.machinesFolder
++	if initial == "" {
++		initial = m.suggestedFolder
++	}
++
++	if _, err := os.Stat(initial); err != nil {
++		initial = filepath.Dir(initial)
++	}
++
++	if _, err := os.Stat(initial); err == nil {
++		fileDialog.SetInitialFolder(gio.FileNewForPath(initial))
++	}
++
++	var onFolderChosen gio.AsyncReadyCallback
++	onFolderChosen = gio.AsyncReadyCallback(func(_ uintptr, resultPtr uintptr, _ uintptr) {
++		result := gio.AsyncResultBase{Ptr: resultPtr}
++
++		file, err := fileDialog.SelectFolderFinish(&result)
++		if err != nil {
++			m.log.Error("Could not choose machines folder", "err", err)
++
++			return
++		}
++
++		if file == nil {
++			return
++		}
++
++		m.SetMachinesFolder(file.GetPath())
++		m.notifyChanged()
++	})
++	m.callbacks = append(m.callbacks, &onFolderChosen)
++
++	var parentWindow gtk.Window
++	m.parent.Cast(&parentWindow)
++
++	fileDialog.SelectFolder(&parentWindow, nil, &onFolderChosen, 0)
++}
++
++func (m *MachinesPreferences) notifyChanged() {
++	m.onChanged(m.machinesFolder)
++}
+diff --git a/internal/components/preferences_dialog.go b/internal/components/preferences_dialog.go
+index fbe599ea78b6f3c1d1a964f229cb84bfb30d27fd..5381891ad8b0ccac5300f033ff8647624b4bbfef 100644
+--- a/internal/components/preferences_dialog.go
++++ b/internal/components/preferences_dialog.go
+@@ -3,8 +3,6 @@
+ import (
+ 	"context"
+ 	"log/slog"
+-	"os"
+-	"path/filepath"
+ 	"runtime"
+ 	"unsafe"
+ 
+@@ -15,7 +13,6 @@ 	"codeberg.org/puregotk/puregotk/v4/gio"
+ 	"codeberg.org/puregotk/puregotk/v4/glib"
+ 	"codeberg.org/puregotk/puregotk/v4/gobject"
+ 	"codeberg.org/puregotk/puregotk/v4/gtk"
+-	. "github.com/pojntfx/go-gettext/pkg/i18n"
+ )
+ 
+ var (
+@@ -33,8 +30,11 @@ 	store *state.Store
+ 
+ 	parent *gtk.Widget
+ 
+-	machinesFolderRow    *adw.ActionRow
+-	machinesFolderButton *gtk.Button
++	machinesPage *adw.PreferencesPage
++	secretsPage  *adw.PreferencesPage
++
++	machinesPreferences *MachinesPreferences
++	secretsPreferences  *SecretsPreferences
+ 
+ 	callbacks []interface{}
+ }
+@@ -53,50 +53,47 @@ 	dialog.log = log
+ 	dialog.store = store
+ 	dialog.parent = parent
+ 
+-	onChooseFolder := func(gtk.Button) {
+-		fileDialog := gtk.NewFileDialog()
+-		fileDialog.SetTitle(L("Choose the Machines Folder"))
+-
+-		initial := dialog.store.MachinesFolder()
+-
+-		if initial == "" {
+-			initial = dialog.store.SuggestedMachinesFolder()
+-		}
+-
+-		if _, err := os.Stat(initial); err != nil {
+-			initial = filepath.Dir(initial)
+-		}
+-
+-		if _, err := os.Stat(initial); err == nil {
+-			fileDialog.SetInitialFolder(gio.FileNewForPath(initial))
+-		}
+-
+-		var onFolderChosen gio.AsyncReadyCallback
+-		onFolderChosen = gio.AsyncReadyCallback(func(_ uintptr, resultPtr uintptr, _ uintptr) {
+-			result := gio.AsyncResultBase{Ptr: resultPtr}
+-
+-			file, err := fileDialog.SelectFolderFinish(&result)
+-			if err != nil {
+-				dialog.log.Error("Could not choose folder", "err", err)
++	machinesPreferences := NewMachinesPreferences(
++		dialog.parent,
++		dialog.log,
++		dialog.store.MachinesFolder(),
++		dialog.store.SuggestedMachinesFolder(),
++		func(path string) {
++			if err := dialog.store.SetMachinesFolder(dialog.ctx, path); err != nil {
++				dialog.log.Error("Could not set machines folder", "err", err)
+ 
+ 				return
+ 			}
+ 
+-			if file == nil {
++			if !dialog.settings.SetString(resources.SchemaMachinesFolderKey, path) {
++				dialog.log.Error("Could not write machines folder setting")
++
+ 				return
+ 			}
+ 
+-			dialog.setMachinesFolder(file.GetPath())
+-		})
+-		dialog.callbacks = append(dialog.callbacks, &onFolderChosen)
++			dialog.Refresh()
++		},
++	)
++	dialog.machinesPreferences = machinesPreferences
++	machinesPreferences.AddTo(dialog.machinesPage)
+ 
+-		var parentWindow gtk.Window
+-		dialog.parent.Cast(&parentWindow)
++	secretsPreferences := NewSecretsPreferences(
++		dialog.parent,
++		dialog.log,
++		dialog.settings.GetStrv(resources.SchemaSSHAgentSocketsKey),
++		dialog.settings.GetString(resources.SchemaGPGHomeKey),
++		func(sockets []string, gpgHome string) {
++			if !dialog.settings.SetStrv(resources.SchemaSSHAgentSocketsKey, sockets) {
++				dialog.log.Error("Could not write SSH agent sockets setting")
++			}
+ 
+-		fileDialog.SelectFolder(&parentWindow, nil, &onFolderChosen, 0)
+-	}
+-	dialog.callbacks = append(dialog.callbacks, &onChooseFolder)
+-	dialog.machinesFolderButton.ConnectClicked(&onChooseFolder)
++			if !dialog.settings.SetString(resources.SchemaGPGHomeKey, gpgHome) {
++				dialog.log.Error("Could not write GPG home setting")
++			}
++		},
++	)
++	dialog.secretsPreferences = secretsPreferences
++	secretsPreferences.AddTo(dialog.secretsPage)
+ 
+ 	dialog.Refresh()
+ 
+@@ -104,39 +101,27 @@ 	return v
+ }
+ 
+ func (w *PreferencesDialog) Present(parent *gtk.Widget) {
++	w.SetVisiblePageName("machines")
+ 	w.PreferencesDialog.Present(parent)
+ }
+ 
+-func (w *PreferencesDialog) setMachinesFolder(path string) {
+-	if err := w.store.SetMachinesFolder(w.ctx, path); err != nil {
+-		w.log.Error("Could not set machines folder", "err", err)
+-
+-		return
+-	}
+-
+-	if !w.settings.SetString(resources.SchemaMachinesFolderKey, path) {
+-		w.log.Error("Could not write machines folder setting")
+-
+-		return
+-	}
+-
+-	w.Refresh()
+-}
+-
+ func (w *PreferencesDialog) Refresh() {
+ 	if w.store == nil {
+ 		return
+ 	}
+ 
+-	w.machinesFolderRow.SetSubtitle(w.store.MachinesFolder())
++	w.machinesPreferences.SetMachinesFolder(w.store.MachinesFolder())
++
++	w.secretsPreferences.SetSSHAgentSockets(w.settings.GetStrv(resources.SchemaSSHAgentSocketsKey))
++	w.secretsPreferences.SetGPGHome(w.settings.GetString(resources.SchemaGPGHomeKey))
+ }
+ 
+ func init() {
+ 	var classInit gobject.ClassInitFunc = func(tc *gobject.TypeClass, u uintptr) {
+ 		typeClass := (*gtk.WidgetClass)(unsafe.Pointer(tc))
+ 		typeClass.SetTemplateFromResource(resources.ResourcePreferencesDialogUIPath)
+-		typeClass.BindTemplateChildFull("machines_folder_row", false, 0)
+-		typeClass.BindTemplateChildFull("machines_folder_button", false, 0)
++		typeClass.BindTemplateChildFull("machines_page", false, 0)
++		typeClass.BindTemplateChildFull("secrets_page", false, 0)
+ 
+ 		objClass := (*gobject.ObjectClass)(unsafe.Pointer(tc))
+ 
+@@ -150,24 +135,24 @@
+ 			parent.InitTemplate()
+ 
+ 			var (
+-				machinesFolderRow    adw.ActionRow
+-				machinesFolderButton gtk.Button
++				machinesPage adw.PreferencesPage
++				secretsPage  adw.PreferencesPage
+ 			)
+ 
+ 			parent.Widget.GetTemplateChild(
+ 				gTypePreferencesDialog,
+-				"machines_folder_row",
+-			).Cast(&machinesFolderRow)
++				"machines_page",
++			).Cast(&machinesPage)
+ 			parent.Widget.GetTemplateChild(
+ 				gTypePreferencesDialog,
+-				"machines_folder_button",
+-			).Cast(&machinesFolderButton)
++				"secrets_page",
++			).Cast(&secretsPage)
+ 
+ 			w := &PreferencesDialog{
+ 				PreferencesDialog: parent,
+ 
+-				machinesFolderRow:    &machinesFolderRow,
+-				machinesFolderButton: &machinesFolderButton,
++				machinesPage: &machinesPage,
++				secretsPage:  &secretsPage,
+ 
+ 				callbacks: []interface{}{},
+ 			}
+@@ -181,6 +166,9 @@ 					if err := glib.UnrefCallback(callback); err != nil {
+ 						w.log.Error("Could not unref callback", "err", err)
+ 					}
+ 				}
++
++				w.machinesPreferences.Close()
++				w.secretsPreferences.Close()
+ 
+ 				pinner.Unpin()
+ 			}
+diff --git a/internal/components/secrets_preferences.go b/internal/components/secrets_preferences.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..198dbeed72dc6d4eebb214dfd89787110b33b2c2
+--- /dev/null
++++ b/internal/components/secrets_preferences.go
+@@ -0,0 +1,398 @@
++package components
++
++import (
++	"log/slog"
++	"os"
++	"path/filepath"
++	"runtime"
++	"slices"
++	"strings"
++	"unsafe"
++
++	"codeberg.org/pojntfx/phial/pkg/state"
++	"codeberg.org/puregotk/puregotk/v4/adw"
++	"codeberg.org/puregotk/puregotk/v4/gio"
++	"codeberg.org/puregotk/puregotk/v4/glib"
++	"codeberg.org/puregotk/puregotk/v4/gobject"
++	"codeberg.org/puregotk/puregotk/v4/gtk"
++	. "github.com/pojntfx/go-gettext/pkg/i18n"
++)
++
++type agentSocketRowKind uint8
++
++const (
++	agentSocketRowSocket agentSocketRowKind = iota
++	agentSocketRowAction
++	agentSocketRowEmpty
++)
++
++type agentSocketRowItem struct {
++	gobject.Object
++
++	kind     agentSocketRowKind
++	title    string
++	subtitle string
++	path     string
++}
++
++var (
++	gTypeAgentSocketRowItem gobject.Type
++
++	destroyAgentSocketModel glib.DestroyNotify = func(uintptr) {}
++)
++
++type SecretsPreferences struct {
++	parent *gtk.Widget
++	log    *slog.Logger
++
++	sshAgentSockets []string
++	gpgHome         string
++
++	onChanged func(sockets []string, gpgHome string)
++
++	sshAgentGroup *adw.PreferencesGroup
++	gpgGroup      *adw.PreferencesGroup
++	gpgHomeRow    *adw.ActionRow
++
++	callbacks       []interface{}
++	socketCallbacks []interface{}
++
++	createAgentSocketRow gtk.ListBoxCreateWidgetFunc
++
++	closed bool
++}
++
++func NewSecretsPreferences(parent *gtk.Widget, log *slog.Logger, sshAgentSockets []string, gpgHome string, onChanged func(sockets []string, gpgHome string)) *SecretsPreferences {
++	a := &SecretsPreferences{
++		parent:    parent,
++		log:       log,
++		onChanged: onChanged,
++
++		callbacks:       []interface{}{},
++		socketCallbacks: []interface{}{},
++	}
++
++	a.sshAgentGroup = adw.NewPreferencesGroup()
++	a.sshAgentGroup.SetTitle(L("SSH Agents"))
++	a.sshAgentGroup.SetDescription(L("Sockets of the SSH agents that machines can use"))
++
++	a.gpgGroup = adw.NewPreferencesGroup()
++	a.gpgGroup.SetTitle(L("PGP Keyring"))
++	a.gpgGroup.SetDescription(L("Home folder of the PGP keyring"))
++
++	a.gpgHomeRow = adw.NewActionRow()
++	a.gpgHomeRow.SetTitle(L("Keyring Folder"))
++	a.gpgHomeRow.SetSubtitle(L("Not selected"))
++
++	gpgHomeIcon := gtk.NewImageFromIconName("folder-symbolic")
++	gpgHomeIcon.SetValign(gtk.AlignCenterValue)
++	a.gpgHomeRow.AddPrefix(&gpgHomeIcon.Widget)
++
++	gpgHomeButton := gtk.NewButtonWithLabel(L("_Choose..."))
++	gpgHomeButton.SetUseUnderline(true)
++	gpgHomeButton.SetValign(gtk.AlignCenterValue)
++	a.gpgHomeRow.AddSuffix(&gpgHomeButton.Widget)
++
++	onChooseGPGHome := func(gtk.Button) {
++		a.chooseGPGHome()
++	}
++	a.callbacks = append(a.callbacks, &onChooseGPGHome)
++	gpgHomeButton.ConnectClicked(&onChooseGPGHome)
++
++	a.gpgGroup.Add(&a.gpgHomeRow.Widget)
++
++	a.sshAgentSockets = append([]string(nil), sshAgentSockets...)
++	a.rebuildSSHAgentSockets()
++	a.SetGPGHome(gpgHome)
++
++	return a
++}
++
++func (a *SecretsPreferences) AddTo(page *adw.PreferencesPage) {
++	page.Add(a.sshAgentGroup)
++	page.Add(a.gpgGroup)
++}
++
++func (a *SecretsPreferences) SetSSHAgentSockets(sockets []string) {
++	if slices.Equal(a.sshAgentSockets, sockets) {
++		return
++	}
++
++	a.sshAgentSockets = append([]string(nil), sockets...)
++
++	a.rebuildSSHAgentSockets()
++}
++
++func (a *SecretsPreferences) SetGPGHome(home string) {
++	a.gpgHome = home
++
++	if home == "" {
++		a.gpgHomeRow.SetSubtitle(L("Not selected"))
++
++		return
++	}
++
++	a.gpgHomeRow.SetSubtitle(home)
++}
++
++func (a *SecretsPreferences) Close() {
++	if a.closed {
++		return
++	}
++	a.closed = true
++
++	for _, callback := range a.callbacks {
++		if err := glib.UnrefCallback(callback); err != nil {
++			a.log.Error("Could not unref callback", "err", err)
++		}
++	}
++	a.callbacks = nil
++
++	for _, callback := range a.socketCallbacks {
++		if err := glib.UnrefCallback(callback); err != nil {
++			a.log.Error("Could not unref callback", "err", err)
++		}
++	}
++	a.socketCallbacks = nil
++}
++
++func (a *SecretsPreferences) rebuildSSHAgentSockets() {
++	for _, callback := range a.socketCallbacks {
++		if err := glib.UnrefCallback(callback); err != nil {
++			a.log.Error("Could not unref callback", "err", err)
++		}
++	}
++	a.socketCallbacks = nil
++
++	model := gio.NewListStore(gTypeAgentSocketRowItem)
++
++	for _, socket := range a.sshAgentSockets {
++		appendAgentSocketRow(model, newAgentSocketRowItem(agentSocketRowSocket, filepath.Base(socket), socket, socket))
++	}
++	if len(a.sshAgentSockets) == 0 {
++		appendAgentSocketRow(model, newAgentSocketRowItem(agentSocketRowEmpty, L("No SSH Agent Sockets"), "", ""))
++	}
++	appendAgentSocketRow(model, newAgentSocketRowItem(agentSocketRowAction, L("_Add Socket..."), "", ""))
++
++	a.createAgentSocketRow = func(itemPtr uintptr, _ uintptr) uintptr {
++		return a.createAgentSocketRowWidget(itemPtr)
++	}
++	a.sshAgentGroup.BindModel(model, &a.createAgentSocketRow, 0, &destroyAgentSocketModel)
++	model.Unref()
++}
++
++func newAgentSocketRowItem(kind agentSocketRowKind, title string, subtitle string, path string) agentSocketRowItem {
++	obj := gobject.NewObjectWithProperties(gTypeAgentSocketRowItem, 0, nil, nil)
++
++	var v agentSocketRowItem
++	obj.Cast(&v)
++
++	item := (*agentSocketRowItem)(unsafe.Pointer(obj.GetData(dataKeyGoInstance)))
++	item.kind = kind
++	item.title = title
++	item.subtitle = subtitle
++	item.path = path
++
++	return v
++}
++
++func appendAgentSocketRow(model *gio.ListStore, item agentSocketRowItem) {
++	model.Append(&item.Object)
++	item.Unref()
++}
++
++func (a *SecretsPreferences) createAgentSocketRowWidget(itemPtr uintptr) uintptr {
++	obj := gobject.ObjectNewFromInternalPtr(itemPtr)
++	item := (*agentSocketRowItem)(unsafe.Pointer(obj.GetData(dataKeyGoInstance)))
++
++	switch item.kind {
++	case agentSocketRowAction:
++		row := adw.NewButtonRow()
++		row.SetTitle(item.title)
++		row.SetUseUnderline(true)
++		row.SetStartIconName("list-add-symbolic")
++
++		onAddSocket := func(adw.ButtonRow) {
++			a.chooseSSHAgentSocket()
++		}
++		a.socketCallbacks = append(a.socketCallbacks, &onAddSocket)
++		row.ConnectActivated(&onAddSocket)
++
++		return row.GoPointer()
++
++	case agentSocketRowEmpty:
++		label := gtk.NewLabel(item.title)
++		label.AddCssClass("dim-label")
++		label.SetHalign(gtk.AlignCenterValue)
++		label.SetMarginTop(12)
++		label.SetMarginBottom(12)
++		label.SetMarginStart(12)
++		label.SetMarginEnd(12)
++
++		return label.GoPointer()
++	}
++
++	row := adw.NewActionRow()
++	row.SetIconName("channel-secure-symbolic")
++	row.SetUseMarkup(false)
++	row.SetTitle(item.title)
++	row.SetSubtitle(item.subtitle)
++
++	remove := gtk.NewButton()
++	remove.SetIconName("user-trash-symbolic")
++	remove.SetTooltipText(L("Remove Socket"))
++	remove.SetValign(gtk.AlignCenterValue)
++	remove.SetHasFrame(false)
++
++	onRemove := func(gtk.Button) {
++		a.removeSSHAgentSocket(item.path)
++	}
++	a.socketCallbacks = append(a.socketCallbacks, &onRemove)
++	remove.ConnectClicked(&onRemove)
++
++	row.AddSuffix(&remove.Widget)
++
++	return row.GoPointer()
++}
++
++func (a *SecretsPreferences) addSSHAgentSocket(socket string) {
++	socket = strings.TrimSpace(socket)
++	if socket == "" || slices.Contains(a.sshAgentSockets, socket) {
++		return
++	}
++
++	a.sshAgentSockets = append(a.sshAgentSockets, socket)
++	a.rebuildSSHAgentSockets()
++	a.notifyChanged()
++}
++
++func (a *SecretsPreferences) removeSSHAgentSocket(socket string) {
++	a.sshAgentSockets = slices.DeleteFunc(a.sshAgentSockets, func(current string) bool {
++		return current == socket
++	})
++	a.rebuildSSHAgentSockets()
++	a.notifyChanged()
++}
++
++func (a *SecretsPreferences) setGPGHome(home string) {
++	a.SetGPGHome(home)
++	a.notifyChanged()
++}
++
++func (a *SecretsPreferences) notifyChanged() {
++	a.onChanged(append([]string(nil), a.sshAgentSockets...), a.gpgHome)
++}
++
++func (a *SecretsPreferences) chooseSSHAgentSocket() {
++	fileDialog := gtk.NewFileDialog()
++	fileDialog.SetTitle(L("Choose an SSH Agent Socket"))
++
++	if folder := state.MockSSHAgentSocketFolder(); folder != "" {
++		if _, err := os.Stat(folder); err == nil {
++			fileDialog.SetInitialFolder(gio.FileNewForPath(folder))
++		}
++	}
++
++	var onSocketChosen gio.AsyncReadyCallback
++	onSocketChosen = gio.AsyncReadyCallback(func(_ uintptr, resultPtr uintptr, _ uintptr) {
++		result := gio.AsyncResultBase{Ptr: resultPtr}
++
++		file, err := fileDialog.OpenFinish(&result)
++		if err != nil {
++			a.log.Error("Could not choose SSH agent socket", "err", err)
++
++			return
++		}
++
++		if file == nil {
++			return
++		}
++
++		a.addSSHAgentSocket(file.GetPath())
++	})
++	a.callbacks = append(a.callbacks, &onSocketChosen)
++
++	var parentWindow gtk.Window
++	a.parent.Cast(&parentWindow)
++
++	fileDialog.Open(&parentWindow, nil, &onSocketChosen, 0)
++}
++
++func (a *SecretsPreferences) chooseGPGHome() {
++	fileDialog := gtk.NewFileDialog()
++	fileDialog.SetTitle(L("Choose the PGP Keyring Folder"))
++
++	initial := state.MockGPGHome()
++	if _, err := os.Stat(initial); err != nil {
++		initial = filepath.Dir(initial)
++	}
++
++	if _, err := os.Stat(initial); err == nil {
++		fileDialog.SetInitialFolder(gio.FileNewForPath(initial))
++	}
++
++	var onGPGHomeChosen gio.AsyncReadyCallback
++	onGPGHomeChosen = gio.AsyncReadyCallback(func(_ uintptr, resultPtr uintptr, _ uintptr) {
++		result := gio.AsyncResultBase{Ptr: resultPtr}
++
++		file, err := fileDialog.SelectFolderFinish(&result)
++		if err != nil {
++			a.log.Error("Could not choose PGP keyring folder", "err", err)
++
++			return
++		}
++
++		if file == nil {
++			return
++		}
++
++		a.setGPGHome(file.GetPath())
++	})
++	a.callbacks = append(a.callbacks, &onGPGHomeChosen)
++
++	var parentWindow gtk.Window
++	a.parent.Cast(&parentWindow)
++
++	fileDialog.SelectFolder(&parentWindow, nil, &onGPGHomeChosen, 0)
++}
++
++func init() {
++	var classInit gobject.ClassInitFunc = func(tc *gobject.TypeClass, u uintptr) {
++		objClass := (*gobject.ObjectClass)(unsafe.Pointer(tc))
++
++		objClass.OverrideConstructed(func(o *gobject.Object) {
++			parentObjClass := (*gobject.ObjectClass)(unsafe.Pointer(tc.PeekParent()))
++			parentObjClass.GetConstructed()(o)
++
++			var parent gobject.Object
++			o.Cast(&parent)
++
++			item := &agentSocketRowItem{
++				Object: parent,
++			}
++
++			var pinner runtime.Pinner
++			pinner.Pin(item)
++
++			var cleanupCallback glib.DestroyNotify = func(data uintptr) {
++				pinner.Unpin()
++			}
++			o.SetDataFull(dataKeyGoInstance, uintptr(unsafe.Pointer(item)), &cleanupCallback)
++		})
++	}
++
++	var instanceInit gobject.InstanceInitFunc = func(ti *gobject.TypeInstance, tc *gobject.TypeClass) {}
++
++	var parentQuery gobject.TypeQuery
++	gobject.NewTypeQuery(gobject.TypeObjectVal, &parentQuery)
++
++	gTypeAgentSocketRowItem = gobject.TypeRegisterStaticSimple(
++		parentQuery.Type,
++		"PhialAgentSocketRowItem",
++		parentQuery.ClassSize,
++		&classInit,
++		parentQuery.InstanceSize,
++		&instanceInit,
++		0,
++	)
++}
+diff --git a/pkg/state/secrets.go b/pkg/state/secrets.go
+index 6ea383fb177aeaacffbcb7edb394a74cd038c216..4a0893680fbee8787f1fd03ffba62fa5ae959764 100644
+--- a/pkg/state/secrets.go
++++ b/pkg/state/secrets.go
+@@ -1,5 +1,10 @@
+ package state
+ 
++import (
++	"os"
++	"path/filepath"
++)
++
+ type SecretMode string
+ 
+ const (
+@@ -31,6 +36,26 @@ 	Fingerprint string
+ 
+ 	// TODO: Remove this mock once grants reference PGP keys.
+ 	LinkedTo []string
++}
++
++// TODO: Remove this mock once actual implementation exists
++func MockSSHAgentSockets() []string {
++	return []string{filepath.Join(os.TempDir(), "ssh-agent.sock")}
++}
++
++// TODO: Remove this mock once actual implementation exists
++func MockSSHAgentSocketFolder() string {
++	return filepath.Dir(MockSSHAgentSockets()[0])
++}
++
++// TODO: Remove this mock once actual implementation exists
++func MockGPGHome() string {
++	home, err := os.UserHomeDir()
++	if err != nil {
++		return ""
++	}
++
++	return filepath.Join(home, ".gnupg")
+ }
+ 
+ // TODO: Remove this mock once actual implementation exists
+diff --git a/po/phial.pot b/po/phial.pot
+index 64cdc5e986e77c567a8d2e8eb3cf001ab969c9fe..6c6164dc564da3b1c441c54608c703d31dcc2544 100644
+--- a/po/phial.pot
++++ b/po/phial.pot
+@@ -1,108 +1,3 @@
+-#: ../assets/resources/setup-dialog.blp:5
+-msgid "Set Up Phial"
+-msgstr ""
+-
+-#: ../assets/resources/setup-dialog.blp:19
+-#: ../assets/resources/create-machine-dialog.blp:17
+-msgid "_Cancel"
+-msgstr ""
+-
+-#: ../assets/resources/setup-dialog.blp:25
+-msgid "_Back"
+-msgstr ""
+-
+-#: ../assets/resources/setup-dialog.blp:45
+-msgid "_Continue"
+-msgstr ""
+-
+-#: ../assets/resources/setup-dialog.blp:59
+-#: ../assets/resources/preferences-dialog.blp:11
+-msgid "Phial keeps its machines and their configurations in this folder"
+-msgstr ""
+-
+-#: ../assets/resources/setup-dialog.blp:62
+-#: ../assets/resources/preferences-dialog.blp:14
+-msgid "Machines Folder"
+-msgstr ""
+-
+-#: ../assets/resources/setup-dialog.blp:63
+-#: ../internal/components/setup_dialog.go:413
+-msgid "Not selected"
+-msgstr ""
+-
+-#: ../assets/resources/setup-dialog.blp:72
+-#: ../assets/resources/preferences-dialog.blp:23
+-msgid "_Choose..."
+-msgstr ""
+-
+-#: ../assets/resources/setup-dialog.blp:85
+-msgid ""
+-"The host service runs your machines on this computer, outside the "
+-"application sandbox. It is the only part of Phial that touches the system."
+-msgstr ""
+-
+-#: ../assets/resources/setup-dialog.blp:88
+-msgid ""
+-"I understand it <b>runs your machines outside the application sandbox</b>"
+-msgstr ""
+-
+-#: ../assets/resources/setup-dialog.blp:99
+-msgid "I understand it <b>reads and writes to the machines folder</b>"
+-msgstr ""
+-
+-#: ../assets/resources/setup-dialog.blp:110
+-msgid ""
+-"I understand it <b>uses the SSH and PGP agents and the secret service of the "
+-"host</b>"
+-msgstr ""
+-
+-#: ../assets/resources/setup-dialog.blp:121
+-msgid "I understand it <b>uses the virtualisation tools of the host</b>"
+-msgstr ""
+-
+-#: ../assets/resources/setup-dialog.blp:132
+-msgid ""
+-"I understand it <b>runs fixed administrator commands, which you approve each "
+-"time</b>"
+-msgstr ""
+-
+-#: ../assets/resources/setup-dialog.blp:149
+-msgid ""
+-"Run this command in a terminal. It installs the host service and starts it."
+-msgstr ""
+-
+-#: ../assets/resources/setup-dialog.blp:173
+-#: ../assets/resources/setup-dialog.blp:215
+-msgid "_Copy Command"
+-msgstr ""
+-
+-#: ../assets/resources/setup-dialog.blp:179
+-msgid "_Verify Connection"
+-msgstr ""
+-
+-#: ../assets/resources/setup-dialog.blp:191
+-msgid ""
+-"Run this command in a terminal. It adds the rules for the USB devices and "
+-"needs your password."
+-msgstr ""
+-
+-#: ../assets/resources/setup-dialog.blp:227
+-msgid "You're Ready"
+-msgstr ""
+-
+-#: ../assets/resources/setup-dialog.blp:228
+-msgid "Now make a machine your own"
+-msgstr ""
+-
+-#: ../assets/resources/setup-dialog.blp:232
+-msgid "_Finish"
+-msgstr ""
+-
+-#: ../assets/resources/preferences-dialog.blp:5
+-msgid "Preferences"
+-msgstr ""
+-
+-#: ../assets/resources/preferences-dialog.blp:8
+ #: ../assets/resources/shortcuts-dialog.blp:6
+ msgid "General"
+ msgstr ""
+@@ -124,6 +19,7 @@ msgid "Quit"
+ msgstr ""
+ 
+ #: ../assets/resources/shortcuts-dialog.blp:30
++#: ../assets/resources/preferences-dialog.blp:10
+ #: ../assets/resources/window.blp:130 ../assets/resources/window.blp:169
+ msgid "Machines"
+ msgstr ""
+@@ -136,6 +32,11 @@ #: ../assets/resources/create-machine-dialog.blp:5
+ #: ../assets/resources/create-machine-dialog.blp:23
+ #: ../assets/resources/window.blp:102 ../assets/resources/window.blp:109
+ msgid "New Machine"
++msgstr ""
++
++#: ../assets/resources/create-machine-dialog.blp:17
++#: ../assets/resources/setup-dialog.blp:19
++msgid "_Cancel"
+ msgstr ""
+ 
+ #: ../assets/resources/create-machine-dialog.blp:29
+@@ -196,6 +97,116 @@ msgid ""
+ "Not enough storage available. A machine needs at least 8 GiB of free storage."
+ msgstr ""
+ 
++#: ../assets/resources/preferences-dialog.blp:5
++#: ../internal/components/secrets.go:122
++msgid "Preferences"
++msgstr ""
++
++#: ../assets/resources/preferences-dialog.blp:16
++#: ../assets/resources/window.blp:141 ../assets/resources/window.blp:196
++#: ../assets/resources/window.blp:203
++msgid "Secrets"
++msgstr ""
++
++#: ../assets/resources/setup-dialog.blp:5
++msgid "Set Up Phial"
++msgstr ""
++
++#: ../assets/resources/setup-dialog.blp:25
++msgid "_Back"
++msgstr ""
++
++#: ../assets/resources/setup-dialog.blp:45
++msgid "_Continue"
++msgstr ""
++
++#: ../assets/resources/setup-dialog.blp:59
++#: ../internal/components/machines_preferences.go:43
++msgid "Phial keeps its machines and their configurations in this folder"
++msgstr ""
++
++#: ../assets/resources/setup-dialog.blp:62
++#: ../internal/components/machines_preferences.go:46
++msgid "Machines Folder"
++msgstr ""
++
++#: ../assets/resources/setup-dialog.blp:63
++#: ../internal/components/setup_dialog.go:453
++#: ../internal/components/secrets_preferences.go:85
++#: ../internal/components/secrets_preferences.go:130
++#: ../internal/components/machines_preferences.go:78
++msgid "Not selected"
++msgstr ""
++
++#: ../assets/resources/setup-dialog.blp:72
++#: ../internal/components/secrets_preferences.go:91
++#: ../internal/components/machines_preferences.go:52
++msgid "_Choose..."
++msgstr ""
++
++#: ../assets/resources/setup-dialog.blp:85
++msgid ""
++"The host service runs your machines on this computer, outside the "
++"application sandbox. It is the only part of Phial that touches the system."
++msgstr ""
++
++#: ../assets/resources/setup-dialog.blp:88
++msgid ""
++"I understand it <b>runs your machines outside the application sandbox</b>"
++msgstr ""
++
++#: ../assets/resources/setup-dialog.blp:99
++msgid "I understand it <b>reads and writes to the machines folder</b>"
++msgstr ""
++
++#: ../assets/resources/setup-dialog.blp:110
++msgid ""
++"I understand it <b>uses the SSH and PGP agents and the secret service of the "
++"host</b>"
++msgstr ""
++
++#: ../assets/resources/setup-dialog.blp:121
++msgid "I understand it <b>uses the virtualisation tools of the host</b>"
++msgstr ""
++
++#: ../assets/resources/setup-dialog.blp:132
++msgid ""
++"I understand it <b>runs fixed administrator commands, which you approve each "
++"time</b>"
++msgstr ""
++
++#: ../assets/resources/setup-dialog.blp:149
++msgid ""
++"Run this command in a terminal. It installs the host service and starts it."
++msgstr ""
++
++#: ../assets/resources/setup-dialog.blp:173
++#: ../assets/resources/setup-dialog.blp:215
++msgid "_Copy Command"
++msgstr ""
++
++#: ../assets/resources/setup-dialog.blp:179
++msgid "_Verify Connection"
++msgstr ""
++
++#: ../assets/resources/setup-dialog.blp:191
++msgid ""
++"Run this command in a terminal. It adds the rules for the USB devices and "
++"needs your password."
++msgstr ""
++
++#: ../assets/resources/setup-dialog.blp:232
++msgid "You're Ready"
++msgstr ""
++
++#: ../assets/resources/setup-dialog.blp:233
++msgid "Now make a machine your own"
++msgstr ""
++
++#: ../assets/resources/setup-dialog.blp:237
++msgid "_Finish"
++msgstr ""
++
+ #: ../assets/resources/window.blp:7 ../assets/resources/window.blp:25
+ #: ../assets/resources/window.blp:55 ../assets/resources/window.blp:94
+ #: ../assets/resources/window.blp:114 ../assets/resources/window.blp:163
+@@ -237,11 +248,6 @@ msgstr ""
+ 
+ #: ../assets/resources/window.blp:135
+ msgid "Create your first machine"
+-msgstr ""
+-
+-#: ../assets/resources/window.blp:141 ../assets/resources/window.blp:196
+-#: ../assets/resources/window.blp:203
+-msgid "Secrets"
+ msgstr ""
+ 
+ #: ../assets/resources/window.blp:154 ../assets/resources/window.blp:255
+@@ -274,7 +280,7 @@ msgid "SSH Keys"
+ msgstr ""
+ 
+ #: ../assets/resources/window.blp:230
+-msgid "From the SSH agent"
++msgid "From the SSH agents"
+ msgstr ""
+ 
+ #: ../assets/resources/window.blp:234
+@@ -301,102 +307,152 @@ #: ../assets/resources/window.blp:291
+ msgid "_About Phial"
+ msgstr ""
+ 
++#: ../internal/components/create_machine_dialog.go:168
++msgid "No more memory available"
++msgstr ""
++
++#: ../internal/components/create_machine_dialog.go:172
++msgid "No more storage available"
++msgstr ""
++
+ #. TRANSLATORS: Replace "translator-credits" with your name/username, and optionally an email or URL.
+ #: ../internal/components/application.go:91
+ msgid "translator-credits"
+ msgstr ""
+ 
+-#: ../internal/components/preferences_dialog.go:58
+-#: ../internal/components/setup_dialog.go:259
+-msgid "Choose the Machines Folder"
++#: ../internal/components/secrets.go:64
++msgid "Environment file"
+ msgstr ""
+ 
+-#: ../internal/components/setup_dialog.go:395
+-msgid "Welcome"
++#: ../internal/components/secrets.go:66
++msgid "Proxy, %v"
+ msgstr ""
+ 
+-#: ../internal/components/setup_dialog.go:397
+-msgid "Storage"
++#: ../internal/components/secrets.go:70
++msgid "granted to %v"
+ msgstr ""
+ 
+-#: ../internal/components/setup_dialog.go:399
+-msgid "Host Access"
++#: ../internal/components/secrets.go:76
++msgid "No Tokens"
+ msgstr ""
+ 
+-#: ../internal/components/setup_dialog.go:401
+-msgid "Host Service"
++#: ../internal/components/secrets.go:78
++msgid "_Add Token..."
+ msgstr ""
+ 
+-#: ../internal/components/setup_dialog.go:403
+-msgid "System Setup"
++#: ../internal/components/secrets.go:90 ../internal/components/secrets.go:109
++msgid "linked to %v"
+ msgstr ""
+ 
+-#: ../internal/components/setup_dialog.go:405
+-msgid "Done"
++#: ../internal/components/secrets.go:96
++msgid "No SSH Keys"
+ msgstr ""
+ 
+-#: ../internal/components/create_machine_dialog.go:168
+-msgid "No more memory available"
++#: ../internal/components/secrets.go:115
++msgid "No PGP Keys"
+ msgstr ""
+ 
+-#: ../internal/components/create_machine_dialog.go:172
+-msgid "No more storage available"
++#: ../internal/components/secrets.go:121
++msgid "Manage SSH and PGP keys, and optionally tokens, in"
+ msgstr ""
+ 
+-#: ../internal/components/secrets.go:61
+-msgid "Environment file"
++#: ../internal/components/secrets.go:121
++msgid "Passwords and Keys"
+ msgstr ""
+ 
+-#: ../internal/components/secrets.go:63
+-msgid "Proxy, %v"
++#: ../internal/components/secrets.go:122
++msgid "If expected keys are missing, check"
+ msgstr ""
+ 
+-#: ../internal/components/secrets.go:67
+-msgid "granted to %v"
++#: ../internal/components/secrets.go:180
++msgid "Grant Access"
+ msgstr ""
+ 
+-#: ../internal/components/secrets.go:73
+-msgid "No Tokens"
++#: ../internal/components/secrets.go:181
++msgid "Token Menu"
+ msgstr ""
+ 
+-#: ../internal/components/secrets.go:75
+-msgid "_Add Token..."
++#: ../internal/components/secrets.go:183
++msgid "Link a Key"
++msgstr ""
++
++#: ../internal/components/secrets.go:185
++msgid "Unlink the Key"
++msgstr ""
++
++#: ../internal/components/setup_dialog.go:294
++#: ../internal/components/machines_preferences.go:97
++msgid "Choose the Machines Folder"
++msgstr ""
++
++#: ../internal/components/setup_dialog.go:433
++msgid "Welcome"
++msgstr ""
++
++#: ../internal/components/setup_dialog.go:435
++msgid "Storage"
++msgstr ""
++
++#: ../internal/components/setup_dialog.go:437
++msgid "Host Access"
++msgstr ""
++
++#: ../internal/components/setup_dialog.go:439
++msgid "Host Service"
++msgstr ""
++
++#: ../internal/components/setup_dialog.go:441
++msgid "System Setup"
++msgstr ""
++
++#: ../internal/components/setup_dialog.go:443
++msgid "Agents"
++msgstr ""
++
++#: ../internal/components/setup_dialog.go:445
++msgid "Done"
++msgstr ""
++
++#: ../internal/components/secrets_preferences.go:76
++msgid "SSH Agents"
+ msgstr ""
+ 
+-#: ../internal/components/secrets.go:87 ../internal/components/secrets.go:106
+-msgid "linked to %v"
++#: ../internal/components/secrets_preferences.go:77
++#: ../assets/resources/index.gschema.xml:22
++msgid "Sockets of the SSH agents that machines can use"
+ msgstr ""
+ 
+-#: ../internal/components/secrets.go:93
+-msgid "No SSH Keys"
++#: ../internal/components/secrets_preferences.go:80
++msgid "PGP Keyring"
+ msgstr ""
+ 
+-#: ../internal/components/secrets.go:112
+-msgid "No PGP Keys"
++#: ../internal/components/secrets_preferences.go:81
++#: ../assets/resources/index.gschema.xml:27
++msgid "Home folder of the PGP keyring"
+ msgstr ""
+ 
+-#: ../internal/components/secrets.go:118
+-msgid "Manage SSH and PGP keys, and optionally tokens, in"
++#: ../internal/components/secrets_preferences.go:84
++msgid "Keyring Folder"
+ msgstr ""
+ 
+-#: ../internal/components/secrets.go:118
+-msgid "Passwords and Keys"
++#: ../internal/components/secrets_preferences.go:173
++msgid "No SSH Agent Sockets"
+ msgstr ""
+ 
+-#: ../internal/components/secrets.go:173
+-msgid "Grant Access"
++#: ../internal/components/secrets_preferences.go:175
++msgid "_Add Socket..."
+ msgstr ""
+ 
+-#: ../internal/components/secrets.go:174
+-msgid "Token Menu"
++#: ../internal/components/secrets_preferences.go:243
++msgid "Remove Socket"
+ msgstr ""
+ 
+-#: ../internal/components/secrets.go:176
+-msgid "Link a Key"
++#: ../internal/components/secrets_preferences.go:292
++msgid "Choose an SSH Agent Socket"
+ msgstr ""
+ 
+-#: ../internal/components/secrets.go:178
+-msgid "Unlink the Key"
++#: ../internal/components/secrets_preferences.go:327
++msgid "Choose the PGP Keyring Folder"
+ msgstr ""
+ 
+ #. TRANSLATORS: Search terms to find this application.
+@@ -477,3 +533,11 @@
+ #: ../assets/resources/index.gschema.xml:17
+ msgid "Folder that the host service was last verified with"
+ msgstr ""
++
++#: ../assets/resources/index.gschema.xml:21
++msgid "SSH agent sockets"
++msgstr ""
++
++#: ../assets/resources/index.gschema.xml:26
++msgid "GPG home"
++msgstr ""
+
