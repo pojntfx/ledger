@@ -1,0 +1,143 @@
+From 02768ba263285c85793f154d7aea374afac9d53c Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Sat, 21 Nov 2026 01:15:08 -0700
+Subject: [PATCH] feat: Add missing-key hint and Preferences deep link
+---
+diff --git a/assets/resources/window.blp b/assets/resources/window.blp
+index 77931609aea54eb0ed32cb1c343c95325e987a4c..9095583f209a93e9cae11d1f44a57dcae8214268 100644
+--- a/assets/resources/window.blp
++++ b/assets/resources/window.blp
+@@ -227,7 +227,7 @@                         }
+ 
+                         Adw.PreferencesGroup secrets_ssh_keys_group {
+                           title: _("SSH Keys");
+-                          description: _("From the SSH agent");
++                          description: _("From the SSH agents");
+                         }
+ 
+                         Adw.PreferencesGroup secrets_gpg_keys_group {
+diff --git a/internal/components/application.go b/internal/components/application.go
+index 50b66bee23064262a02dede4b29333c14a38e060..344abe4d1cb9ff826be3dbb6d950038bdd82acc6 100644
+--- a/internal/components/application.go
++++ b/internal/components/application.go
+@@ -177,6 +177,13 @@ 			}
+ 			openPreferencesAction.ConnectActivate(&onOpenPreferences)
+ 			phialApp.Application.AddAction(openPreferencesAction)
+ 
++			openPreferencesSecretsAction := gio.NewSimpleAction("openPreferencesSecrets", nil)
++			onOpenPreferencesSecrets := func(gio.SimpleAction, uintptr) {
++				phialApp.preferencesDialog.PresentSecrets(&phialApp.window.ApplicationWindow.Widget)
++			}
++			openPreferencesSecretsAction.ConnectActivate(&onOpenPreferencesSecrets)
++			phialApp.Application.AddAction(openPreferencesSecretsAction)
++
+ 			phialApp.window.SetPreferencesAction(openPreferencesAction)
+ 
+ 			quitAction := gio.NewSimpleAction("quit", nil)
+diff --git a/internal/components/main_window.go b/internal/components/main_window.go
+index 89e227ac126b45dc9674b923b6a7b3fbf89e367e..bfd3d14b9ba6a27ec1a518f9fba16d24a0b1d9a2 100644
+--- a/internal/components/main_window.go
++++ b/internal/components/main_window.go
+@@ -163,6 +163,23 @@ 	}
+ 
+ 	window.populateSecrets()
+ 
++	onSecretsFooterActivateLink := func(_ gtk.Label, uri string) bool {
++		switch uri {
++		case preferencesURI:
++			window.app.ActivateAction("openPreferencesSecrets", nil)
++
++			return true
++		case seahorseHelp:
++			gtk.ShowUri(&window.ApplicationWindow.Window, uri, 0)
++
++			return true
++		}
++
++		return false
++	}
++	window.callbacks = append(window.callbacks, &onSecretsFooterActivateLink)
++	window.secretsFooterLabel.ConnectActivateLink(&onSecretsFooterActivateLink)
++
+ 	window.refresh()
+ 
+ 	return v
+diff --git a/internal/components/preferences_dialog.go b/internal/components/preferences_dialog.go
+index 5381891ad8b0ccac5300f033ff8647624b4bbfef..649fec186dd974fdefed8fb73a730b5647c97360 100644
+--- a/internal/components/preferences_dialog.go
++++ b/internal/components/preferences_dialog.go
+@@ -105,6 +105,12 @@ 	w.SetVisiblePageName("machines")
+ 	w.PreferencesDialog.Present(parent)
+ }
+ 
++func (w *PreferencesDialog) PresentSecrets(parent *gtk.Widget) {
++	w.Refresh()
++	w.SetVisiblePageName("secrets")
++	w.PreferencesDialog.Present(parent)
++}
++
+ func (w *PreferencesDialog) Refresh() {
+ 	if w.store == nil {
+ 		return
+diff --git a/internal/components/secrets.go b/internal/components/secrets.go
+index 65d0cf33d1c0c02a8ab1a6efb240e7229f3b5158..3b11a007053970bd500a8bf4e42ed3f463cc71d7 100644
+--- a/internal/components/secrets.go
++++ b/internal/components/secrets.go
+@@ -16,13 +16,16 @@ 	"codeberg.org/puregotk/puregotk/v4/gtk"
+ 	. "github.com/pojntfx/go-gettext/pkg/i18n"
+ )
+ 
+-const seahorseHelp = "https://help.gnome.org/seahorse/"
++const (
++	seahorseHelp   = "https://help.gnome.org/seahorse/"
++	preferencesURI = "#preferences"
++)
+ 
+-var seahorseLinkTemplate = template.Must(template.New("seahorse-link").Parse(
++var linkTemplate = template.Must(template.New("link").Parse(
+ 	`<a href="{{.URL}}">{{.Label}}</a>`,
+ ))
+ 
+-type seahorseLinkData struct {
++type linkData struct {
+ 	URL   string
+ 	Label string
+ }
+@@ -115,7 +118,8 @@ 	w.secretsGPGKeysGroup.BindModel(gpgKeyModel, &createSecretsRow, 0, &destroySecretsModel)
+ 	gpgKeyModel.Unref()
+ 
+ 	w.secretsFooterLabel.SetMarkup(
+-		L("Manage SSH and PGP keys, and optionally tokens, in") + " " + seahorseHelpLink(L("Passwords and Keys")),
++		L("Manage SSH and PGP keys, and optionally tokens, in") + " " + seahorseHelpLink(L("Passwords and Keys")) + ". " +
++			L("If expected keys are missing, check") + " " + preferencesHelpLink(L("Preferences")) + ".",
+ 	)
+ }
+ 
+@@ -215,15 +219,23 @@
+ 	return fingerprint
+ }
+ 
+-func seahorseHelpLink(label string) string {
++func markupLink(uri string, label string) string {
+ 	var b strings.Builder
+ 
+-	seahorseLinkTemplate.Execute(&b, seahorseLinkData{
+-		URL:   seahorseHelp,
++	linkTemplate.Execute(&b, linkData{
++		URL:   uri,
+ 		Label: label,
+ 	})
+ 
+ 	return b.String()
++}
++
++func seahorseHelpLink(label string) string {
++	return markupLink(seahorseHelp, label)
++}
++
++func preferencesHelpLink(label string) string {
++	return markupLink(preferencesURI, label)
+ }
+ 
+ func init() {
+
