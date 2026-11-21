@@ -1,0 +1,337 @@
+From d2a5dda84b5d548a30941132c3c72c5c5394ebb9 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Sat, 21 Nov 2026 02:10:21 -0700
+Subject: [PATCH] feat: Add the new token dialog
+---
+diff --git a/assets/resources/add-token-dialog.blp b/assets/resources/add-token-dialog.blp
+new file mode 100644
+index 0000000000000000000000000000000000000000..e6511c890098d915efaebb8135f4b578f50ffae8
+--- /dev/null
++++ b/assets/resources/add-token-dialog.blp
+@@ -0,0 +1,68 @@
++using Gtk 4.0;
++using Adw 1;
++
++template $PhialAddTokenDialog: Adw.Dialog {
++  title: _("Add Token");
++
++  child: Adw.ToolbarView {
++    [top]
++    Adw.HeaderBar {
++      show-start-title-buttons: false;
++      show-end-title-buttons: false;
++
++      [start]
++      Button {
++        label: _("_Cancel");
++        use-underline: true;
++        action-name: "window.close";
++      }
++
++      title-widget: Adw.WindowTitle {
++        title: _("Add Token");
++      };
++
++      [end]
++      Button {
++        sensitive: false;
++        label: _("_Add");
++        use-underline: true;
++        styles [
++          "suggested-action",
++        ]
++      }
++    }
++
++    content: Adw.PreferencesPage {
++      Adw.PreferencesGroup {
++        Adw.EntryRow name_row {
++          title: _("_Name");
++          use-underline: true;
++          show-apply-button: false;
++        }
++
++        Adw.PasswordEntryRow value_row {
++          title: _("_Value");
++          use-underline: true;
++          show-apply-button: false;
++        }
++
++        Adw.ComboRow delivery_row {
++          title: _("Delivery");
++          model: StringList {
++            strings [
++              _("Environment file"),
++              _("Proxy"),
++            ]
++          };
++        }
++
++        Adw.EntryRow upstream_row {
++          visible: false;
++          title: _("_Upstream URL");
++          use-underline: true;
++          show-apply-button: false;
++        }
++      }
++    };
++  };
++}
+diff --git a/assets/resources/index.go b/assets/resources/index.go
+index 6e5c114ee942660dcd1e9257d64d338d8f5a4c75..54678ad3b63a7493e53740e8b0e9150e60e51345 100644
+--- a/assets/resources/index.go
++++ b/assets/resources/index.go
+@@ -39,6 +39,7 @@ 	ResourceWindowUIPath              = path.Join(AppPath, "window.ui")
+ 	ResourceSetupDialogUIPath         = path.Join(AppPath, "setup-dialog.ui")
+ 	ResourcePreferencesDialogUIPath   = path.Join(AppPath, "preferences-dialog.ui")
+ 	ResourceCreateMachineDialogUIPath = path.Join(AppPath, "create-machine-dialog.ui")
++	ResourceAddTokenDialogUIPath      = path.Join(AppPath, "add-token-dialog.ui")
+ 	ResourceShortcutsDialogUIPath     = path.Join(AppPath, "shortcuts-dialog.ui")
+ 	ResourceMetainfoPath              = path.Join(AppPath, "metainfo.xml")
+ 	ResourceIconPath                  = path.Join(AppPath, "icon.svg")
+diff --git a/assets/resources/index.gresource.xml b/assets/resources/index.gresource.xml
+index 2a1d2df6f962f415438ac2bf23b8efe31da59a0f..1abf571f413adea8b42a5ffc9b41d808f0ff7344 100644
+--- a/assets/resources/index.gresource.xml
++++ b/assets/resources/index.gresource.xml
+@@ -5,6 +5,7 @@         <file>window.ui</file>
+         <file>setup-dialog.ui</file>
+         <file>preferences-dialog.ui</file>
+         <file>create-machine-dialog.ui</file>
++        <file>add-token-dialog.ui</file>
+         <file>shortcuts-dialog.ui</file>
+         <file>style.css</file>
+         <file>metainfo.xml</file>
+diff --git a/internal/components/add_token_dialog.go b/internal/components/add_token_dialog.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..dc2b97be06cc97cc2209b4f66675383e0c82e581
+--- /dev/null
++++ b/internal/components/add_token_dialog.go
+@@ -0,0 +1,150 @@
++package components
++
++import (
++	"log/slog"
++	"runtime"
++	"unsafe"
++
++	"codeberg.org/pojntfx/phial/assets/resources"
++	"codeberg.org/puregotk/puregotk/v4/adw"
++	"codeberg.org/puregotk/puregotk/v4/glib"
++	"codeberg.org/puregotk/puregotk/v4/gobject"
++	"codeberg.org/puregotk/puregotk/v4/gtk"
++)
++
++var (
++	gTypeAddTokenDialog gobject.Type
++)
++
++type AddTokenDialog struct {
++	adw.Dialog
++
++	log *slog.Logger
++
++	nameRow     *adw.EntryRow
++	valueRow    *adw.PasswordEntryRow
++	deliveryRow *adw.ComboRow
++	upstreamRow *adw.EntryRow
++
++	callbacks []interface{}
++}
++
++func NewAddTokenDialog(log *slog.Logger) AddTokenDialog {
++	obj := gobject.NewObject(gTypeAddTokenDialog, "css-name")
++	gobject.IncreaseRef(obj.GoPointer())
++
++	var v AddTokenDialog
++	obj.Cast(&v)
++
++	dialog := (*AddTokenDialog)(unsafe.Pointer(obj.GetData(dataKeyGoInstance)))
++	dialog.log = log
++
++	onDeliveryChanged := func(gobject.Object, uintptr) {
++		dialog.updateUpstreamVisibility()
++	}
++	dialog.callbacks = append(dialog.callbacks, &onDeliveryChanged)
++	dialog.deliveryRow.ConnectNotify(&onDeliveryChanged)
++
++	dialog.Refresh()
++
++	return v
++}
++
++func (w *AddTokenDialog) Refresh() {
++	w.nameRow.SetText("")
++	w.valueRow.SetText("")
++	w.deliveryRow.SetSelected(0)
++	w.upstreamRow.SetText("")
++	w.updateUpstreamVisibility()
++}
++
++func (w *AddTokenDialog) updateUpstreamVisibility() {
++	w.upstreamRow.SetVisible(w.deliveryRow.GetSelected() == 1)
++}
++
++func init() {
++	var dialogClassInit gobject.ClassInitFunc = func(tc *gobject.TypeClass, u uintptr) {
++		typeClass := (*gtk.WidgetClass)(unsafe.Pointer(tc))
++		typeClass.SetTemplateFromResource(resources.ResourceAddTokenDialogUIPath)
++		typeClass.BindTemplateChildFull("name_row", false, 0)
++		typeClass.BindTemplateChildFull("value_row", false, 0)
++		typeClass.BindTemplateChildFull("delivery_row", false, 0)
++		typeClass.BindTemplateChildFull("upstream_row", false, 0)
++
++		objClass := (*gobject.ObjectClass)(unsafe.Pointer(tc))
++
++		objClass.OverrideConstructed(func(o *gobject.Object) {
++			parentObjClass := (*gobject.ObjectClass)(unsafe.Pointer(tc.PeekParent()))
++			parentObjClass.GetConstructed()(o)
++
++			var parent adw.Dialog
++			o.Cast(&parent)
++
++			parent.InitTemplate()
++
++			var (
++				nameRow     adw.EntryRow
++				valueRow    adw.PasswordEntryRow
++				deliveryRow adw.ComboRow
++				upstreamRow adw.EntryRow
++			)
++
++			parent.Widget.GetTemplateChild(
++				gTypeAddTokenDialog,
++				"name_row",
++			).Cast(&nameRow)
++			parent.Widget.GetTemplateChild(
++				gTypeAddTokenDialog,
++				"value_row",
++			).Cast(&valueRow)
++			parent.Widget.GetTemplateChild(
++				gTypeAddTokenDialog,
++				"delivery_row",
++			).Cast(&deliveryRow)
++			parent.Widget.GetTemplateChild(
++				gTypeAddTokenDialog,
++				"upstream_row",
++			).Cast(&upstreamRow)
++
++			d := &AddTokenDialog{
++				Dialog: parent,
++
++				nameRow:     &nameRow,
++				valueRow:    &valueRow,
++				deliveryRow: &deliveryRow,
++				upstreamRow: &upstreamRow,
++
++				callbacks: []interface{}{},
++			}
++
++			var pinner runtime.Pinner
++			pinner.Pin(d)
++
++			var cleanupCallback glib.DestroyNotify = func(data uintptr) {
++				for _, callback := range d.callbacks {
++					if err := glib.UnrefCallback(callback); err != nil {
++						d.log.Error("Could not unref callback", "err", err)
++					}
++				}
++
++				pinner.Unpin()
++			}
++			o.SetDataFull(dataKeyGoInstance, uintptr(unsafe.Pointer(d)), &cleanupCallback)
++		})
++	}
++
++	var dialogInstanceInit gobject.InstanceInitFunc = func(ti *gobject.TypeInstance, tc *gobject.TypeClass) {}
++
++	var dialogParentQuery gobject.TypeQuery
++	gobject.NewTypeQuery(adw.DialogGLibType(), &dialogParentQuery)
++
++	gTypeAddTokenDialog = gobject.TypeRegisterStaticSimple(
++		dialogParentQuery.Type,
++		"PhialAddTokenDialog",
++		dialogParentQuery.ClassSize,
++		&dialogClassInit,
++		dialogParentQuery.InstanceSize,
++		&dialogInstanceInit,
++		0,
++	)
++}
+diff --git a/internal/components/main_window.go b/internal/components/main_window.go
+index bfd3d14b9ba6a27ec1a518f9fba16d24a0b1d9a2..03ffa60aa2d15f675f5e4de2e9cfd6c812607f51 100644
+--- a/internal/components/main_window.go
++++ b/internal/components/main_window.go
+@@ -68,6 +68,8 @@
+ 	createMachineDialog *CreateMachineDialog
+ 	createMachineAction *gio.SimpleAction
+ 
++	addTokenDialog *AddTokenDialog
++
+ 	preferencesAction *gio.SimpleAction
+ 
+ 	callbacks []interface{}
+@@ -117,6 +119,9 @@ 	window.setupDialog = (*SetupDialog)(unsafe.Pointer(setupDialog.Widget.GetData(dataKeyGoInstance)))
+ 
+ 	createMachineDialog := NewCreateMachineDialog(window.store, window.log)
+ 	window.createMachineDialog = (*CreateMachineDialog)(unsafe.Pointer(createMachineDialog.Widget.GetData(dataKeyGoInstance)))
++
++	addTokenDialog := NewAddTokenDialog(window.log)
++	window.addTokenDialog = (*AddTokenDialog)(unsafe.Pointer(addTokenDialog.Widget.GetData(dataKeyGoInstance)))
+ 
+ 	createMachineAction := gio.NewSimpleAction("newMachine", nil)
+ 	onCreateMachine := func(gio.SimpleAction, uintptr) {
+@@ -357,6 +362,10 @@ 				}
+ 
+ 				if w.createMachineDialog != nil {
+ 					w.createMachineDialog.Widget.Object.Unref()
++				}
++
++				if w.addTokenDialog != nil {
++					w.addTokenDialog.Widget.Object.Unref()
+ 				}
+ 
+ 				pinner.Unpin()
+diff --git a/internal/components/secrets.go b/internal/components/secrets.go
+index 3b11a007053970bd500a8bf4e42ed3f463cc71d7..aeb456c097b0c4dde496cde185c3f3c8de96b733 100644
+--- a/internal/components/secrets.go
++++ b/internal/components/secrets.go
+@@ -53,11 +53,12 @@
+ var (
+ 	gTypeSecretsRowItem gobject.Type
+ 
+-	createSecretsRow                       = gtk.ListBoxCreateWidgetFunc(onCreateSecretsRow)
+ 	destroySecretsModel glib.DestroyNotify = func(uintptr) {}
+ )
+ 
+ func (w *MainWindow) populateSecrets() {
++	createSecretsRow := gtk.ListBoxCreateWidgetFunc(w.onCreateSecretsRow)
++
+ 	tokens := w.store.Secrets()
+ 	tokenModel := gio.NewListStore(gTypeSecretsRowItem)
+ 	for _, token := range tokens {
+@@ -144,7 +145,7 @@ 	model.Append(&item.Object)
+ 	item.Unref()
+ }
+ 
+-func onCreateSecretsRow(itemPtr uintptr, _ uintptr) uintptr {
++func (w *MainWindow) onCreateSecretsRow(itemPtr uintptr, _ uintptr) uintptr {
+ 	obj := gobject.ObjectNewFromInternalPtr(itemPtr)
+ 	item := (*secretsRowItem)(unsafe.Pointer(obj.GetData(dataKeyGoInstance)))
+ 
+@@ -154,7 +155,14 @@ 		row := adw.NewButtonRow()
+ 		row.SetTitle(item.title)
+ 		row.SetUseUnderline(true)
+ 		row.SetStartIconName(item.icon)
+-		row.SetSensitive(false)
++
++		onAddToken := func(adw.ButtonRow) {
++			w.addTokenDialog.Refresh()
++			w.addTokenDialog.Present(&w.ApplicationWindow.Widget)
++			w.addTokenDialog.nameRow.GrabFocus()
++		}
++		w.callbacks = append(w.callbacks, &onAddToken)
++		row.ConnectActivated(&onAddToken)
+ 
+ 		return row.GoPointer()
+ 
+
