@@ -1,0 +1,214 @@
+From 95d18c5c920faa55b764a0f5d940f6eefb8a4529 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Mon, 23 Nov 2026 23:48:37 -0700
+Subject: [PATCH] feat: Add machine config and basic info to state
+---
+diff --git a/pkg/state/machine.go b/pkg/state/machine.go
+index 517afafe63ac8be9c49d8fbd20329e2862e247eb..94ae354098adbe74d9fb782276ff62a24fb4a7d5 100644
+--- a/pkg/state/machine.go
++++ b/pkg/state/machine.go
+@@ -12,6 +12,18 @@ 	OnStatusChange      func(ctx context.Context, status MachineStatus) error
+ 	OnInstallStepChange func(ctx context.Context, step InstallStep) error
+ }
+ 
++type MachineConfig struct {
++	Name      string
++	MemoryGiB int
++	DiskGiB   int
++}
++
++type MachineInfo struct {
++	Name      string
++	MemoryGiB int
++	DiskGiB   int
++}
++
+ type Machine struct {
+ 	resume machineState
+ 
+diff --git a/pkg/state/store.go b/pkg/state/store.go
+index 625cdd4bd67a31c0620503ec744ccdaba61f39a6..6ba32e897855b65e04335427e3ab67c1ae18e624 100644
+--- a/pkg/state/store.go
++++ b/pkg/state/store.go
+@@ -1,8 +1,10 @@
+ package state
+ 
+ import (
++	"cmp"
+ 	"context"
+ 	"log/slog"
++	"slices"
+ 	"sync"
+ 	"time"
+ )
+@@ -12,6 +14,11 @@ 	OnChange func(ctx context.Context) error
+ }
+ 
+ type HostProbe func(ctx context.Context) (outdated bool, err error)
++
++type machineEntry struct {
++	config  MachineConfig
++	machine *Machine
++}
+ 
+ type Store struct {
+ 	mu sync.Mutex
+@@ -25,7 +32,7 @@
+ 	session *Session
+ 	host    *Host
+ 
+-	machines map[string]*Machine
++	machines map[string]*machineEntry
+ 	grants   map[string]*Grant
+ 	requests map[string]*Request
+ 
+@@ -40,7 +47,6 @@ 	hostStatus   HostStatus
+ 	hostVerified bool
+ 
+ 	machineStatuses map[string]MachineStatus
+-	installSteps    map[string]InstallStep
+ 	grantStatuses   map[string]GrantStatus
+ 	requestStatuses map[string]RequestStatus
+ 
+@@ -55,12 +61,11 @@ 		hooks: hooks,
+ 
+ 		hostProbe: hostProbe,
+ 
+-		machines: map[string]*Machine{},
++		machines: map[string]*machineEntry{},
+ 		grants:   map[string]*Grant{},
+ 		requests: map[string]*Request{},
+ 
+ 		machineStatuses: map[string]MachineStatus{},
+-		installSteps:    map[string]InstallStep{},
+ 		grantStatuses:   map[string]GrantStatus{},
+ 		requestStatuses: map[string]RequestStatus{},
+ 	}
+@@ -296,29 +301,54 @@
+ 	return nil
+ }
+ 
+-func (s *Store) AddMachine(ctx context.Context, id string) error {
++func (s *Store) AddMachine(ctx context.Context, config MachineConfig) error {
+ 	s.mu.Lock()
+ 	defer s.mu.Unlock()
+ 
+-	if _, ok := s.machines[id]; ok {
++	if config.Name == "" {
++		return ErrCouldNotAddMachine
++	}
++
++	if _, ok := s.machines[config.Name]; ok {
+ 		return ErrCouldNotAddMachine
+ 	}
+ 
+ 	m := NewMachine(s.ctx, s.log, &MachineHooks{
+ 		OnStatusChange: func(ctx context.Context, status MachineStatus) error {
+-			s.machineStatuses[id] = status
++			s.machineStatuses[config.Name] = status
+ 
+ 			return s.onChange(ctx)
+ 		},
+-		OnInstallStepChange: func(ctx context.Context, step InstallStep) error {
+-			s.installSteps[id] = step
+-
++		OnInstallStepChange: func(ctx context.Context, _ InstallStep) error {
+ 			return s.onChange(ctx)
+ 		},
+ 	})
+-	s.machines[id] = m
++	s.machines[config.Name] = &machineEntry{
++		config:  config,
++		machine: m,
++	}
+ 
+ 	return m.FlushStatus(ctx)
++}
++
++func (s *Store) Machines() []MachineInfo {
++	s.mu.Lock()
++	defer s.mu.Unlock()
++
++	machines := make([]MachineInfo, 0, len(s.machines))
++	for name, entry := range s.machines {
++		machines = append(machines, MachineInfo{
++			Name:      name,
++			MemoryGiB: entry.config.MemoryGiB,
++			DiskGiB:   entry.config.DiskGiB,
++		})
++	}
++
++	slices.SortFunc(machines, func(a, b MachineInfo) int {
++		return cmp.Compare(a.Name, b.Name)
++	})
++
++	return machines
+ }
+ 
+ func (s *Store) Install(ctx context.Context, id string) error {
+@@ -610,12 +640,12 @@ 	delete(s.grantStatuses, id)
+ }
+ 
+ func (s *Store) machine(id string) (*Machine, error) {
+-	m, ok := s.machines[id]
++	entry, ok := s.machines[id]
+ 	if !ok {
+ 		return nil, ErrCouldNotFindMachine
+ 	}
+ 
+-	return m, nil
++	return entry.machine, nil
+ }
+ 
+ func (s *Store) request(id string) (*Request, error) {
+diff --git a/pkg/state/store_test.go b/pkg/state/store_test.go
+index 8af86716c6425353dbc908642c6c18c4864d1525..605360e37b69d037708cf8d36c277362cfd3b1a0 100644
+--- a/pkg/state/store_test.go
++++ b/pkg/state/store_test.go
+@@ -129,9 +129,24 @@
+ func TestStoreAddMachineCachesInitialStatus(t *testing.T) {
+ 	s := newTestingStore(t, func(_ context.Context) (bool, error) { return false, nil })
+ 
+-	require.NoError(t, s.AddMachine(t.Context(), "m1"))
++	require.NoError(t, s.AddMachine(t.Context(), MachineConfig{Name: "m1", MemoryGiB: 16, DiskGiB: 48}))
+ 
+ 	require.Equal(t, MachineStatusNotInstalled, s.machineStatuses["m1"])
++}
++
++func TestStoreMachinesReturnsConfigurationSortedByName(t *testing.T) {
++	s := newTestingStore(t, func(_ context.Context) (bool, error) { return false, nil })
++
++	require.NoError(t, s.AddMachine(t.Context(), MachineConfig{Name: "m2", MemoryGiB: 8, DiskGiB: 20}))
++	require.NoError(t, s.AddMachine(t.Context(), MachineConfig{Name: "m1", MemoryGiB: 16, DiskGiB: 48}))
++
++	machines := s.Machines()
++
++	require.Len(t, machines, 2)
++	require.Equal(t, "m1", machines[0].Name)
++	require.Equal(t, 16, machines[0].MemoryGiB)
++	require.Equal(t, 48, machines[0].DiskGiB)
++	require.Equal(t, "m2", machines[1].Name)
+ }
+ 
+ func TestStoreAdvanceRequestDeadline(t *testing.T) {
+@@ -301,11 +316,17 @@ 	require.ErrorIs(t, s.ApproveRequest(t.Context(), "missing"), ErrCouldNotFindRequest)
+ 	require.ErrorIs(t, s.RevokeGrant(t.Context(), "missing"), ErrCouldNotFindGrant)
+ }
+ 
++func TestStoreAddMachineRejectsEmptyName(t *testing.T) {
++	s := newTestingStore(t, func(_ context.Context) (bool, error) { return false, nil })
++
++	require.ErrorIs(t, s.AddMachine(t.Context(), MachineConfig{}), ErrCouldNotAddMachine)
++}
++
+ func TestStoreDuplicateID(t *testing.T) {
+ 	s := newTestingStore(t, func(_ context.Context) (bool, error) { return false, nil })
+ 
+-	require.NoError(t, s.AddMachine(t.Context(), "m1"))
+-	require.ErrorIs(t, s.AddMachine(t.Context(), "m1"), ErrCouldNotAddMachine)
++	require.NoError(t, s.AddMachine(t.Context(), MachineConfig{Name: "m1"}))
++	require.ErrorIs(t, s.AddMachine(t.Context(), MachineConfig{Name: "m1"}), ErrCouldNotAddMachine)
+ 
+ 	require.NoError(t, s.AddRequest(t.Context(), "r1", 1, time.Time{}, false, time.Time{}))
+ 	require.ErrorIs(t, s.AddRequest(t.Context(), "r1", 1, time.Time{}, false, time.Time{}), ErrCouldNotAddRequest)
+
