@@ -1,0 +1,1343 @@
+From 1bc5c9ba8c1a3f763fbf847c0894dbf4eaed10e3 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Mon, 23 Nov 2026 23:54:47 -0700
+Subject: [PATCH] feat: Add machine page and sidebar list
+---
+diff --git a/assets/resources/index.go b/assets/resources/index.go
+index 54678ad3b63a7493e53740e8b0e9150e60e51345..4a62b32a0d24c6c6a8f2bf54633b7f7c88703549 100644
+--- a/assets/resources/index.go
++++ b/assets/resources/index.go
+@@ -39,6 +39,7 @@ 	ResourceWindowUIPath              = path.Join(AppPath, "window.ui")
+ 	ResourceSetupDialogUIPath         = path.Join(AppPath, "setup-dialog.ui")
+ 	ResourcePreferencesDialogUIPath   = path.Join(AppPath, "preferences-dialog.ui")
+ 	ResourceCreateMachineDialogUIPath = path.Join(AppPath, "create-machine-dialog.ui")
++	ResourceMachinePageUIPath         = path.Join(AppPath, "machine-page.ui")
+ 	ResourceAddTokenDialogUIPath      = path.Join(AppPath, "add-token-dialog.ui")
+ 	ResourceShortcutsDialogUIPath     = path.Join(AppPath, "shortcuts-dialog.ui")
+ 	ResourceMetainfoPath              = path.Join(AppPath, "metainfo.xml")
+diff --git a/assets/resources/index.gresource.xml b/assets/resources/index.gresource.xml
+index 1abf571f413adea8b42a5ffc9b41d808f0ff7344..faf3528309e64e4cbace1b01a64db37d1884c0e2 100644
+--- a/assets/resources/index.gresource.xml
++++ b/assets/resources/index.gresource.xml
+@@ -5,6 +5,7 @@         <file>window.ui</file>
+         <file>setup-dialog.ui</file>
+         <file>preferences-dialog.ui</file>
+         <file>create-machine-dialog.ui</file>
++        <file>machine-page.ui</file>
+         <file>add-token-dialog.ui</file>
+         <file>shortcuts-dialog.ui</file>
+         <file>style.css</file>
+diff --git a/assets/resources/machine-page.blp b/assets/resources/machine-page.blp
+new file mode 100644
+index 0000000000000000000000000000000000000000..0fc4e049b886d637d68d8361a4829e1df02f45c6
+--- /dev/null
++++ b/assets/resources/machine-page.blp
+@@ -0,0 +1,245 @@
++using Gtk 4.0;
++using Adw 1;
++
++template $PhialMachinePage: Adw.NavigationPage {
++  child: Adw.ToolbarView {
++    [top]
++    Adw.BreakpointBin {
++      height-request: 1;
++      width-request: 360;
++
++      Adw.Breakpoint {
++        condition ("max-width: 500sp")
++
++        setters {
++          machine_edit_button.visible: false;
++          machine_menu_button.visible: false;
++        }
++      }
++
++      Adw.HeaderBar {
++        title-widget: Adw.WindowTitle machine_title {};
++
++        [end]
++        Button {
++          sensitive: false;
++          icon-name: "system-software-install-symbolic";
++          label: _("_Install...");
++          use-underline: true;
++          styles [
++            "suggested-action",
++          ]
++        }
++
++        [end]
++        Button machine_edit_button {
++          sensitive: false;
++          icon-name: "document-edit-symbolic";
++          tooltip-text: _("Machine Settings");
++          styles [
++            "flat",
++          ]
++
++          accessibility {
++            label: _("Machine Settings");
++          }
++        }
++
++        [end]
++        MenuButton machine_menu_button {
++          sensitive: false;
++          icon-name: "view-more-symbolic";
++          tooltip-text: _("Machine Menu");
++          menu-model: machine_menu;
++          styles [
++            "flat",
++          ]
++
++          accessibility {
++            label: _("Machine Menu");
++          }
++        }
++      }
++    }
++
++    content: ScrolledWindow {
++      hscrollbar-policy: never;
++      vexpand: true;
++
++      child: Adw.Clamp {
++        maximum-size: 600;
++        tightening-threshold: 400;
++
++        child: Box {
++          orientation: vertical;
++          spacing: 18;
++          margin-top: 24;
++          margin-bottom: 24;
++          margin-start: 12;
++          margin-end: 12;
++
++          Adw.PreferencesGroup {
++            title: _("Overview");
++
++            Adw.ActionRow overview_state_row {
++              title: _("State");
++              subtitle-selectable: true;
++              styles [
++                "property",
++              ]
++            }
++
++            Adw.ActionRow {
++              title: _("No Live Usage");
++              subtitle: _("Start the machine to see live usage");
++              sensitive: false;
++            }
++          }
++
++          Adw.PreferencesGroup {
++            title: _("Access");
++
++            Adw.ActionRow {
++              title: _("Guest Applications");
++              sensitive: false;
++
++              [suffix]
++              Image {
++                icon-name: "go-next-symbolic";
++              }
++            }
++
++            Adw.ActionRow {
++              title: _("Remote Desktop");
++              sensitive: false;
++
++              [suffix]
++              Image {
++                icon-name: "go-next-symbolic";
++              }
++            }
++
++            Adw.ActionRow {
++              title: _("Serial Console");
++              sensitive: false;
++
++              [suffix]
++              Image {
++                icon-name: "go-next-symbolic";
++              }
++            }
++
++            Adw.ActionRow {
++              title: _("SSH");
++              sensitive: false;
++
++              [suffix]
++              Image {
++                icon-name: "go-next-symbolic";
++              }
++            }
++          }
++
++          Adw.PreferencesGroup {
++            title: _("Shared Folders");
++
++            Adw.ActionRow {
++              title: _("No Shared Folders");
++              sensitive: false;
++            }
++
++            Adw.ButtonRow {
++              title: _("_Share a Folder...");
++              use-underline: true;
++              start-icon-name: "folder-new-symbolic";
++              sensitive: false;
++            }
++          }
++
++          Adw.PreferencesGroup {
++            title: _("USB Devices");
++
++            Adw.ActionRow {
++              title: _("No USB Devices");
++              sensitive: false;
++            }
++
++            Adw.ButtonRow {
++              title: _("_Add USB Device...");
++              use-underline: true;
++              start-icon-name: "list-add-symbolic";
++              sensitive: false;
++            }
++          }
++
++          Adw.PreferencesGroup {
++            title: _("USB Hubs");
++
++            Adw.ActionRow {
++              title: _("No USB Hubs");
++              sensitive: false;
++            }
++
++            Adw.ButtonRow {
++              title: _("_Add USB Hub...");
++              use-underline: true;
++              start-icon-name: "list-add-symbolic";
++              sensitive: false;
++            }
++          }
++
++          Adw.PreferencesGroup {
++            title: _("Storage");
++
++            Adw.ActionRow storage_disk_row {
++              title: _("Disk Image");
++              subtitle-selectable: true;
++              activatable: false;
++              styles [
++                "property",
++              ]
++
++              [suffix]
++              Button storage_open_button {
++                icon-name: "folder-open-symbolic";
++                tooltip-text: _("Open Containing Folder");
++                valign: center;
++                styles [
++                  "flat",
++                ]
++
++                accessibility {
++                  label: _("Open Containing Folder");
++                }
++              }
++            }
++          }
++        };
++      };
++    };
++  };
++}
++
++menu machine_menu {
++  section {
++    item {
++      label: _("_Logs");
++      action: "win.machineLogs";
++    }
++
++    item {
++      label: _("_Reprovision Guest Agent");
++      action: "win.reprovisionMachine";
++    }
++
++    item {
++      label: _("_Restart");
++      action: "win.restartMachine";
++    }
++
++    item {
++      label: _("_Delete Machine...");
++      action: "win.deleteMachine";
++    }
++  }
++}
+diff --git a/assets/resources/window.blp b/assets/resources/window.blp
+index ca0fe2ac7b022b16a89e79f62ef9f683ab614f3a..fa60f7ac034c877f39230088b2e618d2ebc03052 100644
+--- a/assets/resources/window.blp
++++ b/assets/resources/window.blp
+@@ -126,14 +126,8 @@
+               content: Adw.Sidebar sidebar {
+                 vexpand: true;
+ 
+-                Adw.SidebarSection {
++                Adw.SidebarSection machines_section {
+                   title: _("Machines");
+-
+-                  Adw.SidebarItem {
+-                    title: _("Get Started");
+-                    icon-name: "computer-symbolic";
+-                    subtitle: _("Create your first machine");
+-                  }
+                 }
+ 
+                 Adw.SidebarSection {
+diff --git a/internal/components/create_machine_dialog.go b/internal/components/create_machine_dialog.go
+index 3743bd366415da31a8ff074e62e2f0d48a34addb..fd8dc474e6bb326d24eafa8268c8554626e6e64a 100644
+--- a/internal/components/create_machine_dialog.go
++++ b/internal/components/create_machine_dialog.go
+@@ -1,12 +1,15 @@
+ package components
+ 
+ import (
++	"context"
+ 	"errors"
+ 	"io/fs"
+ 	"log/slog"
+ 	"math"
++	"os"
+ 	"path/filepath"
+ 	"runtime"
++	"strings"
+ 	"unsafe"
+ 
+ 	"codeberg.org/pojntfx/phial/assets/resources"
+@@ -30,12 +33,24 @@ const (
+ 	minimumMemoryGiB = 1
+ 	minimumDiskGiB   = 8
+ )
++
++func validMachineName(name string) bool {
++	name = strings.TrimSpace(name)
++
++	return name != "" && hostnameValidator.Var(name, "hostname_rfc1123,max=253") == nil
++}
+ 
+ type CreateMachineDialog struct {
+ 	adw.Dialog
+ 
++	ctx context.Context
++
+ 	store *state.Store
+ 	log   *slog.Logger
++
++	onCreated func(name string)
++
++	createButton *gtk.Button
+ 
+ 	nameRow             *adw.EntryRow
+ 	nameErrorButton     *gtk.MenuButton
+@@ -50,7 +65,7 @@
+ 	callbacks []interface{}
+ }
+ 
+-func NewCreateMachineDialog(store *state.Store, log *slog.Logger) CreateMachineDialog {
++func NewCreateMachineDialog(ctx context.Context, store *state.Store, log *slog.Logger, onCreated func(name string)) CreateMachineDialog {
+ 	obj := gobject.NewObject(gTypeCreateMachineDialog, "css-name")
+ 	gobject.IncreaseRef(obj.GoPointer())
+ 
+@@ -58,8 +73,42 @@ 	var v CreateMachineDialog
+ 	obj.Cast(&v)
+ 
+ 	dialog := (*CreateMachineDialog)(unsafe.Pointer(obj.GetData(dataKeyGoInstance)))
++	dialog.ctx = ctx
+ 	dialog.store = store
+ 	dialog.log = log
++	dialog.onCreated = onCreated
++
++	onCreate := func(gtk.Button) {
++		name := strings.TrimSpace(dialog.nameRow.GetText())
++		if !validMachineName(name) {
++			return
++		}
++
++		config := state.MachineConfig{
++			Name:      name,
++			MemoryGiB: int(dialog.memoryRow.GetValue()),
++			DiskGiB:   int(dialog.diskRow.GetValue()),
++		}
++		if err := dialog.store.AddMachine(dialog.ctx, config); err != nil {
++			dialog.log.Error("Could not add machine", "err", err)
++
++			return
++		}
++
++		folder := dialog.store.MachinesFolder()
++		if folder == "" {
++			folder = dialog.store.SuggestedMachinesFolder()
++		}
++		if err := os.MkdirAll(filepath.Join(folder, name), os.ModePerm); err != nil {
++			dialog.log.Error("Could not create machine folder", "err", err)
++		}
++
++		dialog.nameRow.SetText("")
++		dialog.onCreated(name)
++		dialog.Close()
++	}
++	dialog.callbacks = append(dialog.callbacks, &onCreate)
++	dialog.createButton.ConnectClicked(&onCreate)
+ 
+ 	onAliasChanged := func() {
+ 		dialog.validateAlias()
+@@ -190,8 +239,12 @@ 	row.SetTooltipText("")
+ }
+ 
+ func (w *CreateMachineDialog) validateAlias() {
+-	name := w.nameRow.GetText()
+-	if name == "" || hostnameValidator.Var(name, "hostname_rfc1123,max=253") == nil {
++	name := strings.TrimSpace(w.nameRow.GetText())
++	valid := validMachineName(name)
++
++	w.createButton.SetSensitive(valid)
++
++	if name == "" || valid {
+ 		w.nameRow.RemoveCssClass("error")
+ 		w.nameRow.SetTooltipText("")
+ 		w.nameErrorButton.SetVisible(false)
+@@ -243,6 +296,7 @@ func init() {
+ 	var dialogClassInit gobject.ClassInitFunc = func(tc *gobject.TypeClass, u uintptr) {
+ 		typeClass := (*gtk.WidgetClass)(unsafe.Pointer(tc))
+ 		typeClass.SetTemplateFromResource(resources.ResourceCreateMachineDialogUIPath)
++		typeClass.BindTemplateChildFull("create_machine_button", false, 0)
+ 		typeClass.BindTemplateChildFull("name_row", false, 0)
+ 		typeClass.BindTemplateChildFull("name_error_button", false, 0)
+ 		typeClass.BindTemplateChildFull("memory_row", false, 0)
+@@ -262,6 +316,7 @@
+ 			parent.InitTemplate()
+ 
+ 			var (
++				createButton        gtk.Button
+ 				nameRow             adw.EntryRow
+ 				nameErrorButton     gtk.MenuButton
+ 				memoryRow           adw.SpinRow
+@@ -272,6 +327,10 @@ 			)
+ 
+ 			parent.Widget.GetTemplateChild(
+ 				gTypeCreateMachineDialog,
++				"create_machine_button",
++			).Cast(&createButton)
++			parent.Widget.GetTemplateChild(
++				gTypeCreateMachineDialog,
+ 				"name_row",
+ 			).Cast(&nameRow)
+ 			parent.Widget.GetTemplateChild(
+@@ -298,6 +357,7 @@
+ 			d := &CreateMachineDialog{
+ 				Dialog: parent,
+ 
++				createButton:        &createButton,
+ 				nameRow:             &nameRow,
+ 				nameErrorButton:     &nameErrorButton,
+ 				memoryRow:           &memoryRow,
+diff --git a/internal/components/machine_page.go b/internal/components/machine_page.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..8997383c69b358c03354faa46169f887022b4a19
+--- /dev/null
++++ b/internal/components/machine_page.go
+@@ -0,0 +1,163 @@
++package components
++
++import (
++	"log/slog"
++	"os"
++	"path/filepath"
++	"runtime"
++	"unsafe"
++
++	"codeberg.org/pojntfx/phial/assets/resources"
++	"codeberg.org/pojntfx/phial/pkg/state"
++	"codeberg.org/puregotk/puregotk/v4/adw"
++	"codeberg.org/puregotk/puregotk/v4/gio"
++	"codeberg.org/puregotk/puregotk/v4/glib"
++	"codeberg.org/puregotk/puregotk/v4/gobject"
++	"codeberg.org/puregotk/puregotk/v4/gtk"
++	. "github.com/pojntfx/go-gettext/pkg/i18n"
++)
++
++var (
++	gTypeMachinePage gobject.Type
++)
++
++type MachinePage struct {
++	adw.NavigationPage
++
++	window *gtk.Window
++	log    *slog.Logger
++
++	machinesFolder string
++
++	machineTitle      *adw.WindowTitle
++	overviewStateRow  *adw.ActionRow
++	storageDiskRow    *adw.ActionRow
++	storageOpenButton *gtk.Button
++
++	callbacks []interface{}
++}
++
++func NewMachinePage(info state.MachineInfo, machinesFolder string, window *gtk.Window, log *slog.Logger) MachinePage {
++	obj := gobject.NewObject(gTypeMachinePage, "css-name")
++
++	var v MachinePage
++	obj.Cast(&v)
++
++	page := (*MachinePage)(unsafe.Pointer(obj.GetData(dataKeyGoInstance)))
++	page.window = window
++	page.log = log
++	page.machinesFolder = machinesFolder
++
++	onOpenFolder := func(gtk.Button) {
++		folder := filepath.Dir(page.storageDiskRow.GetSubtitle())
++		if _, err := os.Stat(folder); err != nil {
++			folder = page.machinesFolder
++		}
++
++		gtk.ShowUri(page.window, gio.FileNewForPath(folder).GetUri(), 0)
++	}
++	page.callbacks = append(page.callbacks, &onOpenFolder)
++	page.storageOpenButton.ConnectClicked(&onOpenFolder)
++
++	page.Refresh(info)
++
++	v.NavigationPage.SetTitle(info.Name)
++	v.NavigationPage.SetTag(machinePageTag(info.Name))
++
++	return v
++}
++
++func (p *MachinePage) Refresh(info state.MachineInfo) {
++	p.machineTitle.SetTitle(info.Name)
++	p.machineTitle.SetSubtitle(L("Not installed"))
++
++	p.overviewStateRow.SetSubtitle(L("Not installed"))
++	p.storageDiskRow.SetSubtitle(filepath.Join(p.machinesFolder, info.Name, "disk.qcow2"))
++}
++
++func init() {
++	var classInit gobject.ClassInitFunc = func(tc *gobject.TypeClass, u uintptr) {
++		typeClass := (*gtk.WidgetClass)(unsafe.Pointer(tc))
++		typeClass.SetTemplateFromResource(resources.ResourceMachinePageUIPath)
++		typeClass.BindTemplateChildFull("machine_title", false, 0)
++		typeClass.BindTemplateChildFull("overview_state_row", false, 0)
++		typeClass.BindTemplateChildFull("storage_disk_row", false, 0)
++		typeClass.BindTemplateChildFull("storage_open_button", false, 0)
++
++		objClass := (*gobject.ObjectClass)(unsafe.Pointer(tc))
++
++		objClass.OverrideConstructed(func(o *gobject.Object) {
++			parentObjClass := (*gobject.ObjectClass)(unsafe.Pointer(tc.PeekParent()))
++			parentObjClass.GetConstructed()(o)
++
++			var parent adw.NavigationPage
++			o.Cast(&parent)
++
++			parent.InitTemplate()
++
++			var (
++				machineTitle      adw.WindowTitle
++				overviewStateRow  adw.ActionRow
++				storageDiskRow    adw.ActionRow
++				storageOpenButton gtk.Button
++			)
++
++			parent.Widget.GetTemplateChild(
++				gTypeMachinePage,
++				"machine_title",
++			).Cast(&machineTitle)
++			parent.Widget.GetTemplateChild(
++				gTypeMachinePage,
++				"overview_state_row",
++			).Cast(&overviewStateRow)
++			parent.Widget.GetTemplateChild(
++				gTypeMachinePage,
++				"storage_disk_row",
++			).Cast(&storageDiskRow)
++			parent.Widget.GetTemplateChild(
++				gTypeMachinePage,
++				"storage_open_button",
++			).Cast(&storageOpenButton)
++
++			p := &MachinePage{
++				NavigationPage: parent,
++
++				machineTitle:      &machineTitle,
++				overviewStateRow:  &overviewStateRow,
++				storageDiskRow:    &storageDiskRow,
++				storageOpenButton: &storageOpenButton,
++
++				callbacks: []interface{}{},
++			}
++
++			var pinner runtime.Pinner
++			pinner.Pin(p)
++
++			var cleanupCallback glib.DestroyNotify = func(data uintptr) {
++				for _, callback := range p.callbacks {
++					if err := glib.UnrefCallback(callback); err != nil {
++						p.log.Error("Could not unref callback", "err", err)
++					}
++				}
++
++				pinner.Unpin()
++			}
++			o.SetDataFull(dataKeyGoInstance, uintptr(unsafe.Pointer(p)), &cleanupCallback)
++		})
++	}
++
++	var instanceInit gobject.InstanceInitFunc = func(ti *gobject.TypeInstance, tc *gobject.TypeClass) {}
++
++	var parentQuery gobject.TypeQuery
++	gobject.NewTypeQuery(adw.NavigationPageGLibType(), &parentQuery)
++
++	gTypeMachinePage = gobject.TypeRegisterStaticSimple(
++		parentQuery.Type,
++		"PhialMachinePage",
++		parentQuery.ClassSize,
++		&classInit,
++		parentQuery.InstanceSize,
++		&instanceInit,
++		0,
++	)
++}
+diff --git a/internal/components/main_window.go b/internal/components/main_window.go
+index 3f8fe7eadcb040cd050e6c45a311967b1c7d25a6..193bc7a3ae81259f2803261b8f20f54d8f732d74 100644
+--- a/internal/components/main_window.go
++++ b/internal/components/main_window.go
+@@ -3,8 +3,10 @@
+ import (
+ 	"context"
+ 	"log/slog"
++	"path"
+ 	"runtime"
+ 	"strconv"
++	"strings"
+ 	"unsafe"
+ 
+ 	"codeberg.org/pojntfx/phial/assets/resources"
+@@ -15,6 +17,7 @@ 	"codeberg.org/puregotk/puregotk/v4/gio"
+ 	"codeberg.org/puregotk/puregotk/v4/glib"
+ 	"codeberg.org/puregotk/puregotk/v4/gobject"
+ 	"codeberg.org/puregotk/puregotk/v4/gtk"
++	. "github.com/pojntfx/go-gettext/pkg/i18n"
+ )
+ 
+ const (
+@@ -22,15 +25,10 @@ 	contentPageConnecting = "connecting"
+ 	contentPageSetup      = "setup"
+ 	contentPageReady      = "ready"
+ 
+-	contentPageNoMachines = "no-machines"
+-	contentPageSecrets    = "secrets"
+-	contentPageGrants     = "grants"
+-)
+-
+-const (
+-	sidebarItemGetStarted uint32 = iota
+-	sidebarItemSecrets
+-	sidebarItemGrants
++	contentPageNoMachines    = "no-machines"
++	contentPageSecrets       = "secrets"
++	contentPageGrants        = "grants"
++	contentPageMachinePrefix = "/machines"
+ )
+ 
+ var (
+@@ -52,6 +50,10 @@
+ 	splitView   *adw.NavigationSplitView
+ 	sidebar     *adw.Sidebar
+ 	contentView *adw.NavigationView
++
++	machinesSection *adw.SidebarSection
++	sidebarTags     []string
++	machinePages    map[string]*MachinePage
+ 
+ 	currentPage string
+ 
+@@ -91,18 +93,11 @@
+ 	window.ctx = ctx
+ 
+ 	onSidebarActivated := func(_ adw.Sidebar, index uint32) {
+-		var tag string
+-
+-		switch index {
+-		case sidebarItemGetStarted:
+-			tag = contentPageNoMachines
+-		case sidebarItemSecrets:
+-			tag = contentPageSecrets
+-		case sidebarItemGrants:
+-			tag = contentPageGrants
+-		default:
++		if int(index) >= len(window.sidebarTags) {
+ 			return
+ 		}
++
++		tag := window.sidebarTags[index]
+ 
+ 		window.currentPage = tag
+ 		window.showPage(tag)
+@@ -117,7 +112,19 @@
+ 	setupDialog := NewSetupDialog(window.ctx, window.store, window.settings, window.log, &window.ApplicationWindow.Widget)
+ 	window.setupDialog = (*SetupDialog)(unsafe.Pointer(setupDialog.Widget.GetData(dataKeyGoInstance)))
+ 
+-	createMachineDialog := NewCreateMachineDialog(window.store, window.log)
++	createMachineDialog := NewCreateMachineDialog(
++		window.ctx,
++		window.store,
++		window.log,
++		func(name string) {
++			window.currentPage = machinePageTag(name)
++			window.refresh()
++
++			if window.splitView.GetCollapsed() {
++				window.splitView.SetShowContent(true)
++			}
++		},
++	)
+ 	window.createMachineDialog = (*CreateMachineDialog)(unsafe.Pointer(createMachineDialog.Widget.GetData(dataKeyGoInstance)))
+ 
+ 	addTokenDialog := NewAddTokenDialog(window.log)
+@@ -222,19 +229,59 @@ 	w.setupDialog.Refresh()
+ }
+ 
+ func (w *MainWindow) syncSidebar() {
+-	index := sidebarItemGetStarted
++	machines := w.store.Machines()
++
++	w.machinesSection.RemoveAll()
++	w.sidebarTags = w.sidebarTags[:0]
++
++	if len(machines) == 0 {
++		item := adw.NewSidebarItem(L("Get Started"))
++		item.SetIconName("computer-symbolic")
++		item.SetSubtitle(L("Create your first machine"))
++
++		w.machinesSection.Append(item)
++		w.sidebarTags = append(w.sidebarTags, contentPageNoMachines)
++	} else {
++		for _, machine := range machines {
++			item := adw.NewSidebarItem(machine.Name)
++			item.SetIconName("computer-symbolic")
++			item.SetSubtitle(L("Not installed"))
++
++			w.machinesSection.Append(item)
++			w.sidebarTags = append(w.sidebarTags, machinePageTag(machine.Name))
++		}
++	}
++
++	w.sidebarTags = append(w.sidebarTags, contentPageSecrets, contentPageGrants)
++
++	pageExists := false
++	for _, tag := range w.sidebarTags {
++		if tag == w.currentPage {
++			pageExists = true
++
++			break
++		}
++	}
+ 
+-	switch w.currentPage {
+-	case contentPageSecrets:
+-		index = sidebarItemSecrets
+-	case contentPageGrants:
+-		index = sidebarItemGrants
+-	default:
+-		w.currentPage = contentPageNoMachines
++	if !pageExists {
++		if len(machines) > 0 {
++			w.currentPage = machinePageTag(machines[0].Name)
++		} else {
++			w.currentPage = contentPageNoMachines
++		}
+ 	}
+ 
+-	if w.sidebar.GetSelected() != index {
+-		w.sidebar.SetSelected(index)
++	selected := uint32(0)
++	for index, tag := range w.sidebarTags {
++		if tag == w.currentPage {
++			selected = uint32(index)
++
++			break
++		}
++	}
++
++	if w.sidebar.GetSelected() != selected {
++		w.sidebar.SetSelected(selected)
+ 	}
+ 
+ 	w.showPage(w.currentPage)
+@@ -245,9 +292,51 @@ 	if w.contentView.GetVisiblePageTag() == tag {
+ 		return
+ 	}
+ 
++	if name, ok := strings.CutPrefix(tag, contentPageMachinePrefix+"/"); ok {
++		info, ok := w.machineInfo(name)
++		if !ok {
++			return
++		}
++
++		page := w.machinePages[name]
++		if page == nil {
++			machinePage := NewMachinePage(info, w.machinesFolder(), &w.ApplicationWindow.Window, w.log)
++			page = (*MachinePage)(unsafe.Pointer(machinePage.Widget.GetData(dataKeyGoInstance)))
++			w.machinePages[name] = page
++
++			w.contentView.Add(&machinePage.NavigationPage)
++		} else {
++			page.machinesFolder = w.machinesFolder()
++			page.Refresh(info)
++		}
++	}
++
+ 	w.contentView.ReplaceWithTags([]string{tag}, 1)
+ }
+ 
++func (w *MainWindow) machineInfo(name string) (state.MachineInfo, bool) {
++	for _, machine := range w.store.Machines() {
++		if machine.Name == name {
++			return machine, true
++		}
++	}
++
++	return state.MachineInfo{}, false
++}
++
++func (w *MainWindow) machinesFolder() string {
++	folder := w.store.MachinesFolder()
++	if folder == "" {
++		folder = w.store.SuggestedMachinesFolder()
++	}
++
++	return folder
++}
++
++func machinePageTag(name string) string {
++	return path.Join(contentPageMachinePrefix, name)
++}
++
+ func init() {
+ 	var windowClassInit gobject.ClassInitFunc = func(tc *gobject.TypeClass, u uintptr) {
+ 		typeClass := (*gtk.WidgetClass)(unsafe.Pointer(tc))
+@@ -256,6 +345,7 @@ 		typeClass.BindTemplateChildFull("content_stack", false, 0)
+ 		typeClass.BindTemplateChildFull("welcome_status_page", false, 0)
+ 		typeClass.BindTemplateChildFull("split_view", false, 0)
+ 		typeClass.BindTemplateChildFull("sidebar", false, 0)
++		typeClass.BindTemplateChildFull("machines_section", false, 0)
+ 		typeClass.BindTemplateChildFull("content_view", false, 0)
+ 		typeClass.BindTemplateChildFull("secrets_tokens_group", false, 0)
+ 		typeClass.BindTemplateChildFull("secrets_ssh_keys_group", false, 0)
+@@ -279,6 +369,7 @@ 				contentStack        gtk.Stack
+ 				welcomeStatusPage   adw.StatusPage
+ 				splitView           adw.NavigationSplitView
+ 				sidebar             adw.Sidebar
++				machinesSection     adw.SidebarSection
+ 				contentView         adw.NavigationView
+ 				secretsTokensGroup  adw.PreferencesGroup
+ 				secretsSSHKeysGroup adw.PreferencesGroup
+@@ -303,6 +394,10 @@ 			parent.Widget.GetTemplateChild(
+ 				gTypeMainWindow,
+ 				"sidebar",
+ 			).Cast(&sidebar)
++			parent.Widget.GetTemplateChild(
++				gTypeMainWindow,
++				"machines_section",
++			).Cast(&machinesSection)
+ 			parent.Widget.GetTemplateChild(
+ 				gTypeMainWindow,
+ 				"content_view",
+@@ -336,6 +431,10 @@
+ 				splitView:   &splitView,
+ 				sidebar:     &sidebar,
+ 				contentView: &contentView,
++
++				machinesSection: &machinesSection,
++				sidebarTags:     []string{},
++				machinePages:    map[string]*MachinePage{},
+ 
+ 				welcomeStatusPage: &welcomeStatusPage,
+ 
+diff --git a/po/phial.pot b/po/phial.pot
+index 8c03ce0bbe64b9155dc2adeb57d44d38bad7adbb..42f0497a006f762b07df443e7291170f21281263 100644
+--- a/po/phial.pot
++++ b/po/phial.pot
+@@ -20,7 +20,7 @@ msgstr ""
+ 
+ #: ../assets/resources/shortcuts-dialog.blp:30
+ #: ../assets/resources/preferences-dialog.blp:10
+-#: ../assets/resources/window.blp:130 ../assets/resources/window.blp:169
++#: ../assets/resources/window.blp:130 ../assets/resources/window.blp:163
+ msgid "Machines"
+ msgstr ""
+ 
+@@ -34,8 +34,8 @@ msgid "Preferences"
+ msgstr ""
+ 
+ #: ../assets/resources/preferences-dialog.blp:16
+-#: ../assets/resources/window.blp:141 ../assets/resources/window.blp:196
+-#: ../assets/resources/window.blp:203
++#: ../assets/resources/window.blp:135 ../assets/resources/window.blp:190
++#: ../assets/resources/window.blp:197
+ #: ../internal/components/setup_dialog.go:409
+ msgid "Secrets"
+ msgstr ""
+@@ -81,7 +81,7 @@ msgid "Disk size"
+ msgstr ""
+ 
+ #: ../assets/resources/create-machine-dialog.blp:134
+-#: ../internal/components/create_machine_dialog.go:203
++#: ../internal/components/create_machine_dialog.go:256
+ msgid "Use a hostname like dev-vm or dev.example"
+ msgstr ""
+ 
+@@ -93,94 +93,6 @@ #: ../assets/resources/create-machine-dialog.blp:156
+ msgid "A machine needs at least 8 GiB of free storage"
+ msgstr ""
+ 
+-#: ../assets/resources/window.blp:7 ../assets/resources/window.blp:25
+-#: ../assets/resources/window.blp:55 ../assets/resources/window.blp:94
+-#: ../assets/resources/window.blp:114 ../assets/resources/window.blp:163
+-#: ../assets/meta/com.pojtinger.felicitas.Phial.desktop.in:4
+-#: ../assets/resources/metainfo.xml.in:7
+-msgid "Phial"
+-msgstr ""
+-
+-#: ../assets/resources/window.blp:31 ../assets/resources/window.blp:61
+-#: ../assets/resources/window.blp:120
+-msgid "Main Menu"
+-msgstr ""
+-
+-#: ../assets/resources/window.blp:38
+-msgid "Starting Phial"
+-msgstr ""
+-
+-#: ../assets/resources/window.blp:39
+-msgid "Connecting to the host service"
+-msgstr ""
+-
+-#: ../assets/resources/window.blp:69
+-msgid "Welcome to Phial"
+-msgstr ""
+-
+-#: ../assets/resources/window.blp:70
+-#: ../assets/meta/com.pojtinger.felicitas.Phial.desktop.in:5
+-#: ../assets/resources/metainfo.xml.in:8
+-msgid "Run development machines safely"
+-msgstr ""
+-
+-#: ../assets/resources/window.blp:75
+-msgid "_Get Started"
+-msgstr ""
+-
+-#: ../assets/resources/window.blp:133
+-msgid "Get Started"
+-msgstr ""
+-
+-#: ../assets/resources/window.blp:135 ../assets/resources/setup-dialog.blp:232
+-msgid "Create your first machine"
+-msgstr ""
+-
+-#: ../assets/resources/window.blp:154 ../assets/resources/window.blp:252
+-#: ../assets/resources/window.blp:261
+-msgid "Grants"
+-msgstr ""
+-
+-#: ../assets/resources/window.blp:178
+-msgid "No Machines"
+-msgstr ""
+-
+-#: ../assets/resources/window.blp:179
+-msgid "Run virtual machines on your desktop"
+-msgstr ""
+-
+-#: ../assets/resources/window.blp:184
+-msgid "_New Machine..."
+-msgstr ""
+-
+-#: ../assets/resources/window.blp:224
+-msgid "Tokens"
+-msgstr ""
+-
+-#: ../assets/resources/window.blp:228
+-msgid "SSH Keys"
+-msgstr ""
+-
+-#: ../assets/resources/window.blp:232
+-msgid "PGP Keys"
+-msgstr ""
+-
+-#: ../assets/resources/window.blp:262
+-msgid "Access that a machine has to a token or key"
+-msgstr ""
+-
+-#: ../assets/resources/window.blp:277
+-msgid "_Preferences"
+-msgstr ""
+-
+-#: ../assets/resources/window.blp:283
+-msgid "_Keyboard Shortcuts"
+-msgstr ""
+-
+-#: ../assets/resources/window.blp:288
+-msgid "_About Phial"
+-msgstr ""
+-
+ #: ../assets/resources/setup-dialog.blp:5
+ msgid "Set Up Phial"
+ msgstr ""
+@@ -206,9 +118,9 @@ msgstr ""
+ 
+ #: ../assets/resources/setup-dialog.blp:62
+ #: ../internal/components/machines_preferences.go:75
++#: ../internal/components/setup_dialog.go:419
+ #: ../internal/components/secrets_preferences.go:85
+ #: ../internal/components/secrets_preferences.go:130
+-#: ../internal/components/setup_dialog.go:419
+ msgid "Not selected"
+ msgstr ""
+ 
+@@ -272,6 +184,11 @@ #: ../assets/resources/setup-dialog.blp:231
+ msgid "You're Ready"
+ msgstr ""
+ 
++#: ../assets/resources/setup-dialog.blp:232
++#: ../internal/components/main_window.go:240
++msgid "Create your first machine"
++msgstr ""
++
+ #: ../assets/resources/setup-dialog.blp:236
+ msgid "_Finish"
+ msgstr ""
+@@ -306,12 +223,200 @@ #: ../assets/resources/add-token-dialog.blp:61
+ msgid "_Upstream URL"
+ msgstr ""
+ 
+-#: ../internal/components/create_machine_dialog.go:168
+-msgid "No more memory available"
++#: ../assets/resources/machine-page.blp:27
++msgid "_Install..."
++msgstr ""
++
++#: ../assets/resources/machine-page.blp:38
++#: ../assets/resources/machine-page.blp:44
++msgid "Machine Settings"
++msgstr ""
++
++#: ../assets/resources/machine-page.blp:52
++#: ../assets/resources/machine-page.blp:59
++msgid "Machine Menu"
++msgstr ""
++
++#: ../assets/resources/machine-page.blp:82
++msgid "Overview"
++msgstr ""
++
++#: ../assets/resources/machine-page.blp:85
++msgid "State"
++msgstr ""
++
++#: ../assets/resources/machine-page.blp:93
++msgid "No Live Usage"
++msgstr ""
++
++#: ../assets/resources/machine-page.blp:94
++msgid "Start the machine to see live usage"
++msgstr ""
++
++#: ../assets/resources/machine-page.blp:100
++msgid "Access"
++msgstr ""
++
++#: ../assets/resources/machine-page.blp:103
++msgid "Guest Applications"
++msgstr ""
++
++#: ../assets/resources/machine-page.blp:113
++msgid "Remote Desktop"
++msgstr ""
++
++#: ../assets/resources/machine-page.blp:123
++msgid "Serial Console"
++msgstr ""
++
++#: ../assets/resources/machine-page.blp:133
++msgid "SSH"
++msgstr ""
++
++#: ../assets/resources/machine-page.blp:144
++msgid "Shared Folders"
++msgstr ""
++
++#: ../assets/resources/machine-page.blp:147
++msgid "No Shared Folders"
++msgstr ""
++
++#: ../assets/resources/machine-page.blp:152
++msgid "_Share a Folder..."
++msgstr ""
++
++#: ../assets/resources/machine-page.blp:160
++msgid "USB Devices"
++msgstr ""
++
++#: ../assets/resources/machine-page.blp:163
++msgid "No USB Devices"
++msgstr ""
++
++#: ../assets/resources/machine-page.blp:168
++msgid "_Add USB Device..."
++msgstr ""
++
++#: ../assets/resources/machine-page.blp:176
++msgid "USB Hubs"
++msgstr ""
++
++#: ../assets/resources/machine-page.blp:179
++msgid "No USB Hubs"
++msgstr ""
++
++#: ../assets/resources/machine-page.blp:184
++msgid "_Add USB Hub..."
++msgstr ""
++
++#: ../assets/resources/machine-page.blp:192
++#: ../internal/components/setup_dialog.go:401
++msgid "Storage"
++msgstr ""
++
++#: ../assets/resources/machine-page.blp:195
++msgid "Disk Image"
++msgstr ""
++
++#: ../assets/resources/machine-page.blp:205
++#: ../assets/resources/machine-page.blp:212
++msgid "Open Containing Folder"
++msgstr ""
++
++#: ../assets/resources/machine-page.blp:226
++msgid "_Logs"
++msgstr ""
++
++#: ../assets/resources/machine-page.blp:231
++msgid "_Reprovision Guest Agent"
++msgstr ""
++
++#: ../assets/resources/machine-page.blp:236
++msgid "_Restart"
++msgstr ""
++
++#: ../assets/resources/machine-page.blp:241
++msgid "_Delete Machine..."
++msgstr ""
++
++#: ../assets/resources/window.blp:7 ../assets/resources/window.blp:25
++#: ../assets/resources/window.blp:55 ../assets/resources/window.blp:94
++#: ../assets/resources/window.blp:114 ../assets/resources/window.blp:157
++#: ../assets/meta/com.pojtinger.felicitas.Phial.desktop.in:4
++#: ../assets/resources/metainfo.xml.in:7
++msgid "Phial"
++msgstr ""
++
++#: ../assets/resources/window.blp:31 ../assets/resources/window.blp:61
++#: ../assets/resources/window.blp:120
++msgid "Main Menu"
++msgstr ""
++
++#: ../assets/resources/window.blp:38
++msgid "Starting Phial"
++msgstr ""
++
++#: ../assets/resources/window.blp:39
++msgid "Connecting to the host service"
++msgstr ""
++
++#: ../assets/resources/window.blp:69
++msgid "Welcome to Phial"
++msgstr ""
++
++#: ../assets/resources/window.blp:70
++#: ../assets/meta/com.pojtinger.felicitas.Phial.desktop.in:5
++#: ../assets/resources/metainfo.xml.in:8
++msgid "Run development machines safely"
++msgstr ""
++
++#: ../assets/resources/window.blp:75
++msgid "_Get Started"
++msgstr ""
++
++#: ../assets/resources/window.blp:148 ../assets/resources/window.blp:246
++#: ../assets/resources/window.blp:255
++msgid "Grants"
++msgstr ""
++
++#: ../assets/resources/window.blp:172
++msgid "No Machines"
++msgstr ""
++
++#: ../assets/resources/window.blp:173
++msgid "Run virtual machines on your desktop"
++msgstr ""
++
++#: ../assets/resources/window.blp:178
++msgid "_New Machine..."
++msgstr ""
++
++#: ../assets/resources/window.blp:218
++msgid "Tokens"
++msgstr ""
++
++#: ../assets/resources/window.blp:222
++msgid "SSH Keys"
++msgstr ""
++
++#: ../assets/resources/window.blp:226
++msgid "PGP Keys"
++msgstr ""
++
++#: ../assets/resources/window.blp:256
++msgid "Access that a machine has to a token or key"
+ msgstr ""
+ 
+-#: ../internal/components/create_machine_dialog.go:172
+-msgid "No more storage available"
++#: ../assets/resources/window.blp:271
++msgid "_Preferences"
++msgstr ""
++
++#: ../assets/resources/window.blp:277
++msgid "_Keyboard Shortcuts"
++msgstr ""
++
++#: ../assets/resources/window.blp:282
++msgid "_About Phial"
+ msgstr ""
+ 
+ #. TRANSLATORS: Replace "translator-credits" with your name/username, and optionally an email or URL.
+@@ -324,6 +429,44 @@ #: ../internal/components/setup_dialog.go:247
+ msgid "Choose a Folder for Machines"
+ msgstr ""
+ 
++#: ../internal/components/setup_dialog.go:399
++msgid "Welcome"
++msgstr ""
++
++#: ../internal/components/setup_dialog.go:403
++msgid "Host Access"
++msgstr ""
++
++#: ../internal/components/setup_dialog.go:405
++msgid "Host Service"
++msgstr ""
++
++#: ../internal/components/setup_dialog.go:407
++msgid "System Setup"
++msgstr ""
++
++#: ../internal/components/setup_dialog.go:411
++msgid "Done"
++msgstr ""
++
++#: ../internal/components/main_window.go:238
++msgid "Get Started"
++msgstr ""
++
++#: ../internal/components/main_window.go:248
++#: ../internal/components/machine_page.go:72
++#: ../internal/components/machine_page.go:74
++msgid "Not installed"
++msgstr ""
++
++#: ../internal/components/create_machine_dialog.go:217
++msgid "No more memory available"
++msgstr ""
++
++#: ../internal/components/create_machine_dialog.go:221
++msgid "No more storage available"
++msgstr ""
++
+ #: ../internal/components/secrets.go:67
+ msgid "Proxy, %v"
+ msgstr ""
+@@ -364,19 +507,19 @@ #: ../internal/components/secrets.go:123
+ msgid "If expected keys are missing, check"
+ msgstr ""
+ 
+-#: ../internal/components/secrets.go:188
++#: ../internal/components/secrets.go:185
+ msgid "Grant Access"
+ msgstr ""
+ 
+-#: ../internal/components/secrets.go:189
++#: ../internal/components/secrets.go:186
+ msgid "Token Menu"
+ msgstr ""
+ 
+-#: ../internal/components/secrets.go:191
++#: ../internal/components/secrets.go:188
+ msgid "Link a Key"
+ msgstr ""
+ 
+-#: ../internal/components/secrets.go:193
++#: ../internal/components/secrets.go:190
+ msgid "Unlink the Key"
+ msgstr ""
+ 
+@@ -410,40 +553,16 @@ #: ../internal/components/secrets_preferences.go:175
+ msgid "_Add Socket..."
+ msgstr ""
+ 
+-#: ../internal/components/secrets_preferences.go:243
++#: ../internal/components/secrets_preferences.go:240
+ msgid "Remove Socket"
+ msgstr ""
+ 
+-#: ../internal/components/secrets_preferences.go:288
++#: ../internal/components/secrets_preferences.go:285
+ msgid "Choose an SSH Agent Socket"
+ msgstr ""
+ 
+-#: ../internal/components/secrets_preferences.go:328
++#: ../internal/components/secrets_preferences.go:325
+ msgid "Choose a PGP Agent Socket"
+-msgstr ""
+-
+-#: ../internal/components/setup_dialog.go:399
+-msgid "Welcome"
+-msgstr ""
+-
+-#: ../internal/components/setup_dialog.go:401
+-msgid "Storage"
+-msgstr ""
+-
+-#: ../internal/components/setup_dialog.go:403
+-msgid "Host Access"
+-msgstr ""
+-
+-#: ../internal/components/setup_dialog.go:405
+-msgid "Host Service"
+-msgstr ""
+-
+-#: ../internal/components/setup_dialog.go:407
+-msgid "System Setup"
+-msgstr ""
+-
+-#: ../internal/components/setup_dialog.go:411
+-msgid "Done"
+ msgstr ""
+ 
+ #. TRANSLATORS: Search terms to find this application.
+
