@@ -1,0 +1,1267 @@
+From 7b7a345498a90df1255360ebde4499e63384154c Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Thu, 26 Nov 2026 21:48:32 +0100
+Subject: [PATCH] feat: Add the install button and progress to the machine page
+---
+diff --git a/assets/resources/machine-page.blp b/assets/resources/machine-page.blp
+index 0fc4e049b886d637d68d8361a4829e1df02f45c6..b2a7bb47a3de51068ca1e35714736b07d11449ac 100644
+--- a/assets/resources/machine-page.blp
++++ b/assets/resources/machine-page.blp
+@@ -21,14 +21,19 @@       Adw.HeaderBar {
+         title-widget: Adw.WindowTitle machine_title {};
+ 
+         [end]
+-        Button {
++        Button install_button {
+           sensitive: false;
+-          icon-name: "system-software-install-symbolic";
+-          label: _("_Install...");
+-          use-underline: true;
++          tooltip-text: _("Install Machine");
+           styles [
+             "suggested-action",
+           ]
++
++          child: Adw.ButtonContent {
++            icon-name: "system-software-install-symbolic";
++            label: _("_Install...");
++            use-underline: true;
++            can-shrink: true;
++          };
+         }
+ 
+         [end]
+@@ -77,6 +82,24 @@           margin-top: 24;
+           margin-bottom: 24;
+           margin-start: 12;
+           margin-end: 12;
++
++          Adw.PreferencesGroup install_group {
++            visible: false;
++            title: _("Installation");
++          }
++
++          Adw.PreferencesGroup install_actions_group {
++            visible: false;
++
++            Adw.ButtonRow install_cancel_row {
++              title: _("_Cancel Installation...");
++              use-underline: true;
++              start-icon-name: "process-stop-symbolic";
++              styles [
++                "destructive-action",
++              ]
++            }
++          }
+ 
+           Adw.PreferencesGroup {
+             title: _("Overview");
+diff --git a/assets/resources/style.css b/assets/resources/style.css
+index aa3beb183ebe1a41ef3dd799edfe6841146937e2..844e8fc378363287072175d111d33b92d6205c29 100644
+--- a/assets/resources/style.css
++++ b/assets/resources/style.css
+@@ -7,3 +7,7 @@   font-weight: bold;
+   min-width: 18px;
+   padding: 1px 6px;
+ }
++
++.phial-step-failed {
++  color: var(--error-color);
++}
+diff --git a/go.mod b/go.mod
+index dae1ce81662b006630302d7126da591741e34143..5baa7e00e60ead8beb0b98231e2a1f478af0fc5c 100644
+--- a/go.mod
++++ b/go.mod
+@@ -7,6 +7,7 @@
+ require (
+ 	codeberg.org/puregotk/puregotk v0.0.0-20260420231554-98419d54d2d2
+ 	github.com/adrg/xdg v0.5.3
++	github.com/dustin/go-humanize v1.1.0
+ 	github.com/go-playground/validator/v10 v10.30.6
+ 	github.com/neilotoole/slogt/v2 v2.0.0
+ 	github.com/pojntfx/go-gettext v0.4.2
+diff --git a/go.mod.json b/go.mod.json
+index 43e758ecec0c55eb74040662ef53a36f9cb53924..4eff127042f3d2ef653ead7b92b7a39f900eb4f8 100644
+--- a/go.mod.json
++++ b/go.mod.json
+@@ -19,6 +19,13 @@     "type": "archive",
+     "url": "https://proxy.golang.org/github.com/adrg/xdg/@v/v0.5.3.zip"
+   },
+   {
++    "dest": "vendor/github.com/dustin/go-humanize",
++    "sha256": "b87af6613bff30e9b4f7e7b8e740eabcd921dee3bf0bda563af2278e1be9aaed",
++    "strip-components": 3,
++    "type": "archive",
++    "url": "https://proxy.golang.org/github.com/dustin/go-humanize/@v/v1.1.0.zip"
++  },
++  {
+     "dest": "vendor/github.com/go-playground/validator/v10",
+     "sha256": "39863f25c9e88d60dc79632167dfcaaf947caeef3960dd1aea5c72bb66c3edee",
+     "strip-components": 4,
+diff --git a/go.sum b/go.sum
+index 2085ffa9d57a4b70029190bca567a8354a3f5eb8..34827708f90f4e8fe8820a7aa825cc51c843991c 100644
+--- a/go.sum
++++ b/go.sum
+@@ -6,6 +6,8 @@ github.com/adrg/xdg v0.5.3 h1:xRnxJXne7+oWDatRhR1JLnvuccuIeCoBu2rtuLqQB78=
+ github.com/adrg/xdg v0.5.3/go.mod h1:nlTsY+NNiCBGCK2tpm09vRqfVzrc2fLmXGpBLF0zlTQ=
+ github.com/dennwc/flatpak-go-mod v0.1.1-0.20250809093520-ddf8d84264aa h1:c5k0CB16zFqMTKviySxusHVRFAnggzX3l6JK3Cw6fiQ=
+ github.com/dennwc/flatpak-go-mod v0.1.1-0.20250809093520-ddf8d84264aa/go.mod h1:4akg2uvMr36H/vDzQSPofcff2LBk4u+bTAPy2bxVoOo=
++github.com/dustin/go-humanize v1.1.0 h1:dbKTrvD0klcbBV/h4AWJdMuZogJACoMlvWIWZ5b2xWg=
++github.com/dustin/go-humanize v1.1.0/go.mod h1:hc1CvRkJMsgxqjmjMQF3QNRAZBwY8AXBAzKYoSX9sFI=
+ github.com/ebitengine/purego v0.11.2 h1:WWiTx8rD8zYdOwSj8O/NiNbsOvSAgJMTlyV1XlbUSeU=
+ github.com/ebitengine/purego v0.11.2/go.mod h1:DCHPP08djqhNSoTfImcnHYQRZmd0qhakvrozqaEYhGQ=
+ github.com/gabriel-vasile/mimetype v1.4.16 h1:5izNFuvA37st1dDRAcA7TtmngBmRgiIPDmTtiEvjx1E=
+diff --git a/internal/components/machine_page.go b/internal/components/machine_page.go
+index 8997383c69b358c03354faa46169f887022b4a19..126c6793f91b87372ec3537a96cd1c036cf90d2b 100644
+--- a/internal/components/machine_page.go
++++ b/internal/components/machine_page.go
+@@ -1,10 +1,12 @@
+ package components
+ 
+ import (
++	"fmt"
+ 	"log/slog"
+ 	"os"
+ 	"path/filepath"
+ 	"runtime"
++	"strings"
+ 	"unsafe"
+ 
+ 	"codeberg.org/pojntfx/phial/assets/resources"
+@@ -14,13 +16,48 @@ 	"codeberg.org/puregotk/puregotk/v4/gio"
+ 	"codeberg.org/puregotk/puregotk/v4/glib"
+ 	"codeberg.org/puregotk/puregotk/v4/gobject"
+ 	"codeberg.org/puregotk/puregotk/v4/gtk"
++	"github.com/dustin/go-humanize"
+ 	. "github.com/pojntfx/go-gettext/pkg/i18n"
+ )
+ 
+ var (
+-	gTypeMachinePage gobject.Type
++	gTypeMachinePage     gobject.Type
++	gTypeInstallStepItem gobject.Type
+ )
+ 
++type installStepItem struct {
++	gobject.Object
++
++	step    state.InstallStep
++	index   int
++	row     *adw.ActionRow
++	icon    *gtk.Image
++	spinner *adw.Spinner
++}
++
++func newInstallStepItem(step state.InstallStep, index int) installStepItem {
++	obj := gobject.NewObjectWithProperties(gTypeInstallStepItem, 0, nil, nil)
++
++	var v installStepItem
++	obj.Cast(&v)
++
++	item := (*installStepItem)(unsafe.Pointer(obj.GetData(dataKeyGoInstance)))
++	item.step = step
++	item.index = index
++
++	return v
++}
++
++func appendInstallStepItem(model *gio.ListStore, item installStepItem) {
++	model.Append(&item.Object)
++	item.Unref()
++}
++
++type MachinePageActions struct {
++	OnInstall       func(name string)
++	OnCancelInstall func(name string)
++}
++
+ type MachinePage struct {
+ 	adw.NavigationPage
+ 
+@@ -28,16 +65,24 @@ 	window *gtk.Window
+ 	log    *slog.Logger
+ 
+ 	machinesFolder string
++	machineName    string
++	actions        MachinePageActions
++	info           state.MachineInfo
+ 
+-	machineTitle      *adw.WindowTitle
+-	overviewStateRow  *adw.ActionRow
+-	storageDiskRow    *adw.ActionRow
+-	storageOpenButton *gtk.Button
++	machineTitle        *adw.WindowTitle
++	overviewStateRow    *adw.ActionRow
++	storageDiskRow      *adw.ActionRow
++	storageOpenButton   *gtk.Button
++	installButton       *gtk.Button
++	installGroup        *adw.PreferencesGroup
++	installActionsGroup *adw.PreferencesGroup
++	installCancelRow    *adw.ButtonRow
++	installStepModel    *gio.ListStore
+ 
+ 	callbacks []interface{}
+ }
+ 
+-func NewMachinePage(info state.MachineInfo, machinesFolder string, window *gtk.Window, log *slog.Logger) MachinePage {
++func NewMachinePage(info state.MachineInfo, machinesFolder string, window *gtk.Window, log *slog.Logger, actions MachinePageActions) MachinePage {
+ 	obj := gobject.NewObject(gTypeMachinePage, "css-name")
+ 
+ 	var v MachinePage
+@@ -47,6 +92,7 @@ 	page := (*MachinePage)(unsafe.Pointer(obj.GetData(dataKeyGoInstance)))
+ 	page.window = window
+ 	page.log = log
+ 	page.machinesFolder = machinesFolder
++	page.actions = actions
+ 
+ 	onOpenFolder := func(gtk.Button) {
+ 		folder := filepath.Dir(page.storageDiskRow.GetSubtitle())
+@@ -59,6 +105,23 @@ 	}
+ 	page.callbacks = append(page.callbacks, &onOpenFolder)
+ 	page.storageOpenButton.ConnectClicked(&onOpenFolder)
+ 
++	onInstall := func(gtk.Button) {
++		if page.actions.OnInstall != nil {
++			page.actions.OnInstall(page.machineName)
++		}
++	}
++	page.callbacks = append(page.callbacks, &onInstall)
++	page.installButton.ConnectClicked(&onInstall)
++
++	onCancelInstall := func(adw.ButtonRow) {
++		if page.actions.OnCancelInstall != nil {
++			page.actions.OnCancelInstall(page.machineName)
++		}
++	}
++	page.callbacks = append(page.callbacks, &onCancelInstall)
++	page.installCancelRow.ConnectActivated(&onCancelInstall)
++
++	page.buildInstallSteps()
+ 	page.Refresh(info)
+ 
+ 	v.NavigationPage.SetTitle(info.Name)
+@@ -68,11 +131,270 @@ 	return v
+ }
+ 
+ func (p *MachinePage) Refresh(info state.MachineInfo) {
++	p.machineName = info.Name
++	p.info = info
++
++	status := machineStatusText(info.Status)
++
+ 	p.machineTitle.SetTitle(info.Name)
+-	p.machineTitle.SetSubtitle(L("Not installed"))
++	p.machineTitle.SetSubtitle(status)
+ 
+-	p.overviewStateRow.SetSubtitle(L("Not installed"))
++	p.overviewStateRow.SetSubtitle(status)
+ 	p.storageDiskRow.SetSubtitle(filepath.Join(p.machinesFolder, info.Name, "disk.qcow2"))
++
++	installable := info.Status == state.MachineStatusNotInstalled || info.Status == state.MachineStatusInstallFailed
++	p.installButton.SetVisible(installable)
++	p.installButton.SetSensitive(installable)
++
++	installing := info.Status == state.MachineStatusInstalling
++	p.installGroup.SetVisible(installing || info.Status == state.MachineStatusInstallFailed)
++	p.installActionsGroup.SetVisible(installing)
++
++	p.refreshInstallSteps()
++}
++
++func (p *MachinePage) buildInstallSteps() {
++	p.installStepModel = gio.NewListStore(gTypeInstallStepItem)
++	for index, step := range state.InstallSteps {
++		appendInstallStepItem(p.installStepModel, newInstallStepItem(step, index))
++	}
++
++	createRow := gtk.ListBoxCreateWidgetFunc(p.createInstallStepRow)
++	p.callbacks = append(p.callbacks, &createRow)
++
++	var destroyModel glib.DestroyNotify = func(uintptr) {}
++	p.callbacks = append(p.callbacks, &destroyModel)
++
++	p.installGroup.BindModel(p.installStepModel, &createRow, 0, &destroyModel)
++}
++
++func (p *MachinePage) createInstallStepRow(itemPtr, _ uintptr) uintptr {
++	obj := gobject.ObjectNewFromInternalPtr(itemPtr)
++	item := (*installStepItem)(unsafe.Pointer(obj.GetData(dataKeyGoInstance)))
++
++	row := adw.NewActionRow()
++	row.SetTitle(installStepText(item.step))
++
++	icon := gtk.NewImageFromIconName("object-select-symbolic")
++	icon.SetVisible(false)
++	row.AddPrefix(&icon.Widget)
++
++	spinner := adw.NewSpinner()
++	spinner.SetVisible(false)
++	row.AddPrefix(&spinner.Widget)
++
++	item.row = row
++	item.icon = icon
++	item.spinner = spinner
++
++	p.applyInstallStepState(item)
++
++	return row.GoPointer()
++}
++
++func (p *MachinePage) applyInstallStepState(item *installStepItem) {
++	row := item.row
++	if row == nil {
++		return
++	}
++
++	icon := item.icon
++	spinner := item.spinner
++
++	installing := p.info.Status == state.MachineStatusInstalling
++	failed := p.info.Status == state.MachineStatusInstallFailed
++	current := installStepIndex(p.info.InstallStep)
++
++	icon.SetVisible(false)
++	spinner.SetVisible(false)
++	row.SetSubtitle("")
++	row.RemoveCssClass("dim-label")
++	row.RemoveCssClass("phial-step-failed")
++
++	switch {
++	case item.index < current:
++		icon.SetFromIconName("object-select-symbolic")
++		icon.SetVisible(true)
++	case item.index == current && installing:
++		spinner.SetVisible(true)
++		row.SetSubtitle(installStepDetail(p.info.InstallStep, p.info.InstallProgress))
++	case item.index == current && failed:
++		icon.SetFromIconName("dialog-error-symbolic")
++		icon.SetVisible(true)
++		row.AddCssClass("phial-step-failed")
++		row.SetSubtitle(L("The installation failed"))
++	default:
++		row.AddCssClass("dim-label")
++	}
++}
++
++func (p *MachinePage) refreshInstallSteps() {
++	for pos := uint32(0); pos < p.installStepModel.GetNItems(); pos++ {
++		obj := gobject.ObjectNewFromInternalPtr(p.installStepModel.GetItem(pos))
++		item := (*installStepItem)(unsafe.Pointer(obj.GetData(dataKeyGoInstance)))
++
++		p.applyInstallStepState(item)
++	}
++}
++
++func installStepDetail(step state.InstallStep, progress state.InstallProgress) string {
++	switch step {
++	case state.InstallStepDownloading:
++		if progress.Total > 0 {
++			return fmt.Sprintf(
++				L("%v of %v, %d%%"),
++				formatBytes(progress.Downloaded),
++				formatBytes(progress.Total),
++				int(float64(progress.Downloaded)*100/float64(progress.Total)),
++			)
++		}
++
++		return L("Waiting for the first bytes")
++	case state.InstallStepStarting:
++		return L("The installer virtual machine starts")
++	case state.InstallStepPreInstall:
++		return L("The installer reads the kickstart file")
++	case state.InstallStepPackages:
++		if progress.PackagesTotal > 0 {
++			detail := fmt.Sprintf(L("%d of %d packages"), progress.Packages, progress.PackagesTotal)
++			if progress.PackageName != "" {
++				detail = progress.PackageName + ", " + detail
++			}
++
++			return detail
++		}
++
++		return L("The installer solves the package list")
++	case state.InstallStepPostInstall:
++		return L("The installer runs the post-install scripts")
++	case state.InstallStepConfiguring:
++		return L("The installer configures the system")
++	case state.InstallStepFinishing:
++		return L("The installer finishes and restarts the machine")
++	default:
++		return ""
++	}
++}
++
++func formatBytes(bytes uint64) string {
++	value, unit, ok := strings.Cut(humanize.IBytes(bytes), " ")
++	if !ok {
++		return humanize.IBytes(bytes)
++	}
++
++	switch unit {
++	case "B":
++		unit = L("B")
++	case "KiB":
++		unit = L("KiB")
++	case "MiB":
++		unit = L("MiB")
++	case "GiB":
++		unit = L("GiB")
++	case "TiB":
++		unit = L("TiB")
++	case "PiB":
++		unit = L("PiB")
++	case "EiB":
++		unit = L("EiB")
++	}
++
++	return value + " " + unit
++}
++
++func machineStatusText(status state.MachineStatus) string {
++	switch status {
++	case state.MachineStatusInstalling:
++		return L("Installing")
++	case state.MachineStatusInstallFailed:
++		return L("Installation failed")
++	case state.MachineStatusStopped:
++		return L("Stopped")
++	case state.MachineStatusStarting:
++		return L("Starting")
++	case state.MachineStatusRunning:
++		return L("Running")
++	case state.MachineStatusStopping:
++		return L("Stopping")
++	case state.MachineStatusRestarting:
++		return L("Restarting")
++	case state.MachineStatusUpdatingAgent:
++		return L("Updating the guest agent")
++	default:
++		return L("Not installed")
++	}
++}
++
++func installStepText(step state.InstallStep) string {
++	switch step {
++	case state.InstallStepDownloading:
++		return L("Downloading the installer")
++	case state.InstallStepStarting:
++		return L("Starting the installer")
++	case state.InstallStepPreInstall:
++		return L("Running pre-installation scripts")
++	case state.InstallStepPackages:
++		return L("Installing packages")
++	case state.InstallStepPostInstall:
++		return L("Running post-installation scripts")
++	case state.InstallStepConfiguring:
++		return L("Configuring the system")
++	case state.InstallStepFinishing:
++		return L("Finishing the installation")
++	default:
++		return ""
++	}
++}
++
++func installStepIndex(step state.InstallStep) int {
++	for index, current := range state.InstallSteps {
++		if current == step {
++			return index
++		}
++	}
++
++	return -1
++}
++
++func init() {
++	var classInit gobject.ClassInitFunc = func(tc *gobject.TypeClass, u uintptr) {
++		objClass := (*gobject.ObjectClass)(unsafe.Pointer(tc))
++
++		objClass.OverrideConstructed(func(o *gobject.Object) {
++			parentObjClass := (*gobject.ObjectClass)(unsafe.Pointer(tc.PeekParent()))
++			parentObjClass.GetConstructed()(o)
++
++			var parent gobject.Object
++			o.Cast(&parent)
++
++			item := &installStepItem{
++				Object: parent,
++			}
++
++			var pinner runtime.Pinner
++			pinner.Pin(item)
++
++			var cleanupCallback glib.DestroyNotify = func(data uintptr) {
++				pinner.Unpin()
++			}
++			o.SetDataFull(dataKeyGoInstance, uintptr(unsafe.Pointer(item)), &cleanupCallback)
++		})
++	}
++
++	var instanceInit gobject.InstanceInitFunc = func(ti *gobject.TypeInstance, tc *gobject.TypeClass) {}
++
++	var parentQuery gobject.TypeQuery
++	gobject.NewTypeQuery(gobject.TypeObjectVal, &parentQuery)
++
++	gTypeInstallStepItem = gobject.TypeRegisterStaticSimple(
++		parentQuery.Type,
++		"PhialInstallStepItem",
++		parentQuery.ClassSize,
++		&classInit,
++		parentQuery.InstanceSize,
++		&instanceInit,
++		0,
++	)
+ }
+ 
+ func init() {
+@@ -83,6 +405,10 @@ 		typeClass.BindTemplateChildFull("machine_title", false, 0)
+ 		typeClass.BindTemplateChildFull("overview_state_row", false, 0)
+ 		typeClass.BindTemplateChildFull("storage_disk_row", false, 0)
+ 		typeClass.BindTemplateChildFull("storage_open_button", false, 0)
++		typeClass.BindTemplateChildFull("install_button", false, 0)
++		typeClass.BindTemplateChildFull("install_group", false, 0)
++		typeClass.BindTemplateChildFull("install_actions_group", false, 0)
++		typeClass.BindTemplateChildFull("install_cancel_row", false, 0)
+ 
+ 		objClass := (*gobject.ObjectClass)(unsafe.Pointer(tc))
+ 
+@@ -96,10 +422,14 @@
+ 			parent.InitTemplate()
+ 
+ 			var (
+-				machineTitle      adw.WindowTitle
+-				overviewStateRow  adw.ActionRow
+-				storageDiskRow    adw.ActionRow
+-				storageOpenButton gtk.Button
++				machineTitle        adw.WindowTitle
++				overviewStateRow    adw.ActionRow
++				storageDiskRow      adw.ActionRow
++				storageOpenButton   gtk.Button
++				installButton       gtk.Button
++				installGroup        adw.PreferencesGroup
++				installActionsGroup adw.PreferencesGroup
++				installCancelRow    adw.ButtonRow
+ 			)
+ 
+ 			parent.Widget.GetTemplateChild(
+@@ -118,14 +448,34 @@ 			parent.Widget.GetTemplateChild(
+ 				gTypeMachinePage,
+ 				"storage_open_button",
+ 			).Cast(&storageOpenButton)
++			parent.Widget.GetTemplateChild(
++				gTypeMachinePage,
++				"install_button",
++			).Cast(&installButton)
++			parent.Widget.GetTemplateChild(
++				gTypeMachinePage,
++				"install_group",
++			).Cast(&installGroup)
++			parent.Widget.GetTemplateChild(
++				gTypeMachinePage,
++				"install_actions_group",
++			).Cast(&installActionsGroup)
++			parent.Widget.GetTemplateChild(
++				gTypeMachinePage,
++				"install_cancel_row",
++			).Cast(&installCancelRow)
+ 
+ 			p := &MachinePage{
+ 				NavigationPage: parent,
+ 
+-				machineTitle:      &machineTitle,
+-				overviewStateRow:  &overviewStateRow,
+-				storageDiskRow:    &storageDiskRow,
+-				storageOpenButton: &storageOpenButton,
++				machineTitle:        &machineTitle,
++				overviewStateRow:    &overviewStateRow,
++				storageDiskRow:      &storageDiskRow,
++				storageOpenButton:   &storageOpenButton,
++				installButton:       &installButton,
++				installGroup:        &installGroup,
++				installActionsGroup: &installActionsGroup,
++				installCancelRow:    &installCancelRow,
+ 
+ 				callbacks: []interface{}{},
+ 			}
+@@ -138,6 +488,10 @@ 				for _, callback := range p.callbacks {
+ 					if err := glib.UnrefCallback(callback); err != nil {
+ 						p.log.Error("Could not unref callback", "err", err)
+ 					}
++				}
++
++				if p.installStepModel != nil {
++					p.installStepModel.Unref()
+ 				}
+ 
+ 				pinner.Unpin()
+diff --git a/internal/components/main_window.go b/internal/components/main_window.go
+index 193bc7a3ae81259f2803261b8f20f54d8f732d74..dbc23b2e63bbdd06621fde79c2ec0226263b654e 100644
+--- a/internal/components/main_window.go
++++ b/internal/components/main_window.go
+@@ -70,6 +70,8 @@
+ 	createMachineDialog *CreateMachineDialog
+ 	createMachineAction *gio.SimpleAction
+ 
++	installMachineDialog *InstallMachineDialog
++
+ 	addTokenDialog *AddTokenDialog
+ 
+ 	preferencesAction *gio.SimpleAction
+@@ -126,6 +128,9 @@ 			}
+ 		},
+ 	)
+ 	window.createMachineDialog = (*CreateMachineDialog)(unsafe.Pointer(createMachineDialog.Widget.GetData(dataKeyGoInstance)))
++
++	installMachineDialog := NewInstallMachineDialog(window.ctx, window.store, window.log, nil)
++	window.installMachineDialog = (*InstallMachineDialog)(unsafe.Pointer(installMachineDialog.Widget.GetData(dataKeyGoInstance)))
+ 
+ 	addTokenDialog := NewAddTokenDialog(window.log)
+ 	window.addTokenDialog = (*AddTokenDialog)(unsafe.Pointer(addTokenDialog.Widget.GetData(dataKeyGoInstance)))
+@@ -245,7 +250,7 @@ 	} else {
+ 		for _, machine := range machines {
+ 			item := adw.NewSidebarItem(machine.Name)
+ 			item.SetIconName("computer-symbolic")
+-			item.SetSubtitle(L("Not installed"))
++			item.SetSubtitle(machineStatusText(machine.Status))
+ 
+ 			w.machinesSection.Append(item)
+ 			w.sidebarTags = append(w.sidebarTags, machinePageTag(machine.Name))
+@@ -288,10 +293,6 @@ 	w.showPage(w.currentPage)
+ }
+ 
+ func (w *MainWindow) showPage(tag string) {
+-	if w.contentView.GetVisiblePageTag() == tag {
+-		return
+-	}
+-
+ 	if name, ok := strings.CutPrefix(tag, contentPageMachinePrefix+"/"); ok {
+ 		info, ok := w.machineInfo(name)
+ 		if !ok {
+@@ -300,7 +301,22 @@ 		}
+ 
+ 		page := w.machinePages[name]
+ 		if page == nil {
+-			machinePage := NewMachinePage(info, w.machinesFolder(), &w.ApplicationWindow.Window, w.log)
++			machinePage := NewMachinePage(
++				info,
++				w.machinesFolder(),
++				&w.ApplicationWindow.Window,
++				w.log,
++				MachinePageActions{
++					OnInstall: func(name string) {
++						w.installMachineDialog.SetMachine(name)
++						w.installMachineDialog.Present(&w.ApplicationWindow.Widget)
++						w.installMachineDialog.operatingSystemRow.GrabFocus()
++					},
++					OnCancelInstall: func(name string) {
++						w.confirmCancelInstall(name)
++					},
++				},
++			)
+ 			page = (*MachinePage)(unsafe.Pointer(machinePage.Widget.GetData(dataKeyGoInstance)))
+ 			w.machinePages[name] = page
+ 
+@@ -311,7 +327,37 @@ 			page.Refresh(info)
+ 		}
+ 	}
+ 
++	if w.contentView.GetVisiblePageTag() == tag {
++		return
++	}
++
+ 	w.contentView.ReplaceWithTags([]string{tag}, 1)
++}
++
++func (w *MainWindow) confirmCancelInstall(name string) {
++	dialog := adw.NewAlertDialog(
++		L("Cancel the Installation?"),
++		L("This stops the installer and removes the partial disk."),
++	)
++	dialog.AddResponse("keep", L("_Keep Installing"))
++	dialog.AddResponse("cancel", L("_Cancel Installation"))
++	dialog.SetResponseAppearance("cancel", adw.ResponseDestructiveValue)
++	dialog.SetCloseResponse("keep")
++
++	var onResponse func(adw.AlertDialog, string)
++	onResponse = func(_ adw.AlertDialog, response string) {
++		if response != "cancel" {
++			return
++		}
++
++		if err := w.store.InstallCancel(w.ctx, name); err != nil {
++			w.log.Error("Could not cancel installation", "err", err)
++		}
++	}
++	w.callbacks = append(w.callbacks, &onResponse)
++	dialog.ConnectResponse(&onResponse)
++
++	dialog.Present(&w.ApplicationWindow.Widget)
+ }
+ 
+ func (w *MainWindow) machineInfo(name string) (state.MachineInfo, bool) {
+@@ -463,6 +509,10 @@ 				}
+ 
+ 				if w.createMachineDialog != nil {
+ 					w.createMachineDialog.Widget.Object.Unref()
++				}
++
++				if w.installMachineDialog != nil {
++					w.installMachineDialog.Widget.Object.Unref()
+ 				}
+ 
+ 				if w.addTokenDialog != nil {
+diff --git a/modules.txt b/modules.txt
+index b3d1f985f284bc1a0ee4713e4499cd0df53c01d3..95d3af4c227f6fb56eebf2c98f24e16917f541ad 100644
+--- a/modules.txt
++++ b/modules.txt
+@@ -30,6 +30,9 @@ github.com/adrg/xdg/internal/userdirs
+ # github.com/dennwc/flatpak-go-mod v0.1.1-0.20250809093520-ddf8d84264aa
+ ## explicit; go 1.24.4
+ github.com/dennwc/flatpak-go-mod
++# github.com/dustin/go-humanize v1.1.0
++## explicit; go 1.21
++github.com/dustin/go-humanize
+ # github.com/ebitengine/purego v0.11.2
+ ## explicit; go 1.25.0
+ github.com/ebitengine/purego
+diff --git a/po/phial.pot b/po/phial.pot
+index 42f0497a006f762b07df443e7291170f21281263..c855e5288df43257b87f0de7ce41f8077ac510a1 100644
+--- a/po/phial.pot
++++ b/po/phial.pot
+@@ -49,6 +49,7 @@
+ #: ../assets/resources/create-machine-dialog.blp:15
+ #: ../assets/resources/setup-dialog.blp:18
+ #: ../assets/resources/add-token-dialog.blp:15
++#: ../assets/resources/install-machine-dialog.blp:15
+ msgid "_Cancel"
+ msgstr ""
+ 
+@@ -73,6 +74,7 @@ msgstr ""
+ 
+ #: ../assets/resources/create-machine-dialog.blp:71
+ #: ../assets/resources/create-machine-dialog.blp:107
++#: ../internal/components/machine_page.go:293
+ msgid "GiB"
+ msgstr ""
+ 
+@@ -185,7 +187,7 @@ msgid "You're Ready"
+ msgstr ""
+ 
+ #: ../assets/resources/setup-dialog.blp:232
+-#: ../internal/components/main_window.go:240
++#: ../internal/components/main_window.go:245
+ msgid "Create your first machine"
+ msgstr ""
+ 
+@@ -223,200 +225,226 @@ #: ../assets/resources/add-token-dialog.blp:61
+ msgid "_Upstream URL"
+ msgstr ""
+ 
+-#: ../assets/resources/machine-page.blp:27
+-msgid "_Install..."
++#: ../assets/resources/window.blp:7 ../assets/resources/window.blp:25
++#: ../assets/resources/window.blp:55 ../assets/resources/window.blp:94
++#: ../assets/resources/window.blp:114 ../assets/resources/window.blp:157
++#: ../assets/meta/com.pojtinger.felicitas.Phial.desktop.in:4
++#: ../assets/resources/metainfo.xml.in:7
++msgid "Phial"
+ msgstr ""
+ 
+-#: ../assets/resources/machine-page.blp:38
+-#: ../assets/resources/machine-page.blp:44
+-msgid "Machine Settings"
++#: ../assets/resources/window.blp:31 ../assets/resources/window.blp:61
++#: ../assets/resources/window.blp:120
++msgid "Main Menu"
+ msgstr ""
+ 
+-#: ../assets/resources/machine-page.blp:52
+-#: ../assets/resources/machine-page.blp:59
+-msgid "Machine Menu"
++#: ../assets/resources/window.blp:38
++msgid "Starting Phial"
+ msgstr ""
+ 
+-#: ../assets/resources/machine-page.blp:82
+-msgid "Overview"
++#: ../assets/resources/window.blp:39
++msgid "Connecting to the host service"
+ msgstr ""
+ 
+-#: ../assets/resources/machine-page.blp:85
+-msgid "State"
++#: ../assets/resources/window.blp:69
++msgid "Welcome to Phial"
+ msgstr ""
+ 
+-#: ../assets/resources/machine-page.blp:93
+-msgid "No Live Usage"
++#: ../assets/resources/window.blp:70
++#: ../assets/meta/com.pojtinger.felicitas.Phial.desktop.in:5
++#: ../assets/resources/metainfo.xml.in:8
++msgid "Run development machines safely"
+ msgstr ""
+ 
+-#: ../assets/resources/machine-page.blp:94
+-msgid "Start the machine to see live usage"
++#: ../assets/resources/window.blp:75
++msgid "_Get Started"
+ msgstr ""
+ 
+-#: ../assets/resources/machine-page.blp:100
+-msgid "Access"
++#: ../assets/resources/window.blp:148 ../assets/resources/window.blp:246
++#: ../assets/resources/window.blp:255
++msgid "Grants"
+ msgstr ""
+ 
+-#: ../assets/resources/machine-page.blp:103
+-msgid "Guest Applications"
++#: ../assets/resources/window.blp:172
++msgid "No Machines"
+ msgstr ""
+ 
+-#: ../assets/resources/machine-page.blp:113
+-msgid "Remote Desktop"
++#: ../assets/resources/window.blp:173
++msgid "Run virtual machines on your desktop"
++msgstr ""
++
++#: ../assets/resources/window.blp:178
++msgid "_New Machine..."
++msgstr ""
++
++#: ../assets/resources/window.blp:218
++msgid "Tokens"
++msgstr ""
++
++#: ../assets/resources/window.blp:222
++msgid "SSH Keys"
++msgstr ""
++
++#: ../assets/resources/window.blp:226
++msgid "PGP Keys"
++msgstr ""
++
++#: ../assets/resources/window.blp:256
++msgid "Access that a machine has to a token or key"
++msgstr ""
++
++#: ../assets/resources/window.blp:271
++msgid "_Preferences"
+ msgstr ""
+ 
+-#: ../assets/resources/machine-page.blp:123
+-msgid "Serial Console"
++#: ../assets/resources/window.blp:277
++msgid "_Keyboard Shortcuts"
+ msgstr ""
+ 
+-#: ../assets/resources/machine-page.blp:133
+-msgid "SSH"
++#: ../assets/resources/window.blp:282
++msgid "_About Phial"
+ msgstr ""
+ 
+-#: ../assets/resources/machine-page.blp:144
+-msgid "Shared Folders"
++#: ../assets/resources/machine-page.blp:26
++#: ../assets/resources/install-machine-dialog.blp:5
++#: ../assets/resources/install-machine-dialog.blp:21
++msgid "Install Machine"
+ msgstr ""
+ 
+-#: ../assets/resources/machine-page.blp:147
+-msgid "No Shared Folders"
++#: ../assets/resources/machine-page.blp:33
++msgid "_Install..."
+ msgstr ""
+ 
+-#: ../assets/resources/machine-page.blp:152
+-msgid "_Share a Folder..."
++#: ../assets/resources/machine-page.blp:43
++#: ../assets/resources/machine-page.blp:49
++msgid "Machine Settings"
+ msgstr ""
+ 
+-#: ../assets/resources/machine-page.blp:160
+-msgid "USB Devices"
++#: ../assets/resources/machine-page.blp:57
++#: ../assets/resources/machine-page.blp:64
++msgid "Machine Menu"
+ msgstr ""
+ 
+-#: ../assets/resources/machine-page.blp:163
+-msgid "No USB Devices"
++#: ../assets/resources/machine-page.blp:88
++msgid "Installation"
+ msgstr ""
+ 
+-#: ../assets/resources/machine-page.blp:168
+-msgid "_Add USB Device..."
++#: ../assets/resources/machine-page.blp:95
++msgid "_Cancel Installation..."
+ msgstr ""
+ 
+-#: ../assets/resources/machine-page.blp:176
+-msgid "USB Hubs"
++#: ../assets/resources/machine-page.blp:105
++msgid "Overview"
+ msgstr ""
+ 
+-#: ../assets/resources/machine-page.blp:179
+-msgid "No USB Hubs"
++#: ../assets/resources/machine-page.blp:108
++msgid "State"
+ msgstr ""
+ 
+-#: ../assets/resources/machine-page.blp:184
+-msgid "_Add USB Hub..."
++#: ../assets/resources/machine-page.blp:116
++msgid "No Live Usage"
+ msgstr ""
+ 
+-#: ../assets/resources/machine-page.blp:192
+-#: ../internal/components/setup_dialog.go:401
+-msgid "Storage"
++#: ../assets/resources/machine-page.blp:117
++msgid "Start the machine to see live usage"
+ msgstr ""
+ 
+-#: ../assets/resources/machine-page.blp:195
+-msgid "Disk Image"
++#: ../assets/resources/machine-page.blp:123
++msgid "Access"
+ msgstr ""
+ 
+-#: ../assets/resources/machine-page.blp:205
+-#: ../assets/resources/machine-page.blp:212
+-msgid "Open Containing Folder"
++#: ../assets/resources/machine-page.blp:126
++msgid "Guest Applications"
+ msgstr ""
+ 
+-#: ../assets/resources/machine-page.blp:226
+-msgid "_Logs"
++#: ../assets/resources/machine-page.blp:136
++msgid "Remote Desktop"
+ msgstr ""
+ 
+-#: ../assets/resources/machine-page.blp:231
+-msgid "_Reprovision Guest Agent"
++#: ../assets/resources/machine-page.blp:146
++msgid "Serial Console"
+ msgstr ""
+ 
+-#: ../assets/resources/machine-page.blp:236
+-msgid "_Restart"
++#: ../assets/resources/machine-page.blp:156
++msgid "SSH"
+ msgstr ""
+ 
+-#: ../assets/resources/machine-page.blp:241
+-msgid "_Delete Machine..."
++#: ../assets/resources/machine-page.blp:167
++msgid "Shared Folders"
+ msgstr ""
+ 
+-#: ../assets/resources/window.blp:7 ../assets/resources/window.blp:25
+-#: ../assets/resources/window.blp:55 ../assets/resources/window.blp:94
+-#: ../assets/resources/window.blp:114 ../assets/resources/window.blp:157
+-#: ../assets/meta/com.pojtinger.felicitas.Phial.desktop.in:4
+-#: ../assets/resources/metainfo.xml.in:7
+-msgid "Phial"
++#: ../assets/resources/machine-page.blp:170
++msgid "No Shared Folders"
+ msgstr ""
+ 
+-#: ../assets/resources/window.blp:31 ../assets/resources/window.blp:61
+-#: ../assets/resources/window.blp:120
+-msgid "Main Menu"
++#: ../assets/resources/machine-page.blp:175
++msgid "_Share a Folder..."
+ msgstr ""
+ 
+-#: ../assets/resources/window.blp:38
+-msgid "Starting Phial"
++#: ../assets/resources/machine-page.blp:183
++msgid "USB Devices"
+ msgstr ""
+ 
+-#: ../assets/resources/window.blp:39
+-msgid "Connecting to the host service"
++#: ../assets/resources/machine-page.blp:186
++msgid "No USB Devices"
+ msgstr ""
+ 
+-#: ../assets/resources/window.blp:69
+-msgid "Welcome to Phial"
++#: ../assets/resources/machine-page.blp:191
++msgid "_Add USB Device..."
+ msgstr ""
+ 
+-#: ../assets/resources/window.blp:70
+-#: ../assets/meta/com.pojtinger.felicitas.Phial.desktop.in:5
+-#: ../assets/resources/metainfo.xml.in:8
+-msgid "Run development machines safely"
++#: ../assets/resources/machine-page.blp:199
++msgid "USB Hubs"
+ msgstr ""
+ 
+-#: ../assets/resources/window.blp:75
+-msgid "_Get Started"
++#: ../assets/resources/machine-page.blp:202
++msgid "No USB Hubs"
+ msgstr ""
+ 
+-#: ../assets/resources/window.blp:148 ../assets/resources/window.blp:246
+-#: ../assets/resources/window.blp:255
+-msgid "Grants"
++#: ../assets/resources/machine-page.blp:207
++msgid "_Add USB Hub..."
+ msgstr ""
+ 
+-#: ../assets/resources/window.blp:172
+-msgid "No Machines"
++#: ../assets/resources/machine-page.blp:215
++#: ../internal/components/setup_dialog.go:401
++msgid "Storage"
+ msgstr ""
+ 
+-#: ../assets/resources/window.blp:173
+-msgid "Run virtual machines on your desktop"
++#: ../assets/resources/machine-page.blp:218
++msgid "Disk Image"
+ msgstr ""
+ 
+-#: ../assets/resources/window.blp:178
+-msgid "_New Machine..."
++#: ../assets/resources/machine-page.blp:228
++#: ../assets/resources/machine-page.blp:235
++msgid "Open Containing Folder"
+ msgstr ""
+ 
+-#: ../assets/resources/window.blp:218
+-msgid "Tokens"
++#: ../assets/resources/machine-page.blp:249
++msgid "_Logs"
+ msgstr ""
+ 
+-#: ../assets/resources/window.blp:222
+-msgid "SSH Keys"
++#: ../assets/resources/machine-page.blp:254
++msgid "_Reprovision Guest Agent"
+ msgstr ""
+ 
+-#: ../assets/resources/window.blp:226
+-msgid "PGP Keys"
++#: ../assets/resources/machine-page.blp:259
++msgid "_Restart"
+ msgstr ""
+ 
+-#: ../assets/resources/window.blp:256
+-msgid "Access that a machine has to a token or key"
++#: ../assets/resources/machine-page.blp:264
++msgid "_Delete Machine..."
+ msgstr ""
+ 
+-#: ../assets/resources/window.blp:271
+-msgid "_Preferences"
++#: ../assets/resources/install-machine-dialog.blp:26
++msgid "_Install"
+ msgstr ""
+ 
+-#: ../assets/resources/window.blp:277
+-msgid "_Keyboard Shortcuts"
++#: ../assets/resources/install-machine-dialog.blp:37
++msgid "Operating system"
+ msgstr ""
+ 
+-#: ../assets/resources/window.blp:282
+-msgid "_About Phial"
++#: ../assets/resources/install-machine-dialog.blp:44
++msgid "Version"
+ msgstr ""
+ 
+ #. TRANSLATORS: Replace "translator-credits" with your name/username, and optionally an email or URL.
+@@ -447,16 +475,6 @@ msgstr ""
+ 
+ #: ../internal/components/setup_dialog.go:411
+ msgid "Done"
+-msgstr ""
+-
+-#: ../internal/components/main_window.go:238
+-msgid "Get Started"
+-msgstr ""
+-
+-#: ../internal/components/main_window.go:248
+-#: ../internal/components/machine_page.go:72
+-#: ../internal/components/machine_page.go:74
+-msgid "Not installed"
+ msgstr ""
+ 
+ #: ../internal/components/create_machine_dialog.go:217
+@@ -563,6 +581,163 @@ msgstr ""
+ 
+ #: ../internal/components/secrets_preferences.go:325
+ msgid "Choose a PGP Agent Socket"
++msgstr ""
++
++#: ../internal/components/main_window.go:243
++msgid "Get Started"
++msgstr ""
++
++#: ../internal/components/main_window.go:339
++msgid "Cancel the Installation?"
++msgstr ""
++
++#: ../internal/components/main_window.go:340
++msgid "This stops the installer and removes the partial disk."
++msgstr ""
++
++#: ../internal/components/main_window.go:342
++msgid "_Keep Installing"
++msgstr ""
++
++#: ../internal/components/main_window.go:343
++msgid "_Cancel Installation"
++msgstr ""
++
++#: ../internal/components/machine_page.go:225
++msgid "The installation failed"
++msgstr ""
++
++#: ../internal/components/machine_page.go:245
++msgid "%v of %v, %d%%"
++msgstr ""
++
++#: ../internal/components/machine_page.go:252
++msgid "Waiting for the first bytes"
++msgstr ""
++
++#: ../internal/components/machine_page.go:254
++msgid "The installer virtual machine starts"
++msgstr ""
++
++#: ../internal/components/machine_page.go:256
++msgid "The installer reads the kickstart file"
++msgstr ""
++
++#: ../internal/components/machine_page.go:259
++#, c-format
++msgid "%d of %d packages"
++msgstr ""
++
++#: ../internal/components/machine_page.go:267
++msgid "The installer solves the package list"
++msgstr ""
++
++#: ../internal/components/machine_page.go:269
++msgid "The installer runs the post-install scripts"
++msgstr ""
++
++#: ../internal/components/machine_page.go:271
++msgid "The installer configures the system"
++msgstr ""
++
++#: ../internal/components/machine_page.go:273
++msgid "The installer finishes and restarts the machine"
++msgstr ""
++
++#: ../internal/components/machine_page.go:287
++msgid "B"
++msgstr ""
++
++#: ../internal/components/machine_page.go:289
++msgid "KiB"
++msgstr ""
++
++#: ../internal/components/machine_page.go:291
++msgid "MiB"
++msgstr ""
++
++#: ../internal/components/machine_page.go:295
++msgid "TiB"
++msgstr ""
++
++#: ../internal/components/machine_page.go:297
++msgid "PiB"
++msgstr ""
++
++#: ../internal/components/machine_page.go:299
++msgid "EiB"
++msgstr ""
++
++#: ../internal/components/machine_page.go:308
++msgid "Installing"
++msgstr ""
++
++#: ../internal/components/machine_page.go:310
++msgid "Installation failed"
++msgstr ""
++
++#: ../internal/components/machine_page.go:312
++msgid "Stopped"
++msgstr ""
++
++#: ../internal/components/machine_page.go:314
++msgid "Starting"
++msgstr ""
++
++#: ../internal/components/machine_page.go:316
++msgid "Running"
++msgstr ""
++
++#: ../internal/components/machine_page.go:318
++msgid "Stopping"
++msgstr ""
++
++#: ../internal/components/machine_page.go:320
++msgid "Restarting"
++msgstr ""
++
++#: ../internal/components/machine_page.go:322
++msgid "Updating the guest agent"
++msgstr ""
++
++#: ../internal/components/machine_page.go:324
++msgid "Not installed"
++msgstr ""
++
++#: ../internal/components/machine_page.go:331
++msgid "Downloading the installer"
++msgstr ""
++
++#: ../internal/components/machine_page.go:333
++msgid "Starting the installer"
++msgstr ""
++
++#: ../internal/components/machine_page.go:335
++msgid "Running pre-installation scripts"
++msgstr ""
++
++#: ../internal/components/machine_page.go:337
++msgid "Installing packages"
++msgstr ""
++
++#: ../internal/components/machine_page.go:339
++msgid "Running post-installation scripts"
++msgstr ""
++
++#: ../internal/components/machine_page.go:341
++msgid "Configuring the system"
++msgstr ""
++
++#: ../internal/components/machine_page.go:343
++msgid "Finishing the installation"
++msgstr ""
++
++#: ../internal/components/install_machine_dialog.go:57
++msgid "Fedora"
++msgstr ""
++
++#: ../internal/components/install_machine_dialog.go:57
++msgid "AlmaLinux"
+ msgstr ""
+ 
+ #. TRANSLATORS: Search terms to find this application.
+
