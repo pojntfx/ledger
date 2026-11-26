@@ -1,0 +1,628 @@
+From 2d07fee555610f6fd9b1535e16c756ccb05ed8b4 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Thu, 26 Nov 2026 21:25:18 +0100
+Subject: [PATCH] feat: Add install progress state and simulation
+---
+diff --git a/assets/resources/index.go b/assets/resources/index.go
+index 4a62b32a0d24c6c6a8f2bf54633b7f7c88703549..6791d4a97388c86b29a7bf6132bfa0b768d6d5bd 100644
+--- a/assets/resources/index.go
++++ b/assets/resources/index.go
+@@ -35,13 +35,14 @@ 	AppDevelopers = []string{"Felicitas Pojtinger"}
+ 	AppArtists    = []string{"Felicitas Pojtinger"}
+ 	AppCopyright  = "© 2026 " + strings.Join(AppDevelopers, ", ")
+ 
+-	ResourceWindowUIPath              = path.Join(AppPath, "window.ui")
+-	ResourceSetupDialogUIPath         = path.Join(AppPath, "setup-dialog.ui")
+-	ResourcePreferencesDialogUIPath   = path.Join(AppPath, "preferences-dialog.ui")
+-	ResourceCreateMachineDialogUIPath = path.Join(AppPath, "create-machine-dialog.ui")
+-	ResourceMachinePageUIPath         = path.Join(AppPath, "machine-page.ui")
+-	ResourceAddTokenDialogUIPath      = path.Join(AppPath, "add-token-dialog.ui")
+-	ResourceShortcutsDialogUIPath     = path.Join(AppPath, "shortcuts-dialog.ui")
+-	ResourceMetainfoPath              = path.Join(AppPath, "metainfo.xml")
+-	ResourceIconPath                  = path.Join(AppPath, "icon.svg")
++	ResourceWindowUIPath               = path.Join(AppPath, "window.ui")
++	ResourceSetupDialogUIPath          = path.Join(AppPath, "setup-dialog.ui")
++	ResourcePreferencesDialogUIPath    = path.Join(AppPath, "preferences-dialog.ui")
++	ResourceCreateMachineDialogUIPath  = path.Join(AppPath, "create-machine-dialog.ui")
++	ResourceInstallMachineDialogUIPath = path.Join(AppPath, "install-machine-dialog.ui")
++	ResourceMachinePageUIPath          = path.Join(AppPath, "machine-page.ui")
++	ResourceAddTokenDialogUIPath       = path.Join(AppPath, "add-token-dialog.ui")
++	ResourceShortcutsDialogUIPath      = path.Join(AppPath, "shortcuts-dialog.ui")
++	ResourceMetainfoPath               = path.Join(AppPath, "metainfo.xml")
++	ResourceIconPath                   = path.Join(AppPath, "icon.svg")
+ )
+diff --git a/assets/resources/index.gresource.xml b/assets/resources/index.gresource.xml
+index faf3528309e64e4cbace1b01a64db37d1884c0e2..14e6bcd84f703ea05f22c77b5275d2ac155e7fda 100644
+--- a/assets/resources/index.gresource.xml
++++ b/assets/resources/index.gresource.xml
+@@ -5,6 +5,7 @@         <file>window.ui</file>
+         <file>setup-dialog.ui</file>
+         <file>preferences-dialog.ui</file>
+         <file>create-machine-dialog.ui</file>
++        <file>install-machine-dialog.ui</file>
+         <file>machine-page.ui</file>
+         <file>add-token-dialog.ui</file>
+         <file>shortcuts-dialog.ui</file>
+diff --git a/assets/resources/install-machine-dialog.blp b/assets/resources/install-machine-dialog.blp
+new file mode 100644
+index 0000000000000000000000000000000000000000..65de277e4efb15ea187695f386187351d02c42c3
+--- /dev/null
++++ b/assets/resources/install-machine-dialog.blp
+@@ -0,0 +1,52 @@
++using Gtk 4.0;
++using Adw 1;
++
++template $PhialInstallMachineDialog: Adw.Dialog {
++  title: _("Install Machine");
++
++  child: Adw.ToolbarView {
++    [top]
++    Adw.HeaderBar {
++      show-start-title-buttons: false;
++      show-end-title-buttons: false;
++
++      [start]
++      Button {
++        label: _("_Cancel");
++        use-underline: true;
++        action-name: "window.close";
++      }
++
++      title-widget: Adw.WindowTitle {
++        title: _("Install Machine");
++      };
++
++      [end]
++      Button install_button {
++        label: _("_Install");
++        use-underline: true;
++        styles [
++          "suggested-action",
++        ]
++      }
++    }
++
++    content: Adw.PreferencesPage {
++      Adw.PreferencesGroup {
++        Adw.ComboRow operating_system_row {
++          title: _("Operating system");
++          enable-search: true;
++          search-match-mode: substring;
++          expression: expr item as <Gtk.StringObject>.string;
++        }
++
++        Adw.ComboRow version_row {
++          title: _("Version");
++          enable-search: true;
++          search-match-mode: substring;
++          expression: expr item as <Gtk.StringObject>.string;
++        }
++      }
++    };
++  };
++}
+diff --git a/internal/components/install_machine_dialog.go b/internal/components/install_machine_dialog.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..2e770ee858ac9eeea7dcb50b7bc6d7d9d12fda74
+--- /dev/null
++++ b/internal/components/install_machine_dialog.go
+@@ -0,0 +1,182 @@
++package components
++
++import (
++	"context"
++	"log/slog"
++	"runtime"
++	"unsafe"
++
++	"codeberg.org/pojntfx/phial/assets/resources"
++	"codeberg.org/pojntfx/phial/pkg/state"
++	"codeberg.org/puregotk/puregotk/v4/adw"
++	"codeberg.org/puregotk/puregotk/v4/glib"
++	"codeberg.org/puregotk/puregotk/v4/gobject"
++	"codeberg.org/puregotk/puregotk/v4/gtk"
++	. "github.com/pojntfx/go-gettext/pkg/i18n"
++)
++
++var (
++	gTypeInstallMachineDialog gobject.Type
++)
++
++var operatingSystemVersions = [][]string{
++	{"45", "44"},
++	{"10"},
++}
++
++type InstallMachineDialog struct {
++	adw.Dialog
++
++	ctx   context.Context
++	store *state.Store
++	log   *slog.Logger
++
++	onInstalled func(name string)
++
++	machineName        string
++	installButton      *gtk.Button
++	operatingSystemRow *adw.ComboRow
++	versionRow         *adw.ComboRow
++
++	callbacks []interface{}
++}
++
++func NewInstallMachineDialog(ctx context.Context, store *state.Store, log *slog.Logger, onInstalled func(name string)) InstallMachineDialog {
++	obj := gobject.NewObject(gTypeInstallMachineDialog, "css-name")
++	gobject.IncreaseRef(obj.GoPointer())
++
++	var v InstallMachineDialog
++	obj.Cast(&v)
++
++	dialog := (*InstallMachineDialog)(unsafe.Pointer(obj.GetData(dataKeyGoInstance)))
++	dialog.ctx = ctx
++	dialog.store = store
++	dialog.log = log
++	dialog.onInstalled = onInstalled
++
++	dialog.operatingSystemRow.SetModel(gtk.NewStringList([]string{L("Fedora"), L("AlmaLinux")}))
++	dialog.versionRow.SetModel(gtk.NewStringList(operatingSystemVersions[0]))
++
++	onInstall := func(gtk.Button) {
++		if err := dialog.store.Install(dialog.ctx, dialog.machineName); err != nil {
++			dialog.log.Error("Could not install machine", "err", err)
++
++			return
++		}
++
++		if dialog.onInstalled != nil {
++			dialog.onInstalled(dialog.machineName)
++		}
++
++		dialog.Close()
++	}
++	dialog.callbacks = append(dialog.callbacks, &onInstall)
++	dialog.installButton.ConnectClicked(&onInstall)
++
++	onOperatingSystemChanged := func(gobject.Object, uintptr) {
++		dialog.updateVersions()
++	}
++	dialog.callbacks = append(dialog.callbacks, &onOperatingSystemChanged)
++	dialog.operatingSystemRow.ConnectNotify(&onOperatingSystemChanged)
++
++	dialog.operatingSystemRow.SetSelected(0)
++	dialog.versionRow.SetSelected(0)
++
++	return v
++}
++
++func (d *InstallMachineDialog) SetMachine(name string) {
++	d.machineName = name
++	d.operatingSystemRow.SetSelected(0)
++	d.updateVersions()
++}
++
++func (d *InstallMachineDialog) updateVersions() {
++	selected := d.operatingSystemRow.GetSelected()
++	if int(selected) >= len(operatingSystemVersions) {
++		selected = 0
++	}
++
++	d.versionRow.SetModel(gtk.NewStringList(operatingSystemVersions[selected]))
++	d.versionRow.SetSelected(0)
++}
++
++func init() {
++	var dialogClassInit gobject.ClassInitFunc = func(tc *gobject.TypeClass, u uintptr) {
++		typeClass := (*gtk.WidgetClass)(unsafe.Pointer(tc))
++		typeClass.SetTemplateFromResource(resources.ResourceInstallMachineDialogUIPath)
++		typeClass.BindTemplateChildFull("install_button", false, 0)
++		typeClass.BindTemplateChildFull("operating_system_row", false, 0)
++		typeClass.BindTemplateChildFull("version_row", false, 0)
++
++		objClass := (*gobject.ObjectClass)(unsafe.Pointer(tc))
++
++		objClass.OverrideConstructed(func(o *gobject.Object) {
++			parentObjClass := (*gobject.ObjectClass)(unsafe.Pointer(tc.PeekParent()))
++			parentObjClass.GetConstructed()(o)
++
++			var parent adw.Dialog
++			o.Cast(&parent)
++
++			parent.InitTemplate()
++
++			var (
++				installButton      gtk.Button
++				operatingSystemRow adw.ComboRow
++				versionRow         adw.ComboRow
++			)
++
++			parent.Widget.GetTemplateChild(
++				gTypeInstallMachineDialog,
++				"install_button",
++			).Cast(&installButton)
++			parent.Widget.GetTemplateChild(
++				gTypeInstallMachineDialog,
++				"operating_system_row",
++			).Cast(&operatingSystemRow)
++			parent.Widget.GetTemplateChild(
++				gTypeInstallMachineDialog,
++				"version_row",
++			).Cast(&versionRow)
++
++			d := &InstallMachineDialog{
++				Dialog: parent,
++
++				installButton:      &installButton,
++				operatingSystemRow: &operatingSystemRow,
++				versionRow:         &versionRow,
++
++				callbacks: []interface{}{},
++			}
++
++			var pinner runtime.Pinner
++			pinner.Pin(d)
++
++			var cleanupCallback glib.DestroyNotify = func(data uintptr) {
++				for _, callback := range d.callbacks {
++					if err := glib.UnrefCallback(callback); err != nil {
++						d.log.Error("Could not unref callback", "err", err)
++					}
++				}
++
++				pinner.Unpin()
++			}
++			o.SetDataFull(dataKeyGoInstance, uintptr(unsafe.Pointer(d)), &cleanupCallback)
++		})
++	}
++
++	var dialogInstanceInit gobject.InstanceInitFunc = func(ti *gobject.TypeInstance, tc *gobject.TypeClass) {}
++
++	var dialogParentQuery gobject.TypeQuery
++	gobject.NewTypeQuery(adw.DialogGLibType(), &dialogParentQuery)
++
++	gTypeInstallMachineDialog = gobject.TypeRegisterStaticSimple(
++		dialogParentQuery.Type,
++		"PhialInstallMachineDialog",
++		dialogParentQuery.ClassSize,
++		&dialogClassInit,
++		dialogParentQuery.InstanceSize,
++		&dialogInstanceInit,
++		0,
++	)
++}
+diff --git a/pkg/state/constants.go b/pkg/state/constants.go
+index 324086da1d9963880ff2d9f540553b444cdb170a..77e5e5fdc14e5c46a55e4cd1e4e678708a2630aa 100644
+--- a/pkg/state/constants.go
++++ b/pkg/state/constants.go
+@@ -169,6 +169,16 @@ 	InstallStepConfiguring InstallStep = "install-configuring"
+ 	InstallStepFinishing   InstallStep = "install-finishing"
+ )
+ 
++var InstallSteps = []InstallStep{
++	InstallStepDownloading,
++	InstallStepStarting,
++	InstallStepPreInstall,
++	InstallStepPackages,
++	InstallStepPostInstall,
++	InstallStepConfiguring,
++	InstallStepFinishing,
++}
++
+ type GrantStatus string
+ 
+ const (
+diff --git a/pkg/state/machine.go b/pkg/state/machine.go
+index 94ae354098adbe74d9fb782276ff62a24fb4a7d5..266460fe6d478d953044bf6c6941908d856e8864 100644
+--- a/pkg/state/machine.go
++++ b/pkg/state/machine.go
+@@ -18,10 +18,21 @@ 	MemoryGiB int
+ 	DiskGiB   int
+ }
+ 
++type InstallProgress struct {
++	Downloaded    uint64
++	Total         uint64
++	Packages      uint32
++	PackagesTotal uint32
++	PackageName   string
++}
++
+ type MachineInfo struct {
+-	Name      string
+-	MemoryGiB int
+-	DiskGiB   int
++	Name            string
++	MemoryGiB       int
++	DiskGiB         int
++	Status          MachineStatus
++	InstallStep     InstallStep
++	InstallProgress InstallProgress
+ }
+ 
+ type Machine struct {
+diff --git a/pkg/state/machine_test.go b/pkg/state/machine_test.go
+index 47586513ac3e7b925a64424f7f216216019e7c6e..34a85b11b092f762634a35e0b04aa88f25aa458c 100644
+--- a/pkg/state/machine_test.go
++++ b/pkg/state/machine_test.go
+@@ -8,16 +8,6 @@ 	"github.com/neilotoole/slogt/v2"
+ 	"github.com/stretchr/testify/require"
+ )
+ 
+-var installSteps = []InstallStep{
+-	InstallStepDownloading,
+-	InstallStepStarting,
+-	InstallStepPreInstall,
+-	InstallStepPackages,
+-	InstallStepPostInstall,
+-	InstallStepConfiguring,
+-	InstallStepFinishing,
+-}
+-
+ func newTestingMachine(t *testing.T) *Machine {
+ 	return NewMachine(t.Context(), slogt.New(t), &MachineHooks{
+ 		OnStatusChange:      func(_ context.Context, _ MachineStatus) error { return nil },
+@@ -30,7 +20,7 @@ 	m := newTestingMachine(t)
+ 
+ 	require.NoError(t, m.Install(t.Context()))
+ 
+-	for range installSteps {
++	for range InstallSteps {
+ 		require.NoError(t, m.InstallNext(t.Context()))
+ 	}
+ 
+diff --git a/pkg/state/store.go b/pkg/state/store.go
+index 6ba32e897855b65e04335427e3ab67c1ae18e624..2e4a1a7fffefad090e92989d8bf6a76bd3891aff 100644
+--- a/pkg/state/store.go
++++ b/pkg/state/store.go
+@@ -15,9 +15,32 @@ }
+ 
+ type HostProbe func(ctx context.Context) (outdated bool, err error)
+ 
++// TODO: Remove this mock once actual implementation exists
++const (
++	installDownloadTotal = 1_200_000_000
++	installPackagesTotal = 412
++)
++
++// TODO: Remove this mock once actual implementation exists
++var installPackageNames = []string{
++	"glibc",
++	"systemd",
++	"kernel-core",
++	"gnome-shell",
++	"firefox",
++}
++
+ type machineEntry struct {
+ 	config  MachineConfig
+ 	machine *Machine
++	install InstallProgress
++}
++
++func newInstallProgress() InstallProgress {
++	return InstallProgress{
++		Total:         installDownloadTotal,
++		PackagesTotal: installPackagesTotal,
++	}
+ }
+ 
+ type Store struct {
+@@ -46,9 +69,10 @@
+ 	hostStatus   HostStatus
+ 	hostVerified bool
+ 
+-	machineStatuses map[string]MachineStatus
+-	grantStatuses   map[string]GrantStatus
+-	requestStatuses map[string]RequestStatus
++	machineStatuses     map[string]MachineStatus
++	machineInstallSteps map[string]InstallStep
++	grantStatuses       map[string]GrantStatus
++	requestStatuses     map[string]RequestStatus
+ 
+ 	ticker *time.Ticker
+ }
+@@ -65,9 +89,10 @@ 		machines: map[string]*machineEntry{},
+ 		grants:   map[string]*Grant{},
+ 		requests: map[string]*Request{},
+ 
+-		machineStatuses: map[string]MachineStatus{},
+-		grantStatuses:   map[string]GrantStatus{},
+-		requestStatuses: map[string]RequestStatus{},
++		machineStatuses:     map[string]MachineStatus{},
++		machineInstallSteps: map[string]InstallStep{},
++		grantStatuses:       map[string]GrantStatus{},
++		requestStatuses:     map[string]RequestStatus{},
+ 	}
+ 
+ 	s.session = NewSession(ctx, log, &SessionHooks{
+@@ -319,13 +344,16 @@ 			s.machineStatuses[config.Name] = status
+ 
+ 			return s.onChange(ctx)
+ 		},
+-		OnInstallStepChange: func(ctx context.Context, _ InstallStep) error {
++		OnInstallStepChange: func(ctx context.Context, step InstallStep) error {
++			s.machineInstallSteps[config.Name] = step
++
+ 			return s.onChange(ctx)
+ 		},
+ 	})
+ 	s.machines[config.Name] = &machineEntry{
+ 		config:  config,
+ 		machine: m,
++		install: newInstallProgress(),
+ 	}
+ 
+ 	return m.FlushStatus(ctx)
+@@ -337,10 +365,18 @@ 	defer s.mu.Unlock()
+ 
+ 	machines := make([]MachineInfo, 0, len(s.machines))
+ 	for name, entry := range s.machines {
++		status, ok := s.machineStatuses[name]
++		if !ok {
++			status = MachineStatusNotInstalled
++		}
++
+ 		machines = append(machines, MachineInfo{
+-			Name:      name,
+-			MemoryGiB: entry.config.MemoryGiB,
+-			DiskGiB:   entry.config.DiskGiB,
++			Name:            name,
++			MemoryGiB:       entry.config.MemoryGiB,
++			DiskGiB:         entry.config.DiskGiB,
++			Status:          status,
++			InstallStep:     s.machineInstallSteps[name],
++			InstallProgress: entry.install,
+ 		})
+ 	}
+ 
+@@ -355,12 +391,14 @@ func (s *Store) Install(ctx context.Context, id string) error {
+ 	s.mu.Lock()
+ 	defer s.mu.Unlock()
+ 
+-	m, err := s.machine(id)
+-	if err != nil {
+-		return err
++	entry, ok := s.machines[id]
++	if !ok {
++		return ErrCouldNotFindMachine
+ 	}
+ 
+-	return m.Install(ctx)
++	entry.install = newInstallProgress()
++
++	return entry.machine.Install(ctx)
+ }
+ 
+ func (s *Store) InstallNext(ctx context.Context, id string) error {
+@@ -391,12 +429,18 @@ func (s *Store) InstallCancel(ctx context.Context, id string) error {
+ 	s.mu.Lock()
+ 	defer s.mu.Unlock()
+ 
+-	m, err := s.machine(id)
+-	if err != nil {
++	entry, ok := s.machines[id]
++	if !ok {
++		return ErrCouldNotFindMachine
++	}
++
++	if err := entry.machine.InstallCancel(ctx); err != nil {
+ 		return err
+ 	}
+ 
+-	return m.InstallCancel(ctx)
++	entry.install = newInstallProgress()
++
++	return nil
+ }
+ 
+ func (s *Store) Start(ctx context.Context, id string) error {
+@@ -726,6 +770,56 @@ 	s.mu.Lock()
+ 	defer s.mu.Unlock()
+ 
+ 	now := time.Now()
++
++	for id, status := range s.machineStatuses {
++		if status != MachineStatusInstalling {
++			continue
++		}
++
++		entry, ok := s.machines[id]
++		if !ok {
++			continue
++		}
++
++		switch s.machineInstallSteps[id] {
++		case InstallStepDownloading:
++			entry.install.Downloaded += installDownloadTotal / 4
++			if entry.install.Downloaded >= entry.install.Total {
++				entry.install.Downloaded = entry.install.Total
++
++				if err := entry.machine.InstallNext(ctx); err != nil {
++					return err
++				}
++			}
++
++			if err := s.onChange(ctx); err != nil {
++				return err
++			}
++		case InstallStepPackages:
++			entry.install.Packages += installPackagesTotal / 4
++			if entry.install.Packages >= entry.install.PackagesTotal {
++				entry.install.Packages = entry.install.PackagesTotal
++
++				if err := entry.machine.InstallNext(ctx); err != nil {
++					return err
++				}
++			}
++
++			packageIndex := int(entry.install.Packages / 100)
++			if packageIndex >= len(installPackageNames) {
++				packageIndex = len(installPackageNames) - 1
++			}
++			entry.install.PackageName = installPackageNames[packageIndex]
++
++			if err := s.onChange(ctx); err != nil {
++				return err
++			}
++		default:
++			if err := entry.machine.InstallNext(ctx); err != nil {
++				return err
++			}
++		}
++	}
+ 
+ 	for id, status := range s.requestStatuses {
+ 		if status != RequestStatusPending && status != RequestStatusAwaitingConfirmation {
+diff --git a/pkg/state/store_test.go b/pkg/state/store_test.go
+index 605360e37b69d037708cf8d36c277362cfd3b1a0..fe98004d6a97ae053d815c193bb90684b6fb8871 100644
+--- a/pkg/state/store_test.go
++++ b/pkg/state/store_test.go
+@@ -132,6 +132,48 @@
+ 	require.NoError(t, s.AddMachine(t.Context(), MachineConfig{Name: "m1", MemoryGiB: 16, DiskGiB: 48}))
+ 
+ 	require.Equal(t, MachineStatusNotInstalled, s.machineStatuses["m1"])
++	require.Equal(t, MachineStatusNotInstalled, s.Machines()[0].Status)
++}
++
++func TestStoreInstallCachesStatusAndStep(t *testing.T) {
++	s := newTestingStore(t, func(_ context.Context) (bool, error) { return false, nil })
++
++	require.NoError(t, s.AddMachine(t.Context(), MachineConfig{Name: "m1", MemoryGiB: 16, DiskGiB: 48}))
++	require.NoError(t, s.Install(t.Context(), "m1"))
++
++	machine := s.Machines()[0]
++	require.Equal(t, MachineStatusInstalling, machine.Status)
++	require.Equal(t, InstallStepDownloading, machine.InstallStep)
++	require.Equal(t, uint64(0), machine.InstallProgress.Downloaded)
++}
++
++func TestStoreInstallProgress(t *testing.T) {
++	s := newTestingStore(t, func(_ context.Context) (bool, error) { return false, nil })
++
++	require.NoError(t, s.AddMachine(t.Context(), MachineConfig{Name: "m1", MemoryGiB: 16, DiskGiB: 48}))
++	require.NoError(t, s.Install(t.Context(), "m1"))
++
++	require.NoError(t, s.advance(t.Context()))
++	require.Equal(t, uint64(installDownloadTotal/4), s.Machines()[0].InstallProgress.Downloaded)
++
++	for i := 0; i < 20 && s.Machines()[0].InstallStep != InstallStepPackages; i++ {
++		require.NoError(t, s.advance(t.Context()))
++	}
++	require.Equal(t, InstallStepPackages, s.Machines()[0].InstallStep)
++
++	require.NoError(t, s.advance(t.Context()))
++	require.Equal(t, uint32(installPackagesTotal/4), s.Machines()[0].InstallProgress.Packages)
++	require.NotEmpty(t, s.Machines()[0].InstallProgress.PackageName)
++}
++
++func TestStoreAdvanceSkipsMachinesThatDoNotInstall(t *testing.T) {
++	s := newTestingStore(t, func(_ context.Context) (bool, error) { return false, nil })
++
++	require.NoError(t, s.AddMachine(t.Context(), MachineConfig{Name: "m1"}))
++
++	require.NoError(t, s.advance(t.Context()))
++
++	require.Equal(t, MachineStatusNotInstalled, s.Machines()[0].Status)
+ }
+ 
+ func TestStoreMachinesReturnsConfigurationSortedByName(t *testing.T) {
+
