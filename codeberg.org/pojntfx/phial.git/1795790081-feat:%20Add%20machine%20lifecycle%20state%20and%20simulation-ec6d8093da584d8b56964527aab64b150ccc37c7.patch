@@ -1,0 +1,347 @@
+From ec6d8093da584d8b56964527aab64b150ccc37c7 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Fri, 27 Nov 2026 15:34:41 +0100
+Subject: [PATCH] feat: Add machine lifecycle state and simulation
+---
+diff --git a/pkg/state/machine.go b/pkg/state/machine.go
+index 266460fe6d478d953044bf6c6941908d856e8864..74f953dfcafd999fe9e492f2c39dfb25b4761987 100644
+--- a/pkg/state/machine.go
++++ b/pkg/state/machine.go
+@@ -31,6 +31,7 @@ 	Name            string
+ 	MemoryGiB       int
+ 	DiskGiB         int
+ 	Status          MachineStatus
++	Ready           bool
+ 	InstallStep     InstallStep
+ 	InstallProgress InstallProgress
+ }
+diff --git a/pkg/state/store.go b/pkg/state/store.go
+index 2e4a1a7fffefad090e92989d8bf6a76bd3891aff..2d65ceb7249929f59053d3bbb84b4dcec0f48436 100644
+--- a/pkg/state/store.go
++++ b/pkg/state/store.go
+@@ -17,8 +17,10 @@ type HostProbe func(ctx context.Context) (outdated bool, err error)
+ 
+ // TODO: Remove this mock once actual implementation exists
+ const (
+-	installDownloadTotal = 1_200_000_000
+-	installPackagesTotal = 412
++	installDownloadTotal   = 1_200_000_000
++	installPackagesTotal   = 412
++	machineTransitionTicks = 2
++	machineReadyTicks      = 2
+ )
+ 
+ // TODO: Remove this mock once actual implementation exists
+@@ -31,9 +33,12 @@ 	"firefox",
+ }
+ 
+ type machineEntry struct {
+-	config  MachineConfig
+-	machine *Machine
+-	install InstallProgress
++	config         MachineConfig
++	machine        *Machine
++	install        InstallProgress
++	ready          bool
++	lifecycleTicks int
++	readyTicks     int
+ }
+ 
+ func newInstallProgress() InstallProgress {
+@@ -375,6 +380,7 @@ 			Name:            name,
+ 			MemoryGiB:       entry.config.MemoryGiB,
+ 			DiskGiB:         entry.config.DiskGiB,
+ 			Status:          status,
++			Ready:           entry.ready,
+ 			InstallStep:     s.machineInstallSteps[name],
+ 			InstallProgress: entry.install,
+ 		})
+@@ -452,7 +458,15 @@ 	if err != nil {
+ 		return err
+ 	}
+ 
+-	return m.Start(ctx)
++	if err := m.Start(ctx); err != nil {
++		return err
++	}
++
++	s.machines[id].ready = false
++	s.machines[id].lifecycleTicks = 0
++	s.machines[id].readyTicks = 0
++
++	return nil
+ }
+ 
+ func (s *Store) Started(ctx context.Context, id string) error {
+@@ -464,7 +478,15 @@ 	if err != nil {
+ 		return err
+ 	}
+ 
+-	return m.Started(ctx)
++	if err := m.Started(ctx); err != nil {
++		return err
++	}
++
++	s.machines[id].ready = false
++	s.machines[id].lifecycleTicks = 0
++	s.machines[id].readyTicks = 0
++
++	return nil
+ }
+ 
+ func (s *Store) Stop(ctx context.Context, id string) error {
+@@ -476,7 +498,13 @@ 	if err != nil {
+ 		return err
+ 	}
+ 
+-	return m.Stop(ctx)
++	if err := m.Stop(ctx); err != nil {
++		return err
++	}
++
++	s.machines[id].lifecycleTicks = 0
++
++	return nil
+ }
+ 
+ func (s *Store) Stopped(ctx context.Context, id string) error {
+@@ -488,7 +516,15 @@ 	if err != nil {
+ 		return err
+ 	}
+ 
+-	return m.Stopped(ctx)
++	if err := m.Stopped(ctx); err != nil {
++		return err
++	}
++
++	s.machines[id].ready = false
++	s.machines[id].lifecycleTicks = 0
++	s.machines[id].readyTicks = 0
++
++	return nil
+ }
+ 
+ func (s *Store) Restart(ctx context.Context, id string) error {
+@@ -500,7 +536,15 @@ 	if err != nil {
+ 		return err
+ 	}
+ 
+-	return m.Restart(ctx)
++	if err := m.Restart(ctx); err != nil {
++		return err
++	}
++
++	s.machines[id].ready = false
++	s.machines[id].lifecycleTicks = 0
++	s.machines[id].readyTicks = 0
++
++	return nil
+ }
+ 
+ func (s *Store) Restarted(ctx context.Context, id string) error {
+@@ -512,7 +556,15 @@ 	if err != nil {
+ 		return err
+ 	}
+ 
+-	return m.Restarted(ctx)
++	if err := m.Restarted(ctx); err != nil {
++		return err
++	}
++
++	s.machines[id].ready = false
++	s.machines[id].lifecycleTicks = 0
++	s.machines[id].readyTicks = 0
++
++	return nil
+ }
+ 
+ func (s *Store) UpdateAgent(ctx context.Context, id string) error {
+@@ -524,7 +576,13 @@ 	if err != nil {
+ 		return err
+ 	}
+ 
+-	return m.UpdateAgent(ctx)
++	if err := m.UpdateAgent(ctx); err != nil {
++		return err
++	}
++
++	s.machines[id].lifecycleTicks = 0
++
++	return nil
+ }
+ 
+ func (s *Store) AgentUpdated(ctx context.Context, id string) error {
+@@ -772,51 +830,100 @@
+ 	now := time.Now()
+ 
+ 	for id, status := range s.machineStatuses {
+-		if status != MachineStatusInstalling {
+-			continue
+-		}
+-
+ 		entry, ok := s.machines[id]
+ 		if !ok {
+ 			continue
+ 		}
+ 
+-		switch s.machineInstallSteps[id] {
+-		case InstallStepDownloading:
+-			entry.install.Downloaded += installDownloadTotal / 4
+-			if entry.install.Downloaded >= entry.install.Total {
+-				entry.install.Downloaded = entry.install.Total
++		switch status {
++		case MachineStatusInstalling:
++			switch s.machineInstallSteps[id] {
++			case InstallStepDownloading:
++				entry.install.Downloaded += installDownloadTotal / 4
++				if entry.install.Downloaded >= entry.install.Total {
++					entry.install.Downloaded = entry.install.Total
++
++					if err := entry.machine.InstallNext(ctx); err != nil {
++						return err
++					}
++				}
++
++				if err := s.onChange(ctx); err != nil {
++					return err
++				}
++			case InstallStepPackages:
++				entry.install.Packages += installPackagesTotal / 4
++				if entry.install.Packages >= entry.install.PackagesTotal {
++					entry.install.Packages = entry.install.PackagesTotal
+ 
++					if err := entry.machine.InstallNext(ctx); err != nil {
++						return err
++					}
++				}
++
++				packageIndex := int(entry.install.Packages / 100)
++				if packageIndex >= len(installPackageNames) {
++					packageIndex = len(installPackageNames) - 1
++				}
++				entry.install.PackageName = installPackageNames[packageIndex]
++
++				if err := s.onChange(ctx); err != nil {
++					return err
++				}
++			default:
+ 				if err := entry.machine.InstallNext(ctx); err != nil {
+ 					return err
+ 				}
+ 			}
++		case MachineStatusStarting:
++			entry.lifecycleTicks++
++			if entry.lifecycleTicks >= machineTransitionTicks {
++				entry.lifecycleTicks = 0
+ 
+-			if err := s.onChange(ctx); err != nil {
+-				return err
++				if err := entry.machine.Started(ctx); err != nil {
++					return err
++				}
++			}
++		case MachineStatusRunning:
++			if !entry.ready {
++				entry.readyTicks++
++				if entry.readyTicks >= machineReadyTicks {
++					entry.ready = true
++					entry.readyTicks = 0
++
++					if err := s.onChange(ctx); err != nil {
++						return err
++					}
++				}
+ 			}
+-		case InstallStepPackages:
+-			entry.install.Packages += installPackagesTotal / 4
+-			if entry.install.Packages >= entry.install.PackagesTotal {
+-				entry.install.Packages = entry.install.PackagesTotal
++		case MachineStatusStopping:
++			entry.lifecycleTicks++
++			if entry.lifecycleTicks >= machineTransitionTicks {
++				entry.lifecycleTicks = 0
++				entry.ready = false
++				entry.readyTicks = 0
+ 
+-				if err := entry.machine.InstallNext(ctx); err != nil {
++				if err := entry.machine.Stopped(ctx); err != nil {
+ 					return err
+ 				}
+ 			}
++		case MachineStatusRestarting:
++			entry.lifecycleTicks++
++			if entry.lifecycleTicks >= machineTransitionTicks {
++				entry.lifecycleTicks = 0
+ 
+-			packageIndex := int(entry.install.Packages / 100)
+-			if packageIndex >= len(installPackageNames) {
+-				packageIndex = len(installPackageNames) - 1
++				if err := entry.machine.Restarted(ctx); err != nil {
++					return err
++				}
+ 			}
+-			entry.install.PackageName = installPackageNames[packageIndex]
++		case MachineStatusUpdatingAgent:
++			entry.lifecycleTicks++
++			if entry.lifecycleTicks >= machineTransitionTicks {
++				entry.lifecycleTicks = 0
+ 
+-			if err := s.onChange(ctx); err != nil {
+-				return err
+-			}
+-		default:
+-			if err := entry.machine.InstallNext(ctx); err != nil {
+-				return err
++				if err := entry.machine.AgentUpdated(ctx); err != nil {
++					return err
++				}
+ 			}
+ 		}
+ 	}
+diff --git a/pkg/state/store_test.go b/pkg/state/store_test.go
+index fe98004d6a97ae053d815c193bb90684b6fb8871..6d846953fa569a1ead5bfa36eab1858f42c8986d 100644
+--- a/pkg/state/store_test.go
++++ b/pkg/state/store_test.go
+@@ -166,6 +166,41 @@ 	require.Equal(t, uint32(installPackagesTotal/4), s.Machines()[0].InstallProgress.Packages)
+ 	require.NotEmpty(t, s.Machines()[0].InstallProgress.PackageName)
+ }
+ 
++func TestStoreMachineReady(t *testing.T) {
++	s := newTestingStore(t, func(_ context.Context) (bool, error) { return false, nil })
++
++	require.NoError(t, s.AddMachine(t.Context(), MachineConfig{Name: "m1"}))
++	require.NoError(t, s.Install(t.Context(), "m1"))
++
++	for range InstallSteps {
++		require.NoError(t, s.InstallNext(t.Context(), "m1"))
++	}
++
++	require.False(t, s.Machines()[0].Ready)
++
++	require.NoError(t, s.Start(t.Context(), "m1"))
++
++	for range machineTransitionTicks {
++		require.NoError(t, s.advance(t.Context()))
++	}
++
++	require.False(t, s.Machines()[0].Ready)
++
++	require.NoError(t, s.advance(t.Context()))
++	require.False(t, s.Machines()[0].Ready)
++
++	require.NoError(t, s.advance(t.Context()))
++	require.True(t, s.Machines()[0].Ready)
++
++	require.NoError(t, s.Stop(t.Context(), "m1"))
++
++	for range machineTransitionTicks {
++		require.NoError(t, s.advance(t.Context()))
++	}
++
++	require.False(t, s.Machines()[0].Ready)
++}
++
+ func TestStoreAdvanceSkipsMachinesThatDoNotInstall(t *testing.T) {
+ 	s := newTestingStore(t, func(_ context.Context) (bool, error) { return false, nil })
+ 
+
