@@ -1,0 +1,487 @@
+From aead672fbcf92524ce43efd9b0e6c7c858e98472 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Fri, 27 Nov 2026 15:42:48 +0100
+Subject: [PATCH] feat: Add machine lifecycle controls to the machine page
+
+Signed-off-by: Felicitas Pojtinger <felicitas@pojtinger.com>
+---
+diff --git a/assets/resources/machine-page.blp b/assets/resources/machine-page.blp
+index b2a7bb47a3de51068ca1e35714736b07d11449ac..9dc8c7371d08ce546bc8e457524be7f349f82bda 100644
+--- a/assets/resources/machine-page.blp
++++ b/assets/resources/machine-page.blp
+@@ -21,19 +21,132 @@       Adw.HeaderBar {
+         title-widget: Adw.WindowTitle machine_title {};
+ 
+         [end]
+-        Button install_button {
+-          sensitive: false;
+-          tooltip-text: _("Install Machine");
+-          styles [
+-            "suggested-action",
+-          ]
++        Stack machine_action_stack {
++          transition-type: crossfade;
++          transition-duration: 150;
++
++          StackPage {
++            name: "install";
++            child: Button install_button {
++              sensitive: false;
++              tooltip-text: _("Install Machine");
++              styles [
++                "suggested-action",
++              ]
++
++              child: Adw.ButtonContent {
++                icon-name: "system-software-install-symbolic";
++                label: _("_Install...");
++                use-underline: true;
++                can-shrink: true;
++              };
++            };
++          }
++
++          StackPage {
++            name: "start";
++            child: Button start_button {
++              sensitive: false;
++              tooltip-text: _("Start Machine");
++              styles [
++                "suggested-action",
++              ]
++
++              child: Adw.ButtonContent {
++                icon-name: "media-playback-start-symbolic";
++                label: _("_Start");
++                use-underline: true;
++                can-shrink: true;
++              };
++            };
++          }
++
++          StackPage {
++            name: "stop";
++            child: Button stop_button {
++              sensitive: false;
++              tooltip-text: _("Stop Machine");
++
++              child: Adw.ButtonContent {
++                icon-name: "media-playback-stop-symbolic";
++                label: _("_Stop");
++                use-underline: true;
++                can-shrink: true;
++              };
++            };
++          }
++
++          StackPage {
++            name: "busy";
++            child: Button busy_button {
++              sensitive: false;
++              tooltip-text: _("Cancel Startup");
++              styles [
++                "flat",
++              ]
+ 
+-          child: Adw.ButtonContent {
+-            icon-name: "system-software-install-symbolic";
+-            label: _("_Install...");
+-            use-underline: true;
+-            can-shrink: true;
+-          };
++              child: Box {
++                spacing: 6;
++
++                Adw.Spinner {
++                  valign: center;
++                }
++
++                Label busy_button_label {
++                  label: _("_Cancel");
++                  use-underline: true;
++                  valign: center;
++                }
++              };
++            };
++          }
++
++          StackPage {
++            name: "cancel-install";
++            child: Button cancel_install_button {
++              sensitive: false;
++              tooltip-text: _("Cancel Installation");
++              styles [
++                "destructive-action",
++              ]
++
++              child: Box {
++                spacing: 6;
++
++                Adw.Spinner {
++                  valign: center;
++                }
++
++                Label {
++                  label: _("_Cancel...");
++                  use-underline: true;
++                  valign: center;
++                }
++              };
++            };
++          }
++
++          StackPage {
++            name: "busy-indicator";
++            child: Button busy_indicator {
++              sensitive: false;
++              styles [
++                "flat",
++              ]
++
++              child: Box {
++                spacing: 6;
++
++                Adw.Spinner {
++                  valign: center;
++                }
++
++                Label busy_indicator_label {
++                  valign: center;
++                }
++              };
++            };
++          }
+         }
+ 
+         [end]
+@@ -86,19 +199,6 @@
+           Adw.PreferencesGroup install_group {
+             visible: false;
+             title: _("Installation");
+-          }
+-
+-          Adw.PreferencesGroup install_actions_group {
+-            visible: false;
+-
+-            Adw.ButtonRow install_cancel_row {
+-              title: _("_Cancel Installation...");
+-              use-underline: true;
+-              start-icon-name: "process-stop-symbolic";
+-              styles [
+-                "destructive-action",
+-              ]
+-            }
+           }
+ 
+           Adw.PreferencesGroup {
+diff --git a/internal/components/machine_page.go b/internal/components/machine_page.go
+index 126c6793f91b87372ec3537a96cd1c036cf90d2b..7b9dd916b8527d48a3554fe609add9e08e2a706c 100644
+--- a/internal/components/machine_page.go
++++ b/internal/components/machine_page.go
+@@ -56,6 +56,8 @@
+ type MachinePageActions struct {
+ 	OnInstall       func(name string)
+ 	OnCancelInstall func(name string)
++	OnStart         func(name string)
++	OnStop          func(name string)
+ }
+ 
+ type MachinePage struct {
+@@ -70,13 +72,19 @@ 	actions        MachinePageActions
+ 	info           state.MachineInfo
+ 
+ 	machineTitle        *adw.WindowTitle
++	machineActionStack  *gtk.Stack
+ 	overviewStateRow    *adw.ActionRow
+ 	storageDiskRow      *adw.ActionRow
+ 	storageOpenButton   *gtk.Button
+ 	installButton       *gtk.Button
++	startButton         *gtk.Button
++	stopButton          *gtk.Button
++	busyButton          *gtk.Button
++	busyButtonLabel     *gtk.Label
++	cancelInstallButton *gtk.Button
++	busyIndicator       *gtk.Button
++	busyIndicatorLabel  *gtk.Label
+ 	installGroup        *adw.PreferencesGroup
+-	installActionsGroup *adw.PreferencesGroup
+-	installCancelRow    *adw.ButtonRow
+ 	installStepModel    *gio.ListStore
+ 
+ 	callbacks []interface{}
+@@ -113,13 +121,37 @@ 	}
+ 	page.callbacks = append(page.callbacks, &onInstall)
+ 	page.installButton.ConnectClicked(&onInstall)
+ 
+-	onCancelInstall := func(adw.ButtonRow) {
++	onCancelInstall := func(gtk.Button) {
+ 		if page.actions.OnCancelInstall != nil {
+ 			page.actions.OnCancelInstall(page.machineName)
+ 		}
+ 	}
+ 	page.callbacks = append(page.callbacks, &onCancelInstall)
+-	page.installCancelRow.ConnectActivated(&onCancelInstall)
++	page.cancelInstallButton.ConnectClicked(&onCancelInstall)
++
++	onStart := func(gtk.Button) {
++		if page.actions.OnStart != nil {
++			page.actions.OnStart(page.machineName)
++		}
++	}
++	page.callbacks = append(page.callbacks, &onStart)
++	page.startButton.ConnectClicked(&onStart)
++
++	onStop := func(gtk.Button) {
++		if page.actions.OnStop != nil {
++			page.actions.OnStop(page.machineName)
++		}
++	}
++	page.callbacks = append(page.callbacks, &onStop)
++	page.stopButton.ConnectClicked(&onStop)
++
++	onBusyAction := func(gtk.Button) {
++		if page.actions.OnStop != nil {
++			page.actions.OnStop(page.machineName)
++		}
++	}
++	page.callbacks = append(page.callbacks, &onBusyAction)
++	page.busyButton.ConnectClicked(&onBusyAction)
+ 
+ 	page.buildInstallSteps()
+ 	page.Refresh(info)
+@@ -134,7 +166,7 @@ func (p *MachinePage) Refresh(info state.MachineInfo) {
+ 	p.machineName = info.Name
+ 	p.info = info
+ 
+-	status := machineStatusText(info.Status)
++	status := machineStatusText(info)
+ 
+ 	p.machineTitle.SetTitle(info.Name)
+ 	p.machineTitle.SetSubtitle(status)
+@@ -143,12 +175,33 @@ 	p.overviewStateRow.SetSubtitle(status)
+ 	p.storageDiskRow.SetSubtitle(filepath.Join(p.machinesFolder, info.Name, "disk.qcow2"))
+ 
+ 	installable := info.Status == state.MachineStatusNotInstalled || info.Status == state.MachineStatusInstallFailed
+-	p.installButton.SetVisible(installable)
+ 	p.installButton.SetSensitive(installable)
++	p.startButton.SetSensitive(info.Status == state.MachineStatusStopped)
++	p.stopButton.SetSensitive(info.Status == state.MachineStatusRunning && info.Ready)
++	p.busyButton.SetSensitive(info.Status == state.MachineStatusStarting || info.Status == state.MachineStatusRestarting || info.Status == state.MachineStatusRunning && !info.Ready)
++	p.cancelInstallButton.SetSensitive(info.Status == state.MachineStatusInstalling)
++
++	if info.Status == state.MachineStatusStarting || info.Status == state.MachineStatusRunning && !info.Ready {
++		p.busyButtonLabel.SetTextWithMnemonic(L("_Cancel"))
++		p.busyButton.SetTooltipText(L("Cancel Startup"))
++	} else {
++		p.busyButtonLabel.SetTextWithMnemonic(L("_Stop"))
++		p.busyButton.SetTooltipText(L("Stop Machine"))
++	}
++
++	p.machineActionStack.SetVisibleChildName(machineActionPage(info))
++
++	switch info.Status {
++	case state.MachineStatusStopping:
++		p.busyIndicatorLabel.SetText(L("Stopping"))
++		p.busyIndicator.SetTooltipText(L("Stopping the Machine"))
++	case state.MachineStatusUpdatingAgent:
++		p.busyIndicatorLabel.SetText(L("Updating"))
++		p.busyIndicator.SetTooltipText(L("Updating the Guest Agent"))
++	}
+ 
+ 	installing := info.Status == state.MachineStatusInstalling
+ 	p.installGroup.SetVisible(installing || info.Status == state.MachineStatusInstallFailed)
+-	p.installActionsGroup.SetVisible(installing)
+ 
+ 	p.refreshInstallSteps()
+ }
+@@ -302,8 +355,29 @@
+ 	return value + " " + unit
+ }
+ 
+-func machineStatusText(status state.MachineStatus) string {
+-	switch status {
++func machineActionPage(info state.MachineInfo) string {
++	if info.Status == state.MachineStatusRunning && !info.Ready {
++		return "busy"
++	}
++
++	switch info.Status {
++	case state.MachineStatusStopped:
++		return "start"
++	case state.MachineStatusStarting, state.MachineStatusRestarting:
++		return "busy"
++	case state.MachineStatusRunning:
++		return "stop"
++	case state.MachineStatusInstalling:
++		return "cancel-install"
++	case state.MachineStatusStopping, state.MachineStatusUpdatingAgent:
++		return "busy-indicator"
++	default:
++		return "install"
++	}
++}
++
++func machineStatusText(info state.MachineInfo) string {
++	switch info.Status {
+ 	case state.MachineStatusInstalling:
+ 		return L("Installing")
+ 	case state.MachineStatusInstallFailed:
+@@ -313,6 +387,10 @@ 		return L("Stopped")
+ 	case state.MachineStatusStarting:
+ 		return L("Starting")
+ 	case state.MachineStatusRunning:
++		if !info.Ready {
++			return L("Starting")
++		}
++
+ 		return L("Running")
+ 	case state.MachineStatusStopping:
+ 		return L("Stopping")
+@@ -402,13 +480,19 @@ 	var classInit gobject.ClassInitFunc = func(tc *gobject.TypeClass, u uintptr) {
+ 		typeClass := (*gtk.WidgetClass)(unsafe.Pointer(tc))
+ 		typeClass.SetTemplateFromResource(resources.ResourceMachinePageUIPath)
+ 		typeClass.BindTemplateChildFull("machine_title", false, 0)
++		typeClass.BindTemplateChildFull("machine_action_stack", false, 0)
+ 		typeClass.BindTemplateChildFull("overview_state_row", false, 0)
+ 		typeClass.BindTemplateChildFull("storage_disk_row", false, 0)
+ 		typeClass.BindTemplateChildFull("storage_open_button", false, 0)
+ 		typeClass.BindTemplateChildFull("install_button", false, 0)
++		typeClass.BindTemplateChildFull("start_button", false, 0)
++		typeClass.BindTemplateChildFull("stop_button", false, 0)
++		typeClass.BindTemplateChildFull("busy_button", false, 0)
++		typeClass.BindTemplateChildFull("busy_button_label", false, 0)
++		typeClass.BindTemplateChildFull("cancel_install_button", false, 0)
++		typeClass.BindTemplateChildFull("busy_indicator", false, 0)
++		typeClass.BindTemplateChildFull("busy_indicator_label", false, 0)
+ 		typeClass.BindTemplateChildFull("install_group", false, 0)
+-		typeClass.BindTemplateChildFull("install_actions_group", false, 0)
+-		typeClass.BindTemplateChildFull("install_cancel_row", false, 0)
+ 
+ 		objClass := (*gobject.ObjectClass)(unsafe.Pointer(tc))
+ 
+@@ -423,19 +507,29 @@ 			parent.InitTemplate()
+ 
+ 			var (
+ 				machineTitle        adw.WindowTitle
++				machineActionStack  gtk.Stack
+ 				overviewStateRow    adw.ActionRow
+ 				storageDiskRow      adw.ActionRow
+ 				storageOpenButton   gtk.Button
+ 				installButton       gtk.Button
++				startButton         gtk.Button
++				stopButton          gtk.Button
++				busyButton          gtk.Button
++				busyButtonLabel     gtk.Label
++				cancelInstallButton gtk.Button
++				busyIndicator       gtk.Button
++				busyIndicatorLabel  gtk.Label
+ 				installGroup        adw.PreferencesGroup
+-				installActionsGroup adw.PreferencesGroup
+-				installCancelRow    adw.ButtonRow
+ 			)
+ 
+ 			parent.Widget.GetTemplateChild(
+ 				gTypeMachinePage,
+ 				"machine_title",
+ 			).Cast(&machineTitle)
++			parent.Widget.GetTemplateChild(
++				gTypeMachinePage,
++				"machine_action_stack",
++			).Cast(&machineActionStack)
+ 			parent.Widget.GetTemplateChild(
+ 				gTypeMachinePage,
+ 				"overview_state_row",
+@@ -454,28 +548,54 @@ 				"install_button",
+ 			).Cast(&installButton)
+ 			parent.Widget.GetTemplateChild(
+ 				gTypeMachinePage,
+-				"install_group",
+-			).Cast(&installGroup)
++				"start_button",
++			).Cast(&startButton)
+ 			parent.Widget.GetTemplateChild(
+ 				gTypeMachinePage,
+-				"install_actions_group",
+-			).Cast(&installActionsGroup)
++				"stop_button",
++			).Cast(&stopButton)
+ 			parent.Widget.GetTemplateChild(
+ 				gTypeMachinePage,
+-				"install_cancel_row",
+-			).Cast(&installCancelRow)
++				"busy_button",
++			).Cast(&busyButton)
++			parent.Widget.GetTemplateChild(
++				gTypeMachinePage,
++				"busy_button_label",
++			).Cast(&busyButtonLabel)
++			parent.Widget.GetTemplateChild(
++				gTypeMachinePage,
++				"cancel_install_button",
++			).Cast(&cancelInstallButton)
++			parent.Widget.GetTemplateChild(
++				gTypeMachinePage,
++				"busy_indicator",
++			).Cast(&busyIndicator)
++			parent.Widget.GetTemplateChild(
++				gTypeMachinePage,
++				"busy_indicator_label",
++			).Cast(&busyIndicatorLabel)
++			parent.Widget.GetTemplateChild(
++				gTypeMachinePage,
++				"install_group",
++			).Cast(&installGroup)
+ 
+ 			p := &MachinePage{
+ 				NavigationPage: parent,
+ 
+ 				machineTitle:        &machineTitle,
++				machineActionStack:  &machineActionStack,
+ 				overviewStateRow:    &overviewStateRow,
+ 				storageDiskRow:      &storageDiskRow,
+ 				storageOpenButton:   &storageOpenButton,
+ 				installButton:       &installButton,
++				startButton:         &startButton,
++				stopButton:          &stopButton,
++				busyButton:          &busyButton,
++				busyButtonLabel:     &busyButtonLabel,
++				cancelInstallButton: &cancelInstallButton,
++				busyIndicator:       &busyIndicator,
++				busyIndicatorLabel:  &busyIndicatorLabel,
+ 				installGroup:        &installGroup,
+-				installActionsGroup: &installActionsGroup,
+-				installCancelRow:    &installCancelRow,
+ 
+ 				callbacks: []interface{}{},
+ 			}
+diff --git a/internal/components/main_window.go b/internal/components/main_window.go
+index dbc23b2e63bbdd06621fde79c2ec0226263b654e..e88f2540e5cfacd1f4bbc6875aeb8d1daff53766 100644
+--- a/internal/components/main_window.go
++++ b/internal/components/main_window.go
+@@ -250,7 +250,7 @@ 	} else {
+ 		for _, machine := range machines {
+ 			item := adw.NewSidebarItem(machine.Name)
+ 			item.SetIconName("computer-symbolic")
+-			item.SetSubtitle(machineStatusText(machine.Status))
++			item.SetSubtitle(machineStatusText(machine))
+ 
+ 			w.machinesSection.Append(item)
+ 			w.sidebarTags = append(w.sidebarTags, machinePageTag(machine.Name))
+@@ -314,6 +314,16 @@ 						w.installMachineDialog.operatingSystemRow.GrabFocus()
+ 					},
+ 					OnCancelInstall: func(name string) {
+ 						w.confirmCancelInstall(name)
++					},
++					OnStart: func(name string) {
++						if err := w.store.Start(w.ctx, name); err != nil {
++							w.log.Error("Could not start machine", "err", err)
++						}
++					},
++					OnStop: func(name string) {
++						if err := w.store.Stop(w.ctx, name); err != nil {
++							w.log.Error("Could not stop machine", "err", err)
++						}
+ 					},
+ 				},
+ 			)
+
