@@ -1,0 +1,766 @@
+From 909d9edf09c8f2a24e38205c3d27b2964fadb535 Mon Sep 17 00:00:00 2001
+From: Felicitas Pojtinger <felicitas@pojtinger.com>
+Date: Fri, 27 Nov 2026 16:22:54 +0100
+Subject: [PATCH] feat: Add simulated live usage to the machine page
+---
+diff --git a/assets/resources/machine-page.blp b/assets/resources/machine-page.blp
+index 9dc8c7371d08ce546bc8e457524be7f349f82bda..38eb47ad15184a494ffc88d54fe585f83c6909a8 100644
+--- a/assets/resources/machine-page.blp
++++ b/assets/resources/machine-page.blp
+@@ -212,10 +212,58 @@                 "property",
+               ]
+             }
+ 
+-            Adw.ActionRow {
++            Adw.ActionRow no_usage_row {
+               title: _("No Live Usage");
+               subtitle: _("Start the machine to see live usage");
+               sensitive: false;
++              styles [
++                "dim-label",
++              ]
++            }
++
++            Adw.ActionRow usage_cpu_row {
++              title: _("CPU");
++              visible: false;
++              subtitle-selectable: true;
++              styles [
++                "property",
++              ]
++            }
++
++            Adw.ActionRow usage_memory_row {
++              title: _("Memory");
++              visible: false;
++              subtitle-selectable: true;
++              styles [
++                "property",
++              ]
++            }
++
++            Adw.ActionRow usage_disk_row {
++              title: _("Disk");
++              visible: false;
++              subtitle-selectable: true;
++              styles [
++                "property",
++              ]
++            }
++
++            Adw.ActionRow usage_network_row {
++              title: _("Network");
++              visible: false;
++              subtitle-selectable: true;
++              styles [
++                "property",
++              ]
++            }
++
++            Adw.ActionRow usage_graphics_row {
++              title: _("Graphics");
++              visible: false;
++              subtitle-selectable: true;
++              styles [
++                "property",
++              ]
+             }
+           }
+ 
+diff --git a/internal/components/machine_page.go b/internal/components/machine_page.go
+index 7b9dd916b8527d48a3554fe609add9e08e2a706c..8a7f56c080a0cb8f6c8e6aa129c5591db7bbdd39 100644
+--- a/internal/components/machine_page.go
++++ b/internal/components/machine_page.go
+@@ -74,6 +74,12 @@
+ 	machineTitle        *adw.WindowTitle
+ 	machineActionStack  *gtk.Stack
+ 	overviewStateRow    *adw.ActionRow
++	noUsageRow          *adw.ActionRow
++	usageCPURow         *adw.ActionRow
++	usageMemoryRow      *adw.ActionRow
++	usageDiskRow        *adw.ActionRow
++	usageNetworkRow     *adw.ActionRow
++	usageGraphicsRow    *adw.ActionRow
+ 	storageDiskRow      *adw.ActionRow
+ 	storageOpenButton   *gtk.Button
+ 	installButton       *gtk.Button
+@@ -174,6 +180,8 @@
+ 	p.overviewStateRow.SetSubtitle(status)
+ 	p.storageDiskRow.SetSubtitle(filepath.Join(p.machinesFolder, info.Name, "disk.qcow2"))
+ 
++	p.refreshUsage(info)
++
+ 	installable := info.Status == state.MachineStatusNotInstalled || info.Status == state.MachineStatusInstallFailed
+ 	p.installButton.SetSensitive(installable)
+ 	p.startButton.SetSensitive(info.Status == state.MachineStatusStopped)
+@@ -206,6 +214,81 @@
+ 	p.refreshInstallSteps()
+ }
+ 
++func (p *MachinePage) refreshUsage(info state.MachineInfo) {
++	active := machineActive(info)
++
++	p.noUsageRow.SetVisible(!active)
++	p.usageCPURow.SetVisible(active)
++	p.usageMemoryRow.SetVisible(active)
++	p.usageDiskRow.SetVisible(active)
++	p.usageNetworkRow.SetVisible(active)
++
++	p.usageCPURow.SetSubtitle(fmt.Sprintf(L("%.1f of %d cores"), info.Usage.CPUPercent/100, info.Usage.VCPUs))
++	p.usageMemoryRow.SetSubtitle(fmt.Sprintf(
++		L("%s of %s"),
++		formatBytes(info.Usage.MemoryUsed),
++		formatBytes(info.Usage.MemoryTotal),
++	))
++
++	diskText := fmt.Sprintf(
++		L("%s of %s on this host"),
++		formatBytes(info.Usage.DiskAllocated),
++		formatBytes(info.Usage.DiskTotal),
++	)
++	if info.Usage.DiskReadRate > 0 || info.Usage.DiskWriteRate > 0 {
++		diskText = fmt.Sprintf(
++			L("%s, %s/s read, %s/s written"),
++			diskText,
++			formatBytes(uint64(info.Usage.DiskReadRate)),
++			formatBytes(uint64(info.Usage.DiskWriteRate)),
++		)
++	}
++	p.usageDiskRow.SetSubtitle(diskText)
++
++	networkText := L("No traffic")
++	if !info.Usage.NetworkReady {
++		networkText = L("The guest agent does not answer")
++	} else if info.Usage.NetworkRxRate > 0 || info.Usage.NetworkTxRate > 0 {
++		networkText = fmt.Sprintf(
++			L("%s/s received, %s/s sent"),
++			formatBytes(uint64(info.Usage.NetworkRxRate)),
++			formatBytes(uint64(info.Usage.NetworkTxRate)),
++		)
++	}
++	p.usageNetworkRow.SetSubtitle(networkText)
++
++	graphics := active && info.Usage.GPU != "" && info.Usage.GPU != "none"
++	p.usageGraphicsRow.SetVisible(graphics)
++	if graphics {
++		graphicsText := machineGraphicsText(info.Usage.GPU)
++		if info.Usage.GPUBusyReady {
++			graphicsText = fmt.Sprintf(L("%s, %.0f%% busy"), graphicsText, info.Usage.GPUBusy)
++		}
++
++		p.usageGraphicsRow.SetSubtitle(graphicsText)
++	}
++}
++
++func machineActive(info state.MachineInfo) bool {
++	switch info.Status {
++	case state.MachineStatusStarting, state.MachineStatusRunning, state.MachineStatusRestarting, state.MachineStatusUpdatingAgent:
++		return true
++	default:
++		return false
++	}
++}
++
++func machineGraphicsText(value string) string {
++	switch value {
++	case "virgl":
++		return "VirGL"
++	case "none", "":
++		return L("Off")
++	default:
++		return L("Venus")
++	}
++}
++
+ func (p *MachinePage) buildInstallSteps() {
+ 	p.installStepModel = gio.NewListStore(gTypeInstallStepItem)
+ 	for index, step := range state.InstallSteps {
+@@ -482,6 +565,12 @@ 		typeClass.SetTemplateFromResource(resources.ResourceMachinePageUIPath)
+ 		typeClass.BindTemplateChildFull("machine_title", false, 0)
+ 		typeClass.BindTemplateChildFull("machine_action_stack", false, 0)
+ 		typeClass.BindTemplateChildFull("overview_state_row", false, 0)
++		typeClass.BindTemplateChildFull("no_usage_row", false, 0)
++		typeClass.BindTemplateChildFull("usage_cpu_row", false, 0)
++		typeClass.BindTemplateChildFull("usage_memory_row", false, 0)
++		typeClass.BindTemplateChildFull("usage_disk_row", false, 0)
++		typeClass.BindTemplateChildFull("usage_network_row", false, 0)
++		typeClass.BindTemplateChildFull("usage_graphics_row", false, 0)
+ 		typeClass.BindTemplateChildFull("storage_disk_row", false, 0)
+ 		typeClass.BindTemplateChildFull("storage_open_button", false, 0)
+ 		typeClass.BindTemplateChildFull("install_button", false, 0)
+@@ -509,6 +598,12 @@ 			var (
+ 				machineTitle        adw.WindowTitle
+ 				machineActionStack  gtk.Stack
+ 				overviewStateRow    adw.ActionRow
++				noUsageRow          adw.ActionRow
++				usageCPURow         adw.ActionRow
++				usageMemoryRow      adw.ActionRow
++				usageDiskRow        adw.ActionRow
++				usageNetworkRow     adw.ActionRow
++				usageGraphicsRow    adw.ActionRow
+ 				storageDiskRow      adw.ActionRow
+ 				storageOpenButton   gtk.Button
+ 				installButton       gtk.Button
+@@ -536,6 +631,30 @@ 				"overview_state_row",
+ 			).Cast(&overviewStateRow)
+ 			parent.Widget.GetTemplateChild(
+ 				gTypeMachinePage,
++				"no_usage_row",
++			).Cast(&noUsageRow)
++			parent.Widget.GetTemplateChild(
++				gTypeMachinePage,
++				"usage_cpu_row",
++			).Cast(&usageCPURow)
++			parent.Widget.GetTemplateChild(
++				gTypeMachinePage,
++				"usage_memory_row",
++			).Cast(&usageMemoryRow)
++			parent.Widget.GetTemplateChild(
++				gTypeMachinePage,
++				"usage_disk_row",
++			).Cast(&usageDiskRow)
++			parent.Widget.GetTemplateChild(
++				gTypeMachinePage,
++				"usage_network_row",
++			).Cast(&usageNetworkRow)
++			parent.Widget.GetTemplateChild(
++				gTypeMachinePage,
++				"usage_graphics_row",
++			).Cast(&usageGraphicsRow)
++			parent.Widget.GetTemplateChild(
++				gTypeMachinePage,
+ 				"storage_disk_row",
+ 			).Cast(&storageDiskRow)
+ 			parent.Widget.GetTemplateChild(
+@@ -585,6 +704,12 @@
+ 				machineTitle:        &machineTitle,
+ 				machineActionStack:  &machineActionStack,
+ 				overviewStateRow:    &overviewStateRow,
++				noUsageRow:          &noUsageRow,
++				usageCPURow:         &usageCPURow,
++				usageMemoryRow:      &usageMemoryRow,
++				usageDiskRow:        &usageDiskRow,
++				usageNetworkRow:     &usageNetworkRow,
++				usageGraphicsRow:    &usageGraphicsRow,
+ 				storageDiskRow:      &storageDiskRow,
+ 				storageOpenButton:   &storageOpenButton,
+ 				installButton:       &installButton,
+diff --git a/pkg/state/machine.go b/pkg/state/machine.go
+index 74f953dfcafd999fe9e492f2c39dfb25b4761987..ccdffa56416f02fa55d15d473144932a8cf3fa64 100644
+--- a/pkg/state/machine.go
++++ b/pkg/state/machine.go
+@@ -26,6 +26,23 @@ 	PackagesTotal uint32
+ 	PackageName   string
+ }
+ 
++type MachineUsage struct {
++	CPUPercent    float64
++	VCPUs         int
++	MemoryUsed    uint64
++	MemoryTotal   uint64
++	DiskAllocated uint64
++	DiskTotal     uint64
++	DiskReadRate  float64
++	DiskWriteRate float64
++	NetworkReady  bool
++	NetworkRxRate float64
++	NetworkTxRate float64
++	GPU           string
++	GPUBusy       float64
++	GPUBusyReady  bool
++}
++
+ type MachineInfo struct {
+ 	Name            string
+ 	MemoryGiB       int
+@@ -34,6 +51,7 @@ 	Status          MachineStatus
+ 	Ready           bool
+ 	InstallStep     InstallStep
+ 	InstallProgress InstallProgress
++	Usage           MachineUsage
+ }
+ 
+ type Machine struct {
+diff --git a/pkg/state/store.go b/pkg/state/store.go
+index 2d65ceb7249929f59053d3bbb84b4dcec0f48436..821d2fe7938fbaabc434c907faca31505833ae7d 100644
+--- a/pkg/state/store.go
++++ b/pkg/state/store.go
+@@ -36,6 +36,7 @@ type machineEntry struct {
+ 	config         MachineConfig
+ 	machine        *Machine
+ 	install        InstallProgress
++	usage          MachineUsage
+ 	ready          bool
+ 	lifecycleTicks int
+ 	readyTicks     int
+@@ -45,6 +46,26 @@ func newInstallProgress() InstallProgress {
+ 	return InstallProgress{
+ 		Total:         installDownloadTotal,
+ 		PackagesTotal: installPackagesTotal,
++	}
++}
++
++// TODO: Remove this mock once actual implementation exists
++func newDemoUsage() MachineUsage {
++	return MachineUsage{
++		CPUPercent:    18,
++		VCPUs:         2,
++		MemoryUsed:    1_073_741_824,
++		MemoryTotal:   2_147_483_648,
++		DiskAllocated: 6_442_450_944,
++		DiskTotal:     17_179_869_184,
++		DiskReadRate:  524_288,
++		DiskWriteRate: 262_144,
++		NetworkReady:  true,
++		NetworkRxRate: 1_048_576,
++		NetworkTxRate: 524_288,
++		GPU:           "venus",
++		GPUBusy:       7,
++		GPUBusyReady:  true,
+ 	}
+ }
+ 
+@@ -383,6 +404,7 @@ 			Status:          status,
+ 			Ready:           entry.ready,
+ 			InstallStep:     s.machineInstallSteps[name],
+ 			InstallProgress: entry.install,
++			Usage:           entry.usage,
+ 		})
+ 	}
+ 
+@@ -890,6 +912,7 @@ 				entry.readyTicks++
+ 				if entry.readyTicks >= machineReadyTicks {
+ 					entry.ready = true
+ 					entry.readyTicks = 0
++					entry.usage = newDemoUsage()
+ 
+ 					if err := s.onChange(ctx); err != nil {
+ 						return err
+diff --git a/pkg/state/store_test.go b/pkg/state/store_test.go
+index 6d846953fa569a1ead5bfa36eab1858f42c8986d..1cb563af1437bee8d5f677a979ddb7d9f4858766 100644
+--- a/pkg/state/store_test.go
++++ b/pkg/state/store_test.go
+@@ -177,6 +177,7 @@ 		require.NoError(t, s.InstallNext(t.Context(), "m1"))
+ 	}
+ 
+ 	require.False(t, s.Machines()[0].Ready)
++	require.Equal(t, MachineUsage{}, s.Machines()[0].Usage)
+ 
+ 	require.NoError(t, s.Start(t.Context(), "m1"))
+ 
+@@ -191,6 +192,7 @@ 	require.False(t, s.Machines()[0].Ready)
+ 
+ 	require.NoError(t, s.advance(t.Context()))
+ 	require.True(t, s.Machines()[0].Ready)
++	require.Equal(t, newDemoUsage(), s.Machines()[0].Usage)
+ 
+ 	require.NoError(t, s.Stop(t.Context(), "m1"))
+ 
+diff --git a/po/phial.pot b/po/phial.pot
+index 44fb0749bda586ce33b85b63b5216392f10b63e5..3b3fd28263018423b0aaf04511e0ae6990816aef 100644
+--- a/po/phial.pot
++++ b/po/phial.pot
+@@ -51,7 +51,7 @@ #: ../assets/resources/setup-dialog.blp:18
+ #: ../assets/resources/add-token-dialog.blp:15
+ #: ../assets/resources/install-machine-dialog.blp:15
+ #: ../assets/resources/machine-page.blp:96
+-#: ../internal/components/machine_page.go:185
++#: ../internal/components/machine_page.go:193
+ msgid "_Cancel"
+ msgstr ""
+ 
+@@ -71,12 +71,13 @@ msgid "Show Error"
+ msgstr ""
+ 
+ #: ../assets/resources/create-machine-dialog.blp:57
++#: ../assets/resources/machine-page.blp:234
+ msgid "Memory"
+ msgstr ""
+ 
+ #: ../assets/resources/create-machine-dialog.blp:71
+ #: ../assets/resources/create-machine-dialog.blp:107
+-#: ../internal/components/machine_page.go:346
++#: ../internal/components/machine_page.go:429
+ msgid "GiB"
+ msgstr ""
+ 
+@@ -338,17 +339,17 @@ msgid "_Start"
+ msgstr ""
+ 
+ #: ../assets/resources/machine-page.blp:68
+-#: ../internal/components/machine_page.go:189
++#: ../internal/components/machine_page.go:197
+ msgid "Stop Machine"
+ msgstr ""
+ 
+ #: ../assets/resources/machine-page.blp:72
+-#: ../internal/components/machine_page.go:188
++#: ../internal/components/machine_page.go:196
+ msgid "_Stop"
+ msgstr ""
+ 
+ #: ../assets/resources/machine-page.blp:83
+-#: ../internal/components/machine_page.go:186
++#: ../internal/components/machine_page.go:194
+ msgid "Cancel Startup"
+ msgstr ""
+ 
+@@ -390,89 +391,105 @@ #: ../assets/resources/machine-page.blp:217
+ msgid "Start the machine to see live usage"
+ msgstr ""
+ 
+-#: ../assets/resources/machine-page.blp:223
++#: ../assets/resources/machine-page.blp:225
++msgid "CPU"
++msgstr ""
++
++#: ../assets/resources/machine-page.blp:243
++msgid "Disk"
++msgstr ""
++
++#: ../assets/resources/machine-page.blp:252
++msgid "Network"
++msgstr ""
++
++#: ../assets/resources/machine-page.blp:261
++msgid "Graphics"
++msgstr ""
++
++#: ../assets/resources/machine-page.blp:271
+ msgid "Access"
+ msgstr ""
+ 
+-#: ../assets/resources/machine-page.blp:226
++#: ../assets/resources/machine-page.blp:274
+ msgid "Guest Applications"
+ msgstr ""
+ 
+-#: ../assets/resources/machine-page.blp:236
++#: ../assets/resources/machine-page.blp:284
+ msgid "Remote Desktop"
+ msgstr ""
+ 
+-#: ../assets/resources/machine-page.blp:246
++#: ../assets/resources/machine-page.blp:294
+ msgid "Serial Console"
+ msgstr ""
+ 
+-#: ../assets/resources/machine-page.blp:256
++#: ../assets/resources/machine-page.blp:304
+ msgid "SSH"
+ msgstr ""
+ 
+-#: ../assets/resources/machine-page.blp:267
++#: ../assets/resources/machine-page.blp:315
+ msgid "Shared Folders"
+ msgstr ""
+ 
+-#: ../assets/resources/machine-page.blp:270
++#: ../assets/resources/machine-page.blp:318
+ msgid "No Shared Folders"
+ msgstr ""
+ 
+-#: ../assets/resources/machine-page.blp:275
++#: ../assets/resources/machine-page.blp:323
+ msgid "_Share a Folder..."
+ msgstr ""
+ 
+-#: ../assets/resources/machine-page.blp:283
++#: ../assets/resources/machine-page.blp:331
+ msgid "USB Devices"
+ msgstr ""
+ 
+-#: ../assets/resources/machine-page.blp:286
++#: ../assets/resources/machine-page.blp:334
+ msgid "No USB Devices"
+ msgstr ""
+ 
+-#: ../assets/resources/machine-page.blp:291
++#: ../assets/resources/machine-page.blp:339
+ msgid "_Add USB Device..."
+ msgstr ""
+ 
+-#: ../assets/resources/machine-page.blp:299
++#: ../assets/resources/machine-page.blp:347
+ msgid "USB Hubs"
+ msgstr ""
+ 
+-#: ../assets/resources/machine-page.blp:302
++#: ../assets/resources/machine-page.blp:350
+ msgid "No USB Hubs"
+ msgstr ""
+ 
+-#: ../assets/resources/machine-page.blp:307
++#: ../assets/resources/machine-page.blp:355
+ msgid "_Add USB Hub..."
+ msgstr ""
+ 
+-#: ../assets/resources/machine-page.blp:315
++#: ../assets/resources/machine-page.blp:363
+ #: ../internal/components/setup_dialog.go:401
+ msgid "Storage"
+ msgstr ""
+ 
+-#: ../assets/resources/machine-page.blp:318
++#: ../assets/resources/machine-page.blp:366
+ msgid "Disk Image"
+ msgstr ""
+ 
+-#: ../assets/resources/machine-page.blp:328
+-#: ../assets/resources/machine-page.blp:335
++#: ../assets/resources/machine-page.blp:376
++#: ../assets/resources/machine-page.blp:383
+ msgid "Open Containing Folder"
+ msgstr ""
+ 
+-#: ../assets/resources/machine-page.blp:349
++#: ../assets/resources/machine-page.blp:397
+ msgid "_Logs"
+ msgstr ""
+ 
+-#: ../assets/resources/machine-page.blp:354
++#: ../assets/resources/machine-page.blp:402
+ msgid "_Reprovision Guest Agent"
+ msgstr ""
+ 
+-#: ../assets/resources/machine-page.blp:359
++#: ../assets/resources/machine-page.blp:407
+ msgid "_Restart"
+ msgstr ""
+ 
+-#: ../assets/resources/machine-page.blp:364
++#: ../assets/resources/machine-page.blp:412
+ msgid "_Delete Machine..."
+ msgstr ""
+ 
+@@ -640,146 +657,192 @@ #: ../internal/components/main_window.go:353
+ msgid "_Cancel Installation"
+ msgstr ""
+ 
+-#: ../internal/components/machine_page.go:196
+-#: ../internal/components/machine_page.go:396
++#: ../internal/components/machine_page.go:204
++#: ../internal/components/machine_page.go:479
+ msgid "Stopping"
+ msgstr ""
+ 
+-#: ../internal/components/machine_page.go:197
++#: ../internal/components/machine_page.go:205
+ msgid "Stopping the Machine"
+ msgstr ""
+ 
+-#: ../internal/components/machine_page.go:199
++#: ../internal/components/machine_page.go:207
+ msgid "Updating"
+ msgstr ""
+ 
+-#: ../internal/components/machine_page.go:200
++#: ../internal/components/machine_page.go:208
+ msgid "Updating the Guest Agent"
+ msgstr ""
+ 
+-#: ../internal/components/machine_page.go:278
++#: ../internal/components/machine_page.go:226
++#, c-format
++msgid "%.1f of %d cores"
++msgstr ""
++
++#: ../internal/components/machine_page.go:228
++#, c-format
++msgid "%s of %s"
++msgstr ""
++
++#: ../internal/components/machine_page.go:234
++#, c-format
++msgid "%s of %s on this host"
++msgstr ""
++
++#: ../internal/components/machine_page.go:240
++#, c-format
++msgid "%s, %s/s read, %s/s written"
++msgstr ""
++
++#: ../internal/components/machine_page.go:248
++msgid "No traffic"
++msgstr ""
++
++#: ../internal/components/machine_page.go:250
++msgid "The guest agent does not answer"
++msgstr ""
++
++#: ../internal/components/machine_page.go:253
++#, c-format
++msgid "%s/s received, %s/s sent"
++msgstr ""
++
++#: ../internal/components/machine_page.go:265
++#, c-format
++msgid "%s, %.0f%% busy"
++msgstr ""
++
++#: ../internal/components/machine_page.go:286
++msgid "Off"
++msgstr ""
++
++#: ../internal/components/machine_page.go:288
++msgid "Venus"
++msgstr ""
++
++#: ../internal/components/machine_page.go:361
+ msgid "The installation failed"
+ msgstr ""
+ 
+-#: ../internal/components/machine_page.go:298
++#: ../internal/components/machine_page.go:381
+ msgid "%v of %v, %d%%"
+ msgstr ""
+ 
+-#: ../internal/components/machine_page.go:305
++#: ../internal/components/machine_page.go:388
+ msgid "Waiting for the first bytes"
+ msgstr ""
+ 
+-#: ../internal/components/machine_page.go:307
++#: ../internal/components/machine_page.go:390
+ msgid "The installer virtual machine starts"
+ msgstr ""
+ 
+-#: ../internal/components/machine_page.go:309
++#: ../internal/components/machine_page.go:392
+ msgid "The installer reads the kickstart file"
+ msgstr ""
+ 
+-#: ../internal/components/machine_page.go:312
++#: ../internal/components/machine_page.go:395
+ #, c-format
+ msgid "%d of %d packages"
+ msgstr ""
+ 
+-#: ../internal/components/machine_page.go:320
++#: ../internal/components/machine_page.go:403
+ msgid "The installer solves the package list"
+ msgstr ""
+ 
+-#: ../internal/components/machine_page.go:322
++#: ../internal/components/machine_page.go:405
+ msgid "The installer runs the post-install scripts"
+ msgstr ""
+ 
+-#: ../internal/components/machine_page.go:324
++#: ../internal/components/machine_page.go:407
+ msgid "The installer configures the system"
+ msgstr ""
+ 
+-#: ../internal/components/machine_page.go:326
++#: ../internal/components/machine_page.go:409
+ msgid "The installer finishes and restarts the machine"
+ msgstr ""
+ 
+-#: ../internal/components/machine_page.go:340
++#: ../internal/components/machine_page.go:423
+ msgid "B"
+ msgstr ""
+ 
+-#: ../internal/components/machine_page.go:342
++#: ../internal/components/machine_page.go:425
+ msgid "KiB"
+ msgstr ""
+ 
+-#: ../internal/components/machine_page.go:344
++#: ../internal/components/machine_page.go:427
+ msgid "MiB"
+ msgstr ""
+ 
+-#: ../internal/components/machine_page.go:348
++#: ../internal/components/machine_page.go:431
+ msgid "TiB"
+ msgstr ""
+ 
+-#: ../internal/components/machine_page.go:350
++#: ../internal/components/machine_page.go:433
+ msgid "PiB"
+ msgstr ""
+ 
+-#: ../internal/components/machine_page.go:352
++#: ../internal/components/machine_page.go:435
+ msgid "EiB"
+ msgstr ""
+ 
+-#: ../internal/components/machine_page.go:382
++#: ../internal/components/machine_page.go:465
+ msgid "Installing"
+ msgstr ""
+ 
+-#: ../internal/components/machine_page.go:384
++#: ../internal/components/machine_page.go:467
+ msgid "Installation failed"
+ msgstr ""
+ 
+-#: ../internal/components/machine_page.go:386
++#: ../internal/components/machine_page.go:469
+ msgid "Stopped"
+ msgstr ""
+ 
+-#: ../internal/components/machine_page.go:388
+-#: ../internal/components/machine_page.go:391
++#: ../internal/components/machine_page.go:471
++#: ../internal/components/machine_page.go:474
+ msgid "Starting"
+ msgstr ""
+ 
+-#: ../internal/components/machine_page.go:394
++#: ../internal/components/machine_page.go:477
+ msgid "Running"
+ msgstr ""
+ 
+-#: ../internal/components/machine_page.go:398
++#: ../internal/components/machine_page.go:481
+ msgid "Restarting"
+ msgstr ""
+ 
+-#: ../internal/components/machine_page.go:400
++#: ../internal/components/machine_page.go:483
+ msgid "Updating the guest agent"
+ msgstr ""
+ 
+-#: ../internal/components/machine_page.go:402
++#: ../internal/components/machine_page.go:485
+ msgid "Not installed"
+ msgstr ""
+ 
+-#: ../internal/components/machine_page.go:409
++#: ../internal/components/machine_page.go:492
+ msgid "Downloading the installer"
+ msgstr ""
+ 
+-#: ../internal/components/machine_page.go:411
++#: ../internal/components/machine_page.go:494
+ msgid "Starting the installer"
+ msgstr ""
+ 
+-#: ../internal/components/machine_page.go:413
++#: ../internal/components/machine_page.go:496
+ msgid "Running pre-installation scripts"
+ msgstr ""
+ 
+-#: ../internal/components/machine_page.go:415
++#: ../internal/components/machine_page.go:498
+ msgid "Installing packages"
+ msgstr ""
+ 
+-#: ../internal/components/machine_page.go:417
++#: ../internal/components/machine_page.go:500
+ msgid "Running post-installation scripts"
+ msgstr ""
+ 
+-#: ../internal/components/machine_page.go:419
++#: ../internal/components/machine_page.go:502
+ msgid "Configuring the system"
+ msgstr ""
+ 
+-#: ../internal/components/machine_page.go:421
++#: ../internal/components/machine_page.go:504
+ msgid "Finishing the installation"
+ msgstr ""
+ 
+
